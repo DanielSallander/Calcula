@@ -7,6 +7,7 @@ import {
   setSelectedSheetIndices,
   isSheetGroupingActive,
   getGroupedSheetIndices,
+  getGroupForActiveSheet,
   clearSheetGrouping,
   toggleSheetInGroup,
 } from "../sheetGrouping";
@@ -42,6 +43,29 @@ describe("sheetGrouping", () => {
   it("getGroupedSheetIndices excludes active sheet", () => {
     setSelectedSheetIndices([0, 1, 3]);
     expect(getGroupedSheetIndices(1)).toEqual([0, 3]);
+  });
+
+  // review G#4: Excel ungroups when you reach a sheet outside the group by the
+  // Name Box, Go To or a link; an entry there replicates to nothing.
+  it("getGroupedSheetIndices replicates to nothing when the active sheet is not in the group", () => {
+    setSelectedSheetIndices([0, 2]);
+    expect(getGroupedSheetIndices(1)).toEqual([]);
+  });
+
+  // The ONE membership rule every reader of the group asks (groupArgs for the
+  // formatting wrappers, getGroupedSheetIndices for the typed entry).
+  it("getGroupForActiveSheet: the whole group, the sheet on screen included, only when it is a member", () => {
+    expect(getGroupForActiveSheet(0), "no group").toEqual([]);
+    setSelectedSheetIndices([0]);
+    expect(getGroupForActiveSheet(0), "one sheet is no group").toEqual([]);
+    setSelectedSheetIndices([3, 0, 2]);
+    expect(getGroupForActiveSheet(2)).toEqual([0, 2, 3]);
+    expect(getGroupForActiveSheet(1), "the sheet on screen is outside the group").toEqual([]);
+    expect(getGroupForActiveSheet(undefined), "the sheet on screen is not known").toEqual([]);
+    expect(getGroupForActiveSheet(null)).toEqual([]);
+    // A copy: a caller that edits it cannot change the selection.
+    getGroupForActiveSheet(2).push(9);
+    expect(getSelectedSheetIndices()).toEqual([0, 2, 3]);
   });
 
   it("clearSheetGrouping resets to empty", () => {

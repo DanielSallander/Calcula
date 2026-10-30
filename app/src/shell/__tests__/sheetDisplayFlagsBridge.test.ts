@@ -138,7 +138,13 @@ describe("the announcement reaches something that repaints", () => {
     const sheet = read("../../core/components/Spreadsheet/Spreadsheet.tsx");
     const calls = sheet.match(/hydrateSheetDisplayFlags\(\)/g) ?? [];
     expect(calls.length).toBeGreaterThanOrEqual(3);
-    expect(sheet).toContain('window.addEventListener("sheet:normalSwitch", handleSheetSwitch)');
+    // The sheet-switch listeners moved into sheetSwitchListeners.ts (review
+    // rev3C#2/#5: the view memory's rules run there, under test); Spreadsheet
+    // installs them.
+    expect(sheet).toContain("listenForSheetSwitches<SheetState>(sheetViewMemory");
+    expect(read("../../core/components/Spreadsheet/sheetSwitchListeners.ts")).toContain(
+      'target.addEventListener("sheet:normalSwitch", onNormalSwitch)',
+    );
   });
 
   it("the two names are the same string in Core and in @api", () => {

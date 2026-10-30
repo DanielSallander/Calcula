@@ -13,6 +13,11 @@ export type { ClipboardData } from "../core/hooks/useClipboard";
 // Anything that shifts relative references or re-reads the source by
 // coordinate must map through these instead of assuming contiguity.
 export { clipboardSourceRow, pasteRowDeltas } from "../core/lib/clipboardVisibility";
+// A copy carries its cells' STORED values (`ClipboardData.values`); a paste of
+// a constant writes it through this one rule -- exactly, invariant -- never by
+// re-typing the display text (1.23456 shown under 0.00 pasted as 1.23).
+export { pastedConstantInput } from "../core/lib/clipboardValues";
+export type { ClipboardCellValue, PastedConstant } from "../core/lib/clipboardValues";
 
 // ============================================================================
 // Merge -- Excel's Merge menu (2026-10-02)
@@ -365,6 +370,8 @@ export function requestMacroToNotebook(detail: MacroToNotebookDetail): void {
 
 // Typed (value-preserving) cell reads
 export type { TypedCellData, CellValueType } from "../core/types";
+// One further block of a grouped multi-area clear (`clearRangeOnSheets`' `options.moreAreas`)
+export type { ClearArea } from "../core/types";
 
 // Named range type exports
 export type {

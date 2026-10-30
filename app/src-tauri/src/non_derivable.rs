@@ -28,10 +28,18 @@
 //!
 //! | where the cell is | CUBE / custom fn | GATHER |
 //! |---|---|---|
-//! | a NON-active sheet (`recalculate_sheet_values`) | keeps its OLD value — `preserved_cube_value` / `preserved_udf_value` read the stored value straight back out of the grid and re-write it | re-derives correctly (its resolver IS wired) |
-//! | the ACTIVE sheet (batch / cross-sheet cascade) | `#N/A` / `#NAME?` — the same absent prefetch, but no position is set, so there is nothing to preserve | collapses to an empty list / `0` / `#N/A` |
+//! | a NON-active sheet (`recalculate_sheet_values`) | kept its OLD value — `preserved_cube_value` / `preserved_udf_value` read the stored value straight back out of the grid and re-wrote it | re-derives correctly (its resolver IS wired) |
+//! | the ACTIVE sheet (batch / cross-sheet cascade) | kept its OLD value too — these cascades now evaluate a dependent at its own cell (`cascade_position_tests`); before that no position was set, so there was nothing to preserve and it answered `#N/A` / `#NAME?` | collapses to an empty list / `0` / `#N/A` |
 //!
-//! The first row, left column, is the dangerous one: `A1` publishes at the base
+//! Since rev3A#3 the left column is, on both rows, the answer the sheet's
+//! results cache (`engine::cube::CallMemo`) recorded for exactly the
+//! rolled-back arguments when one is recorded, and `#N/A` / `#NAME?` when none
+//! is: a value is never shown for arguments other than its own. But a recorded
+//! answer is only as current as the last recalculation that served it, and a
+//! published refusal where the author had a number is no better, so the guard
+//! stays.
+//!
+//! The left column is the dangerous one, on either sheet: `A1` publishes at the base
 //! version's value next to a `B1` holding the number derived from the author's
 //! held-back `A1` — a pair that was never simultaneously true, on every
 //! subscriber's screen, and silent by construction because the push diff hides

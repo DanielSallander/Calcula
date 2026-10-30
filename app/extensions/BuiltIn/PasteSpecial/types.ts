@@ -46,6 +46,11 @@ export type PasteAttribute =
  * - "subtract": Target_New = Target_Old - Source
  * - "multiply": Target_New = Target_Old * Source
  * - "divide": Target_New = Target_Old / Source
+ *
+ * A FORMULA on either side stays a formula, as in Excel: `=A1` + 1 becomes
+ * `=(A1)+1`, and 5 + a copied `=C1` becomes `=5+(D3)` (pasteSpecialExecute.ts,
+ * `Operand`, BUG-0346). Text, booleans and errors held as constants leave the
+ * destination as it is.
  */
 export type PasteOperation = "none" | "add" | "subtract" | "multiply" | "divide";
 

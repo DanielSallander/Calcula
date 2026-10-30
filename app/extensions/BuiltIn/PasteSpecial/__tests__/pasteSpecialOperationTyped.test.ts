@@ -54,6 +54,9 @@ vi.mock("@api/lib", async (importOriginal) => {
     commitUndoTransaction: vi.fn(async () => undefined),
     cancelUndoTransaction: vi.fn(async () => undefined),
     shiftFormulasBatch: vi.fn(async () => []),
+    // An operation's own gates (no array, no hidden formula) find nothing here.
+    getSpillRanges: vi.fn(async () => []),
+    isSheetProtected: vi.fn(async () => false),
   };
 });
 vi.mock("@api/cellTarget", async (importOriginal) => ({
@@ -144,8 +147,8 @@ describe("Paste Special operations read typed values and write invariant numbers
     expect(h.typedSheet).toHaveBeenCalledWith(5, 1, 5, 2, undefined);
     const out = written().map((u) => ({ ...u }));
     expect(out, "an operand was read from its display text").toEqual([
-      { row: 5, col: 1, value: "3.5", invariant: true },
-      { row: 5, col: 2, value: "2234", invariant: true },
+      { row: 5, col: 1, value: "3.5", invariant: true, pasted: true },
+      { row: 5, col: 2, value: "2234", invariant: true, pasted: true },
     ]);
     // Never through the user-input parser.
     expect(h.writes.mock.calls.filter((c) => c[0] === "updateCell")).toHaveLength(0);
@@ -180,8 +183,8 @@ describe("Paste Special operations read typed values and write invariant numbers
     expect(h.batch).toHaveBeenCalledTimes(1);
     expect(h.batch.mock.calls[0][1]).toEqual({ target: REF });
     expect(written(), "the grid route read an operand from its display text").toEqual([
-      { row: 3, col: 0, value: "0.5", invariant: true },
-      { row: 3, col: 1, value: String(1000 - 1234), invariant: true },
+      { row: 3, col: 0, value: "0.5", invariant: true, pasted: true },
+      { row: 3, col: 1, value: String(1000 - 1234), invariant: true, pasted: true },
     ]);
   });
 

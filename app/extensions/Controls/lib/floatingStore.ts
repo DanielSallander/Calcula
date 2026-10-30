@@ -349,6 +349,7 @@ export function reanchorFloatingControls(
   interface PendingRename {
     index: number;
     ctrl: FloatingControl;
+    oldId: string;
     newId: string;
     row: number;
     col: number;
@@ -392,6 +393,7 @@ export function reanchorFloatingControls(
     pending.push({
       index,
       ctrl,
+      oldId: ctrl.id,
       newId: makeFloatingControlId(sheetIndex, moved.row, moved.col),
       row: moved.row,
       col: moved.col,
@@ -402,33 +404,58 @@ export function reanchorFloatingControls(
     // RENAME the member in place. Going through removeControlFromGroups would
     // dissolve a two-member group (membership momentarily drops to 1) and then
     // point newId at a group that no longer exists.
-    const groupId = controlToGroup.get(p.ctrl.id);
+    const groupId = controlToGroup.get(p.oldId);
     if (groupId) {
-      controlToGroup.delete(p.ctrl.id);
+      controlToGroup.delete(p.oldId);
       controlToGroup.set(p.newId, groupId);
       const group = controlGroups.get(groupId);
       if (group) {
-        group.memberIds = group.memberIds.map((id) => (id === p.ctrl.id ? p.newId : id));
+        group.memberIds = group.memberIds.map((id) => (id === p.oldId ? p.newId : id));
       }
     }
-    hooks?.onRename?.(p.ctrl.id, p.newId);
-    occupied.delete(p.ctrl.id);
-    occupied.add(p.newId);
+    hooks?.onRename?.(p.oldId, p.newId);
     outcome[p.index] = { ...p.ctrl, id: p.newId, row: p.row, col: p.col };
     changed = true;
   };
 
-  // PHASE 2 — APPLY, VACATED DESTINATIONS FIRST. Each sweep renames whatever
-  // can move without landing on an id somebody still holds, which frees the ids
-  // the next sweep needs; a monotone shift therefore unwinds from the far end of
-  // the block and displaces nothing. The loop is bounded by `pending.length`,
-  // since a sweep that renames nothing ends it.
+  // PHASE 2 — APPLY, VACATED DESTINATIONS FIRST (`applyRenamesVacatedFirst`).
+  applyRenamesVacatedFirst(pending, occupied, applyRename);
+
+  floatingControls = outcome.filter((c): c is FloatingControl => c !== null);
+  return changed;
+}
+
+/**
+ * Apply a block of id renames in an order that DISPLACES NOTHING, then the
+ * renames that cannot avoid it. `occupied` is every id something still holds;
+ * it is kept current as the renames land (the old id freed, the new one taken).
+ *
+ * Each sweep renames whatever can move without landing on an id somebody still
+ * holds, which frees the ids the next sweep needs; a monotone shift therefore
+ * unwinds from the far end of the block and displaces nothing. The loop is
+ * bounded by `pending.length`, since a sweep that renames nothing ends it.
+ *
+ * One rule for both stores that re-key by anchor: the floating store above,
+ * and the side state an OFF-SHEET edit re-keys (lib/controlSideState.ts), whose
+ * controls are not in this store at all. See `reanchorFloatingControls` for
+ * what renaming in plain order destroyed.
+ */
+export function applyRenamesVacatedFirst<T extends { readonly oldId: string; readonly newId: string }>(
+  pending: readonly T[],
+  occupied: Set<string>,
+  apply: (rename: T) => void,
+): void {
+  const applyOne = (p: T): void => {
+    apply(p);
+    occupied.delete(p.oldId);
+    occupied.add(p.newId);
+  };
   let remaining = pending;
   while (remaining.length > 0) {
-    const blocked: PendingRename[] = [];
+    const blocked: T[] = [];
     for (const p of remaining) {
       if (occupied.has(p.newId)) blocked.push(p);
-      else applyRename(p);
+      else applyOne(p);
     }
     if (blocked.length === remaining.length) {
       // No progress: every destination left is held by a control that is not
@@ -437,14 +464,11 @@ export function reanchorFloatingControls(
       // the one it always gave — the hooks are told, and they displace what was
       // there. Doing it here rather than earlier is what keeps the collision
       // limited to the controls that genuinely collide.
-      for (const p of blocked) applyRename(p);
+      for (const p of blocked) applyOne(p);
       break;
     }
     remaining = blocked;
   }
-
-  floatingControls = outcome.filter((c): c is FloatingControl => c !== null);
-  return changed;
 }
 
 /**

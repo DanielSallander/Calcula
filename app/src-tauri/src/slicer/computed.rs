@@ -580,7 +580,10 @@ pub fn update_slicer_computed_property(
         }
     }
 
-    // Find the property and its slicer
+    // Find the property and its slicer. The properties are released before
+    // the slicers are read: `slicers` before `computed_properties` is the
+    // crate's order for the two (BUG-0593, see
+    // `re_evaluate_slicer_computed_properties`).
     let (slicer_id, sheet_index) = {
         let props = slicer_state.computed_properties.read().unwrap();
         let mut found = None;
@@ -590,6 +593,7 @@ pub fn update_slicer_computed_property(
                 break;
             }
         }
+        drop(props);
         let slicer_id = found.ok_or_else(|| format!("Property {} not found", prop_id))?;
 
         let slicers = slicer_state.slicers.read().unwrap();
@@ -836,9 +840,19 @@ pub fn re_evaluate_slicer_computed_properties(
         return modified_slicers;
     }
 
-    // Re-evaluate each affected property
-    let mut props = slicer_state.computed_properties.write(effect).unwrap();
+    // Re-evaluate each affected property.
+    //
+    // `slicers` BEFORE `computed_properties` (BUG-0593): the crate's one order
+    // for the two slicer stores. The save's and the publish carrier's slicer
+    // collector (`collect_slicers_for_save`), the refresh's slicer install
+    // and the load all take the slicers first, and the save's collector runs
+    // in its tail with no grid lock held. This function runs inside
+    // `update_cell_impl` -- off the main thread for the MCP server, the AI
+    // chat and the notebook -- and took the properties first, so a save
+    // overlapping a cell edit that re-evaluated a slicer property could leave
+    // each holding the store the other waited for.
     let mut slicers = slicer_state.slicers.write(effect).unwrap();
+    let mut props = slicer_state.computed_properties.write(effect).unwrap();
 
     for prop_id in &affected_prop_ids {
         // Find the property across all slicers

@@ -235,7 +235,8 @@ fn the_digest_takes_the_two_grid_locks_in_the_passs_order() {
     let digest_src = include_str!("state_digest.rs");
     let calc_src = include_str!("calculation.rs");
 
-    let pass = function_body(calc_src, "pub(crate) fn run_calculation_pass(");
+    // The pass's body (`run_calculation_pass` delegates to it since round 7).
+    let pass = function_body(calc_src, "pub(crate) fn run_calculation_pass_with(");
     let pass_grid = first_index_of(pass, "state.grid.write(").expect("the pass stopped locking grid");
     let pass_grids =
         first_index_of(pass, "state.grids.write(").expect("the pass stopped locking grids");
@@ -868,6 +869,18 @@ fn binding_name(line: &str) -> String {
     };
     let rest = after.1.trim_start();
     let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+    // `let Ok(guard) = .. else {`, `if let Some(mut guard) = ..`: the guard is
+    // the pattern's inner binding, which is what `drop(guard)` names. Read as
+    // the pattern's head, every let-else guard was named `Ok` and no `drop`
+    // could ever release it (rev5C#1).
+    let rest = ["Ok(", "Some("]
+        .iter()
+        .find_map(|head| rest.strip_prefix(head))
+        .map(|inner| {
+            let inner = inner.trim_start();
+            inner.strip_prefix("mut ").unwrap_or(inner).trim_start()
+        })
+        .unwrap_or(rest);
     rest.chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect()
@@ -875,8 +888,18 @@ fn binding_name(line: &str) -> String {
 
 /// Receivers whose fields are the locks this census is about. A local named
 /// `pivot_state` / `user_files_state` counts too -- the pass locks several.
+///
+/// `slicers` too (BUG-0593): the object-binding contexts hold the slicer store
+/// as a field named `slicers` (`ctx.slicers.slicers.read()`,
+/// `cx.slicers.slicers.read()`), and without this every one of those
+/// acquisitions of the store was invisible to every census here. It is the
+/// only lock reached through a receiver of that name in the crate. (They read
+/// as ACQUISITIONS; a guard bound through a context path -- `let g =
+/// ctx.x.y.read()` -- is never read as HELD, because the `let` test looks for
+/// `=` right before the receiver. Each of the five was read by hand for
+/// BUG-0593: every one is a scoped copy or an `if let` block.)
 fn is_state_receiver(name: &str) -> bool {
-    name == "state" || name.ends_with("_state")
+    name == "state" || name.ends_with("_state") || name == "slicers"
 }
 
 /// Method calls that CONSUME the guard inside the same statement, leaving
@@ -1236,13 +1259,21 @@ fn acquisitions_in(line: &str, tail: &str) -> Vec<Acquisition> {
             }
             let recv_start = recv_text.len() - recv.len();
             let head = line[..recv_start].trim_end();
+            // `controls` names TWO locks: AppState's control store and the pane
+            // controls' own (`PaneControlState::controls`, reached as
+            // `pane_control_state.controls` / `pane_state.controls`). Read as one,
+            // a pane-control command holding ITS store across an undo record
+            // paired with a structural edit taking AppState's under the stack
+            // (round 8). The pane's is named apart.
+            let field = if field == "controls" && recv.starts_with("pane") { "pane_controls" } else { field };
             // `*state.active_sheet.read()...` copies the value out; the guard
             // is a temporary that dies at the `;`.
             let deref_copied = head.ends_with('*');
             let rest_of_line = &line[at + method.len()..];
             let consumed = CONSUMING.iter().any(|c| rest_of_line.contains(c))
                 || (!rest_of_line.contains(';')
-                    && CONSUMING.iter().any(|c| tail.contains(c)));
+                    && CONSUMING.iter().any(|c| tail.contains(c)))
+                || (trailing_ident(head) == "match" && match_arm_consumes_the_guard(&format!("{rest_of_line}{tail}")));
             // Bound to a name that outlives the statement?
             let mut h = head;
             loop {
@@ -1273,6 +1304,49 @@ fn acquisitions_in(line: &str, tail: &str) -> Vec<Acquisition> {
     out
 }
 
+/// After `let x = match state.y.lock()`: does the `Ok` arm do something with the
+/// guard OTHER than hand it to `x`? `text` is the rest of the statement.
+///
+/// `let g = match state.y.lock() { Ok(g) => g, Err(_) => return };` binds the
+/// guard, and `x` holds the lock for the rest of its block. But
+/// `let pruned = match state.object_scripts.write(&effect) { Ok(mut scripts) =>
+/// take_object_scripts(&mut scripts, ..), Err(_) => Vec::new() };` (the table
+/// and name deletes) consumes it inside the arm: the lock is released at the
+/// `;` and `pruned` holds what the arm made. Read as bound, those deletes held
+/// `object_scripts` across their undo records (round 8). `false` -- the guard is
+/// bound -- when the arm is exactly its binding, or when no `Ok(` arm is in
+/// sight, which keeps the over-approximation.
+fn match_arm_consumes_the_guard(text: &str) -> bool {
+    let Some(at) = text.find("Ok(") else {
+        return false;
+    };
+    let rest = text[at + "Ok(".len()..].trim_start();
+    let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+    let binding: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    if binding.is_empty() {
+        return false;
+    }
+    let Some(arm) = rest[binding.len()..].trim_start().strip_prefix(')') else {
+        return false;
+    };
+    let Some(arm) = arm.trim_start().strip_prefix("=>") else {
+        return false;
+    };
+    let arm = arm.trim_start();
+    let yields_the_guard = arm
+        .strip_prefix(binding.as_str())
+        .is_some_and(|after| after.trim_start().starts_with([',', '}']));
+    !yields_the_guard
+}
+
+/// Every `.authorize(` call on one line of code: `(column, receiver)`.
+fn authorized_on_line(line: &str) -> Vec<(usize, String)> {
+    line.match_indices(".authorize(")
+        .map(|(at, _)| (at, trailing_ident(&line[..at]).to_string()))
+        .filter(|(_, receiver)| !receiver.is_empty())
+        .collect()
+}
+
 /// Every function in `text` that acquires a grid lock while holding another
 /// state guard.
 ///
@@ -1284,10 +1358,13 @@ fn acquisitions_in(line: &str, tail: &str) -> Vec<Acquisition> {
 ///     and must not be reported. Without this, the first run reported 130
 ///     violations, 48 of them that shape.
 ///   * `} else {` has a net brace delta of ZERO but it ends the scope of every
-///     guard the `if` arm bound. Closes are therefore applied BEFORE opens.
-///     Without this, `protection.rs`'s two-armed
+///     guard the `if` arm bound. The braces are therefore read IN ORDER
+///     (`brace_profile`), so that line dips below the arm's depth. Without
+///     this, `protection.rs`'s two-armed
 ///     `if sheet_index == active_sheet { grid } else { grids }` reads as one
-///     arm holding the other arm's guards.
+///     arm holding the other arm's guards. (It was "closes before opens" until
+///     rev5C#1, which also dipped on `{ return; }` and forgot every guard bound
+///     beside a one-line block -- see `brace_profile`.)
 fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder> {
     // The crate's ONE list of function-start spellings: this census kept its
     // own and lacked `pub(super) async fn` (fix round 5).
@@ -1304,7 +1381,9 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
     let mut out = Vec::new();
     let mut current: Option<String> = None;
     let mut depth: i32 = 0;
-    let mut held: Vec<(String, i32)> = Vec::new();
+    // (store, scope, fresh): `fresh` is `Some(survives)` on the line that bound
+    // the guard, which judged it by its own column (`guard_scope_on_line`).
+    let mut held: Vec<(String, i32, Option<bool>)> = Vec::new();
     // The SAME guards, tracked by binding name, for the re-entrancy question.
     //
     // Two lists rather than one, and the difference is the point. For the ORDER
@@ -1314,7 +1393,7 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
     // that drops four unrelated guards and then re-takes `grids` would go
     // unreported, and `apply_override_value_to_grid` is exactly that shape. So
     // this list releases only the guard `drop(name)` actually names.
-    let mut held_named: Vec<(String, String, i32)> = Vec::new();
+    let mut held_named: Vec<(String, String, i32, Option<bool>)> = Vec::new();
     // Depth at which a closure handed to `spawn` opened, while it is open.
     let mut spawn_until: Option<i32> = None;
 
@@ -1357,7 +1436,7 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
             acquisitions_at(&code, i, &tail)
         };
         for acq in acquisitions {
-            if held_named.iter().any(|(f, _, _)| *f == acq.field) {
+            if held_named.iter().any(|(f, _, _, _)| *f == acq.field) {
                 if let Some(name) = current.clone() {
                     out.push(GridLockHolder {
                         file: file.to_string(),
@@ -1372,8 +1451,8 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
                 // `grid` before `grids` is the canonical order, not a holding.
                 let blocking: Vec<String> = held
                     .iter()
-                    .filter(|(f, _)| !(acq.field == "grids" && f == "grid"))
-                    .map(|(f, _)| f.clone())
+                    .filter(|(f, _, _)| !(acq.field == "grids" && f == "grid"))
+                    .map(|(f, _, _)| f.clone())
                     .collect();
                 if !blocking.is_empty() {
                     if let Some(name) = current.clone() {
@@ -1400,15 +1479,14 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
                 // (`recover_spill_map_by_evaluation`, which binds every one of
                 // its six guards that way) as clean, and passed against a tree
                 // with the defect deliberately re-introduced. The statement
-                // being a `let` is what tells them apart.
+                // being a `let` is what tells them apart. A one-line
+                // `let Ok(g) = .. else { return };` is a `let` too, and its
+                // guard outlives the line (`guard_scope_on_line`).
                 let is_let_binding = statement.trim_start().starts_with("let ");
-                let scope = if !is_let_binding && line.trim_end().ends_with('{') {
-                    depth + 1
-                } else {
-                    depth
-                };
-                held.push((acq.field.clone(), scope));
-                held_named.push((acq.field, acq.binding, scope));
+                let at = column_in_line(&code, i, acq.col);
+                let (scope, survives) = guard_scope_on_line(line, at, depth, is_let_binding);
+                held.push((acq.field.clone(), scope, Some(survives)));
+                held_named.push((acq.field, acq.binding, scope, Some(survives)));
             }
         }
         if let Some(rest) = line.split_once("drop(") {
@@ -1418,12 +1496,20 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                 .collect();
-            held_named.retain(|(_, name, _)| *name != dropped);
+            held_named.retain(|(_, name, _, _)| *name != dropped);
         }
-        depth -= closes_here;
-        held.retain(|(_, d)| depth >= *d);
-        held_named.retain(|(_, _, d)| depth >= *d);
-        depth += opens_here;
+        // The braces IN ORDER (`brace_profile`): `} else {` ends the arm's
+        // guards; a block that opens and closes on this line ends nothing.
+        let (lowest, end) = brace_profile(line.as_bytes(), depth);
+        held.retain(|(_, d, fresh)| fresh.unwrap_or(lowest >= *d));
+        held_named.retain(|(_, _, d, fresh)| fresh.unwrap_or(lowest >= *d));
+        for (_, _, fresh) in &mut held {
+            *fresh = None;
+        }
+        for (_, _, _, fresh) in &mut held_named {
+            *fresh = None;
+        }
+        depth = end;
         // AFTER the opens are counted, or the `spawn(` line clears its own
         // marker: on that line `depth` is still the outer depth until the `{`
         // has been counted.
@@ -1609,6 +1695,21 @@ fn the_generalised_detector_fires_on_every_shape_that_deadlocked() {
             "guards bound through .ok()",
             "pub fn f(state: &AppState) {\n    let named_ranges = state.named_ranges.read().ok();\n    let tables = state.tables.read().ok();\n    let table_names = state.table_names.read().ok();\n    if let Ok(mut grid) = state.grid.write(effect) {\n        respell(&mut grid);\n    }\n}\n",
         ),
+        (
+            // rev5C#1. A ONE-LINE let-else binds a guard that outlives its
+            // line; read closes-first, its `{ return }` dipped below the
+            // guard's depth and the census forgot it on the line that bound
+            // it. `table_deps::refresh_reader_edges` held the three name stores
+            // exactly this way while it took `grid`.
+            "guards bound by one-line let-else",
+            "pub fn f(state: &AppState) {\n    let Ok(named_ranges) = state.named_ranges.read() else { return };\n    let Ok(tables) = state.tables.read() else { return };\n    let Ok(grid) = state.grid.read() else { return };\n}\n",
+        ),
+        (
+            // The same blind spot without a let-else: any block that opens
+            // and closes on one line ended every guard bound beside it.
+            "a one-line block beside a held guard",
+            "pub fn f(state: &AppState) {\n    let n = state.named_ranges.read().unwrap();\n    if n.is_empty() { return; }\n    let g = state.grid.read().unwrap();\n}\n",
+        ),
     ];
     for (label, src) in cases {
         let found = grid_locks_taken_while_holding("planted.rs", src);
@@ -1669,6 +1770,23 @@ fn the_generalised_detector_stays_quiet_on_the_shapes_that_are_correct() {
             // must not carry it past the closing brace.
             "an if-let header scopes its guard to the block",
             "pub fn f(state: &AppState) {\n    if let Ok(mut p) = state.pending_recalc.read() {\n        p.clear();\n    }\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            // The counterparts to the one-line teeth (rev5C#1): a header whose
+            // block closes on its own line ends its guard there...
+            "a one-line if-let header ends its guard on its own line",
+            "pub fn f(state: &AppState) {\n    if let Ok(mut p) = state.pending_recalc.read() { p.clear(); }\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            // ...a let-else guard is released by its own name...
+            "a let-else guard released by drop",
+            "pub fn f(state: &AppState) {\n    let Ok(n) = state.named_ranges.read() else { return };\n    drop(n);\n    let g = state.grid.read().unwrap();\n}\n",
+        ),
+        (
+            // ...and `} else if let .. {` still ends the first arm's guards and
+            // scopes its own to the second.
+            "an else-if-let arm",
+            "pub fn f(state: &AppState) {\n    if a {\n        let s = state.style_registry.read().unwrap();\n    } else if let Ok(t) = state.tables.read() {\n        t.len();\n    }\n    let g = state.grids.read().unwrap();\n}\n",
         ),
     ];
     for (label, src) in cases {
@@ -1791,6 +1909,57 @@ fn statement_tail(code: &[&str], i: usize) -> String {
     tail
 }
 
+/// The depths a line's braces walk through, IN ORDER, from `start`:
+/// `(lowest, end)`, where `lowest` counts `start` itself.
+///
+/// The censuses used to apply a line's closes before its opens, for `} else {`:
+/// its net delta is zero, yet it ends every guard the `if` arm bound. That rule
+/// is right for a line that STARTS by closing a block and wrong for one that
+/// opens and closes a block of its own -- `if x.is_empty() { return; }`,
+/// `items.for_each(|i| { .. });`, `let Ok(g) = state.x.read() else { return };`
+/// -- which ends nothing around it. Read closes-first, such a line dipped below
+/// the depth of every guard bound beside it, and the census FORGOT each one: a
+/// function that held `named_ranges` across a one-line `if` and then waited for
+/// `grid` read as clean, and every one-line let-else guard in the crate was
+/// invisible (rev5C#1: `table_deps::refresh_reader_edges` held the three name
+/// stores, each bound that way, while it took `grid`). Reading the braces in
+/// order tells the two shapes apart: `} else {` dips, `{ return; }` does not.
+fn brace_profile(line: &[u8], start: i32) -> (i32, i32) {
+    let mut depth = start;
+    let mut lowest = start;
+    for &b in line {
+        if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth -= 1;
+            lowest = lowest.min(depth);
+        }
+    }
+    (lowest, depth)
+}
+
+/// Where a guard bound at byte `at` of `line` lives, with the line starting at
+/// `depth`: `(scope, survives the line)`.
+///
+///   * a `let` binding lives at the depth of its statement, and survives the
+///     line unless a brace after it closes that depth (`{ let g = ..; }`);
+///   * an `if let` / `while let` HEADER lives inside the block it opens: to the
+///     next line when the line ends by opening it, not past the line when the
+///     block closes on it too.
+fn guard_scope_on_line(line: &str, at: usize, depth: i32, is_let_binding: bool) -> (i32, bool) {
+    let bytes = line.as_bytes();
+    let at = at.min(bytes.len());
+    let (_, here) = brace_profile(&bytes[..at], depth);
+    let (lowest_after, end) = brace_profile(&bytes[at..], here);
+    if is_let_binding {
+        (here, lowest_after >= here)
+    } else if line.trim_end().ends_with('{') {
+        (end, true)
+    } else {
+        (here + 1, false)
+    }
+}
+
 /// Every name a `drop(..)` on this line of code releases (`undrop(` and other
 /// identifiers that merely END in `drop` are not `drop`).
 fn dropped_on_line(line: &str) -> Vec<String> {
@@ -1899,6 +2068,9 @@ fn held_while_acquiring(
         field: String,
         binding: String,
         scope: i32,
+        /// `Some(survives)` on the line that bound it, which judged it by its
+        /// own column ([`guard_scope_on_line`]); `None` from the next line on.
+        fresh: Option<bool>,
     }
     let mut out = Vec::new();
     let mut current: Option<String> = None;
@@ -1940,7 +2112,7 @@ fn held_while_acquiring(
             }
         }
         events.sort_by_key(|event| event.0);
-        for (_, field, live, binding, via) in events {
+        for (col, field, live, binding, via) in events {
             if then.contains(&field.as_str()) {
                 let mut holding: Vec<String> = Vec::new();
                 let mut all: Vec<String> = Vec::new();
@@ -1967,17 +2139,45 @@ fn held_while_acquiring(
             if live {
                 // A guard bound in an `if let` / `while let` HEADER lives inside
                 // the block that opens on the same line; a `let x = match .. {`
-                // binding outlives it (see `grid_locks_taken_while_holding`).
+                // binding outlives it (see `grid_locks_taken_while_holding`), and
+                // so does a one-line `let Ok(x) = .. else { return };`.
                 let is_let_binding = statement.trim_start().starts_with("let ");
-                let scope = if !is_let_binding && line.trim_end().ends_with('{') { depth + 1 } else { depth };
-                alive.push(Guard { field, binding, scope });
+                let at = column_in_line(&code, i, col);
+                let (scope, survives) = guard_scope_on_line(line, at, depth, is_let_binding);
+                alive.push(Guard { field, binding, scope, fresh: Some(survives) });
+            }
+        }
+        // `.authorize(` MOVES a pending guard (`PendingGuard::authorize` takes
+        // `self`). Bound by a `let`, the guard now lives as long as THAT binding
+        // -- `let updated = { let mut slicers = pending.authorize(&effect); .. };`
+        // releases the store at the block's end, though `pending` itself was
+        // bound outside it; unbound (`pending.authorize(&effect).remove(..)`), it
+        // is a temporary that dies with the statement. Read as still bound to
+        // `pending`, every slicer and control writer of that shape held its store
+        // across the undo record it takes after the block (round 8).
+        for (at, receiver) in authorized_on_line(line) {
+            let Some(pos) = alive.iter().position(|g| !g.binding.is_empty() && g.binding == receiver) else {
+                continue;
+            };
+            let mut guard = alive.remove(pos);
+            if statement.trim_start().starts_with("let ") {
+                let (scope, survives) = guard_scope_on_line(line, at, depth, true);
+                guard.binding = binding_name(line);
+                guard.scope = scope;
+                guard.fresh = Some(survives);
+                alive.push(guard);
             }
         }
         let dropped = dropped_on_line(line);
         alive.retain(|guard| guard.binding.is_empty() || !dropped.contains(&guard.binding));
-        depth -= closes_here;
-        alive.retain(|guard| depth >= guard.scope);
-        depth += opens_here;
+        // The braces IN ORDER (`brace_profile`): a block that opens and closes
+        // on this line ends nothing around it.
+        let (lowest, end) = brace_profile(line.as_bytes(), depth);
+        alive.retain(|guard| guard.fresh.unwrap_or(lowest >= guard.scope));
+        for guard in &mut alive {
+            guard.fresh = None;
+        }
+        depth = end;
         if spawn_until.is_some_and(|d| depth <= d) {
             spawn_until = None;
         }
@@ -2116,7 +2316,10 @@ fn the_recalculation_pass_still_takes_sheet_names_first() {
     // this fails here rather than leaving every other function aligned to an
     // order nothing takes any more.
     let calc = include_str!("calculation.rs");
-    let pass = function_body(calc, "pub(crate) fn recalculate_sheet_values(");
+    // The pass's body is `recalculate_sheet_values_with` since round 8:
+    // `recalculate_sheet_values` and an update's `recalculate_installed_sheet_values`
+    // both delegate to it.
+    let pass = function_body(calc, "fn recalculate_sheet_values_with(");
     let sheet_names = first_index_of(pass, "state.sheet_names.read(")
         .expect("the pass no longer locks `sheet_names` — re-derive this census");
     for field in AFTER_SHEET_NAMES {
@@ -3005,6 +3208,7 @@ fn materialising_dev_controls_does_not_hold_sheet_ids_while_it_waits_for_sheet_n
                 }],
                 media: std::collections::HashMap::new(),
                 floating_ranges: Vec::new(),
+                object_bindings: Vec::new(),
             };
             let dev_map = std::collections::HashMap::from([(local_sid, 0usize)]);
             let mut ledger = Vec::new();
@@ -3557,16 +3761,16 @@ const TAKEN_LATE_BY_THE_CELL_WRITERS: [&str; 4] = ["sheet_ids", "tables", "table
 /// hold at the recorder -- unless it ALSO holds `grid` or `grids`, which every
 /// writer takes first, so it cannot be overlapping a writer that is past them.
 ///
-/// `sheet_ids` is read through calls too. The three name stores are read in
-/// the bodies only: through calls they reach two cases in files this round does
-/// not own (`remove_duplicates` holds all three and rebuilds every dependency
-/// map; `rename_named_range_impl` holds `named_ranges` and rewrites both grids),
-/// each a real cycle with the writers, reported open rather than exempted here.
+/// All four are read THROUGH CALLS (BUG-0592). Round 6 read the three name
+/// stores in the bodies only, because through calls they reached two functions
+/// it did not own: `rename_named_range_impl`, which took `named_ranges` before
+/// the grid locks its repoint takes, and `remove_duplicates`, which held its
+/// name tables across the dependency rebuild. The rename now takes `grid` and
+/// `grids` FIRST and holds them across the move, the repoint and the undo
+/// record; the rebuild reads COPIES of the name tables.
 fn late_store_inversions(file: &str, text: &str, graph: &CallGraph, writers_hold: &[String]) -> Vec<HeldAcquisition> {
     let then: Vec<&str> = writers_hold.iter().map(String::as_str).collect();
-    let (recorders_first, name_stores) = TAKEN_LATE_BY_THE_CELL_WRITERS.split_at(1);
-    let mut hits = held_while_acquiring(file, text, recorders_first, &then, graph);
-    hits.extend(held_while_acquiring(file, text, name_stores, &then, &CallGraph::new()));
+    let mut hits = held_while_acquiring(file, text, &TAKEN_LATE_BY_THE_CELL_WRITERS, &then, graph);
     hits.retain(|hit| !hit.alive.iter().any(|store| store == "grid" || store == "grids"));
     hits
 }
@@ -4003,19 +4207,86 @@ fn the_cell_writer_censuses_fire_on_every_shape_round_six_found_and_stay_quiet_o
 "##,
         ),
         (
-            "the name stores are read in the body only (the documented scope)",
+            // BUG-0592: the dependency rebuild reads COPIES of the name tables.
+            "remove_duplicates as it is now: the name tables copied, nothing held across the rebuild",
             r##"pub fn remove_duplicates(state: &AppState) {
-    let tables = state.tables.read().unwrap();
+    let tables = state.tables.read().unwrap().clone();
+    let named_ranges = state.named_ranges.read().unwrap().clone();
     rebuild_maps(state);
+}
+"##,
+        ),
+        (
+            // BUG-0592: the rename takes both grid locks FIRST and keeps them.
+            "the rename as it is now: both grid locks first, the registry, then the repoint",
+            r##"pub(crate) fn rename_named_range_impl(state: &AppState) {
+    let pending_grid = match state.grid.lock_pending() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    let pending_grids = match state.grids.lock_pending() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    let pending = match state.named_ranges.lock_pending() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    rename_in_grids(state);
+    record_undo(state);
 }
 "##,
         ),
     ];
     let mut wider = writers_hold.clone();
     wider.push("dependents".to_string());
+    wider.push("undo_stack".to_string());
+    let mut name_graph = graph.clone();
+    name_graph.insert("rename_in_grids".to_string(), vec!["grid".to_string(), "grids".to_string()]);
+    name_graph.insert("record_undo".to_string(), vec!["undo_stack".to_string()]);
     for (label, src) in quiet_for_census_two {
-        let hits = late_store_inversions("planted.rs", src, &graph, &wider);
+        let hits = late_store_inversions("planted.rs", src, &name_graph, &wider);
         assert!(hits.is_empty(), "census 2 fired on `{label}`, which it must not: {hits:?}");
+    }
+
+    // BUG-0592: the name stores are read THROUGH CALLS now. Each shape below is
+    // how round 6's call-graph walk read the two functions it reported open.
+    let flagged_through_calls: &[(&str, &str, &str)] = &[
+        (
+            "remove_duplicates as round 6 read it: name tables held across the dependency rebuild",
+            r##"pub fn remove_duplicates(state: &AppState) {
+    let tables = state.tables.read().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
+    rebuild_maps(state);
+}
+"##,
+            "dependents",
+        ),
+        (
+            // How round 6 read the rename: the scanner cannot see `authorize`
+            // CONSUME the pending guard, so `named_ranges` read as held across
+            // the repoint. (At run time the registry guard was released before
+            // it; what the rename really lacked was ONE critical section --
+            // see `rename_named_range_impl`.) The detector must flag the shape.
+            "a name store held across a repoint that takes the grid locks",
+            r##"pub(crate) fn rename_named_range_impl(state: &AppState) {
+    let pending = match state.named_ranges.lock_pending() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    rename_in_grids(state);
+    record_undo(state);
+}
+"##,
+            "grid",
+        ),
+    ];
+    for (label, src, store) in flagged_through_calls {
+        let hits = late_store_inversions("planted.rs", src, &name_graph, &wider);
+        assert!(
+            hits.iter().any(|h| h.acquiring == *store && h.via.is_some()),
+            "census 2 missed `{store}` taken THROUGH A CALL in `{label}`, so it cannot see the shape it now reads: {hits:?}"
+        );
     }
 
     // THE CALL READER: method calls, declarations and a type's functions are not
@@ -4220,13 +4491,13 @@ fn sheet_pair_reads(file: &str, text: &str) -> SheetPairScan {
     scan
 }
 
-/// Torn reads this round could not reach: each a real one, in a file outside the
-/// files the round owned, named as the census reports it (file, function).
-///
-/// TOLERATED, NOT REQUIRED: fixing one needs no edit here (then delete its
-/// entry). Nothing may be ADDED -- a new torn read is a defect to fix, not an
-/// entry to write.
-const TORN_SHEET_PAIRS_NOT_YET_FIXED: [(&str, &str); 9] = [
+/// The nine torn reads round 6 could not reach (BUG-0592) -- each read the pair
+/// in two clone-and-release holds -- now read it under ONE hold, names first:
+/// eight through `calp_commands::sheet_ids_and_names`, which the scan cannot see
+/// read anything (a call), and `with_pane_controls_following_rename` in a
+/// closure holding the names guard while it reads the ids. The allowlist that
+/// tolerated them is gone; this pins that each is still a pairing read.
+const ROUND_SIX_TORN_SITES_NOW_ONE_HOLD: [(&str, &str); 9] = [
     ("calp_collection.rs", "ready_author_collections"),
     ("calp_collection.rs", "list_collection_regions"),
     ("commands/sheet_blank.rs", "sheet_contents"),
@@ -4234,9 +4505,52 @@ const TORN_SHEET_PAIRS_NOT_YET_FIXED: [(&str, &str); 9] = [
     ("object_bindings/object_json.rs", "read"),
     ("object_bindings/page_overrides.rs", "read"),
     ("scripting/application_code_gate.rs", "workbook_sheet_facts"),
-    ("scripting/notebook_commands.rs", "run_cell_internal"),
+    // `run_cell_internal`'s phase-1 read, moved into a helper so its one hold
+    // of `grids` can be proved at run time
+    // (`the_notebook_reads_the_grids_and_the_sheet_ids_in_one_hold`).
+    ("scripting/notebook_commands.rs", "read_cell_run_inputs"),
     ("sheets.rs", "with_pane_controls_following_rename"),
 ];
+
+/// BUG-0592: each of the nine reads the pair through the shared one-hold
+/// helper, or (the pane rename) reads `sheet_ids` while its `sheet_names`
+/// guard is held -- and none reads either store a second time on its own.
+///
+/// SABOTAGE: give `sheet_contents` its two reads back -- the crate-wide census
+/// below fails naming it (and this one, which finds no one-hold read in it).
+#[test]
+fn the_nine_round_six_torn_reads_read_the_pair_under_one_hold() {
+    for (file, function) in ROUND_SIX_TORN_SITES_NOW_ONE_HOLD {
+        let text = std::fs::read_to_string(src_root().join(file)).unwrap_or_else(|_| panic!("cannot read {file}"));
+        let scan = sheet_pair_reads(file, &text);
+        assert!(
+            !scan.torn.iter().any(|hit| hit.function == function),
+            "`{file}::{function}` reads `sheet_ids` and `sheet_names` in two holds again: {scan:?}"
+        );
+        let through_helper = {
+            let blanked = blank_literals(&strip_cfg_test_items(&text));
+            let mut in_function = false;
+            let mut found = false;
+            for line in blanked.lines() {
+                if crate::formula_serialisation_tests::starts_a_function(line.trim_start()) {
+                    in_function = function_name_of(line.trim_start()).as_deref() == Some(function);
+                }
+                let code = line.split("//").next().unwrap_or("");
+                if in_function && code.contains("sheet_ids_and_names(") {
+                    found = true;
+                }
+            }
+            found
+        };
+        let held_together = scan.paired.iter().any(|f| f == function);
+        assert!(
+            through_helper || held_together,
+            "`{file}::{function}` no longer reads the sheet pair under one hold -- neither through \
+             `calp_commands::sheet_ids_and_names` nor with its `sheet_names` guard held while it reads \
+             `sheet_ids` (BUG-0592)"
+        );
+    }
+}
 
 /// R5-TORN-PAIR-SIBLINGS, over every function in the crate: a function that
 /// pairs `sheet_ids[i]` with `sheet_names[i]` reads them under ONE hold,
@@ -4256,9 +4570,6 @@ fn no_function_reads_sheet_ids_and_sheet_names_in_two_holds() {
     for (rel, text) in &crate_sources() {
         let scan = sheet_pair_reads(rel, text);
         for hit in scan.torn {
-            if TORN_SHEET_PAIRS_NOT_YET_FIXED.contains(&(rel.as_str(), hit.function.as_str())) {
-                continue;
-            }
             offenders.push(format!("  {}::{} (line {})", hit.file, hit.function, hit.line));
         }
         paired.extend(scan.paired.into_iter().map(|function| format!("{rel}::{function}")));
@@ -4274,6 +4585,8 @@ fn no_function_reads_sheet_ids_and_sheet_names_in_two_holds() {
         "persistence.rs::build_workbook_for_save",
         "sheets.rs::snapshot",
         "sheets.rs::delete_sheet_impl",
+        // BUG-0592: a closure holding the names guard while it reads the ids.
+        "sheets.rs::with_pane_controls_following_rename",
     ] {
         assert!(
             paired.iter().any(|p| p == anchor),
@@ -4551,7 +4864,8 @@ fn the_torn_pair_detector_fires_on_every_shape_it_exists_for() {
 //   2. THE TAILS (the rest of the `.cala` snapshot, the `.calp` carrier's slicer
 //      and timeline collectors and the rest of the publish assembly) cannot be
 //      held that way: they read `SlicerState::slicers`, and the async
-//      `get_slicer_items_core` holds the slicers while it reads `grids`. They
+//      `get_slicer_items_core` held the slicers while it read `grids` (until
+//      BUG-0593: it copies and releases them now). They
 //      keep BUG-0591's lock shape and are VALIDATED: the body reads
 //      `AppState::sheet_structure_generation` under its hold, every renumbering
 //      bumps it inside its `sheet_names` hold (`remap_sheet_keyed_stores`, and
@@ -7192,8 +7506,10 @@ fn sheet_names_guard_at_each_call(text: &str, function: &str, calls: &[&str]) ->
             }
         }
         guards.retain(|(names, _)| !names.iter().any(|n| dropped.contains(n)));
-        // The braces IN SOURCE ORDER. Counting closes before opens -- the other
-        // trackers' rule, right for `} else {` -- reads a one-line closure at the
+        // The braces IN SOURCE ORDER. Counting closes before opens -- the rule
+        // `reads_outside_the_grid_hold` and `sheet_pair_reads` still use (the
+        // grid and pair censuses read braces in order since rev5C#1,
+        // `brace_profile`), right for `} else {` -- reads a one-line closure at the
         // guard's own depth (`let remap = |i| -> Option<usize> { Some(i) };` in
         // `restore_partition_invariant`) as the guard's block closing, and the
         // guard is forgotten one line before the remap it covers.
@@ -7467,4 +7783,2720 @@ pub fn renumbers(state: &AppState) {
         vec![("a.rs".to_string(), "renumbers".to_string(), 13)],
         "the call-site finder read a declaration, a test helper or the remap's own bump as a caller"
     );
+}
+
+// ===========================================================================
+// BUG-0593: THE SLICER STORE, AGAINST THE GRID LOCKS AND THE CELL WRITERS
+// ===========================================================================
+//
+// `SlicerState::slicers` is `Persisted<T>` -- a Mutex, so even a read is
+// exclusive -- but it is not an `AppState` field, so no census here asked
+// about it until the drill-through's transitive lock-graph walk did:
+//
+// ```text
+// get_slicer_items_core (async, a worker thread):
+//     slicers ... then grids, style_registry, tables, locale  (a TABLE slicer)
+//                 or pivot_tables                            (a pivot slicer)
+// update_cell_impl (main, or the MCP / AI chat / notebook thread):
+//     grid, grids, sheet_names, .., pivot_tables, .. then (re-evaluating the
+//     slicers' computed properties) computed_properties, slicers
+// delete / move / copy sheet:
+//     grid, grids, .. then slicers (`cascade_sheet_removed`)
+// ```
+//
+// A table slicer's item fetch racing a cell edit or a sheet operation could
+// leave each thread holding what the other waited for. The item fetch now
+// COPIES the store and releases it before any other read.
+//
+// The audit of every other acquisition of the store found one more cycle, in
+// the store's own pair: the save's (and the publish carrier's) slicer
+// collector takes `slicers` then `computed_properties` in the save's TAIL,
+// with no grid lock held, and the re-evaluation under `update_cell_impl` took
+// them the other way round. The crate's order for the two is now `slicers`
+// first, everywhere.
+//
+// Pinned like BUG-0590 / BUG-0591:
+//   1. a census over every function in the crate, through one level of calls:
+//      nothing holds the slicer store while it takes a store the cell writer
+//      holds when it writes the slicers (gated by the grid locks, which every
+//      such writer takes first);
+//   2. the pair census for the store's own two locks;
+//   3. each detector on the pre-fix shapes (flagged) and the fixed ones
+//      (quiet);
+//   4. two runtime probes -- the item fetch while a writer holds `grids`, the
+//      re-evaluation while the save's collector holds `slicers` -- each with a
+//      partner that drives the SAME harness with the pre-fix body and must see
+//      the deadlock.
+
+/// The function that writes the slicer store under the cell writer's whole
+/// lock set: `update_cell_impl` calls it holding the grid locks and the rest.
+const SLICER_RE_EVALUATION: &str = "re_evaluate_slicer_computed_properties";
+
+/// Every store `update_cell_impl` holds when it reaches the slicer store,
+/// READ out of `commands/data.rs` (never typed): what is alive at its call of
+/// [`SLICER_RE_EVALUATION`], which the census reaches as "holding `grid`,
+/// acquiring `slicers` inside the callee".
+fn what_the_cell_writer_holds_at_the_slicers(graph: &CallGraph) -> Vec<String> {
+    let data = std::fs::read_to_string(src_root().join("commands/data.rs")).expect("cannot read commands/data.rs");
+    let at_the_call: Vec<HeldAcquisition> = held_while_acquiring("commands/data.rs", &data, &["grid"], &["slicers"], graph)
+        .into_iter()
+        .filter(|h| h.function == "update_cell_impl" && h.via.as_deref() == Some(SLICER_RE_EVALUATION))
+        .collect();
+    assert!(
+        !at_the_call.is_empty(),
+        "`update_cell_impl` no longer calls `{SLICER_RE_EVALUATION}` while it holds `grid` (or the census can no \
+         longer see it do so) -- re-derive the lock set the slicer census enforces"
+    );
+    let mut held: Vec<String> = Vec::new();
+    for hit in at_the_call {
+        for store in hit.alive {
+            if !held.contains(&store) {
+                held.push(store);
+            }
+        }
+    }
+    held
+}
+
+/// The slicer census's question of one file: where a function holds the slicer
+/// store while it acquires `grid`, `grids` or a store the cell writer holds at
+/// the slicers (`writer_holds`) -- unless it ALSO holds `grid` or `grids`,
+/// which that writer and every sheet operation take first, so it cannot be
+/// overlapping one that is past them.
+fn slicer_store_inversions(file: &str, text: &str, graph: &CallGraph, writer_holds: &[String]) -> Vec<HeldAcquisition> {
+    let mut then: Vec<&str> = writer_holds.iter().map(String::as_str).collect();
+    for store in ["grid", "grids"] {
+        if !then.contains(&store) {
+            then.push(store);
+        }
+    }
+    let mut hits = held_while_acquiring(file, text, &["slicers"], &then, graph);
+    hits.retain(|hit| !hit.alive.iter().any(|store| store == "grid" || store == "grids"));
+    hits
+}
+
+/// BUG-0593, over every function in the crate: nothing holds the slicer store
+/// while it waits for a grid lock or for a store the cell writer holds when it
+/// writes the slicers.
+///
+/// SABOTAGE: in `get_slicer_items_core`, bind the store as a guard again
+/// (`let slicers = slicer_state.slicers.read().unwrap();` in place of the
+/// copy) -- this fails naming it, taking `grids` inside `get_table_column_values`.
+#[test]
+fn no_function_holds_the_slicer_store_while_acquiring_a_store_the_cell_writer_holds_first() {
+    let sources = crate_sources();
+    let graph = direct_acquisitions_by_function(&sources);
+    // The premises, read from the code. The re-evaluation writes the store...
+    let re_evaluation =
+        graph.get(SLICER_RE_EVALUATION).unwrap_or_else(|| panic!("the call graph no longer knows `{SLICER_RE_EVALUATION}`"));
+    assert!(
+        re_evaluation.iter().any(|s| s == "slicers"),
+        "`{SLICER_RE_EVALUATION}` no longer takes `slicers` -- re-derive this census: {re_evaluation:?}"
+    );
+    // ...the cell writer reaches it holding the grid locks and the stores the
+    // item fetch reads...
+    let writer_holds = what_the_cell_writer_holds_at_the_slicers(&graph);
+    for store in ["grid", "grids", "style_registry", "locale", "pivot_tables"] {
+        assert!(
+            writer_holds.iter().any(|s| s == store),
+            "`update_cell_impl` no longer holds `{store}` when it writes the slicers (or the census cannot see it): \
+             {writer_holds:?}"
+        );
+    }
+    // ...and a sheet operation reaches the store under the grid locks, through
+    // the cascade: the direction this census enforces is the crate's.
+    let sheets = std::fs::read_to_string(src_root().join("sheets.rs")).expect("cannot read sheets.rs");
+    let cascades: Vec<HeldAcquisition> = held_while_acquiring("sheets.rs", &sheets, &["grid", "grids"], &["slicers"], &graph)
+        .into_iter()
+        .filter(|h| h.via.as_deref() == Some("cascade_sheet_removed"))
+        .collect();
+    assert!(
+        !cascades.is_empty(),
+        "no sheet operation reaches the slicer store through `cascade_sheet_removed` while it holds the grid locks \
+         (or the census cannot see it) -- re-derive the direction this census enforces"
+    );
+    let mut offenders: Vec<String> = Vec::new();
+    for (rel, text) in &sources {
+        offenders.extend(slicer_store_inversions(rel, text, &graph, &writer_holds).iter().map(describe));
+    }
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "these functions hold the slicer store while they wait for a grid lock or for a store the cell writer \
+         holds when it writes the slicers:\n{}\n\n`update_cell_impl` holds [{}] and then writes the slicers \
+         (`{SLICER_RE_EVALUATION}`), off the main thread for the MCP server, the AI chat and the notebook; delete, \
+         move and copy sheet reach the store under the grid locks through `cascade_sheet_removed`. Each function \
+         above can interleave with them and each will hold what the other waits for: a window that never \
+         answers, nothing in the log (BUG-0593). Copy what you need out of the slicer store and release it \
+         first, or take the grid locks first.",
+        offenders.join("\n"),
+        writer_holds.join(", ")
+    );
+}
+
+/// The slicer store's own pair: `slicers` before `computed_properties`,
+/// everywhere (BUG-0593's audit). The save's slicer collector takes them in
+/// that order in the save's tail, with no grid lock held, so a function that
+/// holds the properties while it waits for the slicers can deadlock against a
+/// save. `computed_properties` is also an `AppState` field; the census reads
+/// the name, so it asks the question of both, which is the safe direction --
+/// the cell writer takes that one late too.
+///
+/// SABOTAGE: take `computed_properties` before `slicers` again in
+/// `re_evaluate_slicer_computed_properties` -- this fails naming it.
+#[test]
+fn no_function_holds_the_slicer_properties_while_acquiring_the_slicers() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut canonical: Vec<String> = Vec::new();
+    for (rel, text) in &crate_sources() {
+        for hit in pair_inversions(rel, text, "computed_properties", "slicers") {
+            offenders.push(format!(
+                "  {}::{} (line {}) holds `computed_properties` and then takes `slicers`",
+                hit.file, hit.function, hit.line
+            ));
+        }
+        for hit in pair_inversions(rel, text, "slicers", "computed_properties") {
+            canonical.push(format!("{}::{}", hit.file, hit.function));
+        }
+    }
+    offenders.sort();
+    offenders.dedup();
+    canonical.sort();
+    canonical.dedup();
+    assert!(
+        offenders.is_empty(),
+        "these functions hold `computed_properties` while they wait for `slicers`:\n{}\n\nThe save's and the \
+         publish carrier's slicer collector (`collect_slicers_for_save`) takes `slicers` first and then the \
+         properties, in the save's tail with no grid lock held, and `update_cell_impl` re-evaluates the slicers' \
+         properties off the main thread for the MCP server, the AI chat and the notebook. Each function above can \
+         interleave with a save and each will hold what the other waits for (BUG-0593). Take `slicers` first, or \
+         release the properties before taking it.",
+        offenders.join("\n")
+    );
+    // Non-vacuity: the order enforced is the save collector's, the census can
+    // see it take it, and the re-evaluation now takes it too.
+    for anchor in [
+        "persistence.rs::collect_slicers_for_save",
+        "slicer/computed.rs::re_evaluate_slicer_computed_properties",
+    ] {
+        assert!(
+            canonical.iter().any(|f| f == anchor),
+            "`{anchor}` no longer holds `slicers` while it takes `computed_properties` (or the census cannot see it) \
+             -- re-derive the order this census enforces. It sees:\n  {}",
+            canonical.join("\n  ")
+        );
+    }
+}
+
+/// Both slicer detectors, on the shapes BUG-0593 found and on the fixed ones.
+#[test]
+fn the_slicer_censuses_fire_on_the_shapes_that_deadlocked_and_stay_quiet_on_the_fixes() {
+    let writer_holds: Vec<String> = ["grid", "grids", "sheet_names", "style_registry", "locale", "pivot_tables"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let graph: CallGraph = [
+        ("get_table_column_values", vec!["grids", "style_registry", "tables", "locale"]),
+        ("get_pivot_field_members", vec!["pivot_tables"]),
+        ("evaluate_on_the_grids", vec!["grids"]),
+    ]
+    .into_iter()
+    .map(|(name, stores)| (name.to_string(), stores.into_iter().map(str::to_string).collect()))
+    .collect();
+
+    let flagged: &[(&str, &str, &str)] = &[
+        (
+            "the table slicer's item fetch as it stood",
+            r##"pub(crate) async fn get_slicer_items_core(state: &AppState, slicer_state: &SlicerState) -> Result<(), String> {
+    let (slicer, values) = {
+    let slicers = slicer_state.slicers.read().unwrap();
+    let slicer = slicers.get(&slicer_id).ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    let values = get_table_column_values(state, slicer.cache_source_id, &slicer.field_name)?;
+    (slicer.clone(), values)
+    };
+    Ok(())
+}
+"##,
+            "grids",
+        ),
+        (
+            "the pivot slicer's item fetch as it stood",
+            r##"pub(crate) async fn get_slicer_items_core(state: &AppState, slicer_state: &SlicerState) -> Result<(), String> {
+    let slicers = slicer_state.slicers.read().unwrap();
+    let members = get_pivot_field_members(pivot_state, id, &field, &locale)?;
+    Ok(())
+}
+"##,
+            "pivot_tables",
+        ),
+    ];
+    for (label, src, store) in flagged {
+        let hits = slicer_store_inversions("planted.rs", src, &graph, &writer_holds);
+        assert!(
+            hits.iter().any(|h| h.acquiring == *store),
+            "the slicer census missed `{store}` in `{label}`, so it cannot see the defect it exists for: {hits:?}"
+        );
+    }
+
+    let quiet: &[(&str, &str)] = &[
+        (
+            "the item fetch as it is now: the store copied, then the reads",
+            r##"pub(crate) async fn get_slicer_items_core(state: &AppState, slicer_state: &SlicerState) -> Result<(), String> {
+    let slicers: HashMap<EntityId, Slicer> =
+        slicer_state.slicers.read().map_err(|e| e.to_string())?.clone();
+    let slicer = slicers.get(&slicer_id).ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    let values = get_table_column_values(state, slicer.cache_source_id, &slicer.field_name)?;
+    let members = get_pivot_field_members(pivot_state, id, &field, &locale)?;
+    Ok(())
+}
+"##,
+        ),
+        (
+            "the gate: `add_slicer_computed_property` holds `grids` when it writes the store",
+            r##"pub fn add_slicer_computed_property(state: State<AppState>, slicer_state: State<SlicerState>) -> Result<(), String> {
+    let grids = state.grids.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let styles = state.style_registry.read().unwrap();
+    let slicer_changed = {
+        let mut slicers = slicer_state.slicers.write(&effect).unwrap();
+        slicers.len()
+    };
+    Ok(())
+}
+"##,
+        ),
+        (
+            "a scoped read released before the grid read",
+            r##"fn sheet_of(state: &AppState, slicer_state: &SlicerState) -> usize {
+    let sheet = {
+        let slicers = slicer_state.slicers.read().unwrap();
+        slicers.get(&id).map(|s| s.sheet_index).unwrap_or(0)
+    };
+    let grids = state.grids.read().unwrap();
+    sheet
+}
+"##,
+        ),
+    ];
+    for (label, src) in quiet {
+        let hits = slicer_store_inversions("planted.rs", src, &graph, &writer_holds);
+        assert!(hits.is_empty(), "the slicer census fired on `{label}`, which is CORRECT code: {hits:?}");
+    }
+
+    // The pair: the re-evaluation and the property update as they stood are
+    // flagged; their fixed shapes are quiet and read as the crate's order.
+    let re_evaluation_as_it_stood = r##"pub fn re_evaluate_slicer_computed_properties(slicer_state: &SlicerState, effect: &DocumentEffect) {
+    let mut props = slicer_state.computed_properties.write(effect).unwrap();
+    let mut slicers = slicer_state.slicers.write(effect).unwrap();
+}
+"##;
+    assert_eq!(
+        pair_inversions("planted.rs", re_evaluation_as_it_stood, "computed_properties", "slicers").len(),
+        1,
+        "the pair detector cannot see the re-evaluation as it stood"
+    );
+    let update_as_it_stood = r##"pub fn update_slicer_computed_property(slicer_state: State<SlicerState>) -> Result<(), String> {
+    let (slicer_id, sheet_index) = {
+        let props = slicer_state.computed_properties.read().unwrap();
+        let slicer_id = find(&props)?;
+        let slicers = slicer_state.slicers.read().unwrap();
+        (slicer_id, slicers.len())
+    };
+    Ok(())
+}
+"##;
+    assert_eq!(
+        pair_inversions("planted.rs", update_as_it_stood, "computed_properties", "slicers").len(),
+        1,
+        "the pair detector cannot see the property update as it stood"
+    );
+    let re_evaluation_now = r##"pub fn re_evaluate_slicer_computed_properties(slicer_state: &SlicerState, effect: &DocumentEffect) {
+    let mut slicers = slicer_state.slicers.write(effect).unwrap();
+    let mut props = slicer_state.computed_properties.write(effect).unwrap();
+}
+"##;
+    assert!(pair_inversions("planted.rs", re_evaluation_now, "computed_properties", "slicers").is_empty());
+    assert_eq!(pair_inversions("planted.rs", re_evaluation_now, "slicers", "computed_properties").len(), 1);
+    let update_now = r##"pub fn update_slicer_computed_property(slicer_state: State<SlicerState>) -> Result<(), String> {
+    let (slicer_id, sheet_index) = {
+        let props = slicer_state.computed_properties.read().unwrap();
+        let found = find(&props);
+        drop(props);
+        let slicers = slicer_state.slicers.read().unwrap();
+        (found, slicers.len())
+    };
+    Ok(())
+}
+"##;
+    assert!(
+        pair_inversions("planted.rs", update_now, "computed_properties", "slicers").is_empty(),
+        "the pair detector fired on the property update as it is now, which releases the properties first"
+    );
+    // The store reached through an object-binding context is an acquisition the
+    // pair census sees (the `slicers` receiver).
+    let through_a_context = r##"fn write_slicer(ctx: &LiteralWriteCtx<'_>, slicer_state: &SlicerState) -> Result<(), String> {
+    let props = slicer_state.computed_properties.read().unwrap();
+    let current = {
+        let slicers = ctx.slicers.slicers.read().map_err(|e| e.to_string())?;
+        slicers.len()
+    };
+    Ok(())
+}
+"##;
+    assert_eq!(
+        pair_inversions("planted.rs", through_a_context, "computed_properties", "slicers").len(),
+        1,
+        "the census cannot see the slicer store taken through an object-binding context"
+    );
+}
+
+/// Can another thread take the slicer store within `ms`? The
+/// `probe_can_take_grids` pattern: a THREAD with a deadline, so a "no" is a
+/// timeout the test reports rather than a hang the test joins.
+fn probe_can_take_slicers(slicers: &Arc<SlicerState>, ms: u64) -> bool {
+    let got = Arc::new(AtomicBool::new(false));
+    {
+        let slicers = Arc::clone(slicers);
+        let got = Arc::clone(&got);
+        std::thread::spawn(move || {
+            let guard = slicers.slicers.read();
+            got.store(guard.is_ok(), Ordering::SeqCst);
+        });
+    }
+    wait_until(ms, || got.load(Ordering::SeqCst))
+}
+
+/// Can another thread take the slicers' computed properties within `ms`?
+fn probe_can_take_slicer_properties(slicers: &Arc<SlicerState>, ms: u64) -> bool {
+    let got = Arc::new(AtomicBool::new(false));
+    {
+        let slicers = Arc::clone(slicers);
+        let got = Arc::clone(&got);
+        std::thread::spawn(move || {
+            let guard = slicers.computed_properties.read();
+            got.store(guard.is_ok(), Ordering::SeqCst);
+        });
+    }
+    wait_until(ms, || got.load(Ordering::SeqCst))
+}
+
+/// Run `site` on a thread of its own while the caller's `held` guard is alive,
+/// then ask `probe` whether the store the defect would leave held can be
+/// taken: `(parked, reachable, the site's result)`. `parked` is the
+/// precondition -- a site that finished while `held` was alive never waited for
+/// it, and then the probe measured nothing. `held` is released before the
+/// caller asserts anything, so a failure never leaves the site parked for the
+/// rest of the binary.
+fn run_site_while_held<H, R, F, P>(held: H, site: F, probe: P) -> (bool, bool, R)
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+    P: FnOnce() -> bool,
+{
+    let started = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let started = Arc::clone(&started);
+        let finished = Arc::clone(&finished);
+        std::thread::spawn(move || {
+            started.store(true, Ordering::SeqCst);
+            let result = site();
+            finished.store(true, Ordering::SeqCst);
+            result
+        })
+    };
+    let began = wait_until(2_000, || started.load(Ordering::SeqCst));
+    // Long enough for the site to reach whatever it blocks on.
+    std::thread::sleep(Duration::from_millis(250));
+    let parked = began && !finished.load(Ordering::SeqCst);
+    let reachable = probe();
+    drop(held);
+    let result = handle.join().expect("the site's thread panicked");
+    (parked, reachable, result)
+}
+
+/// A slicer of `source_type` over `source_id`'s `field`, by its wire shape.
+fn slicer_over(source_type: &str, source_id: identity::EntityId, field: &str) -> crate::slicer::types::Slicer {
+    serde_json::from_value(serde_json::json!({
+        "id": identity::EntityId::from_bytes(identity::generate_uuid_v7()).to_string(),
+        "name": field,
+        "sheetIndex": 0,
+        "x": 0.0, "y": 0.0, "width": 180.0, "height": 240.0,
+        "sourceType": source_type,
+        "cacheSourceId": source_id.to_string(),
+        "fieldName": field,
+        "selectedItems": null,
+        "showHeader": true,
+        "columns": 1,
+        "stylePreset": "SlicerStyleLight1",
+        "connectedSources": [{ "sourceType": source_type, "sourceId": source_id.to_string() }]
+    }))
+    .expect("a slicer from its wire shape")
+}
+
+/// A workbook whose sheet 0 holds a TABLE (A1 "Region", A2:A5 East, West,
+/// East, North) and a slicer store with one table slicer over its column.
+fn workbook_with_a_table_slicer() -> (Arc<AppState>, Arc<SlicerState>, identity::EntityId) {
+    let state = shared_state();
+    let seed = test_seed_effect();
+    {
+        let mut grid = state.grid.write(&seed).unwrap();
+        let mut grids = state.grids.write(&seed).unwrap();
+        if grids.is_empty() {
+            grids.push(engine::Grid::new());
+        }
+        for (row, text) in ["Region", "East", "West", "East", "North"].iter().enumerate() {
+            grid.set_cell(row as u32, 0, engine::Cell::new_text(text.to_string()));
+            grids[0].set_cell(row as u32, 0, engine::Cell::new_text(text.to_string()));
+        }
+    }
+    let new_id = || identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    let table = crate::tables::Table {
+        id: new_id(),
+        name: "Sales".to_string(),
+        sheet_index: 0,
+        start_row: 0,
+        start_col: 0,
+        end_row: 4,
+        end_col: 0,
+        columns: vec![crate::tables::TableColumn::new(new_id(), "Region".to_string())],
+        style_options: Default::default(),
+        style_name: "TableStyleMedium2".to_string(),
+        auto_filter_id: None,
+    };
+    state.tables.write(&seed).unwrap().entry(0).or_default().insert(table.id, table.clone());
+    let slicers = Arc::new(SlicerState::new());
+    let slicer = slicer_over("table", table.id, "Region");
+    let slicer_id = slicer.id;
+    slicers.slicers.write(&seed).unwrap().insert(slicer_id, slicer);
+    (state, slicers, slicer_id)
+}
+
+/// THE DEFECT AS A TEST THAT FAILS RATHER THAN HANGS. This thread plays the
+/// cell writer: it holds `grids` (`update_cell_impl` holds `grid` and `grids`
+/// and goes on to write the slicers). The table slicer's item fetch runs on
+/// another thread and blocks on `grids` -- expected, and harmless. The QUESTION
+/// is what it holds while it waits. Before the fix it held the slicer store,
+/// so the writer's own slicer write could never complete.
+#[test]
+fn a_table_slicers_item_fetch_does_not_hold_the_slicers_while_it_waits_for_grids() {
+    let (state, slicers, slicer_id) = workbook_with_a_table_slicer();
+    let writer_holds_grids = state.grids.lock_pending().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        let slicers = Arc::clone(&slicers);
+        move || {
+            let pivots = PivotState::new();
+            let filters = RibbonFilterState::new();
+            let bi = crate::bi::types::BiState::new();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(crate::slicer::commands::get_slicer_items_core(
+                &state, &pivots, &slicers, &filters, &bi, slicer_id, None,
+            ))
+        }
+    };
+    let probe_slicers = Arc::clone(&slicers);
+    let (parked, slicers_reachable, items) =
+        run_site_while_held(writer_holds_grids, site, move || probe_can_take_slicers(&probe_slicers, 3_000));
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the item fetch finished while `grids` was held, so it never waited for it and this \
+         test measured nothing"
+    );
+    assert!(
+        slicers_reachable,
+        "DEADLOCK: `get_slicer_items_core` holds the slicer store while it waits for `grids`. A cell writer holds \
+         the grid locks and then writes the slicers (`update_cell_impl` re-evaluating their computed properties, \
+         off the main thread for the MCP server, the AI chat and the notebook), and delete / move / copy sheet reach \
+         the store under the grid locks too -- so a table slicer's item fetch overlapping either leaves each holding \
+         what the other waits for (BUG-0593). Copy the store and release it before reading the grids."
+    );
+    // NON-VACUITY: the fetch reached the table read and answered as before.
+    let items = items.expect("the item fetch");
+    let listed: Vec<(&str, bool, bool)> = items.iter().map(|i| (i.key.as_str(), i.selected, i.has_data)).collect();
+    assert_eq!(
+        listed,
+        vec![("East", true, true), ("North", true, true), ("West", true, true)],
+        "the table slicer's items changed"
+    );
+}
+
+/// A slicer store whose one slicer has a `headerText` property `=A1`, indexed
+/// on sheet 0's A1, and sheet 0 with A1 = "Hello".
+fn slicer_with_a_computed_header() -> (Arc<SlicerState>, identity::EntityId, Vec<engine::Grid>) {
+    let seed = test_seed_effect();
+    let slicers = Arc::new(SlicerState::new());
+    let slicer = slicer_over("table", identity::EntityId::from_bytes(identity::generate_uuid_v7()), "Region");
+    let slicer_id = slicer.id;
+    let prop_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    slicers.slicers.write(&seed).unwrap().insert(slicer_id, slicer);
+    slicers.computed_properties.write(&seed).unwrap().insert(
+        slicer_id,
+        vec![crate::slicer::computed::SlicerComputedProperty {
+            id: prop_id,
+            slicer_id,
+            attribute: "headerText".to_string(),
+            formula: "=A1".to_string(),
+            cached_ast: Some(crate::convert_expr(&parser::parse("=A1").expect("=A1 parses"))),
+            cached_value: None,
+        }],
+    );
+    slicers
+        .computed_prop_dependents
+        .lock()
+        .unwrap()
+        .insert((0, 0, 0), std::collections::HashSet::from([prop_id]));
+    let mut grid = engine::Grid::new();
+    grid.set_cell(0, 0, engine::Cell::new_text("Hello".to_string()));
+    (slicers, slicer_id, vec![grid])
+}
+
+/// The store's own pair at run time. This thread plays the save's slicer
+/// collector, which holds `slicers` and goes on to read the computed
+/// properties (`collect_slicers_for_save`, in the save's tail). The
+/// re-evaluation `update_cell_impl` runs blocks on `slicers` -- expected. Before
+/// the fix it was holding the properties while it waited, so the collector's
+/// own read could never complete.
+#[test]
+fn re_evaluating_a_slicer_property_does_not_hold_the_properties_while_it_waits_for_the_slicers() {
+    let (slicers, slicer_id, grids) = slicer_with_a_computed_header();
+    let collector_holds_slicers = slicers.slicers.lock_pending().unwrap();
+    let site = {
+        let slicers = Arc::clone(&slicers);
+        move || {
+            let names = vec!["Sheet1".to_string()];
+            let styles = engine::StyleRegistry::new();
+            let none: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+            crate::slicer::computed::re_evaluate_slicer_computed_properties(
+                &test_seed_effect(),
+                &[(0, 0, 0)],
+                &grids,
+                &names,
+                &none,
+                &none,
+                &styles,
+                &slicers,
+                None,
+            )
+        }
+    };
+    let probe_slicers = Arc::clone(&slicers);
+    let (parked, properties_reachable, modified) = run_site_while_held(collector_holds_slicers, site, move || {
+        probe_can_take_slicer_properties(&probe_slicers, 3_000)
+    });
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the re-evaluation finished while `slicers` was held, so it never waited for it and \
+         this test measured nothing"
+    );
+    assert!(
+        properties_reachable,
+        "DEADLOCK: `re_evaluate_slicer_computed_properties` holds the slicers' computed properties while it waits \
+         for `slicers`. The save's slicer collector holds `slicers` and then reads the properties, in the save's tail \
+         with no grid lock held, and the re-evaluation runs inside `update_cell_impl` -- off the main thread for the \
+         MCP server, the AI chat and the notebook (BUG-0593). Take `slicers` first."
+    );
+    // NON-VACUITY: the re-evaluation reached the property and applied it.
+    assert!(modified.contains(&slicer_id), "fixture: the re-evaluation did not change the slicer");
+    assert_eq!(
+        slicers.slicers.read().unwrap().get(&slicer_id).and_then(|s| s.header_text.clone()),
+        Some("Hello".to_string()),
+        "fixture: the header did not follow A1"
+    );
+}
+
+/// NON-VACUITY for both probes above, through the SAME harness: the pre-fix
+/// body must read as the store unreachable, the fixed body as reachable. A
+/// harness that cannot tell them apart would pass both probes whatever the
+/// item fetch and the re-evaluation did.
+#[test]
+fn the_slicer_probes_themselves_can_fail_the_way_the_defect_did() {
+    // The item fetch: hold the store, then wait for `grids`.
+    let (state, slicers, _) = workbook_with_a_table_slicer();
+    let site = {
+        let state = Arc::clone(&state);
+        let slicers = Arc::clone(&slicers);
+        move || {
+            let _slicers = slicers.slicers.read().unwrap();
+            let _grids = state.grids.read().unwrap();
+        }
+    };
+    let probe_slicers = Arc::clone(&slicers);
+    let held = state.grids.lock_pending().unwrap();
+    let (parked, reachable, ()) = run_site_while_held(held, site, move || probe_can_take_slicers(&probe_slicers, 1_000));
+    assert!(parked, "fixture: the planted pre-fix item fetch never waited for `grids`");
+    assert!(
+        !reachable,
+        "the probe called the slicer store reachable while a thread held it and waited for `grids` -- it cannot \
+         see the defect, so the item-fetch probe is vacuous"
+    );
+    let site = {
+        let state = Arc::clone(&state);
+        let slicers = Arc::clone(&slicers);
+        move || {
+            let _copy = slicers.slicers.read().unwrap().clone();
+            let _grids = state.grids.read().unwrap();
+        }
+    };
+    let probe_slicers = Arc::clone(&slicers);
+    let held = state.grids.lock_pending().unwrap();
+    let (parked, reachable, ()) = run_site_while_held(held, site, move || probe_can_take_slicers(&probe_slicers, 3_000));
+    assert!(parked, "fixture: the planted fixed item fetch never waited for `grids`");
+    assert!(reachable, "the probe called the slicer store unreachable while the only waiter held nothing");
+
+    // The re-evaluation: hold the properties, then wait for `slicers`.
+    let (slicers, _, _) = slicer_with_a_computed_header();
+    let site = {
+        let slicers = Arc::clone(&slicers);
+        move || {
+            let _props = slicers.computed_properties.read().unwrap();
+            let _slicers = slicers.slicers.read().unwrap();
+        }
+    };
+    let probe_slicers = Arc::clone(&slicers);
+    let held = slicers.slicers.lock_pending().unwrap();
+    let (parked, reachable, ()) =
+        run_site_while_held(held, site, move || probe_can_take_slicer_properties(&probe_slicers, 1_000));
+    assert!(parked, "fixture: the planted pre-fix re-evaluation never waited for `slicers`");
+    assert!(
+        !reachable,
+        "the probe called the properties reachable while a thread held them and waited for `slicers` -- it cannot \
+         see the defect, so the re-evaluation probe is vacuous"
+    );
+    let site = {
+        let slicers = Arc::clone(&slicers);
+        move || {
+            let _slicers = slicers.slicers.read().unwrap();
+            let _props = slicers.computed_properties.read().unwrap();
+        }
+    };
+    let probe_slicers = Arc::clone(&slicers);
+    let held = slicers.slicers.lock_pending().unwrap();
+    let (parked, reachable, ()) =
+        run_site_while_held(held, site, move || probe_can_take_slicer_properties(&probe_slicers, 3_000));
+    assert!(parked, "fixture: the planted fixed re-evaluation never waited for `slicers`");
+    assert!(reachable, "the probe called the properties unreachable while the only waiter held nothing");
+}
+
+/// The census's call graph knows the slicer paths this lane rests on, and
+/// charges each with what its body takes.
+#[test]
+fn the_call_graph_knows_the_slicer_paths() {
+    let graph = direct_acquisitions_by_function(&crate_sources());
+    let get = |name: &str| graph.get(name).cloned().unwrap_or_else(|| panic!("the call graph no longer knows `{name}`"));
+    assert!(get("get_table_column_values").iter().any(|s| s == "grids"));
+    assert!(get("get_table_available_values").iter().any(|s| s == "grids"));
+    assert_eq!(
+        get(SLICER_RE_EVALUATION),
+        vec!["computed_prop_dependents".to_string(), "slicers".to_string(), "computed_properties".to_string()],
+        "the re-evaluation's own stores, in the order it takes them"
+    );
+    assert!(get("cascade_sheet_removed").iter().any(|s| s == "slicers"));
+}
+
+// ===========================================================================
+// BUG-0592: THE NAME STORES AGAINST THE CELL WRITERS
+// ===========================================================================
+//
+// Round 6's call-graph census reported two functions holding a name store
+// across a store the cell writers hold first. Read against the code, neither
+// was a cycle at run time -- but each was the writers' order inside out, and
+// one of them was not atomic:
+//
+//   * `remove_duplicates` holds `grid` and `grids` across its dependency
+//     rebuild, which no cell writer can be past. The census read it as holding
+//     its name tables WITHOUT them, because one line of the function
+//     (`let data_start_row = if has_headers { .. } else { .. };`) closes two
+//     braces before it opens two, and the scanner applies closes first. The
+//     rebuild still held `tables` / `table_names` / `named_ranges` while it
+//     took the dependency maps -- which every writer takes BEFORE the name
+//     stores -- so it now reads copies.
+//   * `rename_named_range_impl` released the registry before its repoint (the
+//     scanner cannot see `authorize` consume the pending guard), but the move
+//     and the repoint were two critical sections: a reader that takes a grid
+//     lock first -- the recalculation pass, a cell writer, the save's body --
+//     could land between them and see the registry say the new name while
+//     every formula still said the old one (`#NAME?`). It now takes `grid` and
+//     `grids` FIRST and holds them across the move, the repoint and the undo
+//     record.
+
+/// The dependency maps `rebuild_all_dependencies_from_grid` takes.
+const DEPENDENCY_MAPS: [&str; 12] = [
+    "dependents",
+    "dependencies",
+    "column_dependents",
+    "column_dependencies",
+    "row_dependents",
+    "row_dependencies",
+    "name_dependents",
+    "name_dependencies",
+    "table_dependents",
+    "table_dependencies",
+    "cross_sheet_dependents",
+    "cross_sheet_dependencies",
+];
+
+/// BUG-0592: `remove_duplicates` holds no name store while its rebuild takes
+/// the dependency maps -- the rebuild reads copies. The cell writers take the
+/// maps BEFORE the name stores, so holding a name store across them is their
+/// order inside out; what keeps that from closing a cycle is a grid lock held
+/// around it (every writer takes `grid` first), and the crate-wide rule is
+/// exactly that, GATED on the grid locks:
+/// `no_function_holds_a_name_store_across_the_dependency_maps_without_a_grid_lock`.
+/// This pin is the stricter one for this function alone: its copies are safe
+/// whether or not the grid hold around them survives a later edit.
+///
+/// SABOTAGE: take the `.clone()` off one of the three copies -- this fails.
+#[test]
+fn remove_duplicates_holds_no_name_store_across_the_dependency_rebuild() {
+    let sources = crate_sources();
+    let graph = direct_acquisitions_by_function(&sources);
+    let rebuild = graph
+        .get("rebuild_all_dependencies_from_grid")
+        .expect("the call graph no longer knows `rebuild_all_dependencies_from_grid`");
+    for map in DEPENDENCY_MAPS {
+        assert!(rebuild.iter().any(|s| s == map), "the rebuild no longer takes `{map}`: {rebuild:?}");
+    }
+    let data = std::fs::read_to_string(src_root().join("commands/data.rs")).expect("cannot read commands/data.rs");
+    // NON-VACUITY: `remove_duplicates` still calls the rebuild, so the question
+    // below is asked of a call that exists.
+    let body: String = function_body(&blank_literals(&data), "pub fn remove_duplicates(")
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.contains("rebuild_all_dependencies_from_grid("),
+        "`remove_duplicates` no longer calls `rebuild_all_dependencies_from_grid` -- re-derive this pin"
+    );
+    let held: Vec<String> = held_while_acquiring(
+        "commands/data.rs",
+        &data,
+        &["tables", "table_names", "named_ranges"],
+        &DEPENDENCY_MAPS,
+        &graph,
+    )
+    .into_iter()
+    .filter(|h| h.function == "remove_duplicates")
+    .map(|h| describe(&h))
+    .collect();
+    assert!(
+        held.is_empty(),
+        "`remove_duplicates` holds a name store while its rebuild takes the dependency maps:\n{}\n\nEvery cell writer \
+         takes the dependency maps BEFORE `tables` / `table_names` / `named_ranges` (BUG-0592). Read copies of the \
+         name tables for the rebuild.",
+        held.join("\n")
+    );
+}
+
+/// BUG-0592: the rename takes the registry and the undo stack while it holds
+/// BOTH grid locks -- the crate's order, and one critical section.
+///
+/// SABOTAGE: see `a_name_rename_moves_the_registry_and_the_formulas_in_one_critical_section`.
+#[test]
+fn the_name_rename_takes_the_registry_and_the_undo_stack_under_both_grid_locks() {
+    let sources = crate_sources();
+    let graph = direct_acquisitions_by_function(&sources);
+    assert_eq!(
+        graph.get("record_rename_undo").cloned(),
+        Some(vec!["undo_stack".to_string()]),
+        "the rename's undo record no longer takes only the undo stack"
+    );
+    assert!(
+        !graph.contains_key("rename_name_in_grids"),
+        "`rename_name_in_grids` takes a lock of its own again -- it walks the grids the rename already holds"
+    );
+    let text = std::fs::read_to_string(src_root().join("named_ranges.rs")).expect("cannot read named_ranges.rs");
+    let hits: Vec<HeldAcquisition> =
+        held_while_acquiring("named_ranges.rs", &text, &["grid"], &["grids", "named_ranges", "undo_stack"], &graph)
+            .into_iter()
+            .filter(|h| h.function == "rename_named_range_impl")
+            .collect();
+    for store in ["grids", "named_ranges", "undo_stack"] {
+        assert!(
+            hits.iter().any(|h| h.acquiring == store && h.alive.iter().any(|s| s == "grid")),
+            "`rename_named_range_impl` no longer takes `{store}` while it holds `grid`: {hits:?}"
+        );
+    }
+    for store in ["named_ranges", "undo_stack"] {
+        assert!(
+            hits.iter().any(|h| h.acquiring == store && h.alive.iter().any(|s| s == "grids")),
+            "`rename_named_range_impl` no longer takes `{store}` while it holds `grids`: {hits:?}"
+        );
+    }
+}
+
+/// A workbook with the workbook-scoped name `Rate` (`=Sheet1!$A$1`, A1 = 2)
+/// and `=Rate*2` in B1, on the active sheet.
+fn workbook_with_a_name_and_its_reader() -> Arc<AppState> {
+    let state = Arc::new(crate::create_app_state());
+    let seed = test_seed_effect();
+    state.named_ranges.write(&seed).unwrap().insert(
+        "RATE".to_string(),
+        crate::named_ranges::NamedRange {
+            name: "Rate".to_string(),
+            sheet_index: None,
+            refers_to: "=Sheet1!$A$1".to_string(),
+            comment: None,
+            folder: None,
+        },
+    );
+    let reader = engine::Cell::new_formula_with_ast(parser::parse("=Rate*2").expect("=Rate*2 parses"));
+    {
+        let mut grid = state.grid.write(&seed).unwrap();
+        let mut grids = state.grids.write(&seed).unwrap();
+        if grids.is_empty() {
+            grids.push(engine::Grid::new());
+        }
+        grid.set_cell(0, 0, engine::Cell::new_number(2.0));
+        grids[0].set_cell(0, 0, engine::Cell::new_number(2.0));
+        grid.set_cell(0, 1, reader.clone());
+        grids[0].set_cell(0, 1, reader);
+    }
+    state
+}
+
+/// The registry's keys, read on a thread of their own with a deadline.
+fn name_keys_within(state: &Arc<AppState>, ms: u64) -> Option<Vec<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let state = Arc::clone(state);
+        std::thread::spawn(move || {
+            if let Ok(names) = state.named_ranges.read() {
+                let mut keys: Vec<String> = names.keys().cloned().collect();
+                keys.sort();
+                let _ = tx.send(keys);
+            }
+        });
+    }
+    rx.recv_timeout(Duration::from_millis(ms)).ok()
+}
+
+/// THE TORN RENAME AS A TEST. This thread plays a cell writer (or the
+/// recalculation pass) mid-step: it holds `grid`. The rename runs on another
+/// thread and waits for it. The QUESTION is what the workbook says while it
+/// waits. Before the fix the rename had already moved the registry -- it took
+/// the grid locks only for the repoint -- so the registry said `Tax` while B1
+/// still said `=Rate*2`, which resolves to nothing (`#NAME?`), and the writer
+/// holding `grid` was free to compute and store exactly that.
+#[test]
+fn a_name_rename_moves_the_registry_and_the_formulas_in_one_critical_section() {
+    let state = workbook_with_a_name_and_its_reader();
+    let file = Arc::new(crate::persistence::FileState::default());
+    let writer_holds_grid = state.grid.lock_pending().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        let file = Arc::clone(&file);
+        move || crate::named_ranges::rename_named_range_impl(&state, &file, "Rate", "Tax")
+    };
+    let probe_state = Arc::clone(&state);
+    let seen: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+    let (parked, reached, result) = run_site_while_held(writer_holds_grid, site, || {
+        let keys = name_keys_within(&probe_state, 3_000);
+        let reached = keys.is_some();
+        *seen.lock().unwrap() = keys;
+        reached
+    });
+    let keys = seen.into_inner().unwrap();
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the rename finished while `grid` was held, so it never waited for it and this test \
+         measured nothing"
+    );
+    assert!(reached, "the registry could not be read while the rename waited for `grid` -- it is holding it");
+    assert_eq!(
+        keys,
+        Some(vec!["RATE".to_string()]),
+        "TORN RENAME: while the rename waited for the grid lock, the registry already said the NEW name and every \
+         formula still read the OLD one -- a writer or the recalculation pass holding `grid` at that moment computes \
+         `#NAME?` for each reader (BUG-0592). Take `grid` and `grids` first and hold them across the registry move, \
+         the repoint and the undo record."
+    );
+    // NON-VACUITY: once the lock was free the rename did all of it.
+    assert!(result.success, "the rename failed: {:?}", result.error);
+    assert_eq!(name_keys_within(&state, 3_000), Some(vec!["TAX".to_string()]), "the registry did not move");
+    let b1 = state.grid.read().unwrap().get_cell(0, 1).cloned().and_then(|c| c.formula_string()).unwrap_or_default();
+    assert!(b1.to_uppercase().contains("TAX") && !b1.to_uppercase().contains("RATE"), "B1 was not repointed: {b1}");
+}
+
+/// THE NAME WRITERS AGAINST THE RENAME (BUG-0592 follow-up). `create_named_range_impl`,
+/// `update_named_range_core` and `delete_named_range_core` took `named_ranges`
+/// and NO grid lock -- the MCP tools and the script host reach them off the
+/// main thread -- so the rename's grid hold did not order them (they take
+/// `grid` first since rev3B#6, and `grids` after it since rev5C#1; the tests
+/// below pin their side). This thread
+/// holds the undo stack, so the rename parks exactly where it records its step.
+/// Before the fix it had already released the registry at the move, so a name
+/// writer could define the freed old name right then and record its "Define
+/// name" BELOW the rename's step (or inside it, between its separate undo-stack
+/// locks): undoing the rename then overwrote that definition, and the next
+/// Ctrl+Z deleted the user's original name. The probe is a reader of the
+/// registry with a deadline -- a writer would get exactly as far.
+///
+/// SABOTAGE: release the registry guard before the repoint again
+/// (`drop(named_ranges)` right after the move) -- the probe reads the registry
+/// while the rename waits.
+#[test]
+fn a_name_rename_holds_the_registry_until_its_undo_step_is_recorded() {
+    let state = workbook_with_a_name_and_its_reader();
+    let file = Arc::new(crate::persistence::FileState::default());
+    let undo_held = state.undo_stack.lock().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        let file = Arc::clone(&file);
+        move || crate::named_ranges::rename_named_range_impl(&state, &file, "Rate", "Tax")
+    };
+    let probe_state = Arc::clone(&state);
+    let seen: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+    let (parked, reached, result) = run_site_while_held(undo_held, site, || {
+        let keys = name_keys_within(&probe_state, 400);
+        let reached = keys.is_some();
+        *seen.lock().unwrap() = keys;
+        reached
+    });
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the rename finished while the undo stack was held, so it never waited for it and \
+         this test measured nothing"
+    );
+    assert!(
+        !reached,
+        "INTERLEAVED NAME WRITER: while the rename waited to record its undo step, the registry was free and \
+         already said {:?}. A name writer (no grid lock) could define the freed old name here and land its undo \
+         step below or inside \"Rename name\". Hold the registry guard until `record_rename_undo` returns.",
+        seen.lock().unwrap()
+    );
+    // NON-VACUITY: once the stack was free the rename did all of it, as ONE step.
+    assert!(result.success, "the rename failed: {:?}", result.error);
+    assert_eq!(name_keys_within(&state, 3_000), Some(vec!["TAX".to_string()]), "the registry did not move");
+    let undo = state.undo_stack.lock().unwrap();
+    assert_eq!(undo.undo_depth(), 1, "the rename is one undo step");
+    assert_eq!(undo.undo_description(), Some("Rename name"));
+}
+
+/// Whether another thread could take `grids` within `ms` -- the lock every
+/// sheet mover (`move_sheet_impl`, `delete_sheet_impl`, `set_active_sheet`)
+/// takes right after `grid`.
+fn grids_free_within(state: &Arc<AppState>, ms: u64) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let state = Arc::clone(state);
+        std::thread::spawn(move || {
+            if state.grids.read().is_ok() {
+                let _ = tx.send(());
+            }
+        });
+    }
+    rx.recv_timeout(Duration::from_millis(ms)).is_ok()
+}
+
+/// THE GRIDS-WITH-IDS PAIRING, AS A TEST (BUG-0592 follow-up). Two of the nine
+/// torn-read sites paired `grids[i]` -- read and RELEASED first -- with
+/// `sheet_ids[i]` read in a later hold: `workbook_sheet_facts` (the private-
+/// sheet rule judges sheet i blank or not by `grids[i]` and names it by
+/// `ids[i]`) and the notebook's phase-1 read (`read_cell_run_inputs`: a
+/// checkpoint stamps `grids[i]` with `sheet_ids[i]`, and Rewind installs each
+/// snapshot by that stamp). This thread holds `sheet_names`, so each reader
+/// parks on its names-and-ids read. The question is whether a sheet mover could
+/// take `grids` at that moment: if it can, it can permute the sheets between
+/// the reader's grids and its ids. Before the fix both readers had already
+/// released `grids`.
+///
+/// SABOTAGE: read the grids in their own statement again in either function
+/// (clone and release before `sheet_ids_and_names`) -- its test fails.
+fn assert_grids_and_ids_are_read_in_one_hold(label: &str, read: fn(&AppState) -> Result<usize, String>) {
+    let state = Arc::new(crate::create_app_state());
+    let names_held = state.sheet_names.lock_pending().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        move || read(&*state)
+    };
+    let probe_state = Arc::clone(&state);
+    let (parked, grids_were_free, result) =
+        run_site_while_held(names_held, site, || grids_free_within(&probe_state, 400));
+    assert!(
+        parked,
+        "PRECONDITION FAILED: `{label}` finished while `sheet_names` was held, so it never waited for the \
+         names and this test measured nothing"
+    );
+    assert!(
+        !grids_were_free,
+        "TORN PAIR: while `{label}` waited for the sheet names and ids, `grids` was free -- a `move_sheet` could \
+         permute the sheets between the grids it read and the ids it pairs them with by index. Read the names \
+         and ids while the `grids` guard is held (canonical order: grid, grids, then everything else)."
+    );
+    // NON-VACUITY: once the names were free the reader did its read.
+    assert_eq!(result, Ok(1), "`{label}` did not read the one-sheet workbook");
+}
+
+#[test]
+fn the_code_gate_reads_the_grids_and_the_sheet_ids_in_one_hold() {
+    assert_grids_and_ids_are_read_in_one_hold("application_code_gate::workbook_sheet_facts", |state| {
+        crate::scripting::application_code_gate::workbook_sheet_facts(state).map(|facts| facts.len())
+    });
+}
+
+#[test]
+fn the_notebook_reads_the_grids_and_the_sheet_ids_in_one_hold() {
+    assert_grids_and_ids_are_read_in_one_hold("notebook_commands::read_cell_run_inputs", |state| {
+        crate::scripting::notebook_commands::read_cell_run_inputs(state).map(|inputs| inputs.sheet_ids.len())
+    });
+}
+
+/// revB#4: Remove Duplicates dirties the document ONLY once rows really go.
+/// `DocumentEffect::mutates` dirties at construction and the command minted it
+/// right after the protection gate, ahead of four exits that change nothing
+/// (no key column, a range cutting a merged block, a header-only range, no
+/// duplicates found), so each of them left the title-bar asterisk and the
+/// close-without-saving prompt behind ([LIVE] Excel 16: `RemoveDuplicates` on a
+/// range with no duplicates leaves `Workbook.Saved` True). The command takes
+/// `State<..>` and cannot run in-process, so this reads its body: the effect
+/// comes after every `return`, and the gates read through PENDING grid guards
+/// -- never a read, a drop and a later write (the TOCTOU `lock_pending` exists
+/// to rule out).
+///
+/// SABOTAGE: mint a `DocumentEffect::mutates` right after the protection gate
+/// again -- this fails naming the exits after it.
+#[test]
+fn remove_duplicates_dirties_the_document_only_once_rows_really_go() {
+    let data = std::fs::read_to_string(src_root().join("commands/data.rs")).expect("cannot read commands/data.rs");
+    let body: String = function_body(&blank_literals(&data), "pub fn remove_duplicates(")
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let effect_at = body
+        .find("DocumentEffect::mutates(")
+        .expect("`remove_duplicates` no longer mints a `DocumentEffect::mutates` -- re-derive this pin");
+    let (before, after) = body.split_at(effect_at);
+    let exits_after: Vec<&str> = after.lines().filter(|l| l.contains("return ")).collect();
+    assert!(
+        exits_after.is_empty(),
+        "`remove_duplicates` can still return after it has dirtied the document:\n{}\n\nEvery exit after \
+         `DocumentEffect::mutates` leaves the workbook marked modified for a command that changed nothing. Mint \
+         the effect once duplicates are really removed.",
+        exits_after.join("\n")
+    );
+    // NON-VACUITY: the protection refusal and the four no-change exits are all
+    // still there, ahead of the effect.
+    let exits_before = before.matches("return RemoveDuplicatesResult").count();
+    assert!(
+        exits_before >= 5,
+        "only {exits_before} early exit(s) precede the effect in `remove_duplicates` -- expected the protection \
+         refusal and the four no-change exits; re-derive this pin"
+    );
+    for lock in ["state.grid.lock_pending()", "state.grids.lock_pending()"] {
+        assert!(
+            before.contains(lock),
+            "`remove_duplicates` no longer takes `{lock}` before its gates -- a gate read through a guard that is \
+             dropped and re-taken for the write is a TOCTOU window"
+        );
+    }
+    assert!(
+        !before.contains(".write(&"),
+        "`remove_duplicates` writes a store before it has decided the dirty flag"
+    );
+}
+
+/// rev3B#8: Remove Duplicates gates sheet protection over the guards it HOLDS.
+/// The gate used to run first, through `check_sheet_protection_range`, which
+/// takes and RELEASES its own grid, style and protection locks -- and only then
+/// were the grid locks taken pending for the write. A `protect_sheet` (it takes
+/// `sheet_protection` alone) or a cell-lock change landing between the two let
+/// the command compact rows on a sheet that had just become protected: the
+/// read-drop-write window `lock_pending` exists to rule out. The command takes
+/// `State<..>`, so this reads its body: the gate is the borrowed form over the
+/// PENDING grid, after both `lock_pending` calls, and the protection guard it
+/// judged is held until the rows are written.
+///
+/// SABOTAGE: put the self-locking `check_sheet_protection_range` call back at
+/// the top of `remove_duplicates` -- this fails naming it.
+#[test]
+fn remove_duplicates_gates_protection_over_the_guards_it_holds() {
+    let data = std::fs::read_to_string(src_root().join("commands/data.rs")).expect("cannot read commands/data.rs");
+    let body: String = function_body(&blank_literals(&data), "pub fn remove_duplicates(")
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !body.contains("check_sheet_protection_range("),
+        "`remove_duplicates` gates protection through `check_sheet_protection_range`, which takes and RELEASES its \
+         own grid and protection locks before the command takes them for the write -- a protection change can land \
+         in between. Gate over the held guards (`check_sheet_protection_range_in`)."
+    );
+    let gate_at = body
+        .find("check_sheet_protection_range_in(")
+        .expect("`remove_duplicates` has no held-guard protection gate -- re-derive this pin");
+    for lock in ["state.grid.lock_pending()", "state.grids.lock_pending()", "state.sheet_protection.read()"] {
+        let at = body.find(lock).unwrap_or_else(|| panic!("`remove_duplicates` no longer takes `{lock}`"));
+        assert!(at < gate_at, "`remove_duplicates` gates protection BEFORE it takes `{lock}`: the gate reads state it does not hold");
+    }
+    let released_at = body
+        .find("drop(protection_storage)")
+        .expect("`remove_duplicates` no longer releases the protection guard by name -- re-derive this pin");
+    let written_at = body.find("commit_owned(").expect("`remove_duplicates` no longer commits its undo step");
+    assert!(
+        released_at > written_at,
+        "`remove_duplicates` releases the protection guard before the rows are written -- a protection change can \
+         land between the gate and the write"
+    );
+}
+
+fn define_fee(state: &AppState, file: &crate::persistence::FileState) -> crate::named_ranges::NamedRangeResult {
+    crate::named_ranges::create_named_range_impl(state, file, "Fee".to_string(), None, "=Sheet1!$A$1".to_string(), None, None)
+}
+
+fn redefine_rate(state: &AppState, file: &crate::persistence::FileState) -> crate::named_ranges::NamedRangeResult {
+    crate::named_ranges::update_named_range_core(
+        state,
+        file,
+        &crate::persistence::UserFilesState::default(),
+        &PivotState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &RibbonFilterState::new(),
+        "Rate".to_string(),
+        None,
+        "=Sheet1!$A$2".to_string(),
+        None,
+        None,
+    )
+}
+
+fn delete_rate(state: &AppState, file: &crate::persistence::FileState) -> crate::named_ranges::NamedRangeResult {
+    crate::named_ranges::delete_named_range_core(
+        state,
+        file,
+        &crate::persistence::UserFilesState::default(),
+        &PivotState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &RibbonFilterState::new(),
+        "Rate".to_string(),
+    )
+}
+
+/// rev3B#6 (BUG-0592 follow-up), the MIRROR of the rename test above. The three
+/// NAME WRITERS -- `create_named_range_impl`, `update_named_range_core`,
+/// `delete_named_range_core`, which the MCP tools and the script host reach off
+/// the main thread -- changed the registry, RELEASED it, and only then recorded
+/// their undo step. A rename (which holds the registry through its own record)
+/// could run in that gap and land "Rename name" between the writer's change
+/// and its step: an "Edit name" of RATE recorded above a "Rename name" that had
+/// already moved RATE to TAX, so Ctrl+Z re-created RATE beside TAX and the edit
+/// itself was never undone. This thread holds the undo stack, so each writer
+/// parks exactly where it records its step; the probe is a reader of the
+/// registry with a deadline -- a rename would get exactly as far. Each writer
+/// now holds `grid`, `grids` and the registry through its record (both grid
+/// locks first are what keep the registry-then-undo-stack order from closing a
+/// cycle with a cell writer, which holds the undo stack while it reads
+/// `named_ranges` -- `grid` alone missed `update_cell_on_sheets_as`, which
+/// holds `grids` without it: rev5C#1, pinned by
+/// `the_name_writers_hold_both_grid_locks_while_they_record_their_undo_steps`).
+///
+/// SABOTAGE: release the registry before the undo record again in any one of
+/// the writers -- its row fails.
+#[test]
+fn the_name_writers_hold_the_registry_until_their_undo_steps_are_recorded() {
+    type NameWriter = fn(&AppState, &crate::persistence::FileState) -> crate::named_ranges::NamedRangeResult;
+    let writers: [(&str, NameWriter); 3] = [
+        ("create_named_range_impl", define_fee),
+        ("update_named_range_core", redefine_rate),
+        ("delete_named_range_core", delete_rate),
+    ];
+    // Every writer is measured before anything is asserted about the
+    // interleaving, so a failure names EACH writer that releases early.
+    let mut interleaved = Vec::new();
+    for (label, write) in writers {
+        let state = workbook_with_a_name_and_its_reader();
+        let file = Arc::new(crate::persistence::FileState::default());
+        let undo_held = state.undo_stack.lock().unwrap();
+        let site = {
+            let state = Arc::clone(&state);
+            let file = Arc::clone(&file);
+            move || write(&state, &file)
+        };
+        let probe_state = Arc::clone(&state);
+        let seen: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+        let (parked, reached, result) = run_site_while_held(undo_held, site, || {
+            let keys = name_keys_within(&probe_state, 400);
+            let reached = keys.is_some();
+            *seen.lock().unwrap() = keys;
+            reached
+        });
+        assert!(
+            parked,
+            "PRECONDITION FAILED: `{label}` finished while the undo stack was held, so it never waited for it and \
+             this test measured nothing"
+        );
+        if reached {
+            interleaved.push(format!("`{label}` (the registry already said {:?})", seen.lock().unwrap()));
+        }
+        // NON-VACUITY: once the stack was free the writer did all of it, as ONE step.
+        assert!(result.success, "`{label}` failed: {:?}", result.error);
+        assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 1, "`{label}` is one undo step");
+    }
+    assert!(
+        interleaved.is_empty(),
+        "INTERLEAVED RENAME: while these writers waited to record their undo step, the registry was free -- a \
+         rename could move the name there and land \"Rename name\" between the change and its own step. Hold \
+         `grid` and the registry until the undo record returns:\n{}",
+        interleaved.join("\n")
+    );
+}
+
+/// The whole-list object-script snapshot (`obj_object_scripts`) put back every
+/// script as the step found it, and a script SAVE records no undo -- so undoing
+/// a name rename or delete, a table delete or a Convert to Range after the user
+/// had edited or created another script reverted the edit or deleted the new
+/// script. Every step that prunes or re-binds scripts now records only those,
+/// by id (`OBJECT_SCRIPTS_BY_ID_RESTORE_KIND`). `delete_table` and
+/// `convert_to_range` take `State<..>` and cannot run in-process (the names'
+/// routes are pinned by runtime tests in `named_ranges::rename_tests`), so this
+/// reads the crate: no step records the whole list any more.
+///
+/// SABOTAGE: record `object_scripts_snapshot_bytes` in `delete_table` again --
+/// this fails naming `tables.rs`.
+#[test]
+fn no_step_records_a_whole_list_object_script_snapshot() {
+    let mut offenders = Vec::new();
+    let mut by_id: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (rel, text) in crate_sources() {
+        if rel == "undo_commands.rs" {
+            continue;
+        }
+        for (n, line) in strip_cfg_test_items(&text).lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            if code.contains("object_scripts_snapshot_bytes(") || code.contains("\"obj_object_scripts\"") {
+                offenders.push(format!("{rel}:{}: {}", n + 1, code.trim()));
+            }
+            if code.contains("object_scripts_pruned_bytes(") || code.contains("object_scripts_rebound_bytes(") {
+                *by_id.entry(rel.clone()).or_default() += 1;
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a step still records the WHOLE object-script list -- undoing it reverts every script edit made after it \
+         (a script save records no undo). Record what the step pruned or re-bound, by id \
+         (`object_scripts_pruned_bytes` / `object_scripts_rebound_bytes`):\n{}",
+        offenders.join("\n")
+    );
+    // NON-VACUITY: the four recorders this replaced are seen.
+    for (file, at_least) in [("named_ranges.rs", 2), ("tables.rs", 2)] {
+        assert!(
+            by_id.get(file).copied().unwrap_or(0) >= at_least,
+            "expected {at_least} by-id script records in {file}, saw {:?} -- re-derive this census",
+            by_id
+        );
+    }
+}
+
+/// The three name stores the dependency rebuild expands formulas against.
+const NAME_STORES: [&str; 3] = ["tables", "table_names", "named_ranges"];
+
+/// Every place in `text` where a function holds a name store while it acquires
+/// a dependency map -- in its body or through one call
+/// (`rebuild_all_dependencies_from_grid` is the shape) -- WITHOUT `grid` or
+/// `grids` held. Those are the ungated holds; a grid-gated one is returned by
+/// [`gated_name_store_holds`].
+fn ungated_name_store_holds(file: &str, text: &str, graph: &CallGraph) -> Vec<HeldAcquisition> {
+    held_while_acquiring(file, text, &NAME_STORES, &DEPENDENCY_MAPS, graph)
+        .into_iter()
+        .filter(|hit| !hit.alive.iter().any(|store| store == "grid" || store == "grids"))
+        .collect()
+}
+
+/// The grid-gated counterpart of [`ungated_name_store_holds`], for the census's
+/// non-vacuity half.
+fn gated_name_store_holds(file: &str, text: &str, graph: &CallGraph) -> Vec<HeldAcquisition> {
+    held_while_acquiring(file, text, &NAME_STORES, &DEPENDENCY_MAPS, graph)
+        .into_iter()
+        .filter(|hit| hit.alive.iter().any(|store| store == "grid" || store == "grids"))
+        .collect()
+}
+
+/// revB#5 / BUG-0592, over the WHOLE crate: a function holds a name store
+/// across a dependency-map acquisition only while it also holds `grid` or
+/// `grids`. Every cell writer takes the dependency maps BEFORE the name stores,
+/// so such a hold is the writers' order inside out; the grid lock, which every
+/// writer takes FIRST, is what keeps it from closing a cycle -- no writer can
+/// be past its first lock while it is held. `sort_range` (twice) and
+/// `undo_commands::rebuild_all_dependencies` hold the three name tables across
+/// `rebuild_all_dependencies_from_grid` today, each under a grid lock; the
+/// remove_duplicates pin above was the only one asked, and only of one
+/// function. Drop the grid hold around any of them -- or write a new rebuild
+/// caller without one -- and this fails.
+///
+/// SABOTAGE: plant a function that holds `named_ranges` and calls
+/// `rebuild_all_dependencies_from_grid` with no grid lock (or release the grid
+/// guard in `undo_commands::rebuild_all_dependencies` before its name tables)
+/// -- this fails naming it.
+#[test]
+fn no_function_holds_a_name_store_across_the_dependency_maps_without_a_grid_lock() {
+    let sources = crate_sources();
+    let graph = direct_acquisitions_by_function(&sources);
+    let rebuild = graph
+        .get("rebuild_all_dependencies_from_grid")
+        .expect("the call graph no longer knows `rebuild_all_dependencies_from_grid`");
+    for map in DEPENDENCY_MAPS {
+        assert!(rebuild.iter().any(|s| s == map), "the rebuild no longer takes `{map}`: {rebuild:?}");
+    }
+    let mut ungated: Vec<String> = Vec::new();
+    let mut gated: Vec<String> = Vec::new();
+    for (rel, text) in &sources {
+        ungated.extend(ungated_name_store_holds(rel, text, &graph).iter().map(describe));
+        gated.extend(gated_name_store_holds(rel, text, &graph).iter().map(|h| format!("{}::{}", h.file, h.function)));
+    }
+    ungated.sort();
+    ungated.dedup();
+    assert!(
+        ungated.is_empty(),
+        "these functions hold a name store while they take a dependency map, with neither grid lock held:\n{}\n\n\
+         Every cell writer takes the dependency maps BEFORE `tables` / `table_names` / `named_ranges` -- off the \
+         main thread for the MCP server, the AI chat and the notebook -- so each of these can hold what a writer \
+         waits for while it waits for what the writer holds (BUG-0592). Read COPIES of the name tables for the \
+         rebuild (as `remove_duplicates` does), or take `grid` first.",
+        ungated.join("\n")
+    );
+    // NON-VACUITY: the census sees the callers that hold the name tables across
+    // the rebuild today, each under a grid lock.
+    for site in ["commands/data.rs::sort_range", "undo_commands.rs::rebuild_all_dependencies"] {
+        assert!(
+            gated.iter().any(|g| g == site),
+            "the census no longer sees `{site}` hold a name store across the dependency maps under a grid lock, so \
+             it may not be reading what it claims to. It sees:\n  {}",
+            gated.join("\n  ")
+        );
+    }
+}
+
+/// The census above, on the shapes it must tell apart.
+#[test]
+fn the_name_store_census_fires_without_a_grid_lock_and_stays_quiet_under_one_or_on_copies() {
+    let graph: CallGraph = [("rebuild_maps", vec!["dependents"])]
+        .into_iter()
+        .map(|(name, stores)| (name.to_string(), stores.into_iter().map(str::to_string).collect()))
+        .collect();
+    let ungated = r##"pub fn f(state: &AppState) {
+    let named_ranges = state.named_ranges.read().unwrap();
+    rebuild_maps(state);
+}
+"##;
+    let under_grid = r##"pub fn f(state: &AppState) {
+    let grid = state.grid.read().unwrap();
+    let named_ranges = state.named_ranges.read().unwrap();
+    rebuild_maps(state);
+}
+"##;
+    let copies = r##"pub fn f(state: &AppState) {
+    let named_ranges = state.named_ranges.read().unwrap().clone();
+    rebuild_maps(state);
+}
+"##;
+    let dropped_grid = r##"pub fn f(state: &AppState) {
+    let grid = state.grid.read().unwrap();
+    let snapshot = grid.clone();
+    drop(grid);
+    let tables = state.tables.read().unwrap();
+    rebuild_maps(state);
+}
+"##;
+    let hits = ungated_name_store_holds("planted.rs", ungated, &graph);
+    assert!(
+        hits.iter().any(|h| h.acquiring == "dependents" && h.via.as_deref() == Some("rebuild_maps")),
+        "the census missed a name store held across the rebuild with no grid lock: {hits:?}"
+    );
+    let hits = ungated_name_store_holds("planted.rs", dropped_grid, &graph);
+    assert!(
+        hits.iter().any(|h| h.acquiring == "dependents"),
+        "the census read a DROPPED grid guard as still gating the hold: {hits:?}"
+    );
+    assert!(ungated_name_store_holds("planted.rs", under_grid, &graph).is_empty(), "a grid-gated hold is not ungated");
+    assert_eq!(gated_name_store_holds("planted.rs", under_grid, &graph).len(), 1, "...and is seen as gated");
+    assert!(ungated_name_store_holds("planted.rs", copies, &graph).is_empty(), "copies hold nothing");
+    assert!(gated_name_store_holds("planted.rs", copies, &graph).is_empty(), "copies hold nothing");
+}
+
+// ===========================================================================
+// rev5C#1 (BUG-0592) -- THE UNDO STACK AND THE NAME STORES
+// ===========================================================================
+//
+// rev3B#6 made the three name writers (`create_named_range_impl`,
+// `update_named_range_core`, `delete_named_range_core`) hold `grid` and the
+// registry while they record their undo step -- the order NAME STORE, THEN
+// UNDO STACK -- and argued it safe because "every holder of the undo stack that
+// then takes a name store holds `grid` first". `update_cell_on_sheets_as` did
+// not: it held `grids` (never `grid`), then the undo stack, then read
+// `named_ranges` for the casing restamp -- the reverse order, with no lock in
+// common. The MCP server runs the name tools on its own thread, so an AI
+// defining a name while the user typed a formula into a floating grid (or a
+// grouped sheet replicated an entry, or a script wrote another sheet) left each
+// thread holding what the other waited for: the window froze, unsaved work
+// lost. No census asked about this pair, and none could have seen the writers'
+// half: they reach the undo stack THREE calls down (`record_named_range_undo`
+// -> `record_object_undo` -> `record_restores_joining_open_transaction`), and
+// the round-6 call graph follows one.
+
+/// What each free function of the crate acquires in its own body OR inside any
+/// crate function it calls, at ANY depth: [`direct_acquisitions_by_function`]
+/// closed over the call graph.
+///
+/// The one-level graph sees a writer hold the registry and call
+/// `record_named_range_undo`, which takes nothing in its own body, and so sees
+/// no undo stack at all. Here a call to a helper that takes nothing itself
+/// still carries what ITS callees take. The same rules as the one-level graph
+/// otherwise: free functions only, a name declared more than once is left out
+/// (a call to it cannot be told apart), a spawned closure's calls belong to
+/// another thread. Over-approximating by design -- a callee's acquisition counts
+/// whether or not the branch that takes it runs -- which is the direction a
+/// lock census is for.
+fn transitive_acquisitions_by_function(sources: &[(String, String)]) -> CallGraph {
+    use crate::formula_serialisation_tests::starts_a_function;
+    let direct = direct_acquisitions_by_function(sources);
+    // Every uniquely declared free function, whether or not it acquires
+    // anything itself.
+    let mut declared: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (_, text) in sources {
+        for raw in blank_literals(&strip_cfg_test_items(text)).lines() {
+            if starts_a_function(raw) {
+                if let Some(name) = function_name_of(raw) {
+                    *declared.entry(name).or_default() += 1;
+                }
+            }
+        }
+    }
+    let names: CallGraph =
+        declared.iter().filter(|(_, n)| **n == 1).map(|(name, _)| (name.clone(), Vec::new())).collect();
+    // Who calls whom, by the walk `direct_acquisitions_by_function` makes.
+    let mut calls: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (_, text) in sources {
+        let stripped = blank_literals(&strip_cfg_test_items(text));
+        let lines: Vec<&str> = stripped.lines().collect();
+        let code: Vec<&str> = lines.iter().map(|l| l.split("//").next().unwrap_or("")).collect();
+        let mut current: Option<String> = None;
+        let mut depth: i32 = 0;
+        let mut entered = false;
+        let mut spawn_until: Option<i32> = None;
+        for (i, raw) in lines.iter().enumerate() {
+            let declares = starts_a_function(raw);
+            if declares {
+                current = function_name_of(raw).filter(|name| names.contains_key(name));
+                depth = 0;
+                entered = false;
+                spawn_until = None;
+            }
+            let line = code[i];
+            let opens_here = line.matches('{').count() as i32;
+            let closes_here = line.matches('}').count() as i32;
+            if spawn_until.is_none() && line.contains("spawn(") && opens_here > closes_here {
+                spawn_until = Some(depth);
+            }
+            if let (Some(caller), None, false) = (&current, spawn_until, declares) {
+                for (_, callee) in calls_on_line(line, &names) {
+                    if callee == caller.as_str() {
+                        continue;
+                    }
+                    let list = calls.entry(caller.clone()).or_default();
+                    if !list.iter().any(|c| c == callee) {
+                        list.push(callee.to_string());
+                    }
+                }
+            }
+            depth -= closes_here;
+            depth += opens_here;
+            entered |= opens_here > 0;
+            if spawn_until.is_some_and(|d| depth <= d) {
+                spawn_until = None;
+            }
+            if entered && depth <= 0 {
+                current = None;
+                entered = false;
+            }
+        }
+    }
+    let mut graph: CallGraph =
+        names.keys().map(|name| (name.clone(), direct.get(name).cloned().unwrap_or_default())).collect();
+    loop {
+        let mut grew = false;
+        for (caller, callees) in &calls {
+            let mut add: Vec<String> = Vec::new();
+            for callee in callees {
+                for store in graph.get(callee).into_iter().flatten() {
+                    if !graph[caller].contains(store) && !add.contains(store) {
+                        add.push(store.clone());
+                    }
+                }
+            }
+            if !add.is_empty() {
+                graph.get_mut(caller).expect("every caller is a declared name").extend(add);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    graph.retain(|_, stores| !stores.is_empty());
+    graph
+}
+
+/// The undo stack, as the censuses spell its field.
+const UNDO_STACK: &str = "undo_stack";
+
+/// Both halves of the undo-stack / name-store question over one file, through
+/// `graph`: `(the undo stack held while a name store is taken, a name store held
+/// while the undo stack is taken)`.
+fn undo_stack_and_name_store_holds(
+    file: &str,
+    text: &str,
+    graph: &CallGraph,
+) -> (Vec<HeldAcquisition>, Vec<HeldAcquisition>) {
+    (
+        held_while_acquiring(file, text, &[UNDO_STACK], &NAME_STORES, graph),
+        held_while_acquiring(file, text, &NAME_STORES, &[UNDO_STACK], graph),
+    )
+}
+
+/// Is `store` alive at this hit?
+fn alive_at(hit: &HeldAcquisition, store: &str) -> bool {
+    hit.alive.iter().any(|s| s == store)
+}
+
+/// The holds of one file that can close a cycle between the undo stack and a
+/// name store.
+///
+/// The two orders both exist, and both are needed: the cell writers hold the
+/// undo stack while they read the name tables (their formulas' casing and
+/// references), and the name writers hold the registry while they record their
+/// step. Neither can be turned round, so the rule is a GATE every pair shares:
+///
+///   * the undo stack held while a name store is taken: BOTH grid locks held --
+///     the cell writers' order (`grid`, `grids`, then everything else);
+///   * a name store held while the undo stack is taken: at least ONE grid lock.
+///
+/// Any hold of the first kind then shares a lock with any hold of the second,
+/// so no two of them can each hold what the other waits for. `grid` alone on
+/// both sides was the round-5 argument, and `update_cell_on_sheets_as` -- `grids`
+/// without `grid` -- is the hold it missed.
+fn undo_stack_name_store_cycles(file: &str, text: &str, graph: &CallGraph) -> Vec<String> {
+    let (under_the_stack, under_a_name_store) = undo_stack_and_name_store_holds(file, text, graph);
+    let mut out = Vec::new();
+    for hit in &under_the_stack {
+        if !(alive_at(hit, "grid") && alive_at(hit, "grids")) {
+            out.push(format!(
+                "{} -- the UNDO STACK held without both grid locks (alive: [{}])",
+                describe(hit),
+                hit.alive.join(", ")
+            ));
+        }
+    }
+    for hit in &under_a_name_store {
+        if !(alive_at(hit, "grid") || alive_at(hit, "grids")) {
+            out.push(format!(
+                "{} -- a NAME STORE held with neither grid lock (alive: [{}])",
+                describe(hit),
+                hit.alive.join(", ")
+            ));
+        }
+    }
+    out
+}
+
+/// rev5C#1 (BUG-0592), over the WHOLE crate: no function holds the undo stack
+/// and a name store (`named_ranges`, `tables`, `table_names`) in an order that
+/// can close a cycle with another function holding them the other way round --
+/// see [`undo_stack_name_store_cycles`] for the gate. Through the TRANSITIVE
+/// call graph, because the name writers reach the undo stack three calls down.
+///
+/// SABOTAGE: take the undo stack in `update_cell_on_sheets_as` before the
+/// casing restamp again (the pre-fix order) -- this fails naming it; or drop
+/// the `grids` hold from any one name writer -- the non-vacuity half fails
+/// naming that writer.
+#[test]
+fn no_function_holds_the_undo_stack_and_a_name_store_in_an_order_that_can_cycle() {
+    let sources = crate_sources();
+    let graph = transitive_acquisitions_by_function(&sources);
+    // The writers' recorder reaches the stack three calls down; a graph that
+    // cannot see that sees no writer at all.
+    assert!(
+        graph.get("record_named_range_undo").is_some_and(|stores| stores.iter().any(|s| s == UNDO_STACK)),
+        "the transitive call graph no longer sees `record_named_range_undo` take the undo stack: {:?}",
+        graph.get("record_named_range_undo")
+    );
+    let mut cycles: Vec<String> = Vec::new();
+    let mut under_the_stack: Vec<HeldAcquisition> = Vec::new();
+    let mut under_a_name_store: Vec<HeldAcquisition> = Vec::new();
+    for (rel, text) in &sources {
+        cycles.extend(undo_stack_name_store_cycles(rel, text, &graph));
+        let (stack_first, name_first) = undo_stack_and_name_store_holds(rel, text, &graph);
+        under_the_stack.extend(stack_first);
+        under_a_name_store.extend(name_first);
+    }
+    cycles.sort();
+    cycles.dedup();
+    assert!(
+        cycles.is_empty(),
+        "these holds of the undo stack and a name store can close a cycle:\n{}\n\nThe name writers hold the registry \
+         while they record their undo step; the cell writers hold the undo stack while they read the name tables. \
+         Off the main thread (the MCP server, the AI chat, a script) the two meet, and a pair that shares no lock \
+         freezes the window with no panic and no log (rev5C#1). Take both grid locks first (`grid`, then `grids`) \
+         around any hold of the undo stack that reads a name store -- or read the names BEFORE taking the stack -- \
+         and at least one grid lock around any hold of a name store that records an undo step.",
+        cycles.join("\n")
+    );
+    // NON-VACUITY, and the writers' half of the fix: each name writer is seen
+    // holding the registry while it reaches the undo stack, under BOTH grid
+    // locks -- the rename's exact order.
+    for writer in ["create_named_range_impl", "update_named_range_core", "delete_named_range_core", "rename_named_range_impl"] {
+        let at: Vec<&HeldAcquisition> =
+            under_a_name_store.iter().filter(|h| h.file == "named_ranges.rs" && h.function == writer).collect();
+        assert!(
+            !at.is_empty(),
+            "the census no longer sees `{writer}` hold the registry while it records its undo step, so it may not be \
+             reading what it claims to"
+        );
+        let short: Vec<String> =
+            at.iter().filter(|h| !(alive_at(h, "grid") && alive_at(h, "grids"))).map(|h| describe(h)).collect();
+        assert!(
+            short.is_empty(),
+            "`{writer}` records its undo step under the registry without BOTH grid locks -- the rename's order is \
+             `grid`, `grids`, the registry, the undo stack:\n{}",
+            short.join("\n")
+        );
+    }
+    // ...and the cell writers' half is seen too.
+    assert!(
+        under_the_stack.iter().any(|h| h.file == "commands/data.rs" && h.function == "update_cell_impl"),
+        "the census no longer sees `update_cell_impl` read a name store under the undo stack, so it may not be reading \
+         what it claims to"
+    );
+}
+
+/// The census above, on the shapes it exists for -- the round-5 pair, a
+/// one-line let-else guard, a writer three calls from the stack -- and quiet on
+/// the fixes.
+#[test]
+fn the_undo_stack_census_fires_on_the_round_five_shapes_and_stays_quiet_on_the_fixes() {
+    // The TRANSITIVE graph, built from planted sources: the recorder takes the
+    // stack three calls down, as the real one does.
+    let recorder = r##"pub fn record_name(state: &AppState) {
+    record_object(state);
+}
+fn record_object(state: &AppState) {
+    join_open(state);
+}
+fn join_open(state: &AppState) {
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.commit();
+}
+"##;
+    let graph = transitive_acquisitions_by_function(&[("planted.rs".to_string(), recorder.to_string())]);
+    assert_eq!(graph.get("record_name").cloned(), Some(vec![UNDO_STACK.to_string()]), "three calls down: {graph:?}");
+    assert!(
+        !direct_acquisitions_by_function(&[("planted.rs".to_string(), recorder.to_string())]).contains_key("record_name"),
+        "the one-level graph is the blind spot this exists for"
+    );
+    // THE ROUND-5 PAIR, cell-writer half: `grids` and NOT `grid`, the undo
+    // stack, then the registry.
+    let group_write_before = r##"pub fn group_write(state: &AppState) {
+    let mut grids = state.grids.write(&effect).unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    if formula {
+        {
+            let named_ranges_map = state.named_ranges.read().unwrap();
+            restamp(&named_ranges_map);
+        }
+    }
+    undo_stack.commit();
+}
+"##;
+    let group_write_after = r##"pub fn group_write(state: &AppState) {
+    let mut grids = state.grids.write(&effect).unwrap();
+    if formula {
+        {
+            let named_ranges_map = state.named_ranges.read().unwrap();
+            restamp(&named_ranges_map);
+        }
+    }
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.commit();
+}
+"##;
+    // A writer that holds the registry and records with NO grid lock, its
+    // guard bound by a one-line let-else (the shape every census used to drop
+    // at the end of its own line).
+    let ungated_writer = r##"pub fn define(state: &AppState) {
+    let Ok(pending) = state.named_ranges.lock_pending() else { return };
+    if pending.is_empty() { return; }
+    record_name(state);
+}
+"##;
+    let gated_writer = r##"pub fn define(state: &AppState) {
+    let Ok(grid_hold) = state.grid.lock_pending() else { return };
+    let Ok(grids_hold) = state.grids.lock_pending() else { return };
+    let Ok(pending) = state.named_ranges.lock_pending() else { return };
+    record_name(state);
+    drop(pending);
+    drop(grids_hold);
+    drop(grid_hold);
+}
+"##;
+    let cell_writer = r##"pub fn write_cell(state: &AppState) {
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let names = state.named_ranges.read().unwrap();
+}
+"##;
+    let fires = |label: &str, src: &str| {
+        let found = undo_stack_name_store_cycles("planted.rs", src, &graph);
+        assert!(!found.is_empty(), "the census did NOT fire on {label}: it cannot see the deadlock it exists for");
+    };
+    let quiet = |label: &str, src: &str| {
+        let found = undo_stack_name_store_cycles("planted.rs", src, &graph);
+        assert!(found.is_empty(), "the census fired on {label}, which is CORRECT code: {found:?}");
+    };
+    fires("the round-5 `update_cell_on_sheets_as` (grids, the undo stack, then the registry)", group_write_before);
+    fires("a writer holding the registry with no grid lock, bound by a one-line let-else", ungated_writer);
+    quiet("the fixed `update_cell_on_sheets_as` (the registry read and released before the stack)", group_write_after);
+    quiet("a writer under both grid locks, three calls from the stack", gated_writer);
+    quiet("a cell writer under both grid locks", cell_writer);
+    // The gated writer IS a hold of the registry across the stack -- seen, and
+    // seen gated -- not a body the census cannot read.
+    let (_, name_first) = undo_stack_and_name_store_holds("planted.rs", gated_writer, &graph);
+    assert!(
+        name_first.iter().any(|h| h.via.as_deref() == Some("record_name") && alive_at(h, "grid") && alive_at(h, "grids")),
+        "the census did not see the gated writer hold the registry across its recorder: {name_first:?}"
+    );
+}
+
+/// rev5C#1's audit, the other pair it found: NOTHING reads `sheet_names` while
+/// it holds the undo stack, crate-wide and through the transitive call graph.
+///
+/// `sheet_names` is an EARLY lock -- the recalculation pass takes it right after
+/// the two grid locks, and every cell writer takes it before the undo stack --
+/// and `sheets::set_freeze_panes_impl` holds it, with no grid lock, while it
+/// records its undo step. Insert/Delete Rows/Columns (the active-sheet bodies
+/// and `off_sheet_structural_edit`) re-read it UNDER the stack for the name
+/// shift, the inverse with no lock in common, while each already held (or could
+/// take) a copy from before the stack. They read that copy now. (The four
+/// active-sheet bodies held `style_registry` there too, the BUG-0045 pair; the
+/// name-authority census saw them only once it read a one-line `{ .. }` as
+/// ending nothing.)
+///
+/// SABOTAGE: read the sheet names under the undo stack again in
+/// `off_sheet_structural_edit` -- this fails naming it.
+#[test]
+fn no_function_reads_the_sheet_names_while_it_holds_the_undo_stack() {
+    let sources = crate_sources();
+    let graph = transitive_acquisitions_by_function(&sources);
+    let mut offenders: Vec<String> = Vec::new();
+    for (rel, text) in &sources {
+        offenders.extend(held_while_acquiring(rel, text, &[UNDO_STACK], &["sheet_names"], &graph).iter().map(describe));
+    }
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "these functions read `sheet_names` while they hold the undo stack:\n{}\n\n`set_freeze_panes_impl` holds \
+         `sheet_names` while it records its undo step, with no grid lock to order it against these, so each pair can \
+         hold what the other waits for (rev5C#1). Copy the names BEFORE taking the undo stack.",
+        offenders.join("\n")
+    );
+    // NON-VACUITY: the other half of the pair is still seen -- the freeze holds
+    // the names while it reaches the stack through its recorder.
+    let sheets = std::fs::read_to_string(src_root().join("sheets.rs")).expect("cannot read sheets.rs");
+    assert!(
+        held_while_acquiring("sheets.rs", &sheets, &["sheet_names"], &[UNDO_STACK], &graph)
+            .iter()
+            .any(|h| h.function == "set_freeze_panes_impl" && h.via.as_deref() == Some("record_freeze_undo")),
+        "the census no longer sees `set_freeze_panes_impl` hold `sheet_names` across its undo record -- re-derive \
+         which order this pair needs"
+    );
+}
+
+/// Can another thread take the undo stack within `ms`?
+fn undo_stack_free_within(state: &Arc<AppState>, ms: u64) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let state = Arc::clone(state);
+        std::thread::spawn(move || {
+            if state.undo_stack.lock().is_ok() {
+                let _ = tx.send(());
+            }
+        });
+    }
+    rx.recv_timeout(Duration::from_millis(ms)).is_ok()
+}
+
+/// THE ROUND-5 DEADLOCK AS A TEST, cell-writer half (rev5C#1). This thread
+/// plays a NAME WRITER mid-step: it holds the registry, as
+/// `create_named_range_impl` does while it records its undo step (and so waits
+/// for the undo stack). The off-sheet formula write -- a floating grid's cell, a
+/// grouped-sheet entry, a script writing another sheet -- runs on another thread
+/// and parks on the registry for its casing restamp. The question is whether
+/// it holds the undo stack while it waits: if it does, the name writer can
+/// never record, and neither thread moves again.
+///
+/// SABOTAGE: take the undo stack in `update_cell_on_sheets_as` before the
+/// restamp again -- this fails at "DEADLOCK SHAPE".
+#[test]
+fn an_off_sheet_formula_write_never_holds_the_undo_stack_while_it_waits_for_the_names() {
+    let state = workbook_with_a_name_and_its_reader();
+    let (sheet2, _) = append_sheet_for_test(&state, "Sheet2", "visible");
+    let file = Arc::new(crate::persistence::FileState::default());
+    let writer_holds_the_registry = state.named_ranges.lock_pending().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        let file = Arc::clone(&file);
+        move || {
+            crate::commands::data::update_cell_on_sheets_inner(
+                &state,
+                &file,
+                &crate::persistence::UserFilesState::default(),
+                &PivotState::new(),
+                &crate::pane_control::PaneControlState::new(),
+                &RibbonFilterState::new(),
+                vec![sheet2],
+                0,
+                0,
+                "=rate*2".to_string(),
+                None,
+                Some(false),
+                None,
+            )
+        }
+    };
+    let probe_state = Arc::clone(&state);
+    let (parked, stack_free, result) =
+        run_site_while_held(writer_holds_the_registry, site, || undo_stack_free_within(&probe_state, 400));
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the off-sheet write finished while the registry was held, so it never read the names \
+         and this test measured nothing"
+    );
+    assert!(
+        stack_free,
+        "DEADLOCK SHAPE (rev5C#1, BUG-0592): while the off-sheet formula write waited for `named_ranges` (its casing \
+         restamp), it HELD THE UNDO STACK. A name writer holds the registry while it waits for that stack to record \
+         its step -- an MCP name edit on its own thread meeting a floating-grid entry froze the window. Read the \
+         names before taking the undo stack."
+    );
+    // NON-VACUITY: once the registry was free the write did all of it -- one
+    // step, the formula stored on Sheet2 in the name's own capitalisation.
+    assert_eq!(result, Ok(vec![sheet2]), "the off-sheet write did not write Sheet2");
+    let stored = state.grids.read().unwrap()[sheet2]
+        .get_cell(0, 0)
+        .cloned()
+        .and_then(|c| c.formula_string())
+        .unwrap_or_default();
+    assert!(stored.contains("Rate"), "the casing restamp did not run on the stored formula: {stored:?}");
+    assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 1, "the off-sheet write is one undo step");
+}
+
+/// THE ROUND-5 DEADLOCK, name-writer half (rev5C#1): each name writer holds
+/// BOTH grid locks -- the rename's exact order, `grid`, `grids`, the registry,
+/// the undo stack -- while it records its step, so every function that holds
+/// the undo stack while it takes a name store (which holds both first) is
+/// serialized with it. This thread holds the undo stack, so each writer parks
+/// at its record; the probe asks whether `grids` was free at that moment.
+/// Before the fix the writers held `grid` alone, and `update_cell_on_sheets_as`
+/// -- `grids` without `grid` -- was not ordered against them.
+///
+/// SABOTAGE: drop the `grids` hold from any one writer -- its row fails.
+#[test]
+fn the_name_writers_hold_both_grid_locks_while_they_record_their_undo_steps() {
+    type NameWriter = fn(&AppState, &crate::persistence::FileState) -> crate::named_ranges::NamedRangeResult;
+    let writers: [(&str, NameWriter); 3] = [
+        ("create_named_range_impl", define_fee),
+        ("update_named_range_core", redefine_rate),
+        ("delete_named_range_core", delete_rate),
+    ];
+    let mut unordered = Vec::new();
+    for (label, write) in writers {
+        let state = workbook_with_a_name_and_its_reader();
+        let file = Arc::new(crate::persistence::FileState::default());
+        let undo_held = state.undo_stack.lock().unwrap();
+        let site = {
+            let state = Arc::clone(&state);
+            let file = Arc::clone(&file);
+            move || write(&state, &file)
+        };
+        let probe_state = Arc::clone(&state);
+        let (parked, grids_were_free, result) =
+            run_site_while_held(undo_held, site, || grids_free_within(&probe_state, 400));
+        assert!(
+            parked,
+            "PRECONDITION FAILED: `{label}` finished while the undo stack was held, so it never waited for it and \
+             this test measured nothing"
+        );
+        if grids_were_free {
+            unordered.push(format!("`{label}`"));
+        }
+        // NON-VACUITY: once the stack was free the writer did all of it, as ONE step.
+        assert!(result.success, "`{label}` failed: {:?}", result.error);
+        assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 1, "`{label}` is one undo step");
+    }
+    assert!(
+        unordered.is_empty(),
+        "UNORDERED NAME WRITER (rev5C#1, BUG-0592): while these writers held the registry and waited to record their \
+         undo step, `grids` was free -- so a function holding `grids` and the undo stack (`update_cell_on_sheets_as`) \
+         was not serialized with them. Take `grid`, then `grids`, then the registry:\n{}",
+        unordered.join("\n")
+    );
+}
+
+/// THE TABLE AUTO-EXPAND HALF (rev5C#1): `table_deps::refresh_reader_edges`
+/// took `named_ranges`, `tables` and `table_names` BEFORE `grid` -- the
+/// canonical order inside out -- while every name writer holds the grid locks
+/// when it takes the registry. This thread plays a name writer at its first
+/// lock (it holds `grid`); the refresh runs on another thread and parks on the
+/// grid. The question is whether the registry is free while it waits.
+///
+/// SABOTAGE: move the grid read back below the three name stores -- this fails
+/// at "DEADLOCK SHAPE".
+#[test]
+fn refreshing_reader_edges_takes_the_grid_before_the_name_stores() {
+    let state = workbook_with_a_name_and_its_reader();
+    let writer_holds_grid = state.grid.lock_pending().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        move || crate::table_deps::refresh_reader_edges(&state, &[(0, 1)])
+    };
+    let probe_state = Arc::clone(&state);
+    let (parked, registry_free, ()) =
+        run_site_while_held(writer_holds_grid, site, || name_keys_within(&probe_state, 400).is_some());
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the edge refresh finished while `grid` was held, so it never waited for it and this \
+         test measured nothing"
+    );
+    assert!(
+        registry_free,
+        "DEADLOCK SHAPE (rev5C#1, BUG-0592): while the edge refresh waited for `grid`, it held the registry. A name \
+         writer holds `grid` while it waits for the registry -- an MCP name edit meeting a table auto-expand froze \
+         the window. Take the grid first (`rebuild_all_dependencies`'s order)."
+    );
+    // NON-VACUITY: once the grid was free the refresh re-derived B1's edge to
+    // A1, the cell `Rate` names.
+    let local = state.dependents.lock().unwrap().get(&(0, 0)).is_some_and(|cells| cells.contains(&(0, 1)));
+    let cross = state
+        .cross_sheet_dependencies
+        .lock()
+        .unwrap()
+        .get(&(0, 0, 1))
+        .is_some_and(|refs| !refs.is_empty());
+    assert!(local || cross, "the refresh did not re-derive B1's edge through the name");
+}
+
+// ============================================================================
+// Round 8: the undo stack against EVERY store
+// ============================================================================
+//
+// rev5C#1's audit paired every hold of the undo stack against every store and
+// found two more cycles the name census could not see, each with no lock in
+// common:
+//
+//   * `set_column_width` / `set_row_height` held their dimension mirror while
+//     they waited for the stack; the cell writers hold `grid`, `grids` and the
+//     stack and then read `row_heights` / `column_widths` for every formula's
+//     evaluation context (and write them for a computed property).
+//   * `create_pivot_core` held `pivot_tables` (and `active_pivot_id`) across its
+//     undo record, and `delete_pivot_table` held it across three; the cell
+//     writers read `pivot_tables` under the stack for GETPIVOTDATA.
+//
+// The AI chat, the MCP server and the notebook run the cell writers off the main
+// thread, so a resize, a pivot create or a pivot delete meeting one froze the
+// window with no panic and no log. Each now releases its store before it takes
+// the stack. The census below asks the question for EVERY store, so the next
+// such pair is a test failure rather than a hang.
+
+/// Every store the crate locks anywhere, by field name: what any line's
+/// acquisition names (`acquisitions_at`), the undo stack and the two grid locks
+/// left out -- the grid locks are the GATE the undo-stack census asks for, never
+/// one of the stores it pairs.
+fn every_store_the_crate_locks(sources: &[(String, String)]) -> Vec<String> {
+    let mut all: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (_, text) in sources {
+        let stripped = blank_literals(&strip_cfg_test_items(text));
+        let lines: Vec<&str> = stripped.lines().collect();
+        let code: Vec<&str> = lines.iter().map(|l| l.split("//").next().unwrap_or("")).collect();
+        for i in 0..code.len() {
+            let (acquisitions, _) = acquisitions_at(&code, i, &statement_tail(&code, i));
+            for acquisition in acquisitions {
+                all.insert(acquisition.field);
+            }
+        }
+    }
+    for gate in [UNDO_STACK, "grid", "grids"] {
+        all.remove(gate);
+    }
+    all.into_iter().collect()
+}
+
+/// Both halves of the undo-stack question over one file, for every one of
+/// `stores`: `(the undo stack held while a store is taken, a store held while the
+/// undo stack is taken)`.
+fn undo_stack_holds_against(
+    file: &str,
+    text: &str,
+    stores: &[&str],
+    graph: &CallGraph,
+) -> (Vec<HeldAcquisition>, Vec<HeldAcquisition>) {
+    (
+        held_while_acquiring(file, text, &[UNDO_STACK], stores, graph),
+        held_while_acquiring(file, text, stores, &[UNDO_STACK], graph),
+    )
+}
+
+/// The lock fields the crate declares that are EXCLUSIVE: some declaration of
+/// the name is a `Persisted<..>` (a `Mutex` inside) or a `Mutex<..>`, and none
+/// is an `RwLock<..>` -- two readers of an `RwLock` hold it at once, so a read
+/// both sides of a pair hold orders nothing. Read from the field declarations
+/// (`[pub] name: Type`) of every non-test source.
+fn exclusive_lock_fields(sources: &[(String, String)]) -> std::collections::BTreeSet<String> {
+    let mut exclusive: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut shared: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (_, text) in sources {
+        for raw in strip_cfg_test_items(text).lines() {
+            let code = raw.split("//").next().unwrap_or("").trim();
+            let code = code.strip_prefix("pub(crate) ").or_else(|| code.strip_prefix("pub ")).unwrap_or(code);
+            let Some((name, ty)) = code.split_once(':') else { continue };
+            let name = name.trim();
+            if name.is_empty() || ty.starts_with(':') || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            if ty.contains("RwLock<") {
+                shared.insert(name.to_string());
+            } else if ty.contains("Persisted<") || ty.contains("Mutex<") {
+                exclusive.insert(name.to_string());
+            }
+        }
+    }
+    exclusive.retain(|name| !shared.contains(name));
+    exclusive
+}
+
+/// The pairs of holds that can close a cycle through the undo stack: one holds
+/// the stack and takes store X, the other holds X and takes the stack, and no
+/// EXCLUSIVE lock (`exclusive`, [`exclusive_lock_fields`]) is alive at both.
+///
+/// Two holds that each have the same exclusive lock alive cannot be at those two
+/// points at once, so the pair cannot close. In practice that lock is a grid
+/// lock -- what every function in the crate takes FIRST (`grid`, `grids`, then
+/// everything else: `no_lock_is_held_while_a_grid_lock_is_acquired`) -- or the
+/// style registry the cell writers take before the stack. Both orders of a pair
+/// exist on purpose in the crate: the cell writers take the dimension mirrors
+/// and `pivot_tables` under the stack, `apply_changes` and the structural edits
+/// hold the mirrors while they take it, and they are safe exactly because each
+/// side holds the grid locks. A pair that shares no exclusive lock is the
+/// deadlock this exists for. A non-exclusive lock the pair shares is listed in
+/// the report, never accepted as a gate.
+///
+/// One line per pair, grouped by store, sorted and deduplicated.
+fn undo_stack_cycles(
+    stack_first: &[HeldAcquisition],
+    store_first: &[HeldAcquisition],
+    exclusive: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for under_the_stack in stack_first {
+        let store = under_the_stack.acquiring.as_str();
+        for under_the_store in store_first.iter().filter(|h| h.holding.iter().any(|s| s == store)) {
+            let shared: Vec<&str> = under_the_stack
+                .alive
+                .iter()
+                .filter(|s| s.as_str() != UNDO_STACK && s.as_str() != store && alive_at(under_the_store, s))
+                .map(String::as_str)
+                .collect();
+            if shared.iter().any(|s| exclusive.contains(*s)) {
+                continue;
+            }
+            out.insert(format!(
+                "`{store}`:\n    the stack first: {} [alive: {}]\n    the store first: {} [alive: {}]{}",
+                describe(under_the_stack).trim(),
+                under_the_stack.alive.join(", "),
+                describe(under_the_store).trim(),
+                under_the_store.alive.join(", "),
+                if shared.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n    (both also hold [{}], none of them exclusive)", shared.join(", "))
+                }
+            ));
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Round 8 (NEW-dimension-resize-undo-cycle, NEW-pivot-create-delete-undo-cycle),
+/// over the WHOLE crate and EVERY store: no function holds the undo stack while
+/// it takes a store that another function holds while it takes the undo stack,
+/// unless the two share an exclusive lock (in practice a grid lock) -- see
+/// [`undo_stack_cycles`] for the gate. Through the TRANSITIVE call graph:
+/// recorders reach the stack calls down.
+///
+/// It generalises `no_function_holds_the_undo_stack_and_a_name_store_in_an_order_that_can_cycle`
+/// (the name stores) and `no_function_reads_the_sheet_names_while_it_holds_the_undo_stack`,
+/// which stay, because each pins its own fix more tightly than a pairwise
+/// question can. Asking it of every store needed three corrections to the
+/// guard tracker, each a hold it reported that the code does not make (round
+/// 7's audit listed them as the reason the question stayed narrow): a guard
+/// MOVED by `.authorize(` into an inner block (`authorized_on_line`), a
+/// `let x = match state.y.write(..)` whose `Ok` arm consumes the guard
+/// (`match_arm_consumes_the_guard`), and the pane controls' own store, which
+/// shares the field name `controls` with AppState's (`acquisitions_in`).
+///
+/// SABOTAGE: hold `column_widths` across the undo record in
+/// `set_column_width_inner` again, or `pivot_tables` across it in
+/// `create_pivot_core` or `delete_pivot_table` -- this fails naming the store and
+/// both functions of the pair.
+#[test]
+fn no_function_holds_the_undo_stack_and_any_store_in_an_order_that_can_cycle() {
+    let sources = crate_sources();
+    let graph = transitive_acquisitions_by_function(&sources);
+    let stores = every_store_the_crate_locks(&sources);
+    let store_refs: Vec<&str> = stores.iter().map(String::as_str).collect();
+    for store in ["row_heights", "column_widths", "pivot_tables", "named_ranges", "sheet_names"] {
+        assert!(
+            stores.iter().any(|s| s == store),
+            "the store list no longer names `{store}`, so this census may not be reading what it claims to: {stores:?}"
+        );
+    }
+    // The gate's premise: the two grid locks are exclusive.
+    let exclusive = exclusive_lock_fields(&sources);
+    for gate in ["grid", "grids", "style_registry"] {
+        assert!(
+            exclusive.contains(gate),
+            "`{gate}` no longer reads as an exclusive lock, so this census's gate is not what it claims: {exclusive:?}"
+        );
+    }
+    let mut stack_first: Vec<HeldAcquisition> = Vec::new();
+    let mut store_first: Vec<HeldAcquisition> = Vec::new();
+    for (rel, text) in &sources {
+        let (a, b) = undo_stack_holds_against(rel, text, &store_refs, &graph);
+        stack_first.extend(a);
+        store_first.extend(b);
+    }
+    let cycles = undo_stack_cycles(&stack_first, &store_first, &exclusive);
+    assert!(
+        cycles.is_empty(),
+        "these pairs of holds of the undo stack and another store can close a cycle -- each holds what the other \
+         waits for, and they share no exclusive lock that orders them:\n{}\n\nThe cell writers \
+         (`update_cell_impl`, `update_cells_batch_core`, `fill_range`) hold `grid`, `grids` and the undo stack and \
+         then take some thirty stores, and the AI chat, the MCP server and the notebook run them off the main thread. \
+         A resize that held its dimension mirror, and a pivot create or delete that held `pivot_tables`, while it \
+         waited for the stack froze the window with no panic and no log. Release the store before taking the undo \
+         stack (copy what the step records first), or take `grid` and `grids` first.",
+        cycles.join("\n")
+    );
+    // NON-VACUITY, the writers' half: the cell writers are seen taking the two
+    // dimension mirrors and `pivot_tables` under the stack -- under both grid
+    // locks, which is what makes the other half's gate sufficient.
+    for store in ["row_heights", "column_widths", "pivot_tables"] {
+        let at: Vec<&HeldAcquisition> = stack_first
+            .iter()
+            .filter(|h| h.file == "commands/data.rs" && h.function == "update_cell_impl" && h.acquiring == store)
+            .collect();
+        assert!(
+            !at.is_empty(),
+            "the census no longer sees `update_cell_impl` take `{store}` while it holds the undo stack, so it may not \
+             be reading what it claims to"
+        );
+        assert!(
+            at.iter().all(|h| alive_at(h, "grid") && alive_at(h, "grids")),
+            "`update_cell_impl` takes `{store}` under the undo stack without BOTH grid locks: {:?}",
+            at.iter().map(|h| describe(h)).collect::<Vec<_>>()
+        );
+    }
+    // ...and the other half is read too: the undo restore holds both dimension
+    // mirrors while it takes the stack, under the grid locks.
+    for store in ["row_heights", "column_widths"] {
+        assert!(
+            store_first.iter().any(|h| h.file == "undo_commands.rs"
+                && h.function == "apply_changes_with"
+                && h.holding.iter().any(|s| s == store)
+                && alive_at(h, "grid")
+                && alive_at(h, "grids")),
+            "the census no longer sees `apply_changes_with` hold `{store}` (under both grid locks) while it takes the \
+             undo stack -- re-derive which order this pair needs"
+        );
+    }
+}
+
+/// The census above, on the shapes it exists for and quiet on their fixes.
+#[test]
+fn the_every_store_undo_census_fires_on_the_round_eight_shapes_and_stays_quiet_on_the_fixes() {
+    let graph: CallGraph = [("record_cascade", vec![UNDO_STACK])]
+        .iter()
+        .map(|(name, stores)| (name.to_string(), stores.iter().map(|s| s.to_string()).collect()))
+        .collect();
+    let stores = ["row_heights", "column_widths", "pivot_tables", "active_pivot_id"];
+    // The cell writers' half: the grid locks, the stack, then the stores.
+    let cell_writer = r##"pub fn write_cell(state: &AppState, pivot_state: &PivotState) {
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let rh_map = state.row_heights.read().unwrap().clone();
+    let cw_map = state.column_widths.read().unwrap().clone();
+}
+"##;
+    // The pre-fix resize: the mirror held across the record, no grid lock.
+    let resize_before = r##"pub fn set_column_width(state: &AppState) {
+    let recorded_on = *state.active_sheet.read().unwrap();
+    let mut widths = state.column_widths.write(&effect).unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let previous_width = widths.get(&col).copied();
+    undo_stack.record_column_width_change(recorded_on, col, previous_width);
+}
+"##;
+    let resize_after = r##"pub fn set_column_width(state: &AppState) {
+    let recorded_on = *state.active_sheet.read().unwrap();
+    let previous_width = {
+        let mut widths = state.column_widths.write(&effect).unwrap();
+        let previous = widths.get(&col).copied();
+        widths.insert(col, width);
+        previous
+    };
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.record_column_width_change(recorded_on, col, previous_width);
+    }
+}
+"##;
+    // The pre-fix create: `pivot_tables` and the active id held across it.
+    let create_before = r##"pub fn create_pivot(state: &AppState, pivot_state: &PivotState) {
+    let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
+    pivot_tables.insert(pivot_id, (definition, cache_mut));
+    let mut active = pivot_state.active_pivot_id.lock().unwrap();
+    *active = Some(pivot_id);
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.commit_owned(owned_txn);
+    }
+    drop(active);
+    drop(pivot_tables);
+}
+"##;
+    let create_after = r##"pub fn create_pivot(state: &AppState, pivot_state: &PivotState) {
+    {
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
+        pivot_tables.insert(pivot_id, (definition, cache_mut));
+    }
+    *pivot_state.active_pivot_id.lock().unwrap() = Some(pivot_id);
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.commit_owned(owned_txn);
+    }
+}
+"##;
+    // The pre-fix delete: a READ guard held across a recorder one call down.
+    let delete_before = r##"pub fn delete_pivot(state: &AppState, pivot_state: &PivotState) {
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let (definition, cache) = pivot_tables.get(&pivot_id).unwrap();
+    {
+        record_cascade(state);
+    }
+    drop(pivot_tables);
+}
+"##;
+    let delete_after = r##"pub fn delete_pivot(state: &AppState, pivot_state: &PivotState) {
+    let (definition, cache) = {
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+        let (definition, cache) = pivot_tables.get(&pivot_id).unwrap();
+        (definition.clone(), cache.clone())
+    };
+    record_cascade(state);
+}
+"##;
+    // Both orders under a grid lock: a structural edit holds the mirror while it
+    // takes the stack, and the writer the other way round -- serialized by `grid`.
+    let structural_gated = r##"pub fn insert_rows(state: &AppState) {
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
+    let row_heights = state.row_heights.lock_pending().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+}
+"##;
+    // The OTHER half generalised: a hold of the stack WITHOUT the grid locks
+    // that takes a store a gated function holds across the stack.
+    let restore_ungated = r##"pub fn restore(state: &AppState) {
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let row_heights = state.row_heights.read().unwrap();
+}
+"##;
+    // THE GATE, beyond the grid locks: a pair that shares the (exclusive) style
+    // registry is ordered by it -- the AutoFilter commands hold it and `locale`
+    // across their record, the cell writers take it before the stack -- and a
+    // pair that shares only a lock declared as an `RwLock` is not.
+    let filter_under_styles = r##"pub fn apply_filter(state: &AppState) {
+    let styles = state.style_registry.write(&effect).unwrap();
+    let locale = state.locale.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+}
+"##;
+    let writer_under_styles = r##"pub fn write_styled(state: &AppState) {
+    let styles = state.style_registry.write(&effect).unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
+}
+"##;
+    let filter_under_a_read = r##"pub fn apply_filter(state: &AppState) {
+    let view = state.shared_view.read().unwrap();
+    let locale = state.locale.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+}
+"##;
+    let writer_under_a_read = r##"pub fn write_styled(state: &AppState) {
+    let view = state.shared_view.read().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
+}
+"##;
+    // THE THREE TRACKER CORRECTIONS. Each "held" shape below was reported by the
+    // tracker without the correction, though the code releases the store before
+    // the stack; each "kept" shape really holds it.
+    let writer_takes_the_object_stores = r##"pub fn shift_rows(state: &AppState, slicer_state: &SlicerState) {
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let n = slicer_state.slicers.read().unwrap().len();
+    let c = state.controls.lock().unwrap().len();
+    let s = state.object_scripts.write(&effect).unwrap().len();
+}
+"##;
+    // (1) A pending guard MOVED by `.authorize(` into an inner block.
+    let authorize_in_a_block = r##"pub fn update_slicer(state: &AppState, slicer_state: &SlicerState) {
+    let pending = slicer_state.slicers.lock_pending().unwrap();
+    let before = pending.get(&id).cloned();
+    let updated = {
+        let mut slicers = pending.authorize(&effect);
+        slicers.insert(id, slicer);
+        1
+    };
+    record_cascade(state);
+}
+"##;
+    let authorize_kept = r##"pub fn update_slicer(state: &AppState, slicer_state: &SlicerState) {
+    let pending = slicer_state.slicers.lock_pending().unwrap();
+    let mut slicers = pending.authorize(&effect);
+    slicers.insert(id, slicer);
+    record_cascade(state);
+}
+"##;
+    // (2) A `let x = match ..write(..)` whose `Ok` arm consumes the guard.
+    let match_consumes = r##"pub fn delete_table(state: &AppState) {
+    let pruned = match state.object_scripts.write(&effect) {
+        Ok(mut scripts) => take_object_scripts(&mut scripts, |s| {
+            s.instance_id.is_some()
+        }),
+        Err(_) => Vec::new(),
+    };
+    record_cascade(state);
+}
+"##;
+    let match_binds = r##"pub fn delete_table(state: &AppState) {
+    let scripts = match state.object_scripts.write(&effect) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    record_cascade(state);
+}
+"##;
+    // (3) The pane controls' own store, which shares the field name.
+    let pane_controls_held = r##"pub fn update_pane_control(state: &AppState, pane_control_state: &PaneControlState) {
+    let mut controls = pane_control_state.controls.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+}
+"##;
+    let app_controls_held = r##"pub fn move_control(state: &AppState) {
+    let mut controls = state.controls.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+}
+"##;
+    let stores = [
+        "row_heights",
+        "column_widths",
+        "pivot_tables",
+        "active_pivot_id",
+        "locale",
+        "slicers",
+        "controls",
+        "pane_controls",
+        "object_scripts",
+    ];
+    let exclusive: std::collections::BTreeSet<String> =
+        ["grid", "grids", "style_registry"].iter().map(|s| s.to_string()).collect();
+    let census = |srcs: &[&str]| {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for (i, src) in srcs.iter().enumerate() {
+            let (x, y) = undo_stack_holds_against(&format!("planted{i}.rs"), src, &stores, &graph);
+            a.extend(x);
+            b.extend(y);
+        }
+        undo_stack_cycles(&a, &b, &exclusive)
+    };
+    // Every case is judged before anything fails, so one sabotage shows each
+    // case it breaks.
+    let mut wrong: Vec<String> = Vec::new();
+    let mut fires = |label: &str, srcs: &[&str], store: &str| {
+        let found = census(srcs);
+        if !found.iter().any(|f| f.starts_with(&format!("`{store}`"))) {
+            wrong.push(format!("the census did NOT fire on {label}: it cannot see the deadlock it exists for ({found:?})"));
+        }
+    };
+    fires("the pre-fix resize against a cell writer", &[cell_writer, resize_before], "column_widths");
+    fires("the pre-fix pivot create against a cell writer", &[cell_writer, create_before], "pivot_tables");
+    fires("the pre-fix pivot delete (a read guard, the stack one call down)", &[cell_writer, delete_before], "pivot_tables");
+    fires("a hold of the stack with no grid lock against a gated holder of the store", &[restore_ungated, structural_gated], "row_heights");
+    fires("a pair that shares only a lock declared as an `RwLock`", &[writer_under_a_read, filter_under_a_read], "locale");
+    fires("an authorized guard kept to the record", &[writer_takes_the_object_stores, authorize_kept], "slicers");
+    fires("a `match` arm that binds the guard", &[writer_takes_the_object_stores, match_binds], "object_scripts");
+    fires("AppState's controls held across the record", &[writer_takes_the_object_stores, app_controls_held], "controls");
+    let mut quiet = |label: &str, srcs: &[&str]| {
+        let found = census(srcs);
+        if !found.is_empty() {
+            wrong.push(format!("the census fired on {label}, which is CORRECT code: {found:?}"));
+        }
+    };
+    quiet("the fixed resize", &[cell_writer, resize_after]);
+    quiet("the fixed pivot create", &[cell_writer, create_after]);
+    quiet("the fixed pivot delete", &[cell_writer, delete_after]);
+    quiet("both orders, each under the grid locks", &[cell_writer, structural_gated]);
+    quiet("both orders, each under the exclusive style registry", &[writer_under_styles, filter_under_styles]);
+    quiet("a guard authorized into an inner block that ends before the record", &[writer_takes_the_object_stores, authorize_in_a_block]);
+    quiet("a `match` arm that consumes the guard", &[writer_takes_the_object_stores, match_consumes]);
+    quiet("the pane controls' own store held across the record", &[writer_takes_the_object_stores, pane_controls_held]);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // The fired line names BOTH functions of the pair.
+    let found = census(&[cell_writer, resize_before]);
+    assert!(
+        found.iter().any(|f| f.contains("write_cell") && f.contains("set_column_width")),
+        "a reported pair must name both of its functions: {found:?}"
+    );
+}
+
+/// The gate's input: the declarations decide which locks are exclusive.
+#[test]
+fn the_exclusive_lock_reader_tells_a_mutex_from_an_rwlock() {
+    let planted = r##"pub struct Planted {
+    pub grid: document_effect::Persisted<Grid>,
+    pub(crate) locale: Mutex<LocaleSettings>,
+    pub shared_view: RwLock<View>,
+    pub mixed: Mutex<u32>,
+    pub undo_stack: undo_history::UndoHistory,
+}
+pub struct Other {
+    pub mixed: RwLock<u32>,
+}
+pub fn f(state: &AppState) {
+    let local: Mutex<u32> = Mutex::new(0);
+}
+"##;
+    let exclusive = exclusive_lock_fields(&[("planted.rs".to_string(), planted.to_string())]);
+    let names: Vec<&str> = exclusive.iter().map(String::as_str).collect();
+    assert_eq!(names, vec!["grid", "locale"], "a name any declaration makes an RwLock is never exclusive");
+}
+
+/// The two dimension mirrors, read on a thread of their own with a deadline:
+/// `Some(the size line `line` has)` when `rows` / columns could be taken within
+/// `ms`, `None` when not.
+fn dimension_size_within(state: &Arc<AppState>, rows: bool, line: u32, ms: u64) -> Option<Option<f64>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let state = Arc::clone(state);
+        std::thread::spawn(move || {
+            let store = if rows { &state.row_heights } else { &state.column_widths };
+            if let Ok(sizes) = store.read() {
+                let _ = tx.send(sizes.get(&line).copied());
+            }
+        });
+    }
+    rx.recv_timeout(Duration::from_millis(ms)).ok()
+}
+
+/// NEW-dimension-resize-undo-cycle AS A TEST. This thread plays a CELL WRITER
+/// mid-step: it holds the undo stack, as `update_cell_impl` does when it reads
+/// the dimension mirrors for a formula's evaluation context (and so waits for
+/// them). Each one-line resize runs on another thread and parks on the stack to
+/// record its step. The question is whether it holds its mirror while it waits:
+/// if it does, the writer can never read it, and neither thread moves again.
+///
+/// SABOTAGE: take the undo stack in `set_column_width_inner` (or
+/// `set_row_height_inner`) while its mirror is still held -- its row fails at
+/// "DEADLOCK SHAPE".
+#[test]
+fn a_resize_never_holds_its_dimension_mirror_while_it_waits_for_the_undo_stack() {
+    type Resize = fn(&AppState, &crate::persistence::FileState, u32, f64) -> Result<(), String>;
+    let doors: [(&str, bool, Resize); 2] = [
+        ("set_column_width_inner", false, crate::commands::dimensions::set_column_width_inner),
+        ("set_row_height_inner", true, crate::commands::dimensions::set_row_height_inner),
+    ];
+    let mut held_across = Vec::new();
+    for (label, rows, resize) in doors {
+        let state = shared_state();
+        let file = Arc::new(crate::persistence::FileState::default());
+        let writer_holds_the_stack = state.undo_stack.lock().unwrap();
+        let site = {
+            let state = Arc::clone(&state);
+            let file = Arc::clone(&file);
+            move || resize(&state, &file, 3, 77.0)
+        };
+        let probe_state = Arc::clone(&state);
+        let mut seen: Option<Option<f64>> = None;
+        let (parked, _, result) = run_site_while_held(writer_holds_the_stack, site, || {
+            seen = dimension_size_within(&probe_state, rows, 3, 400);
+            seen.is_some()
+        });
+        assert!(
+            parked,
+            "PRECONDITION FAILED: `{label}` finished while the undo stack was held, so it never waited for it and \
+             this test measured nothing"
+        );
+        match seen {
+            None => held_across.push(format!("`{label}`")),
+            // NON-VACUITY: it parked AFTER its write -- the mirror it released
+            // already holds the new size.
+            Some(size) => assert_eq!(
+                size,
+                Some(77.0),
+                "`{label}` parked on the undo stack BEFORE it wrote the size, so the probe measured nothing"
+            ),
+        }
+        assert_eq!(result, Ok(()), "`{label}` failed");
+        assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 1, "`{label}` is one undo step");
+    }
+    assert!(
+        held_across.is_empty(),
+        "DEADLOCK SHAPE (NEW-dimension-resize-undo-cycle): while these resizes waited for the undo stack to record \
+         their step, they HELD THEIR DIMENSION MIRROR. A cell writer holds `grid`, `grids` and the undo stack while it \
+         waits for that mirror (every formula's evaluation context reads it) -- an AI, MCP or notebook write meeting \
+         a column resize froze the window. Write the size, release the mirror, then record:\n{}",
+        held_across.join("\n")
+    );
+}
+
+/// Sheet1 holds a small sales table at A1:C4, in the per-sheet grid and the
+/// active mirror.
+fn workbook_with_a_sales_table() -> Arc<AppState> {
+    let state = Arc::new(crate::create_app_state());
+    let seed = test_seed_effect();
+    let rows: [[&str; 3]; 4] =
+        [["Region", "Product", "Sales"], ["North", "Apples", "10"], ["South", "Apples", "20"], ["North", "Pears", "5"]];
+    let mut sheet = engine::Grid::new();
+    for (r, row) in rows.iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            let cell = match v.parse::<f64>() {
+                Ok(n) => engine::Cell::new_number(n),
+                Err(_) => engine::Cell::new_text(v.to_string()),
+            };
+            sheet.set_cell(r as u32, c as u32, cell);
+        }
+    }
+    {
+        let mut grid = state.grid.write(&seed).unwrap();
+        let mut grids = state.grids.write(&seed).unwrap();
+        if grids.is_empty() {
+            grids.push(engine::Grid::new());
+        }
+        grids[0] = sheet.clone();
+        *grid = sheet;
+    }
+    state
+}
+
+/// How many pivots the store holds, read on a thread of their own with a
+/// deadline: `None` when `pivot_tables` could not be taken within `ms`.
+fn pivot_count_within(pivots: &Arc<PivotState>, ms: u64) -> Option<usize> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let pivots = Arc::clone(pivots);
+        std::thread::spawn(move || {
+            if let Ok(tables) = pivots.pivot_tables.read() {
+                let _ = tx.send(tables.len());
+            }
+        });
+    }
+    rx.recv_timeout(Duration::from_millis(ms)).ok()
+}
+
+/// NEW-pivot-create-delete-undo-cycle AS A TEST, the create door. This thread
+/// plays a CELL WRITER mid-step: it holds the undo stack, as `update_cell_impl`
+/// does when it reads `pivot_tables` for GETPIVOTDATA. The create runs on
+/// another thread and parks on the stack to record its step. The question is
+/// whether it holds `pivot_tables` while it waits.
+///
+/// (`delete_pivot_table`, the other half of the finding, is a Tauri command over
+/// eight `State`s with no state-only body; the crate-wide census pins it.)
+///
+/// SABOTAGE: take the undo stack in `create_pivot_core` while `pivot_tables`
+/// is still held -- this fails at "DEADLOCK SHAPE".
+#[test]
+fn creating_a_pivot_never_holds_pivot_tables_while_it_waits_for_the_undo_stack() {
+    let state = workbook_with_a_sales_table();
+    let file = Arc::new(crate::persistence::FileState::default());
+    let pivots = Arc::new(PivotState::new());
+    let writer_holds_the_stack = state.undo_stack.lock().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        let file = Arc::clone(&file);
+        let pivots = Arc::clone(&pivots);
+        move || {
+            let pane = crate::pane_control::PaneControlState::new();
+            let ribbon = RibbonFilterState::new();
+            let user_files = crate::persistence::UserFilesState::default();
+            let recalc = crate::pivot::operations::PivotRecalcStates { pane: &pane, ribbon: &ribbon, user_files: &user_files };
+            let request = crate::pivot::types::CreatePivotRequest {
+                source_range: "A1:C4".to_string(),
+                destination_cell: "F2".to_string(),
+                source_sheet: Some(0),
+                destination_sheet: Some(0),
+                has_headers: Some(true),
+                name: None,
+                source_table_name: None,
+                canvas_frame: None,
+            };
+            crate::pivot::commands::create_pivot_core(
+                &state,
+                &file,
+                &pivots,
+                recalc,
+                request,
+                vec!["Region".to_string()],
+                vec![("Sales".to_string(), pivot_engine::AggregationType::Sum)],
+            )
+            .map(|response| response.pivot_id)
+        }
+    };
+    let probe_pivots = Arc::clone(&pivots);
+    let mut seen: Option<usize> = None;
+    let (parked, _, result) = run_site_while_held(writer_holds_the_stack, site, || {
+        seen = pivot_count_within(&probe_pivots, 400);
+        seen.is_some()
+    });
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the pivot create finished while the undo stack was held, so it never waited for it \
+         and this test measured nothing"
+    );
+    assert_ne!(
+        seen,
+        Some(0),
+        "the pivot create parked on the undo stack BEFORE it stored the pivot, so the probe measured nothing"
+    );
+    assert!(
+        seen.is_some(),
+        "DEADLOCK SHAPE (NEW-pivot-create-delete-undo-cycle): while the pivot create waited for the undo stack to \
+         record its step, it HELD `pivot_tables`. A cell writer holds `grid`, `grids` and the undo stack while it \
+         waits for `pivot_tables` (GETPIVOTDATA) -- an AI, MCP or notebook write meeting a pivot create froze the \
+         window. Store the pivot, release the store, then record."
+    );
+    // NON-VACUITY: once the stack was free the create did all of it, as ONE step.
+    let id = result.expect("the pivot create failed");
+    assert!(pivots.pivot_tables.read().unwrap().contains_key(&id), "the pivot was not stored");
+    assert_eq!(*pivots.active_pivot_id.lock().unwrap(), Some(id), "the new pivot is not the active one");
+    assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 1, "the pivot create is one undo step");
 }

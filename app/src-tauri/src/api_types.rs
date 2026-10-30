@@ -235,6 +235,11 @@ fn default_span() -> u32 {
 ///   - `display` is the same formatted text `CellData.display` carries.
 ///   - `formula` is the localized formula ("=A1+B1"), withheld exactly where
 ///     `get_cell` withholds it (protected sheet + hidden-formula style).
+///   - `formula_withheld` says that happened: the cell HOLDS a formula this
+///     read did not return. Only then -- never for a hidden-format cell that
+///     holds a constant or nothing, which has no formula to keep -- can a
+///     read/modify/write mistake the value for the whole cell. Serialized
+///     only when true.
 ///   - `r#type` serializes as "type": number|text|boolean|empty|error.
 /// List/Dict cells have no JSON scalar form; they report type "text" with their
 /// display text as the value.
@@ -246,6 +251,8 @@ pub struct TypedCellData {
     pub value: serde_json::Value,
     pub display: String,
     pub formula: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub formula_withheld: bool,
     pub r#type: String,
 }
 
@@ -309,13 +316,38 @@ pub struct CellUpdateInput {
     pub row: u32,
     pub col: u32,
     pub value: String,
-    /// Optional style index to apply. When None, preserves existing style.
+    /// Optional style index: the LOOK the cell must show (a paste or a fill
+    /// sends the source cell's displayed index). It becomes the cell's own
+    /// style, except that 0 (Normal) under a row/column format is written as
+    /// the explicit Normal (`own_index_for_requested_look`); with an empty
+    /// value the position keeps that look as an empty cell. When None,
+    /// preserves existing style.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_index: Option<usize>,
     /// When true, the value is already in invariant (US) format — skip delocalization.
     /// Used by extensions and tests that send formulas with ',' as argument separator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invariant: Option<bool>,
+    /// When true, this write is a PASTE -- a copied formula or a copied cell's
+    /// STORED value written back (Paste, Cut + Paste, a drag move or copy,
+    /// Paste Special, a script's pasteRange) -- and not an ENTRY someone typed.
+    /// The typed-entry ladder then skips its Text rung, so a formula stays a
+    /// formula and a number, TRUE / FALSE or an error stays one in a
+    /// Text-formatted (`@`) cell, which keeps its format. Excel [LIVE, COM
+    /// 2026-10-29]: Paste Formulas of `=A1` into an `@` cell keeps the formula;
+    /// a pasted 5 stays the number 5; `=A1` + Values > Add 1 is `=(A1)+1`.
+    /// Text is pasted behind the apostrophe escape, which stores it verbatim
+    /// either way. Absent or false: a typed entry, read as it always was (`007`
+    /// typed into an `@` cell stays the text "007").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pasted: Option<bool>,
+}
+
+impl CellUpdateInput {
+    /// Whether this write pastes rather than enters (see `pasted`).
+    pub fn is_paste(&self) -> bool {
+        self.pasted.unwrap_or(false)
+    }
 }
 
 /// A single border side (top, right, bottom, or left).
@@ -607,11 +639,86 @@ pub struct BorderSideParam {
     pub color: String,
 }
 
+/// A contiguous run of row or column indices, `first..=last`, as a formatting
+/// command may receive it in place of the listed indices (BUG-0354).
+///
+/// WHY. Select All sent all 1,048,576 row indices -- about 7 MB of JSON, and a
+/// million `serde_json::Value`s on this side -- for what is two numbers, and a
+/// whole column sent the same million for Left Border. The frontend wrapper
+/// (`encodeIndexList`, tauri-api.ts) sends a long ascending run as this
+/// object; everything else stays a plain list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexRun {
+    pub first: u32,
+    pub last: u32,
+}
+
+/// The longest run [`IndexRun`] may expand to: a whole column's rows, the
+/// longer of the two axes. Refused above it rather than allocated -- a run is
+/// two numbers on the wire, so without a bound `{first: 0, last: 4e9}` would
+/// ask this side for 16 GB.
+pub const INDEX_RUN_MAX_LEN: u64 = engine::EXCEL_MAX_ROW_INDEX as u64 + 1;
+
+/// The two wire shapes of an index list. Private: callers see a `Vec<u32>`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IndexListWire {
+    List(Vec<u32>),
+    Run(IndexRun),
+}
+
+/// Deserialize an index list from either wire shape -- a plain array, or an
+/// [`IndexRun`] -- into the `Vec<u32>` every formatting body already takes.
+/// Expanding is O(lines), which is the bound BUG-0354 asks for; the
+/// million-element JSON is what it avoids.
+pub(crate) fn deserialize_index_list<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match IndexListWire::deserialize(deserializer)? {
+        IndexListWire::List(list) => Ok(list),
+        IndexListWire::Run(run) => expand_index_run(run).map_err(serde::de::Error::custom),
+    }
+}
+
+/// One index-list COMMAND ARGUMENT as the bridge sends it: a plain list, or an
+/// [`IndexRun`] `{ first, last }` -- the two wire shapes
+/// `FormattingParams.rows` takes ([`deserialize_index_list`], which also bounds
+/// a run) -- and in Rust always the list (`.0`). A transparent newtype because
+/// a command argument cannot carry `deserialize_with` itself; it adds no wire
+/// shape of its own (TypeScript sends `number[] | IndexRun`, both mirrored in
+/// types.ts). `adjust_number_format_decimals` takes its `rows` / `cols` as
+/// this; the next command with a list-or-run argument reuses it rather than
+/// defining its own (a struct FIELD keeps `deserialize_with`, as
+/// `FormattingParams` does).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct IndexListArg(#[serde(deserialize_with = "deserialize_index_list")] pub Vec<u32>);
+
+/// `first..=last` as a list; refused when reversed or longer than
+/// [`INDEX_RUN_MAX_LEN`].
+pub(crate) fn expand_index_run(run: IndexRun) -> Result<Vec<u32>, String> {
+    if run.first > run.last {
+        return Err(format!("An index run must not be reversed (first {} > last {}).", run.first, run.last));
+    }
+    let len = u64::from(run.last - run.first) + 1;
+    if len > INDEX_RUN_MAX_LEN {
+        return Err(format!("An index run may cover at most {} lines (got {}).", INDEX_RUN_MAX_LEN, len));
+    }
+    Ok((run.first..=run.last).collect())
+}
+
 /// Formatting parameters for cell styling.
+///
+/// `rows` and `cols` arrive as a plain list or as an [`IndexRun`]
+/// (`deserialize_index_list`); in Rust they are always the list.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FormattingParams {
+    #[serde(deserialize_with = "deserialize_index_list")]
     pub rows: Vec<u32>,
+    #[serde(deserialize_with = "deserialize_index_list")]
     pub cols: Vec<u32>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
@@ -865,6 +972,17 @@ pub struct ClearRangeResult {
     pub count: u32,
     /// Updated cells (with new display values if only formatting was cleared)
     pub updated_cells: Vec<CellData>,
+}
+
+/// One further rectangle of a multi-area clear (`clear_range_on_sheets`'
+/// `more_areas`: the other Ctrl+click blocks of a grouped-sheet clear).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearArea {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
 }
 
 // ============================================================================

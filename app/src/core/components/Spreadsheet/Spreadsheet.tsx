@@ -21,6 +21,7 @@ import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { getLayoutSurface, onLayoutSurfaceChanged, GRID_SCROLLBAR_GUTTER_PX } from "../../lib/layoutSurface";
 import { useSpreadsheet } from "./useSpreadsheet";
+import { SheetViewMemory, listenForSheetSwitches } from "./sheetSwitchListeners";
 import { gridPointerMouseDown, gridPointerDoubleClick, editBlocksGridFocus } from "./gridPointerEntry";
 import { notifyPointModeViewChanged } from "../../lib/pointModeView";
 import {
@@ -56,7 +57,7 @@ import {
 } from "../../lib/gridCommands";
 import type { GridMenuContext, GridCommandContext } from "../../lib/gridCommands";
 import type { CellTarget } from "../../lib/selectionOwner";
-import { announceCellTargetObjectChanged } from "../../../api/cellTarget";
+import { announceCellTargetObjectChanged, notifyCellTargetChanged } from "../../../api/cellTarget";
 import { setGridSelectionReader } from "../../lib/selectionOwner";
 
 // Styles
@@ -81,10 +82,11 @@ interface SheetState {
 }
 
 /**
- * Module-level storage for per-sheet state.
+ * Module-level storage for per-sheet state, keyed by TRUE sheet index and
+ * re-keyed on every `sheet:reorder` (sheetSwitchListeners.ts).
  * Using module-level to persist across component re-renders.
  */
-const sheetStatesMap = new Map<number, SheetState>();
+const sheetViewMemory = new SheetViewMemory<SheetState>();
 
 
 /**
@@ -555,128 +557,96 @@ function SpreadsheetContent({
   // Sheet Switch Listener (for normal sheet switching without page reload)
   // Saves current sheet's selection/viewport state and restores the new sheet's state.
   // -------------------------------------------------------------------------
-  // Track the previous sheet index for saving state before switch
-  const previousSheetIndexRef = useRef<number>(gridState.sheetContext.activeSheetIndex);
+  // The rules -- which index a view is kept under, how a renumbering re-keys
+  // it, when the sheet group ends, when the grid takes focus -- live in
+  // sheetSwitchListeners.ts, where the tests run the same code; this supplies
+  // how the grid's view is read and shown. The sheet on screen at mount is
+  // where the first save lands (it was `previousSheetIndexRef`).
+  const sheetOnScreenAtMount = useRef<number>(gridState.sheetContext.activeSheetIndex);
+  useEffect(() => {
+    sheetViewMemory.showing(sheetOnScreenAtMount.current);
+  }, []);
 
   useEffect(() => {
-    const handleSheetSwitchStart = (_event: Event) => {
+    return listenForSheetSwitches<SheetState>(sheetViewMemory, {
       // Save the current sheet's state BEFORE the switch happens
-      const currentSheetIndex = previousSheetIndexRef.current;
-      const currentState: SheetState = {
-        selection: selection,
-        viewport: { ...viewport },
-        virtualBounds: { ...gridState.virtualBounds },
-      };
-      sheetStatesMap.set(currentSheetIndex, currentState);
-      console.log(`[Spreadsheet] Saved state for sheet ${currentSheetIndex}:`, {
-        selection: currentState.selection,
-        scrollX: currentState.viewport.scrollX,
-        scrollY: currentState.viewport.scrollY,
-      });
-    };
-
-    const handleSheetSwitch = (event: Event) => {
-      const customEvent = event as CustomEvent<{
-        newSheetIndex: number;
-        newSheetName: string;
-      }>;
-      const newSheetIndex = customEvent.detail.newSheetIndex;
-
-      console.log("[Spreadsheet] Sheet switch - refreshing dimensions");
-      refreshDimensions();
-
-      // Gridlines, zoom, split/freeze and the display flags are hydrated by the
-      // ACTIVE-SHEET effect below, not here: this listener only hears the tab
-      // strip's switches, and a script, a bookmark, a hyperlink or a backend-
-      // driven switch never fires it -- so a worksheet reached from a canvas
-      // that way kept the canvas's headings-off, gridlines-off and zoom.
-
-      // Restore the new sheet's saved state if available
-      const savedState = sheetStatesMap.get(newSheetIndex);
-      if (savedState) {
-        console.log(`[Spreadsheet] Restoring state for sheet ${newSheetIndex}:`, {
-          selection: savedState.selection,
-          scrollX: savedState.viewport.scrollX,
-          scrollY: savedState.viewport.scrollY,
+      captureView: () => {
+        const currentState: SheetState = {
+          selection: selection,
+          viewport: { ...viewport },
+          virtualBounds: { ...gridState.virtualBounds },
+        };
+        console.log(`[Spreadsheet] Saved state for sheet ${sheetViewMemory.shown}:`, {
+          selection: currentState.selection,
+          scrollX: currentState.viewport.scrollX,
+          scrollY: currentState.viewport.scrollY,
         });
+        return currentState;
+      },
 
-        // Restore selection
-        if (savedState.selection) {
-          dispatch(setSelection(savedState.selection));
+      showView: (newSheetIndex: number, savedState: SheetState | undefined) => {
+        console.log("[Spreadsheet] Sheet switch - refreshing dimensions");
+        refreshDimensions();
+
+        // Gridlines, zoom, split/freeze and the display flags are hydrated by the
+        // ACTIVE-SHEET effect below, not here: this listener only hears the tab
+        // strip's switches, and a script, a bookmark, a hyperlink or a backend-
+        // driven switch never fires it -- so a worksheet reached from a canvas
+        // that way kept the canvas's headings-off, gridlines-off and zoom.
+
+        // Restore the new sheet's saved state if available
+        if (savedState) {
+          console.log(`[Spreadsheet] Restoring state for sheet ${newSheetIndex}:`, {
+            selection: savedState.selection,
+            scrollX: savedState.viewport.scrollX,
+            scrollY: savedState.viewport.scrollY,
+          });
+
+          // Restore selection
+          if (savedState.selection) {
+            dispatch(setSelection(savedState.selection));
+          }
+
+          // Restore the SCROLL POSITION too. The save has always captured
+          // `viewport` (and logged it), but nothing ever applied it — the
+          // captured scroll was dead state, so switching away from a sheet and
+          // back dropped you at the top-left however far down you had been.
+          // Excel restores the top-left visible cell per sheet.
+          //
+          // `scrollToPosition` (not `setViewport`) on purpose: it re-derives
+          // startRow/startCol through `calculateScrollState` and CLAMPS to the
+          // current bounds, and it leaves viewport WIDTH/HEIGHT alone — those
+          // belong to the window, not to the sheet, so a window resized while
+          // another sheet was active must not be reverted by this restore.
+          //
+          // Dispatched after the selection so that if a selection restore ever
+          // scrolls to make its cell visible, the saved scroll still wins.
+          dispatch(
+            scrollToPosition(savedState.viewport.scrollX, savedState.viewport.scrollY)
+          );
+        } else {
+          // No saved state - set default selection to A1
+          console.log(`[Spreadsheet] No saved state for sheet ${newSheetIndex}, using default A1`);
+          dispatch(setSelection({
+            startRow: 0,
+            startCol: 0,
+            endRow: 0,
+            endCol: 0,
+            type: "cells",
+          }));
         }
-
-        // Restore the SCROLL POSITION too. `handleSheetSwitchStart` has always
-        // saved `viewport` (and logged it), but nothing ever applied it — the
-        // captured scroll was dead state, so switching away from a sheet and
-        // back dropped you at the top-left however far down you had been.
-        // Excel restores the top-left visible cell per sheet.
-        //
-        // `scrollToPosition` (not `setViewport`) on purpose: it re-derives
-        // startRow/startCol through `calculateScrollState` and CLAMPS to the
-        // current bounds, and it leaves viewport WIDTH/HEIGHT alone — those
-        // belong to the window, not to the sheet, so a window resized while
-        // another sheet was active must not be reverted by this restore.
-        //
-        // Dispatched after the selection so that if a selection restore ever
-        // scrolls to make its cell visible, the saved scroll still wins.
-        dispatch(
-          scrollToPosition(savedState.viewport.scrollX, savedState.viewport.scrollY)
-        );
-      } else {
-        // No saved state - set default selection to A1
-        console.log(`[Spreadsheet] No saved state for sheet ${newSheetIndex}, using default A1`);
-        dispatch(setSelection({
-          startRow: 0,
-          startCol: 0,
-          endRow: 0,
-          endCol: 0,
-          type: "cells",
-        }));
-      }
-
-      // Update the previous sheet index for the next switch
-      previousSheetIndexRef.current = newSheetIndex;
+      },
 
       // Restore focus to the grid container so keyboard input works immediately
-      // Use setTimeout to ensure DOM has settled after state updates
-      setTimeout(() => {
-        focusContainerRef.current?.focus();
-      }, 0);
-    };
-
-    // Reorder cached sheet states when sheets are moved
-    const handleSheetReorder = (event: Event) => {
-      const { fromIndex, toIndex } = (event as CustomEvent).detail;
-      // Collect all entries, remap keys to match the rotation, then replace
-      const entries = Array.from(sheetStatesMap.entries());
-      const newMap = new Map<number, SheetState>();
-      for (const [key, value] of entries) {
-        let newKey = key;
-        if (key === fromIndex) {
-          newKey = toIndex;
-        } else if (fromIndex < toIndex) {
-          // Moved right: indices in (from, to] shift left by 1
-          if (key > fromIndex && key <= toIndex) newKey = key - 1;
-        } else {
-          // Moved left: indices in [to, from) shift right by 1
-          if (key >= toIndex && key < fromIndex) newKey = key + 1;
-        }
-        newMap.set(newKey, value);
-      }
-      sheetStatesMap.clear();
-      for (const [k, v] of newMap) sheetStatesMap.set(k, v);
-    };
-
-    // Listen for the event that fires BEFORE the sheet switch (to save state)
-    window.addEventListener("sheet:beforeSwitch", handleSheetSwitchStart);
-    window.addEventListener("sheet:normalSwitch", handleSheetSwitch);
-    window.addEventListener("sheet:reorder", handleSheetReorder);
-
-    return () => {
-      window.removeEventListener("sheet:beforeSwitch", handleSheetSwitchStart);
-      window.removeEventListener("sheet:normalSwitch", handleSheetSwitch);
-      window.removeEventListener("sheet:reorder", handleSheetReorder);
-    };
+      // Use setTimeout to ensure DOM has settled after state updates. Not after
+      // a switch that keeps the focus where it is (the command line's prompt:
+      // its next typed line must not land in a cell -- review rev3C#3).
+      focusGrid: () => {
+        setTimeout(() => {
+          focusContainerRef.current?.focus();
+        }, 0);
+      },
+    });
   }, [refreshDimensions, hydrateSheetView, selection, viewport, gridState.virtualBounds, dispatch]);
 
   // -------------------------------------------------------------------------
@@ -705,6 +675,9 @@ function SpreadsheetContent({
           canvasRef.current?.redraw();
           if (formats) window.dispatchEvent(new CustomEvent("styles:refresh"));
           window.dispatchEvent(new CustomEvent("grid:refresh"));
+          // An object's cells: its owner's listeners re-read the target's
+          // state too. (Backspace's own clear did this; it is this door now.)
+          if (owned) notifyCellTargetChanged();
         },
       });
     },

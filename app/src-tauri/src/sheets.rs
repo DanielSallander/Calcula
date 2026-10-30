@@ -753,15 +753,28 @@ fn remap_sheet_keyed_stores(
     // Object-script bindings name controls by the DERIVED id
     // `control-<sheet>-<row>-<col>`. The control store above just changed those
     // coordinates, so the live bindings must be re-keyed in lockstep — exactly
-    // as shift_controls does for row/column edits.
-    if let Ok(mut scripts) = state.object_scripts.write(effect) {
-        for script in scripts.iter_mut() {
-            let Some(current) = script.instance_id.as_deref() else { continue };
-            if let Some(new_id) = remap_control_instance_id(current, &remap) {
-                script.instance_id = new_id;
+    // as shift_controls does for row/column edits -- through the same re-bind
+    // door, so each script's SCHEDULED JOBS move with it and every window is
+    // told once the store's guard is released (scripting/script_rebind.rs,
+    // rev6B#2).
+    let rebound = match state.object_scripts.write(effect) {
+        Ok(mut scripts) => {
+            let mut rebound = Vec::new();
+            for script in scripts.iter_mut() {
+                let Some(new_id) = script
+                    .instance_id
+                    .as_deref()
+                    .and_then(|current| remap_control_instance_id(current, &remap))
+                else {
+                    continue;
+                };
+                rebound.extend(crate::scripting::script_rebind::rebind_script(effect, script, new_id));
             }
+            rebound
         }
-    }
+        Err(_) => Vec::new(),
+    };
+    crate::scripting::script_rebind::announce_rebinds(&rebound);
     // Advanced-filter hidden rows: per-sheet session state that is never
     // recomputed on sheet ops (and shows up in the state digest).
     remap_indexed_map(&mut state.advanced_filter_hidden_rows.write(effect).unwrap(), &remap);
@@ -3980,8 +3993,11 @@ pub fn rename_sheet(
 /// names the renamed sheet) nothing is carried. A refused rename carries
 /// nothing. Every rename door goes through here: the `rename_sheet` command,
 /// the MCP `rename_sheet` tool and `rename_floating_range` (a floating range's
-/// name IS its backing sheet's name). LOCKS: `sheet_ids` then `sheet_names`,
-/// each read and released, before and after; the pane store alone after.
+/// name IS its backing sheet's name). LOCKS: `sheet_names` then `sheet_ids`,
+/// under ONE hold (BUG-0590 / BUG-0592 -- two reads let a delete or a move
+/// land between them and read the id's position against another sheet's
+/// name), before and after, released before the rename runs; the pane store
+/// alone after.
 pub(crate) fn with_pane_controls_following_rename<T>(
     state: &AppState,
     pane_control_state: &crate::pane_control::PaneControlState,
@@ -3989,8 +4005,9 @@ pub(crate) fn with_pane_controls_following_rename<T>(
     rename: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let name_of = |id: identity::SheetId| -> Option<String> {
+        let names = state.sheet_names.read().ok()?;
         let index = state.sheet_ids.read().ok()?.iter().position(|s| *s == id)?;
-        state.sheet_names.read().ok()?.get(index).cloned()
+        names.get(index).cloned()
     };
     let before = sheet_id.and_then(|id| name_of(id).map(|name| (id, name)));
     let out = rename()?;

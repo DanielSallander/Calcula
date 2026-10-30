@@ -761,7 +761,8 @@ fn a_sort_that_moved_nothing_recalculates_nothing() {
 
 /// Pop one undo transaction and apply it through the REAL restore
 /// (`undo_commands::apply_changes`, which `undo`/`redo` both delegate to).
-fn undo_once(wb: &Workbook) -> crate::undo_commands::UndoResult {
+/// `pub(super)` so `cascade_position_tests` restores through the same door.
+pub(super) fn undo_once(wb: &Workbook) -> crate::undo_commands::UndoResult {
     let transaction = wb
         .state
         .undo_stack

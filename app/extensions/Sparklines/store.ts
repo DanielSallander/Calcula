@@ -16,6 +16,7 @@ import type {
 } from "./types";
 import { validateSparklineRanges } from "./types";
 import { sparklinesBackend } from "./lib/sparklinesBackend";
+import { AppEvents, emitAppEvent } from "@api/events";
 
 // ============================================================================
 // State
@@ -436,17 +437,88 @@ export function importGroups(imported: SparklineGroup[]): void {
 // ============================================================================
 
 /**
+ * The loaded sheet's groups as the backend last CONFIRMED them: what a load
+ * read, or what a save it accepted sent. The base a pending change is merged
+ * against when the backend rewrote the groups under it (`mergeSparklineGroups`).
+ */
+let persistedGroups: SparklineGroup[] = [];
+
+/**
+ * The same groups as the EXACT blob the backend holds (`""` for none): what a
+ * load read, or what an accepted save sent. Every save names it as its `base`,
+ * and the backend refuses a save made against a blob it no longer holds
+ * (`SPARKLINE_GROUPS_CHANGED`, sparkline_commands.rs) -- a structural edit
+ * moved the ranges, an undo put an older list back. Kept as the backend's own
+ * text, never re-serialised: the backend rewrites the blob with its own key
+ * order, and a re-serialised base would never match it.
+ */
+let persistedJson = "";
+
+/** The prefix of the backend's refusal of a save whose base it no longer holds. */
+const SPARKLINE_GROUPS_CHANGED = "SPARKLINE_GROUPS_CHANGED";
+
+/** How many rewrites in a row one save merges with before it gives up. */
+const MAX_SPARKLINE_REBASES = 3;
+
+/** Did the backend refuse a save because the groups it was made against changed? */
+function isGroupsChanged(error: unknown): boolean {
+  const message =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : String((error as { message?: unknown } | null)?.message ?? error);
+  return message.startsWith(SPARKLINE_GROUPS_CHANGED);
+}
+
+/** One sheet's stored blob, as `get_sparklines` returns it (`""` for none). */
+function storedJsonOf(
+  entries: ReadonlyArray<{ sheetIndex: number; groupsJson: string }>,
+  sheetIndex: number,
+): string {
+  return entries.find((e) => e.sheetIndex === sheetIndex)?.groupsJson ?? "";
+}
+
+/** A stored blob's groups (none for an empty or unreadable blob). */
+function groupsOfJson(json: string): SparklineGroup[] {
+  if (!json) return [];
+  const parsed = JSON.parse(json) as unknown;
+  return Array.isArray(parsed) ? (parsed as SparklineGroup[]) : [];
+}
+
+/**
  * Save current sparkline groups to the backend for persistence.
  * Called after any mutation (create, update, delete, group, ungroup).
+ *
+ * Made against `persistedJson`. When the backend refuses it because it
+ * rewrote this sheet's groups in the meantime -- a change made WHILE a
+ * structural command ran saves after it, and used to put the pre-edit ranges
+ * back over the moved ones (revF#4) -- the store merges its change into what
+ * is stored now (`mergeIntoStored`) and saves the merge, against that.
  */
 export async function saveToBackend(sheetIndex: number): Promise<void> {
-  try {
+  for (let rebases = 0; ; rebases++) {
     const groupsJson = JSON.stringify(exportGroups());
-    await sparklinesBackend.invoke("save_sparklines", {
-      entry: { sheetIndex, groupsJson },
-    });
-  } catch (err) {
-    console.error("[Sparklines] Failed to save to backend:", err);
+    try {
+      await sparklinesBackend.invoke("save_sparklines", {
+        entry: { sheetIndex, groupsJson },
+        base: persistedJson,
+      });
+      persistedGroups = JSON.parse(groupsJson) as SparklineGroup[];
+      persistedJson = groupsJson;
+      return;
+    } catch (err) {
+      if (!isGroupsChanged(err) || rebases >= MAX_SPARKLINE_REBASES) {
+        console.error("[Sparklines] Failed to save to backend:", err);
+        return;
+      }
+      // Nothing left to save when the merge IS what is stored, or when the
+      // stored groups could not be read (that read reported itself).
+      const owed = await mergeIntoStored(sheetIndex);
+      // The merge moved the groups in memory (the rewrite's ranges): repaint.
+      if (owed !== null) emitAppEvent(AppEvents.GRID_REFRESH);
+      if (owed !== true) return;
+    }
   }
 }
 
@@ -462,12 +534,121 @@ export async function loadFromBackend(sheetIndex: number): Promise<void> {
     if (entry && entry.groupsJson) {
       const parsed = JSON.parse(entry.groupsJson) as SparklineGroup[];
       importGroups(parsed);
+      persistedGroups = exportGroups();
+      persistedJson = entry.groupsJson;
     } else {
       resetSparklineStore();
     }
   } catch (err) {
     console.error("[Sparklines] Failed to load from backend:", err);
   }
+}
+
+/** Structural JSON equality of two group fields (key order is the writer's, so it is not ignored). */
+function sameValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * THREE-WAY MERGE, by group ID, of a pending change (`current`: the store as
+ * it stands) with groups the backend rewrote on its own (`stored`: a
+ * structural edit moved, split or removed them -- chart_range_shift.rs -- or
+ * an undo put them back), against what it last confirmed (`base`).
+ *
+ * - A group both still have: each field the change touched keeps the
+ *   change, each one it did not takes the backend's value (a recolour keeps
+ *   its colour AND takes the moved location and data range). A location or
+ *   data range is one value: the change's, if it made one.
+ * - A group the change REMOVED stays removed; one the backend removed (its
+ *   cells or data deleted) stays removed.
+ * - A group only the backend has (a part a split gave a fresh id, a group an
+ *   undo put back) is taken; a group only the change has (created in the
+ *   change) is kept, under a fresh id if the backend's took its id.
+ *
+ * Pure. Returns new objects; the inputs are left as they are.
+ */
+export function mergeSparklineGroups(
+  current: readonly SparklineGroup[],
+  base: readonly SparklineGroup[],
+  stored: readonly SparklineGroup[],
+): SparklineGroup[] {
+  const baseById = new Map(base.map((g) => [g.id, g] as const));
+  const currentById = new Map(current.map((g) => [g.id, g] as const));
+  const out: SparklineGroup[] = [];
+  for (const s of stored) {
+    const b = baseById.get(s.id);
+    const c = currentById.get(s.id);
+    if (b === undefined) {
+      // The backend's own: a split part or a group put back.
+      out.push({ ...s });
+      continue;
+    }
+    if (c === undefined) continue; // the change removed it
+    const merged: Record<string, unknown> = { ...s };
+    const keys = new Set([...Object.keys(s), ...Object.keys(b), ...Object.keys(c)]);
+    for (const key of keys) {
+      const was = (b as unknown as Record<string, unknown>)[key];
+      const now = (c as unknown as Record<string, unknown>)[key];
+      if (!sameValue(now, was)) merged[key] = now;
+    }
+    out.push(merged as unknown as SparklineGroup);
+  }
+  const taken = new Set(out.map((g) => g.id));
+  // A loop, never `Math.max(...ids)`: a spread passes one call argument per
+  // group, and a sheet a fill gave one group per cell has enough of them to
+  // throw RangeError (BUG-0346) -- inside a refused save's merge, where nobody
+  // would hear it and the change would never be saved.
+  let highestId = 0;
+  for (const g of out) if (g.id > highestId) highestId = g.id;
+  for (const g of current) if (g.id > highestId) highestId = g.id;
+  let nextId = highestId + 1;
+  for (const c of current) {
+    if (baseById.has(c.id)) continue; // merged above, or removed by the backend
+    // Created by the change: the backend never saw it, so it has nothing to move.
+    const id = taken.has(c.id) ? nextId++ : c.id;
+    taken.add(id);
+    out.push({ ...c, id });
+  }
+  return out;
+}
+
+/**
+ * A change is PENDING while the backend rewrote this sheet's groups (the
+ * reload after a structural edit found a save not yet sent): merge it into
+ * what the backend holds now (`mergeSparklineGroups`), show the merge, and
+ * save it -- never the stale in-memory groups over the moved ones, and never
+ * the change thrown away.
+ */
+export async function mergePendingWithBackend(sheetIndex: number): Promise<void> {
+  if ((await mergeIntoStored(sheetIndex)) === true) await saveToBackend(sheetIndex);
+}
+
+/**
+ * Read this sheet's groups as the backend holds them NOW, merge the store's
+ * change into them (`mergeSparklineGroups`, against what the backend last
+ * confirmed), show the merge, and take what was read as the new confirmed
+ * state -- so the next save is made against it. Answers whether a save is
+ * still owed (the merge differs from what is stored), or `null` when the
+ * backend could not be read (nothing is changed then).
+ */
+async function mergeIntoStored(sheetIndex: number): Promise<boolean | null> {
+  let storedJson: string;
+  let stored: SparklineGroup[];
+  try {
+    const entries = await sparklinesBackend.invoke<Array<{ sheetIndex: number; groupsJson: string }>>(
+      "get_sparklines",
+    );
+    storedJson = storedJsonOf(entries, sheetIndex);
+    stored = groupsOfJson(storedJson);
+  } catch (err) {
+    console.error("[Sparklines] Failed to read the backend to merge a pending change:", err);
+    return null;
+  }
+  const merged = mergeSparklineGroups(exportGroups(), persistedGroups, stored);
+  importGroups(merged);
+  persistedGroups = stored.map((g) => ({ ...g }));
+  persistedJson = storedJson;
+  return JSON.stringify(merged) !== JSON.stringify(stored);
 }
 
 /** Reset all state. */
@@ -477,4 +658,6 @@ export function resetSparklineStore(): void {
   dataCache.clear();
   cacheDirty = true;
   nextGroupId = 1;
+  persistedGroups = [];
+  persistedJson = "";
 }

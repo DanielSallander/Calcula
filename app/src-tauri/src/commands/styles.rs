@@ -2,8 +2,8 @@
 // PURPOSE: Styling operations, formatting, and style definitions.
 
 use crate::api_types::{
-    CellData, CellTargetRef, FillParam, FormattingParams, FormattingResult, MergedRegion, PreviewResult, StyleData,
-    StyleEntry,
+    CellData, CellTargetRef, FillParam, FormattingParams, FormattingResult, IndexListArg, MergedRegion, PreviewResult,
+    StyleData, StyleEntry,
 };
 use crate::cell_target::ResolvedCellTarget;
 use serde::{Deserialize, Serialize};
@@ -66,10 +66,18 @@ pub fn set_cell_style(
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
+    // WRITE, not read: the explicit Normal may have to be interned (below).
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
+
+    // Every caller names the LOOK the cell must show -- the source cell's
+    // displayed index (drag-move, Format Painter, Paste Special > Formats) --
+    // so index 0 means Normal, which on a stored cell is "inherit": under a
+    // row/column format it is the explicit Normal (BUG-0354 follow-up; Excel
+    // [LIVE]: Paste Special > Formats of a plain cell onto a bold row is plain).
+    let style_index = own_index_for_requested_look(&mut styles, &grid, row, col, style_index);
 
     // Record previous state for undo
     let previous_cell = grid.get_cell(row, col).cloned();
@@ -95,7 +103,8 @@ pub fn set_cell_style(
         undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
 
         // The cell keeps its OWN index (written above); what is DISPLAYED is the
-        // resolved one, so an index of 0 falls back to the row/column tier.
+        // resolved one. An index of 0 is left only where no row/column format
+        // would show through it (see `own_index_for_requested_look`).
         let effective_style_index = grid.effective_style_index(row, col);
         let style = styles.get(effective_style_index);
         let result = format_cell_value_with_color(&updated_cell.value, style, &locale);
@@ -162,6 +171,95 @@ pub fn set_cell_style(
             accounting_layout: None,
         })
     })
+}
+
+// ============================================================================
+// A CELL THAT MOVES KEEPS ITS LOOK (BUG-0354 follow-up)
+// ============================================================================
+//
+// Since BUG-0354 a whole-row / whole-column format is ONE row or column tier,
+// and a stored cell with style index 0 INHERITS it (`Grid::effective_style_index`).
+// Excel has no "inherit" on a cell: every cell carries its own style, and a
+// line format applies only where no cell exists -- a value typed under a row
+// format takes that format as its own [LIVE, Excel 16, 2026-10-29: row 5 Bold,
+// then a value typed in C5 saves `<c r=C5 s=bold>`]. So in Excel a moved cell
+// keeps the look it showed, and a cell landing under a line format does not
+// pick it up [LIVE, lane `lineformat` probe.ps1 / probe2.ps1: Sort, Delete
+// Cells shift up, Insert Cells shift down, Copy, Cut, Fill Down and Paste
+// Special > Formats all leave a plain cell plain in a bold row, and carry a
+// bold-row cell's bold away with it].
+//
+// Every MOVE primitive therefore writes the look explicitly where the line
+// format at the origin and the one at the destination differ, and a writer
+// that names a look (a paste, a fill, a drag-move) gets the explicit Normal --
+// never index 0 -- where a line format would otherwise show through. Typing is
+// unchanged: a value typed under a line format still inherits it.
+
+/// The style an INHERITING cell (own index 0) shows at `(row, col)`: the row's
+/// format, else the column's, else 0 -- `Grid::effective_style_index` with the
+/// cell itself left out. This is the "line format" a move carries a cell off
+/// or onto.
+pub(crate) fn line_format_index_at(grid: &engine::Grid, row: u32, col: u32) -> usize {
+    match grid.row_styles.get(&row) {
+        Some(&index) if index != 0 => index,
+        _ => match grid.column_styles.get(&col) {
+            Some(&index) if index != 0 => index,
+            _ => 0,
+        },
+    }
+}
+
+/// Whether two style indices LOOK the same (the same index, or equal styles --
+/// index 0 and the explicit Normal look alike).
+pub(crate) fn same_cell_look(styles: &engine::StyleRegistry, a: usize, b: usize) -> bool {
+    a == b || styles.get(a) == styles.get(b)
+}
+
+/// The explicit Normal: a NON-ZERO index whose style is the default, because 0
+/// means "inherit" on a cell (`StyleRegistry::get_or_create_explicit`, memoised
+/// in the registry, so every caller shares one entry).
+pub(crate) fn explicit_normal_index(styles: &mut engine::StyleRegistry) -> usize {
+    let normal = styles.default_style().clone();
+    styles.get_or_create_explicit(normal)
+}
+
+/// The OWN style index a moved cell with NO style of its own (index 0) must
+/// carry so it keeps the look it showed. `origin_line` is the line format at
+/// its origin (`line_format_index_at` there: what it showed), `dest_line` the
+/// one where it lands. 0 -- go on inheriting -- when the two look the same;
+/// otherwise the origin's line format, or the explicit Normal when the origin
+/// had none. A cell with a style of its own needs nothing: it carries it.
+///
+/// It also answers for an EMPTY position whose look a move carries (Insert /
+/// Delete Cells, a pasted blank): a non-zero result is the style of the blank
+/// cell that position needs.
+pub(crate) fn carried_line_format(styles: &mut engine::StyleRegistry, origin_line: usize, dest_line: usize) -> usize {
+    if same_cell_look(styles, origin_line, dest_line) {
+        0
+    } else if origin_line != 0 {
+        origin_line
+    } else {
+        explicit_normal_index(styles)
+    }
+}
+
+/// The OWN index for a writer that names the LOOK a cell must show -- a paste,
+/// a fill, a drag-move, Format Painter: every one of them sends the source
+/// cell's DISPLAYED index. A non-zero index is kept as it is. Index 0 means
+/// Normal, which on a stored cell reads as "inherit": where a row/column format
+/// sits under `(row, col)` it becomes the explicit Normal, so a plain cell
+/// copied into a bold row stays plain [LIVE, Excel 16].
+pub(crate) fn own_index_for_requested_look(
+    styles: &mut engine::StyleRegistry,
+    grid: &engine::Grid,
+    row: u32,
+    col: u32,
+    requested: usize,
+) -> usize {
+    if requested != 0 {
+        return requested;
+    }
+    carried_line_format(styles, 0, line_format_index_at(grid, row, col))
 }
 
 /// The parameters of one `apply_formatting` call, with every field that can be
@@ -392,6 +490,26 @@ pub(crate) fn apply_formatting_on(
         Some(t) => StyleTargets::Only(t),
         None => StyleTargets::Sheets { group, include_active: true },
     };
+    format_cells_on_sheets(state, file_state, &parsed, &params.rows, &params.cols, route).map(|(result, _)| result)
+}
+
+/// [`apply_formatting_core`] on the ACTIVE sheet only, also answering WHICH
+/// sheet that was. The active sheet is read ONCE, under the guards the format
+/// is gated and written under (`StyleLocks::take`), and a canvas sheet is
+/// refused there (the formatCells gate, `check_sheet_action_in`) -- so a
+/// caller that names the sheet afterwards names the one actually formatted,
+/// whatever tab the user clicked meanwhile (the MCP tool's audit row, review
+/// revFU#9).
+pub(crate) fn apply_formatting_core_on_active(
+    state: &AppState,
+    file_state: &FileState,
+    params: &FormattingParams,
+) -> Result<(FormattingResult, usize), String> {
+    let parsed = {
+        let locale = state.locale.lock().unwrap();
+        ParsedFormatting::parse(params, &locale)?
+    };
+    let route = StyleTargets::Sheets { group: &[], include_active: true };
     format_cells_on_sheets(state, file_state, &parsed, &params.rows, &params.cols, route)
 }
 
@@ -584,10 +702,30 @@ fn gate_style_targets(
 }
 
 /// The body of `apply_formatting` and `apply_formatting_to_sheets`: gate every
-/// target sheet under the held guards, then walk `rows` x `cols` on each of
+/// target sheet under the held guards, then write `rows` x `cols` on each of
 /// them inside ONE owned undo transaction (or the step a caller holds open).
 /// Returns the REPORTED sheet's written cells (the active sheet's, or a cell
 /// target's backing sheet's) and the styles they use.
+///
+/// WHOLE ROWS, WHOLE COLUMNS AND SELECT ALL GO THROUGH THE TIERS (BUG-0354).
+/// This walked every (row, col) of the lists: Ctrl+A then Ctrl+B is 1,048,576
+/// x 16,384 = 17.2 billion positions, a cell and an undo entry each, and the
+/// app stopped responding; Left Border on a whole column (the Borders split's
+/// edge presets come here) materialised a million cells. When the lists are
+/// one rectangle spanning whole rows or whole columns -- or ALMOST whole ones
+/// (A2:D1048576, `CellRect::line_extent`) -- the change is planned by
+/// `plan_range_style` -- the planner the border presets and the decimal step
+/// use -- as ONE row/column tier entry per line plus the cells whose style
+/// must differ from it or that hold a value, which is also what Excel stores
+/// (a cell typed there later inherits the line's format; an existing value
+/// takes it as its own). Anything else keeps the cell walk, bounded by
+/// `DENSE_BORDER_CELL_LIMIT` and refused above it before any guard is taken.
+/// A rectangle is gated with the RANGE form of the protection gate, which
+/// never enumerates it.
+///
+/// Also answers the REPORTED sheet -- read once, under the guards everything
+/// above was gated and written under -- so a caller that names the sheet
+/// afterwards (the MCP tool's audit row) names the one formatted.
 fn format_cells_on_sheets(
     state: &AppState,
     file_state: &FileState,
@@ -595,15 +733,31 @@ fn format_cells_on_sheets(
     rows: &[u32],
     cols: &[u32],
     route: StyleTargets<'_>,
-) -> Result<FormattingResult, String> {
+) -> Result<(FormattingResult, usize), String> {
+    let rect = rect_of_lists(rows, cols);
+    let lines = rect.filter(|r| r.line_extent().is_some());
+    let count = rows.len() as u64 * cols.len() as u64;
+    if lines.is_none() && count > DENSE_BORDER_CELL_LIMIT {
+        return Err(dense_limit_refusal(&FORMAT_WORDING, count));
+    }
+
     let locks = StyleLocks::take(state);
     let (targets, report_sheet) = locks.route_targets(&route);
-    gate_style_targets(state, &locks, &targets, route.cell_target(), StyleArea::Cells { rows, cols }, "format cells")?;
+    let area = match rect {
+        Some(r) => StyleArea::Range(r),
+        None => StyleArea::Cells { rows, cols },
+    };
+    gate_style_targets(state, &locks, &targets, route.cell_target(), area, "format cells")?;
     if targets.is_empty() {
         // Nothing to format (a group of only the active sheet, or indices past
         // the workbook): nothing written, and the document stays clean -- this
         // used to construct the effect regardless.
-        return Ok(FormattingResult { cells: Vec::new(), styles: Vec::new() });
+        return Ok((FormattingResult { cells: Vec::new(), styles: Vec::new() }, report_sheet));
+    }
+    let label = format!("Format {} cells", count);
+    if let Some(rect) = lines {
+        return format_lines_on_sheets(state, file_state, parsed, rect, locks, &targets, report_sheet, &label)
+            .map(|result| (result, report_sheet));
     }
 
     // Every gate has passed; from here this command commits. Constructed HERE
@@ -615,7 +769,6 @@ fn format_cells_on_sheets(
     let mut styles = styles.authorize(&effect);
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
-    let label = format!("Format {} cells", rows.len() * cols.len());
     // Joins a step the caller holds open (a script's undo batch).
     let txn = undo_stack.begin_owned_transaction(label);
     let delta = |style: &mut CellStyle| parsed.apply(style);
@@ -647,6 +800,89 @@ fn format_cells_on_sheets(
     drop(undo_stack);
 
     let mut used: Vec<usize> = written.iter().map(|&(_, _, index)| index).collect();
+    used.sort_unstable();
+    used.dedup();
+    let merges = report_merges(state, report_sheet, active_sheet);
+    let report_grid = if report_sheet == active_sheet { &*grid } else { &grids[report_sheet] };
+    Ok((formatting_result(state, report_grid, &styles, &written, &merges, Some(used)), report_sheet))
+}
+
+/// The WHOLE-LINE half of `format_cells_on_sheets` (BUG-0354), under the
+/// guards it took and gated: plan `rect` on EVERY target sheet first -- a
+/// refusal (too many tier crossings) writes nothing on any sheet -- then, only
+/// if something changes, construct the effect and write every plan inside ONE
+/// owned transaction (`write_range_style_plan`: tiers with their undo snapshot,
+/// then the cells that differ).
+///
+/// The result's `cells` are the reported sheet's cells whose look differs
+/// from the new tiers only: a stored value that takes the line's format as
+/// its own (`RangeStylePlan::carried`) is written but not listed -- on a
+/// filled sheet that is every value -- so callers refresh the grid (every
+/// caller announces through `styles:refresh` / `grid:refresh`, as for the
+/// border presets). Its `styles` carry the listed cells' AND the new tiers'
+/// and carried cells' styles -- a Select All writes tiers and maybe no listed
+/// cell at all, and the frontend style cache must know a tier's index to
+/// paint the column (`announceStyleEntries`, BUG-0076).
+#[allow(clippy::too_many_arguments)]
+fn format_lines_on_sheets<'a>(
+    state: &'a AppState,
+    file_state: &FileState,
+    parsed: &ParsedFormatting<'_>,
+    rect: CellRect,
+    locks: StyleLocks<'a>,
+    targets: &[usize],
+    report_sheet: usize,
+    label: &str,
+) -> Result<FormattingResult, String> {
+    let delta = |style: &mut CellStyle, _: EdgePosition| parsed.apply(style);
+    let mut plans: Vec<(usize, RangeStylePlan)> = Vec::new();
+    for &sheet in targets {
+        let Some(grid) = locks.sheet_grid(sheet) else { continue };
+        // Every FormattingParams field sets the same value at every position:
+        // the edges never matter.
+        let plan = plan_range_style(grid, &locks.styles, rect, &delta, false, &FORMAT_WORDING)?;
+        if !plan.is_empty() {
+            plans.push((sheet, plan));
+        }
+    }
+    if plans.is_empty() {
+        // Every position already shows that format: nothing is written,
+        // nothing is recorded, and the document stays clean.
+        return Ok(FormattingResult { cells: Vec::new(), styles: Vec::new() });
+    }
+
+    // Every gate has passed and something changes; from here this command
+    // commits. Constructed HERE so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let StyleLocks { grid, grids, styles, active_sheet } = locks;
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut styles = styles.authorize(&effect);
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    // Joins a step the caller holds open (a script's undo batch, the Home
+    // tab's multi-block gesture).
+    let txn = undo_stack.begin_owned_transaction(label.to_string());
+    let mut written = Vec::new();
+    let mut used: Vec<usize> = Vec::new();
+    for (sheet, plan) in plans {
+        let outcome = if sheet == active_sheet {
+            write_range_style_plan(&mut grid, grids.get_mut(active_sheet), &mut styles, &mut undo_stack, sheet, plan, label)
+        } else if let Some(sheet_grid) = grids.get_mut(sheet) {
+            write_range_style_plan(sheet_grid, None, &mut styles, &mut undo_stack, sheet, plan, label)
+        } else {
+            continue;
+        };
+        used.extend(outcome.cells.iter().map(|&(_, _, index)| index));
+        used.extend(outcome.unreported_styles.iter().copied());
+        if sheet == report_sheet {
+            written = outcome.cells;
+        }
+    }
+    undo_stack.commit_owned(txn);
+    drop(undo_stack);
+
     used.sort_unstable();
     used.dedup();
     let merges = report_merges(state, report_sheet, active_sheet);
@@ -1842,7 +2078,7 @@ impl BorderPreset {
 /// Which of a rectangle's four EDGES a cell lies on. A border preset is a
 /// function of nothing else, which is what lets a whole column's worth of
 /// interior cells share ONE tier style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 struct EdgePosition {
     top: bool,
     bottom: bool,
@@ -1858,8 +2094,20 @@ struct BorderPresetDelta {
 }
 
 impl BorderPresetDelta {
+    /// `width` 0 (or the style word `none`) is NO LINE: the preset then
+    /// REMOVES the sides it would draw, as the canonical empty side
+    /// (`BorderStyle::default()`, what `none` writes). That is how Format
+    /// Cells' Border tab turns an inside line OFF -- `insideHorizontal` with no
+    /// line clears the bottom of every row but the last and the top of every
+    /// row but the first, exactly the two sides of each inner boundary -- in
+    /// ONE call through the tier planner (round-2 review revA#3). It used to
+    /// send two almost-whole strips (rows 0..1048574 and 1..1048575 of a whole
+    /// column) that walked a million cells per column, or were refused.
     fn new(preset: &str, style: &str, color: &str, width: u8) -> Result<Self, String> {
         let preset = BorderPreset::parse(preset)?;
+        if width == 0 || style == "none" {
+            return Ok(BorderPresetDelta { preset, line: BorderStyle::default() });
+        }
         let line_style = match style {
             "solid" => BorderLineStyle::Solid,
             "dashed" => BorderLineStyle::Dashed,
@@ -1873,6 +2121,13 @@ impl BorderPresetDelta {
             style: line_style,
         };
         Ok(BorderPresetDelta { preset, line })
+    }
+
+    /// Whether the preset reads the EDGE position at all. All Borders and No
+    /// Border do the same to every cell, so the planner need not visit a
+    /// whole-line selection's edge cells for them (`plan_range_style`).
+    fn edges_matter(&self) -> bool {
+        !matches!(self.preset, BorderPreset::AllBorders | BorderPreset::NoBorder)
     }
 
     fn apply(&self, style: &mut CellStyle, at: EdgePosition) {
@@ -1992,13 +2247,170 @@ impl CellRect {
     fn whole_rows(&self) -> bool {
         self.start_col == 0 && self.end_col >= engine::EXCEL_MAX_COL_INDEX
     }
+
+    /// The WHOLE-LINE extent `plan_range_style` writes this rectangle through:
+    /// itself for whole rows, whole columns or Select All; the whole columns
+    /// (or whole rows) it nearly fills for an ALMOST-whole rectangle; `None`
+    /// for a rectangle styled cell by cell.
+    ///
+    /// ALMOST WHOLE (round-2 review revA#4). Click A2, Ctrl+Shift+Down: the
+    /// selection is A2:A1048576, one row short of a whole column, and it was
+    /// walked cell by cell -- a million cells, a million undo entries and a
+    /// million-cell result, the BUG-0354 stall -- and A2:D1048576 (4,194,300
+    /// cells) was refused outright. Excel 16 [LIVE, 2026-10-29] stores Bold on
+    /// A2:D1048576 as ONE column format over A:D plus an exception for row 1,
+    /// and no cell. Here: the whole columns' tiers, and every EXCLUDED position
+    /// (row 1 of A:D) keeps what it showed -- as a ROW format where one can
+    /// hold it ([`excluded_row_format`], round-3 review rev3A#7), else as its
+    /// own cell. Taken only when those exceptions are fewer than the selected
+    /// cells and at most [`ALMOST_WHOLE_EXCEPTION_LIMIT`]; the axis is the one
+    /// with fewer of them. Clear Formats / Clear All take the same route
+    /// (`line_extent_of`, `commands::data::plan_clear_formats`, rev3A#2).
+    fn line_extent(&self) -> Option<CellRect> {
+        if self.whole_columns() || self.whole_rows() {
+            return Some(*self);
+        }
+        let every_row = u64::from(engine::EXCEL_MAX_ROW_INDEX) + 1;
+        let every_col = u64::from(engine::EXCEL_MAX_COL_INDEX) + 1;
+        let selected = self.rows() * self.cols();
+        // Expanding to whole COLUMNS leaves the unselected rows of these
+        // columns as exceptions; to whole ROWS, the unselected columns.
+        let as_columns = every_row.saturating_sub(self.rows()) * self.cols();
+        let as_rows = every_col.saturating_sub(self.cols()) * self.rows();
+        let exceptions = as_columns.min(as_rows);
+        if exceptions >= selected || exceptions > ALMOST_WHOLE_EXCEPTION_LIMIT {
+            return None;
+        }
+        Some(if as_columns <= as_rows {
+            CellRect::new(0, self.start_col, engine::EXCEL_MAX_ROW_INDEX, self.end_col)
+        } else {
+            CellRect::new(self.start_row, 0, self.end_row, engine::EXCEL_MAX_COL_INDEX)
+        })
+    }
 }
 
 /// A rectangle smaller than whole rows or whole columns is styled cell by
 /// cell; above this many cells it is refused rather than materialised (a
-/// Calcula-only bound -- Excel has none). Whole rows, whole columns and Select
-/// All never reach it: they go through the row/column TIERS.
+/// Calcula-only bound -- Excel has none). Whole rows, whole columns, Select
+/// All and ALMOST-whole lines (`CellRect::line_extent`) never reach it: they
+/// go through the row/column TIERS.
 const DENSE_BORDER_CELL_LIMIT: u64 = 4_000_000;
+
+/// The most EXCEPTIONS an almost-whole rectangle may need -- the positions of
+/// its whole lines it does not select, each keeping what it showed, as a row
+/// format or as its own cell (`CellRect::line_extent`). A few header rows over
+/// a few columns is a handful; a rectangle short of its lines by more than
+/// this is styled cell by cell (or refused) instead.
+const ALMOST_WHOLE_EXCEPTION_LIMIT: u64 = 65_536;
+
+/// [`CellRect::line_extent`] for a NORMALISED `(min_row, min_col, max_row,
+/// max_col)` rectangle, for a planner outside this module: Clear Formats /
+/// Clear All (`commands::data::plan_clear_formats`) take the same almost-whole
+/// route as the formatting planner (round-3 review rev3A#2) -- C2:C1048576
+/// used to be planned as a partial clear, one explicit cell per position.
+pub(crate) fn line_extent_of(rect: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
+    CellRect::new(rect.0, rect.1, rect.2, rect.3)
+        .line_extent()
+        .map(|line| (line.start_row, line.start_col, line.end_row, line.end_col))
+}
+
+/// How an EXCLUDED row of an almost-whole COLUMN range keeps its look as a
+/// ROW format (`excluded_row_format`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExcludedRowFormat {
+    /// A registry index that LOOKS like what the row shows across the range's
+    /// columns today (0: Normal). The row's new format is this style, interned
+    /// explicitly by the writer.
+    pub(crate) look: usize,
+    /// Columns OUTSIDE the range whose own column format differs from `look`,
+    /// with that format: the row format would hide it there, so each crossing
+    /// keeps it as a cell of its own.
+    pub(crate) crossings: Vec<(u32, usize)>,
+}
+
+/// THE ROW-FORMAT EXCEPTION (round-3 review rev3A#7). An untiered row that an
+/// almost-whole COLUMN range leaves out (row 1 of B2:XFD1048576) shows the
+/// range's column formats today; once those change, each excluded position
+/// must keep its look, and it used to become one cell per column -- 16,383 for
+/// B2 to the sheet's corner, and the used range ran to XFD. Excel 16 [LIVE,
+/// 2026-10-29, lane clearfmt probe.ps1, each case saved and its sheet XML read
+/// back] writes a ROW format instead:
+///   - B2:XFD1048576 Bold, empty sheet: `<col min=2 max=16384 s=bold>` and
+///     `<row r=1 customFormat=1/>`, no cell (and A2:D1048576 the same);
+///   - column F italic, then A2:A1048576 Bold: the row format AND the
+///     crossing `<c r=F1 s=italic/>`, which the row format would hide;
+///   - every column bold, then B2:XFD1048576 (or A2:A1048576) Clear Formats:
+///     `<row r=1 s=bold customFormat=1/>`, no cell;
+///   - but columns A:D bold, then A2:D1048576 Clear Formats: the CELLS A1:D1
+///     (a bold row format would turn E1:XFD1 bold -- 16,380 crossings).
+/// What this takes from them: the range's columns must show ONE look on such
+/// a row; every column outside the range without a format of its own shows
+/// Normal, so that look must then be Normal; and the columns outside the range
+/// whose format differs become crossing cells.
+///
+/// THE CROSSING COUNT IS A CALCULA BOUND, NOT EXCEL'S RULE. The row format is
+/// taken only while the crossings are no more than the cells it saves (the
+/// range's columns; the tie, as in the column-F case, goes to the row format).
+/// Excel keeps the row format with MORE crossings than that [LIVE, rev5A
+/// probe-rowfmt.ps1 / probe-rowfmt2.ps1, sheet XML read back]: columns F:G
+/// italic then A2:A1048576 Bold stores `<row r=1 customFormat=1>` plus F1 and
+/// G1 (2 crossings, 1 column), and F:H italic then A2:B1048576 Bold the row
+/// format plus F1:H1 (3 crossings, 2 columns) -- where this writes the
+/// excluded positions as cells. Excel switches to cells somewhere below the
+/// 16,380 crossings of the A:D case above; its threshold is not known. The
+/// LOOK is identical either way: only the stored shape and the used range
+/// differ. `None`: the excluded positions are kept as cells. O(column
+/// formats), once per range.
+pub(crate) fn excluded_row_format(
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
+    first_col: u32,
+    last_col: u32,
+) -> Option<ExcludedRowFormat> {
+    let (first_col, last_col) = (first_col.min(last_col), first_col.max(last_col));
+    let inside = |col: u32| col >= first_col && col <= last_col;
+    let width = u64::from(last_col - first_col) + 1;
+    let mut inside_tiers: Vec<usize> = Vec::new();
+    let mut outside_tiers: Vec<(u32, usize)> = Vec::new();
+    for (&col, &index) in &grid.column_styles {
+        if index == 0 {
+            continue;
+        }
+        if inside(col) {
+            inside_tiers.push(index);
+        } else {
+            outside_tiers.push((col, index));
+        }
+    }
+    let normal = styles.default_style();
+    // The look the range's columns show on an untiered row: Normal where one
+    // of them has no format, else the one format they all share.
+    let look = if (inside_tiers.len() as u64) < width {
+        if inside_tiers.iter().any(|&index| styles.get(index) != normal) {
+            return None;
+        }
+        0
+    } else {
+        let first = *inside_tiers.first()?;
+        if inside_tiers.iter().any(|&index| styles.get(index) != styles.get(first)) {
+            return None;
+        }
+        first
+    };
+    let shown = styles.get(look);
+    let every_column = u64::from(engine::EXCEL_MAX_COL_INDEX) + 1;
+    let untiered_outside = every_column - width - outside_tiers.len() as u64;
+    if untiered_outside > 0 && shown != normal {
+        return None;
+    }
+    let mut crossings: Vec<(u32, usize)> =
+        outside_tiers.into_iter().filter(|&(_, index)| styles.get(index) != shown).collect();
+    if crossings.len() as u64 > width {
+        return None;
+    }
+    crossings.sort_unstable();
+    Some(ExcludedRowFormat { look, crossings })
+}
 
 /// Where a whole-row/whole-column preset crosses the OTHER axis's tiers, each
 /// crossing needs its own cell (the row tier outranks the column tier, so the
@@ -2008,21 +2420,115 @@ const DENSE_BORDER_CELL_LIMIT: u64 = 4_000_000;
 /// silent gap that is tolerable for a lock bit and is not for a visible border.
 const BORDER_TIER_CROSSING_LIMIT: u64 = 2_000_000;
 
-/// Everything a border preset will WRITE, decided before anything is touched,
-/// so a refusal (too many cells, too many crossings) costs nothing.
+/// Everything a range-style command will WRITE, decided before anything is
+/// touched, so a refusal (too many cells, too many crossings) costs nothing.
 #[derive(Debug, Default)]
 struct RangeStylePlan {
-    /// Explicit cell styles: ((row, col), style).
-    cells: Vec<((u32, u32), CellStyle)>,
-    /// New column-tier styles: (col, style).
-    column_tiers: Vec<(u32, CellStyle)>,
-    /// New row-tier styles: (row, style).
-    row_tiers: Vec<(u32, CellStyle)>,
+    /// The distinct styles the plan writes, each ONCE; the entries below name
+    /// them by position here. A whole column's interior -- or a million row
+    /// tiers -- share a handful of styles, and a clone per entry made the plan
+    /// itself O(lines x style size) before a single tier was written.
+    styles: Vec<CellStyle>,
+    /// Explicit cell styles: ((row, col), index into `styles`).
+    cells: Vec<((u32, u32), usize)>,
+    /// Stored cells holding a value that take the new LINE format as their
+    /// OWN style, although the tier alone would show it: Excel gives every
+    /// existing cell the format, so it travels with the data on Sort, Insert
+    /// Cells and Cut (round-2 review revA#2). Written like `cells`, but not
+    /// REPORTED in the result -- a Select All over a filled sheet is every
+    /// value, and every caller repaints the grid after a whole-line format.
+    carried: Vec<((u32, u32), usize)>,
+    /// New column-tier styles: (col, index into `styles`).
+    column_tiers: Vec<(u32, usize)>,
+    /// New row-tier styles: (row, index into `styles`).
+    row_tiers: Vec<(u32, usize)>,
 }
 
 impl RangeStylePlan {
     fn is_empty(&self) -> bool {
-        self.cells.is_empty() && self.column_tiers.is_empty() && self.row_tiers.is_empty()
+        self.cells.is_empty() && self.carried.is_empty() && self.column_tiers.is_empty() && self.row_tiers.is_empty()
+    }
+}
+
+/// A style the planner settled on for a position or a line: the REGISTRY
+/// style it already has (`Kept`, a registry index), or one of the plan's own
+/// (`New`, an index into `RangeStylePlan::styles`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Planned {
+    Kept(usize),
+    New(usize),
+}
+
+/// The delta, run ONCE per (base style, edge position). Every position of a
+/// whole-line selection is one of a handful of such pairs, so a million row
+/// tiers cost a million hash lookups and a few clones, not a million clones.
+struct DeltaMemo<'p> {
+    registry: &'p engine::StyleRegistry,
+    apply: &'p dyn Fn(&mut CellStyle, EdgePosition),
+    /// Whether `apply` reads the position. When it does not, every position
+    /// shares one answer per base style.
+    edges_matter: bool,
+    answers: std::collections::HashMap<(usize, EdgePosition), Planned>,
+    /// `RangeStylePlan::styles`, by value: one entry per distinct style.
+    interned: std::collections::HashMap<CellStyle, usize>,
+}
+
+impl<'p> DeltaMemo<'p> {
+    fn new(
+        registry: &'p engine::StyleRegistry,
+        apply: &'p dyn Fn(&mut CellStyle, EdgePosition),
+        edges_matter: bool,
+    ) -> Self {
+        DeltaMemo {
+            registry,
+            apply,
+            edges_matter,
+            answers: std::collections::HashMap::new(),
+            interned: std::collections::HashMap::new(),
+        }
+    }
+
+    /// What the registry style `base` becomes at `at`.
+    fn desired(&mut self, plan: &mut RangeStylePlan, base: usize, at: EdgePosition) -> Planned {
+        let at = if self.edges_matter { at } else { EdgePosition::default() };
+        if let Some(&answer) = self.answers.get(&(base, at)) {
+            return answer;
+        }
+        let before = self.registry.get(base);
+        let mut next = before.clone();
+        (self.apply)(&mut next, at);
+        let answer = if next == *before { Planned::Kept(base) } else { Planned::New(self.intern(plan, next)) };
+        self.answers.insert((base, at), answer);
+        answer
+    }
+
+    fn intern(&mut self, plan: &mut RangeStylePlan, style: CellStyle) -> usize {
+        if let Some(&id) = self.interned.get(&style) {
+            return id;
+        }
+        let id = plan.styles.len();
+        self.interned.insert(style.clone(), id);
+        plan.styles.push(style);
+        id
+    }
+
+    /// The plan's own index for `planned` -- a `Kept` registry style is copied
+    /// in when a cell must carry it EXPLICITLY (a new tier would hide it).
+    fn materialize(&mut self, plan: &mut RangeStylePlan, planned: Planned) -> usize {
+        match planned {
+            Planned::New(id) => id,
+            Planned::Kept(index) => {
+                let style = self.registry.get(index).clone();
+                self.intern(plan, style)
+            }
+        }
+    }
+
+    fn style<'a>(&'a self, plan: &'a RangeStylePlan, planned: Planned) -> &'a CellStyle {
+        match planned {
+            Planned::Kept(index) => self.registry.get(index),
+            Planned::New(id) => &plan.styles[id],
+        }
     }
 }
 
@@ -2044,20 +2550,32 @@ impl RangeStylePlan {
 ///  - the cells that can differ from their column's tier get their own style:
 ///    the first and last row (an `outside` top/bottom edge), every stored cell
 ///    that already has a style of its own, and every crossing with a ROW tier
-///    (the row tier outranks the column, so the column change would not show);
+///    (the row tier outranks the column, so the column change would not show)
+///    -- except on Select All, where each row tier takes the change itself
+///    and only its first and last column need a cell (BUG-0354);
 ///  - a cell is written only when what it would SHOW without one differs from
-///    what the preset asks for, so `allBorders` over a plain column writes one
-///    tier entry and no cells at all.
+///    what the preset asks for, or when it holds a value the preset changes
+///    (that value takes the format as its own, as in Excel; see
+///    `plan_range_style`), so `allBorders` over an empty plain column writes
+///    one tier entry and no cells at all.
 /// Whole rows are the same with the axes swapped -- except that the new ROW
 /// tier then outranks every column tier it crosses, so those crossings are
-/// written to keep the column's own format.
+/// written to keep the column's own format (unless every column shares one
+/// format: the row is then based on it; see `plan_range_style`).
 fn plan_border_preset(
     grid: &engine::Grid,
     styles: &engine::StyleRegistry,
     rect: CellRect,
     delta: &BorderPresetDelta,
 ) -> Result<RangeStylePlan, String> {
-    plan_range_style(grid, styles, rect, &|style, position| delta.apply(style, position), &BORDER_WORDING)
+    plan_range_style(
+        grid,
+        styles,
+        rect,
+        &|style, position| delta.apply(style, position),
+        delta.edges_matter(),
+        &BORDER_WORDING,
+    )
 }
 
 /// How a range-style refusal names what it refuses.
@@ -2071,154 +2589,351 @@ struct PlanWording {
 const BORDER_WORDING: PlanWording = PlanWording { dense: "Borders", crossing: "This border" };
 const NUMBER_FORMAT_WORDING: PlanWording =
     PlanWording { dense: "A number format", crossing: "This number format" };
+const FORMAT_WORDING: PlanWording = PlanWording { dense: "Formatting", crossing: "This format" };
 
-/// The planner behind the border presets AND Increase/Decrease Decimal: what
-/// `apply` does to every position of `rect` (it is told where the position
-/// sits on the rectangle's edge; a delta that does not care ignores it), with
-/// whole columns and whole rows written through the style TIERS. See
-/// `plan_border_preset` for the tier rules; they do not depend on the delta.
+/// The planner behind `apply_formatting`, the border presets AND Increase/
+/// Decrease Decimal: what `apply` does to every position of `rect` (it is told
+/// where the position sits on the rectangle's edge; a delta that does not care
+/// passes `edges_matter = false` and is never asked about the edge cells
+/// separately), with whole columns and whole rows written through the style
+/// TIERS. See `plan_border_preset` for the tier rules; they do not depend on
+/// the delta.
+///
+/// THE WORK IS O(lines + stored cells + crossings), never O(rows x columns)
+/// (BUG-0354: `apply_formatting` walked Select All's 17.2 billion positions).
+/// The rules, measured on Excel 16 [LIVE, 2026-10-29: each case saved as
+/// .xlsx and its sheet XML read back]:
+///  - Select All Bold on an EMPTY sheet is ONE column format over every column
+///    and no cell (`<col min=1 max=16384 style=bold>`); a cell typed later is
+///    bold.
+///  - EVERY EXISTING CELL HOLDING A VALUE GETS THE FORMAT AS ITS OWN (round-2
+///    review revA#2). Select All Bold with C3 = 42 and B7 = "x" saves the
+///    column format AND `<c r=C3 s=bold>`, `<c r=B7 s=bold>`; row 5 Bold over
+///    A5:B5 saves the row format and both cells. So the format travels with
+///    the value: sort A1:B8 after that and the moved record keeps it. A stored
+///    cell that only inherited (own style 0) was left to the tier here, so a
+///    sort moved its value off the formatted row without the format. It is now
+///    written explicitly (`RangeStylePlan::carried`) -- O(stored cells), the
+///    candidate set below -- and only empty positions are left to the tier.
+///  - AN ALMOST-WHOLE RECTANGLE IS WHOLE LINES PLUS EXCEPTIONS (round-2 review
+///    revA#4; `CellRect::line_extent`). A2:D1048576 Bold is the column format
+///    over A:D and an exception for row 1. Here the excluded positions (A1:D1)
+///    are planned with NO delta, so each keeps what it showed: an untiered
+///    excluded row as a ROW format holding that look where one can
+///    (`excluded_row_format`, round-3 review rev3A#7 -- Excel's
+///    `<row r=1 customFormat=1/>`; B2 to the sheet's corner used to write
+///    16,383 cells B1:XFD1), else each position as its own cell.
+///  - SELECT ALL ALSO REWRITES EVERY ROW FORMAT. Row 3 bold, then Select All
+///    Italic: row 3's own format became bold italic, no cell was written in
+///    it. Here: each existing row tier takes the delta itself, so a sheet with
+///    row formats needs no crossing cells (it used to need one per row tier
+///    per column -- 16,384 per formatted row, refused above 122 of them).
+///  - A WHOLE ROW over columns that do not all share one format is based on
+///    the DEFAULT, and every crossing with a column format gets its own cell
+///    (columns A:XFC bold, then row 5 yellow: 16,383 cells bold + yellow, the
+///    row's own format plain yellow). Over a sheet whose columns ALL share one
+///    format (the state Select All leaves) the row is based on THAT format and
+///    writes no cell (Select All Bold, then row 5 yellow: the row's format is
+///    bold + yellow, the used range stays A5). `uniform_column_style`.
+///  - A WHOLE COLUMN crossing a row format writes the crossing cell (row 3
+///    bold, column C Left Border: C3 is bold + bordered, as its own cell).
 fn plan_range_style(
     grid: &engine::Grid,
     styles: &engine::StyleRegistry,
     rect: CellRect,
     apply: &dyn Fn(&mut CellStyle, EdgePosition),
+    edges_matter: bool,
     wording: &PlanWording,
 ) -> Result<RangeStylePlan, String> {
     let mut plan = RangeStylePlan::default();
-    let desired_at = |row: u32, col: u32| -> (CellStyle, bool) {
-        let before = styles.get(grid.effective_style_index(row, col));
-        let mut desired = before.clone();
-        apply(&mut desired, rect.position(row, col));
-        let changed = desired != *before;
-        (desired, changed)
-    };
+    let mut memo = DeltaMemo::new(styles, apply, edges_matter);
 
-    let tier_is_column = rect.whole_columns();
-    if !tier_is_column && !rect.whole_rows() {
+    // `line`: the whole lines written through the tiers -- `rect` itself, or
+    // the whole columns / rows an almost-whole `rect` nearly fills. `rect`
+    // still decides which positions take the delta and where its edges are.
+    let Some(line) = rect.line_extent() else {
         let count = rect.rows() * rect.cols();
         if count > DENSE_BORDER_CELL_LIMIT {
             return Err(dense_limit_refusal(wording, count));
         }
         for row in rect.start_row..=rect.end_row {
             for col in rect.start_col..=rect.end_col {
-                let (desired, changed) = desired_at(row, col);
-                if changed {
-                    plan.cells.push(((row, col), desired));
+                let base = grid.effective_style_index(row, col);
+                if let Planned::New(id) = memo.desired(&mut plan, base, rect.position(row, col)) {
+                    plan.cells.push(((row, col), id));
                 }
             }
         }
         return Ok(plan);
-    }
+    };
+    let whole_columns = line.whole_columns();
+    let whole_rows = line.whole_rows();
 
     // ---- Tier path: whole columns (Select All included) or whole rows ----
-    let mut new_tier: std::collections::HashMap<u32, CellStyle> = std::collections::HashMap::new();
-    if tier_is_column {
+    // The new tier of each line that changes (an index into `plan.styles`).
+    let mut new_column_tier: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    let mut new_row_tier: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    // The positions whose style may differ from the tiers after the change:
+    // every stored cell of the lines (its own style outranks every tier, and
+    // one holding a value takes the format as its own), plus the crossings,
+    // edges and exceptions added below.
+    let mut candidates: std::collections::BTreeSet<(u32, u32)> = grid
+        .cells
+        .keys()
+        .copied()
+        .filter(|&(r, c)| line.contains(r, c))
+        .collect();
+
+    // THE EXCEPTIONS of an almost-whole rectangle: the positions of its whole
+    // lines it does not select (`line_extent` bounded their number). Each is
+    // planned with no delta below, so it keeps what it shows -- as its own
+    // cell when the new tiers would otherwise reach it. An excluded ROW with a
+    // tier of its own needs none under new column tiers: it outranks them. An
+    // untiered excluded row keeps its look as a ROW format where one can hold
+    // it (`excluded_row_format`, rev3A#7): written below once the column tiers
+    // are known, with each crossing it would hide as a candidate here.
+    let mut excluded_row_tiers: Option<(usize, Vec<u32>)> = None;
+    if line != rect {
+        if whole_columns {
+            let excluded_rows: Vec<u32> = (line.start_row..rect.start_row)
+                .chain(rect.end_row.saturating_add(1)..=line.end_row)
+                .filter(|row| grid.row_styles.get(row).copied().unwrap_or(0) == 0)
+                .collect();
+            match excluded_row_format(grid, styles, rect.start_col, rect.end_col) {
+                Some(format) if !excluded_rows.is_empty() => {
+                    for &row in &excluded_rows {
+                        for &(col, _) in &format.crossings {
+                            candidates.insert((row, col));
+                        }
+                    }
+                    excluded_row_tiers = Some((format.look, excluded_rows));
+                }
+                _ => {
+                    for row in excluded_rows {
+                        for col in rect.start_col..=rect.end_col {
+                            candidates.insert((row, col));
+                        }
+                    }
+                }
+            }
+        } else {
+            let excluded_cols: Vec<u32> =
+                (line.start_col..rect.start_col).chain(rect.end_col.saturating_add(1)..=line.end_col).collect();
+            for row in rect.start_row..=rect.end_row {
+                for &col in &excluded_cols {
+                    candidates.insert((row, col));
+                }
+            }
+        }
+    }
+
+    if whole_columns {
         for col in rect.start_col..=rect.end_col {
-            let current = styles.get(grid.column_styles.get(&col).copied().unwrap_or(0));
-            let mut next = current.clone();
+            let current = grid.column_styles.get(&col).copied().unwrap_or(0);
             let interior = EdgePosition {
                 top: false,
                 bottom: false,
                 left: col == rect.start_col,
                 right: col == rect.end_col,
             };
-            apply(&mut next, interior);
-            if next != *current {
-                new_tier.insert(col, next.clone());
-                plan.column_tiers.push((col, next));
+            if let Planned::New(id) = memo.desired(&mut plan, current, interior) {
+                new_column_tier.insert(col, id);
+                plan.column_tiers.push((col, id));
+            }
+        }
+        // Rows with a tier of their own: it OUTRANKS the new column tiers.
+        let mut tiered_rows: Vec<(u32, usize)> = grid
+            .row_styles
+            .iter()
+            .filter(|(r, idx)| **idx != 0 && **r >= rect.start_row && **r <= rect.end_row)
+            .map(|(r, idx)| (*r, *idx))
+            .collect();
+        tiered_rows.sort_unstable();
+        if whole_rows {
+            // SELECT ALL: each row tier takes the change itself (see above).
+            for &(row, current) in &tiered_rows {
+                let interior = EdgePosition {
+                    top: row == rect.start_row,
+                    bottom: row == rect.end_row,
+                    left: false,
+                    right: false,
+                };
+                if let Planned::New(id) = memo.desired(&mut plan, current, interior) {
+                    new_row_tier.insert(row, id);
+                    plan.row_tiers.push((row, id));
+                }
+            }
+            if edges_matter {
+                for &(row, _) in &tiered_rows {
+                    candidates.insert((row, rect.start_col));
+                    candidates.insert((row, rect.end_col));
+                }
+            }
+        } else {
+            let crossings = tiered_rows.len() as u64 * rect.cols();
+            if crossings > BORDER_TIER_CROSSING_LIMIT {
+                return Err(crossing_limit_refusal(wording, crossings, "row"));
+            }
+            for &(row, _) in &tiered_rows {
+                for col in rect.start_col..=rect.end_col {
+                    candidates.insert((row, col));
+                }
+            }
+        }
+        if edges_matter {
+            for col in rect.start_col..=rect.end_col {
+                candidates.insert((rect.start_row, col));
+                candidates.insert((rect.end_row, col));
             }
         }
     } else {
+        // Whole rows. A row WITHOUT a tier shows its columns' formats; its new
+        // tier is based on the one format every column shares, else on the
+        // default -- and then every crossing with a column format needs a cell.
+        let background = uniform_column_style(grid);
+        let crossed_columns: Vec<u32> = if background != 0 {
+            Vec::new()
+        } else {
+            let mut cols: Vec<u32> = grid
+                .column_styles
+                .iter()
+                .filter(|(c, idx)| **idx != 0 && **c >= rect.start_col && **c <= rect.end_col)
+                .map(|(c, _)| *c)
+                .collect();
+            cols.sort_unstable();
+            cols
+        };
+        let mut untiered_rows: u64 = 0;
         for row in rect.start_row..=rect.end_row {
-            let current = styles.get(grid.row_styles.get(&row).copied().unwrap_or(0));
-            let mut next = current.clone();
+            let own = grid.row_styles.get(&row).copied().unwrap_or(0);
+            let base = if own != 0 {
+                own
+            } else {
+                untiered_rows += 1;
+                background
+            };
             let interior = EdgePosition {
                 top: row == rect.start_row,
                 bottom: row == rect.end_row,
                 left: false,
                 right: false,
             };
-            apply(&mut next, interior);
-            if next != *current {
-                new_tier.insert(row, next.clone());
-                plan.row_tiers.push((row, next));
+            if let Planned::New(id) = memo.desired(&mut plan, base, interior) {
+                new_row_tier.insert(row, id);
+                plan.row_tiers.push((row, id));
+            }
+        }
+        // A row that HAS a tier shows it over every column already, so only
+        // the untiered rows cross the column formats.
+        let crossings = untiered_rows * crossed_columns.len() as u64;
+        if crossings > BORDER_TIER_CROSSING_LIMIT {
+            return Err(crossing_limit_refusal(wording, crossings, "column"));
+        }
+        if !crossed_columns.is_empty() {
+            for row in rect.start_row..=rect.end_row {
+                if grid.row_styles.get(&row).copied().unwrap_or(0) != 0 {
+                    continue;
+                }
+                for &col in &crossed_columns {
+                    candidates.insert((row, col));
+                }
+            }
+        }
+        if edges_matter {
+            for row in rect.start_row..=rect.end_row {
+                candidates.insert((row, rect.start_col));
+                candidates.insert((row, rect.end_col));
             }
         }
     }
 
-    // The positions whose style may differ from the tier after the change.
-    let crossing: Vec<u32> = if tier_is_column {
-        grid.row_styles
-            .iter()
-            .filter(|(r, idx)| **idx != 0 && **r >= rect.start_row && **r <= rect.end_row)
-            .map(|(r, _)| *r)
-            .collect()
-    } else {
-        grid.column_styles
-            .iter()
-            .filter(|(c, idx)| **idx != 0 && **c >= rect.start_col && **c <= rect.end_col)
-            .map(|(c, _)| *c)
-            .collect()
-    };
-    let span = if tier_is_column { rect.cols() } else { rect.rows() };
-    let crossings = crossing.len() as u64 * span;
-    if crossings > BORDER_TIER_CROSSING_LIMIT {
-        return Err(format!(
-            "{} would have to be written to {} separate cells where whole-{} \
-             formats cross; select a smaller range.",
-            wording.crossing,
-            crossings,
-            if tier_is_column { "row" } else { "column" }
-        ));
-    }
-
-    let mut candidates: std::collections::BTreeSet<(u32, u32)> = grid
-        .cells
-        .keys()
-        .copied()
-        .filter(|&(r, c)| rect.contains(r, c))
-        .collect();
-    if tier_is_column {
-        for col in rect.start_col..=rect.end_col {
-            candidates.insert((rect.start_row, col));
-            candidates.insert((rect.end_row, col));
-            for &row in &crossing {
-                candidates.insert((row, col));
-            }
-        }
-    } else {
-        for row in rect.start_row..=rect.end_row {
-            candidates.insert((row, rect.start_col));
-            candidates.insert((row, rect.end_col));
-            for &col in &crossing {
-                candidates.insert((row, col));
+    // The excluded rows' ROW formats (rev3A#7) -- only when a new column tier
+    // would reach them; with none, the excluded positions keep their look
+    // untouched and nothing is written for them.
+    if let Some((look, rows)) = excluded_row_tiers {
+        if !new_column_tier.is_empty() {
+            let id = memo.intern(&mut plan, styles.get(look).clone());
+            for row in rows {
+                plan.row_tiers.push((row, id));
+                new_row_tier.insert(row, id);
             }
         }
     }
 
     for (row, col) in candidates {
-        let (desired, _) = desired_at(row, col);
-        let own_style = grid.get_cell(row, col).map_or(0, |c| c.style_index);
-        let before = styles.get(grid.effective_style_index(row, col));
+        let before = grid.effective_style_index(row, col);
+        // An exception (outside `rect`, inside `line`) keeps what it shows.
+        let desired = if rect.contains(row, col) {
+            memo.desired(&mut plan, before, rect.position(row, col))
+        } else {
+            Planned::Kept(before)
+        };
+        let stored = grid.get_cell(row, col);
+        let own_style = stored.map_or(0, |c| c.style_index);
+        let row_tiered = grid.row_styles.get(&row).copied().unwrap_or(0) != 0;
         // What this position SHOWS after the tier entries land, if no cell
         // style is written for it. A cell's own style outranks every tier; a
-        // row tier outranks a column tier.
-        let after: &CellStyle = if own_style != 0 {
-            before
-        } else if tier_is_column {
-            if grid.row_styles.get(&row).copied().unwrap_or(0) != 0 {
-                before
-            } else {
-                new_tier.get(&col).unwrap_or(before)
-            }
+        // row tier (new or kept) outranks a column tier.
+        let after = if own_style != 0 {
+            Planned::Kept(before)
+        } else if let Some(&id) = new_row_tier.get(&row) {
+            Planned::New(id)
+        } else if row_tiered {
+            Planned::Kept(before)
+        } else if let Some(&id) = new_column_tier.get(&col) {
+            Planned::New(id)
         } else {
-            new_tier.get(&row).unwrap_or(before)
+            Planned::Kept(before)
         };
-        if desired != *after {
-            plan.cells.push(((row, col), desired));
+        let shows_wrong = memo.style(&plan, desired) != memo.style(&plan, after);
+        let changes = memo.style(&plan, desired) != memo.style(&plan, Planned::Kept(before));
+        if shows_wrong {
+            let id = memo.materialize(&mut plan, desired);
+            plan.cells.push(((row, col), id));
+        } else if changes && own_style == 0 && stored.is_some_and(holds_value) {
+            // The tier alone would show it, but Excel gives the existing cell
+            // the format as its own, so it travels with the value (revA#2).
+            let id = memo.materialize(&mut plan, desired);
+            plan.carried.push(((row, col), id));
         }
     }
     Ok(plan)
+}
+
+/// Whether a stored cell holds something a user put there -- a value, a
+/// formula or rich text -- rather than being an empty placeholder. Such a
+/// cell takes a whole-line format as its OWN style (`plan_range_style`).
+fn holds_value(cell: &Cell) -> bool {
+    !matches!(cell.value, CellValue::Empty) || cell.ast.is_some() || cell.rich_text.is_some()
+}
+
+/// The column format EVERY column of the sheet shares, or 0 (the default)
+/// when they do not all share one. Excel bases a new whole-row format on it
+/// [LIVE: after Select All Bold, row 5 yellow is bold + yellow with no cell;
+/// with 16,383 of the 16,384 columns bold it is plain yellow, and each bold
+/// column's crossing becomes a cell] -- not on a majority.
+fn uniform_column_style(grid: &engine::Grid) -> usize {
+    let every_column = u64::from(engine::EXCEL_MAX_COL_INDEX) + 1;
+    if grid.column_styles.len() as u64 != every_column {
+        return 0;
+    }
+    let mut indices = grid.column_styles.values().copied();
+    let Some(first) = indices.next() else { return 0 };
+    if first != 0 && indices.all(|index| index == first) {
+        first
+    } else {
+        0
+    }
+}
+
+/// The refusal when a whole-line style would need more crossing cells than
+/// [`BORDER_TIER_CROSSING_LIMIT`]; `other_axis` names the formats it crosses.
+fn crossing_limit_refusal(wording: &PlanWording, crossings: u64, other_axis: &str) -> String {
+    format!(
+        "{} would have to be written to {} separate cells where whole-{} \
+         formats cross; select a smaller range.",
+        wording.crossing, crossings, other_axis
+    )
 }
 
 /// The refusal for a cell-by-cell style write past [`DENSE_BORDER_CELL_LIMIT`].
@@ -2230,18 +2945,21 @@ fn dense_limit_refusal(wording: &PlanWording, count: u64) -> String {
     )
 }
 
-/// What `write_range_style_plan` wrote: the cells (with their new style
-/// index) and the style indices its tier entries now use.
+/// What `write_range_style_plan` wrote: the cells to REPORT (with their new
+/// style index) and the style indices no reported cell names -- its tier
+/// entries' and its carried cells' (`RangeStylePlan::carried`) -- which the
+/// frontend's style cache must still learn to paint them.
 struct WrittenPlan {
     cells: Vec<(u32, u32, usize)>,
-    tier_styles: Vec<usize>,
+    unreported_styles: Vec<usize>,
 }
 
 /// Write a `RangeStylePlan` to one sheet: tiers first (with their undo
 /// snapshot), then cells. `mirror` is the second copy of the ACTIVE sheet
 /// (`grids[active]` beside `state.grid`); both must change or the readers that
 /// resolve against the other copy would not see the borders. Returns the
-/// cells written, with their new style index.
+/// cells written (the carried ones written but not listed), with their new
+/// style index.
 fn write_range_style_plan(
     grid: &mut engine::Grid,
     mut mirror: Option<&mut engine::Grid>,
@@ -2251,8 +2969,14 @@ fn write_range_style_plan(
     plan: RangeStylePlan,
     label: &str,
 ) -> WrittenPlan {
-    let mut tier_styles = Vec::new();
-    for (is_column, entries) in [(true, plan.column_tiers), (false, plan.row_tiers)] {
+    // Each planned style is interned ONCE per flavour, however many lines or
+    // cells use it (`explicit` for tiers and cells under a tier, `plain` for
+    // the rest) -- a million row tiers are one registry lookup, not a million.
+    let RangeStylePlan { styles: planned, cells, carried, column_tiers, row_tiers } = plan;
+    let mut explicit: Vec<Option<usize>> = vec![None; planned.len()];
+    let mut plain: Vec<Option<usize>> = vec![None; planned.len()];
+    let mut unreported_styles = Vec::new();
+    for (is_column, entries) in [(true, column_tiers), (false, row_tiers)] {
         if entries.is_empty() {
             continue;
         }
@@ -2268,11 +2992,18 @@ fn write_range_style_plan(
             crate::undo_commands::style_tiers_snapshot_bytes(sheet_index, is_column, previous),
             label,
         );
-        for (idx, style) in entries {
+        for (idx, id) in entries {
             // EXPLICIT: a tier whose style equals the default would otherwise
             // intern to 0, which `set_column_style` reads as "clear the tier".
-            let style_index = styles.get_or_create_explicit(style);
-            tier_styles.push(style_index);
+            let style_index = match explicit[id] {
+                Some(index) => index,
+                None => {
+                    let index = styles.get_or_create_explicit(planned[id].clone());
+                    explicit[id] = Some(index);
+                    unreported_styles.push(index);
+                    index
+                }
+            };
             if is_column {
                 grid.set_column_style(idx, style_index);
                 if let Some(m) = mirror.as_deref_mut() {
@@ -2287,16 +3018,18 @@ fn write_range_style_plan(
         }
     }
 
-    let mut written = Vec::with_capacity(plan.cells.len());
-    for ((row, col), style) in plan.cells {
+    let mut written = Vec::with_capacity(cells.len());
+    let reported = cells.into_iter().map(|entry| (entry, true));
+    let quiet = carried.into_iter().map(|entry| (entry, false));
+    for (((row, col), id), report) in reported.chain(quiet) {
         // Under a tier (after the tier writes above), a style equal to the
         // default must still be EXPLICIT: index 0 means "inherit".
         let under_tier = grid.row_styles.get(&row).copied().unwrap_or(0) != 0
             || grid.column_styles.get(&col).copied().unwrap_or(0) != 0;
         let style_index = if under_tier {
-            styles.get_or_create_explicit(style)
+            *explicit[id].get_or_insert_with(|| styles.get_or_create_explicit(planned[id].clone()))
         } else {
-            styles.get_or_create(style)
+            *plain[id].get_or_insert_with(|| styles.get_or_create(planned[id].clone()))
         };
         let previous_cell = grid.get_cell(row, col).cloned();
         let mut cell = previous_cell.clone().unwrap_or(Cell {
@@ -2311,11 +3044,15 @@ fn write_range_style_plan(
             m.set_cell(row, col, cell);
         }
         undo_stack.record_cell_change(sheet_index, row, col, previous_cell);
-        written.push((row, col, style_index));
+        if report {
+            written.push((row, col, style_index));
+        } else {
+            unreported_styles.push(style_index);
+        }
     }
-    tier_styles.sort_unstable();
-    tier_styles.dedup();
-    WrittenPlan { cells: written, tier_styles }
+    unreported_styles.sort_unstable();
+    unreported_styles.dedup();
+    WrittenPlan { cells: written, unreported_styles }
 }
 
 /// Apply a border preset to a rectangular range.
@@ -2800,25 +3537,73 @@ fn scan_decimal_section(section: &str) -> DecimalSectionScan {
 /// `sheet_indices`: with sheets GROUPED, the group (the active cell's format
 /// decides for every sheet); gated whole and ONE undo step, as
 /// `apply_formatting`.
+///
+/// THE WIRE (BUG-0354 follow-up). `rows` / `cols` arrive as a plain list or as
+/// an [`crate::api_types::IndexRun`] `{ first, last }` ([`IndexListArg`]), the
+/// way `apply_formatting`'s `FormattingParams` takes them, so Select All no
+/// longer crosses the bridge as a million-element array. A run has lost which
+/// line came first, so the frontend then names the active line on its own:
+/// `active_row` / `active_col` (`activeRow` / `activeCol`), which must lie
+/// inside the selection. Absent, the active cell is `(rows[0], cols[0])` as
+/// before.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn adjust_number_format_decimals(
     state: State<AppState>,
     file_state: State<FileState>,
-    rows: Vec<u32>,
-    cols: Vec<u32>,
+    rows: IndexListArg,
+    cols: IndexListArg,
     delta: i32,
+    active_row: Option<u32>,
+    active_col: Option<u32>,
     sheet_indices: Option<Vec<usize>>,
     target: Option<CellTargetRef>,
 ) -> Result<FormattingResult, String> {
-    adjust_number_format_decimals_on(
+    adjust_number_format_decimals_from_wire(
         &state,
         &file_state,
-        &rows,
-        &cols,
+        &rows.0,
+        &cols.0,
         delta,
+        (active_row, active_col),
         sheet_indices.as_deref().unwrap_or(&[]),
         target.as_ref(),
     )
+}
+
+/// The body of [`adjust_number_format_decimals`] below its Tauri arguments:
+/// resolves the active cell -- the named `active` line where one is given
+/// (refused outside the selection, before any guard is taken), else the
+/// list's first entry -- and steps. No selection: nothing to do.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn adjust_number_format_decimals_from_wire(
+    state: &AppState,
+    file_state: &FileState,
+    rows: &[u32],
+    cols: &[u32],
+    delta: i32,
+    active: (Option<u32>, Option<u32>),
+    group: &[usize],
+    target: Option<&CellTargetRef>,
+) -> Result<FormattingResult, String> {
+    if delta != 1 && delta != -1 {
+        return Err(format!("delta must be 1 or -1 (got {})", delta));
+    }
+    let resolve = |named: Option<u32>, list: &[u32], axis: &str| -> Result<Option<u32>, String> {
+        match named {
+            Some(line) if !list.contains(&line) => Err(format!(
+                "The active {} ({}) is not inside the selection, so the decimal step was not applied.",
+                axis,
+                line + 1
+            )),
+            Some(line) => Ok(Some(line)),
+            None => Ok(list.first().copied()),
+        }
+    };
+    let (Some(active_row), Some(active_col)) = (resolve(active.0, rows, "row")?, resolve(active.1, cols, "column")?) else {
+        return Ok(FormattingResult { cells: Vec::new(), styles: Vec::new() });
+    };
+    adjust_number_format_decimals_at(state, file_state, (active_row, active_col), rows, cols, delta, group, target)
 }
 
 /// `rows` and `cols` as ONE rectangle, when they are: each list holds every
@@ -2826,6 +3611,11 @@ pub fn adjust_number_format_decimals(
 /// the active cell's row and column first). `None` otherwise.
 fn rect_of_lists(rows: &[u32], cols: &[u32]) -> Option<CellRect> {
     fn run(list: &[u32]) -> Option<(u32, u32)> {
+        // The common shape -- already ascending and contiguous, which is what a
+        // whole column's million rows are -- is answered without a copy.
+        if !list.is_empty() && list.windows(2).all(|w| w[0].checked_add(1) == Some(w[1])) {
+            return Some((list[0], list[list.len() - 1]));
+        }
         let mut sorted = list.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
@@ -2848,17 +3638,17 @@ fn plan_listed_cells(
     apply: &dyn Fn(&mut CellStyle),
 ) -> RangeStylePlan {
     let mut plan = RangeStylePlan::default();
+    let positioned = |style: &mut CellStyle, _: EdgePosition| apply(style);
+    let mut memo = DeltaMemo::new(styles, &positioned, false);
     let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
     for &row in rows {
         for &col in cols {
             if !seen.insert((row, col)) {
                 continue;
             }
-            let before = styles.get(grid.effective_style_index(row, col));
-            let mut desired = before.clone();
-            apply(&mut desired);
-            if desired != *before {
-                plan.cells.push(((row, col), desired));
+            let base = grid.effective_style_index(row, col);
+            if let Planned::New(id) = memo.desired(&mut plan, base, EdgePosition::default()) {
+                plan.cells.push(((row, col), id));
             }
         }
     }
@@ -2878,7 +3668,8 @@ pub(crate) fn adjust_number_format_decimals_core(
 
 /// [`adjust_number_format_decimals_core`] with an optional cell target (P3):
 /// with `Some`, the step is decided from the BACKING sheet's active cell and
-/// written ONLY there, inside the extent, gated by the host's protection.
+/// written ONLY there, inside the extent, gated by the host's protection. The
+/// active cell is `(rows[0], cols[0])`.
 pub(crate) fn adjust_number_format_decimals_on(
     state: &AppState,
     file_state: &FileState,
@@ -2888,13 +3679,26 @@ pub(crate) fn adjust_number_format_decimals_on(
     group: &[usize],
     target: Option<&CellTargetRef>,
 ) -> Result<FormattingResult, String> {
-    if delta != 1 && delta != -1 {
-        return Err(format!("delta must be 1 or -1 (got {})", delta));
-    }
+    adjust_number_format_decimals_from_wire(state, file_state, rows, cols, delta, (None, None), group, target)
+}
+
+/// The decimal step with the ACTIVE cell resolved (by
+/// [`adjust_number_format_decimals_from_wire`], which has checked `delta` and
+/// that `active` lies inside the selection): `active` decides the new format,
+/// `rows` x `cols` receives it.
+#[allow(clippy::too_many_arguments)]
+fn adjust_number_format_decimals_at(
+    state: &AppState,
+    file_state: &FileState,
+    active: (u32, u32),
+    rows: &[u32],
+    cols: &[u32],
+    delta: i32,
+    group: &[usize],
+    target: Option<&CellTargetRef>,
+) -> Result<FormattingResult, String> {
     let unchanged = || FormattingResult { cells: Vec::new(), styles: Vec::new() };
-    let (Some(&active_row), Some(&active_col)) = (rows.first(), cols.first()) else {
-        return Ok(unchanged());
-    };
+    let (active_row, active_col) = active;
     // The shape decides the route; a scattered list too large to style cell
     // by cell is refused before any guard is taken.
     let rect = rect_of_lists(rows, cols);
@@ -2940,7 +3744,7 @@ pub(crate) fn adjust_number_format_decimals_on(
     for &sheet in &targets {
         let Some(grid) = locks.sheet_grid(sheet) else { continue };
         let plan = match rect {
-            Some(r) => plan_range_style(grid, &locks.styles, r, &|style, _| set_format(style), &NUMBER_FORMAT_WORDING)?,
+            Some(r) => plan_range_style(grid, &locks.styles, r, &|style, _| set_format(style), false, &NUMBER_FORMAT_WORDING)?,
             None => plan_listed_cells(grid, &locks.styles, rows, cols, &set_format),
         };
         if !plan.is_empty() {
@@ -2972,7 +3776,7 @@ pub(crate) fn adjust_number_format_decimals_on(
             continue;
         };
         used.extend(outcome.cells.iter().map(|&(_, _, index)| index));
-        used.extend(outcome.tier_styles.iter().copied());
+        used.extend(outcome.unreported_styles.iter().copied());
         if sheet == report_sheet {
             written = outcome.cells;
         }
@@ -2980,11 +3784,17 @@ pub(crate) fn adjust_number_format_decimals_on(
     undo_stack.commit_owned(txn);
     drop(undo_stack);
 
-    // Every style returned carries the new format (cells' and tiers' alike, on
-    // every sheet written): the wrapper records `styles[0]` for the macro
-    // recorder, and a Select All writes tiers and no cell at all.
+    // THE NEW FORMAT COMES FIRST (round-3 review rev3A#6). The wrapper records
+    // `styles[0]`'s number format for the macro recorder (a Select All writes
+    // tiers and no cell at all, so no written cell can name it). Every style
+    // written for the selection carries `next`, but an almost-whole range's
+    // EXCEPTIONS keep their OLD style (`plan_range_style`) -- often the
+    // registry's memoised explicit default, whose LOWER index sorted it first,
+    // and the recorder then recorded `numberFormat: "General"`. A stable sort
+    // puts every style carrying `next` ahead of the rest.
     used.sort_unstable();
     used.dedup();
+    used.sort_by_key(|&index| styles.get(index).number_format != next);
     let merges = report_merges(state, report_sheet, active_sheet);
     let report_grid = if report_sheet == active_sheet { &*grid } else { &grids[report_sheet] };
     Ok(formatting_result(state, report_grid, &styles, &written, &merges, Some(used)))

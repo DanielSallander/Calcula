@@ -60,6 +60,38 @@ export const pasteRefusalSentence = {
   /** A paste with no route onto a floating grid's cells (style only, comments, validation, column widths). */
   notOnFloatingGrid: (label: string): string =>
     `${label} is not available inside a floating grid yet. ${NOTHING_CHANGED}`,
+  /** Paste Link after the sheet the cells were copied from was deleted: nothing left to link to (BUG-0348). */
+  sourceSheetGone: (label: string, sheetName: string): string =>
+    `${label}: the sheet${sheetName ? ` "${sheetName}"` : ""} the cells were copied from no longer exists, ` +
+    `so there is nothing to link to. ${NOTHING_CHANGED}`,
+  /**
+   * An operation (Add / Subtract / Multiply / Divide) whose paste area touches a
+   * dynamic array -- its formula or any cell it spills into. Excel refuses the
+   * whole paste with "You can't change part of an array." (measured live
+   * through COM, 2026-10-29: onto the whole array, its formula alone, one
+   * spilled cell, or the array plus a cell beyond it; a plain paste of values
+   * is allowed).
+   */
+  partOfArray: (label: string): string =>
+    `${label}: you can't change part of an array. The paste area overlaps a dynamic array ` +
+    `(its formula or the cells it spills into), and an operation cannot be applied to it. ${NOTHING_CHANGED}`,
+  /**
+   * An operation over a cell whose formula a protected sheet HIDES (the typed
+   * read withheld it, whatever the cell's lock state): the operation keeps a
+   * formula (`=(old)+1`), and it cannot read this one.
+   */
+  hiddenFormula: (label: string, address: string): string =>
+    `${label}: ${address} is set to hide its formula on this protected sheet, so an operation cannot keep ` +
+    `what it holds. Unprotect the sheet first. ${NOTHING_CHANGED}`,
+  /**
+   * Cells whose CONTENT was pasted but whose formatting (the source's style or
+   * number format) was then refused -- never "skipped": their values changed.
+   */
+  formattingNotApplied: (count: number, reason: string): string =>
+    `Paste Special pasted ${count} cell(s) without their formatting:\n${reason}`,
+  /** The protection state could not be read, so a hidden formula could not be ruled out. */
+  protectionUnknown: (label: string): string =>
+    `${label} could not check whether this sheet hides formulas, so the operation was not applied. ${NOTHING_CHANGED}`,
 };
 
 /**

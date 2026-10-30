@@ -161,6 +161,9 @@ import {
   cachePivotView,
   setCachedPivotView,
   getCachedPivotView,
+  getReusableCachedPivotView,
+  markAllCachedPivotViewsStale,
+  settleFreshPivotViewsNotIn,
   deleteCachedPivotView,
   isCacheFresh,
   consumeFreshFlag,
@@ -192,6 +195,14 @@ import {
   resetPersistedPivotStyles,
   seedPivotStylesFromRegions,
 } from "./lib/pivotStylePersist";
+import {
+  createRegionRefreshScheduler,
+  holdPivotOutputAnnouncements,
+  isPivotOutputAnnouncement,
+  resetPivotOutputAnnouncements,
+  PIVOT_REFRESH_EVENT,
+  type RegionRefreshUrgency,
+} from "./lib/pivotRegionRefresh";
 
 // Re-export cache accessors so existing consumers (e.g., context menu) keep working
 export { cachePivotView, getCachedPivotView };
@@ -258,12 +269,18 @@ const transitionBounds = new Map<string, { endRow: number; endCol: number }>();
 let transitionCleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Re-entry guard for refreshPivotRegions.
- * When refreshPivotRegions(true) dispatches "grid:refresh", the pivot extension's
- * own grid:refresh listener would trigger another refreshPivotRegions(false) call.
- * This flag prevents that redundant second call from executing.
+ * The region refresh's scheduler (lib/pivotRegionRefresh.ts, BUG-0594). It
+ * replaces a re-entry FLAG that returned early while a refresh was in flight:
+ * meant for the refresh's own echo (refreshPivotRegions(true) dispatches
+ * "grid:refresh", whose listener here asks again -- now `asEcho`), it also
+ * DROPPED a real request that arrived while an earlier refresh was still
+ * awaiting the backend, so the regions read before the change were published
+ * and never read again. Requests in one task merge into one refresh; a strong
+ * request arriving mid-refresh runs once that refresh ends.
  */
-let isRefreshingPivotRegions = false;
+const regionRefresh = createRegionRefreshScheduler((options) =>
+  runPivotRegionRefresh(options.triggerRepaint, options.allowCachedHit),
+);
 
 /**
  * Cached BI connection status per pivot ID.
@@ -298,10 +315,14 @@ async function refreshPivotViewCache(regions: PivotRegionData[], allowCachedHit 
         console.log(`[PERF][pivot] refreshPivotViewCache pivot_id=${r.pivotId} SKIPPED (fresh cache v${existing?.version})`);
         continue;
       }
-      // On sheet switch, reuse existing cached view to avoid IPC delay.
-      // The pivot data hasn't changed — we just navigated away and back.
+      // On sheet switch, reuse existing cached view to avoid IPC delay --
+      // unless it is STALE: the pivot's output changed while its sheet was
+      // not active (revD#1). The region refresh re-reads only the active
+      // sheet's views, so a refresh, filter, undo, locale switch or replaced
+      // document that changed a pivot elsewhere left the old view here, and a
+      // canvas box painted its pre-change numbers on the way back.
       if (allowCachedHit) {
-        const existing = getCachedPivotView(r.pivotId);
+        const existing = getReusableCachedPivotView(r.pivotId);
         if (existing) {
           console.log(`[PERF][pivot] refreshPivotViewCache pivot_id=${r.pivotId} REUSED (cached v${existing.version})`);
           continue;
@@ -309,12 +330,14 @@ async function refreshPivotViewCache(regions: PivotRegionData[], allowCachedHit 
       }
       try {
         const view = await getPivotView(r.pivotId);
-        setCachedPivotView(r.pivotId, view);
+        // The refresh's own write: a listener of the view announcement that
+        // asks for a refresh is this refresh's echo, not a new request.
+        regionRefresh.asEcho(() => setCachedPivotView(r.pivotId, view));
       } catch (e) {
         console.error(`[Pivot Extension] Failed to fetch view for pivot ${r.pivotId}:`, e);
       }
     } else {
-      deleteCachedPivotView(r.pivotId);
+      regionRefresh.asEcho(() => deleteCachedPivotView(r.pivotId));
     }
   }
 }
@@ -899,15 +922,26 @@ function drawPivotPlaceholderText(overlayCtx: OverlayRenderContext): void {
 // ============================================================================
 
 /**
+ * Ask for the pivot regions to be re-read from the backend and published (see
+ * `regionRefresh`): requests in one task merge into ONE refresh, and a strong
+ * request that arrives while a refresh is in flight runs again once it ends,
+ * so a region is never left at an extent read before the change (BUG-0594).
+ * Resolves once a refresh covering this request has published.
+ */
+function refreshPivotRegions(
+  triggerRepaint: boolean = false,
+  allowCachedHit = false,
+  urgency: RegionRefreshUrgency = "strong",
+): Promise<void> {
+  return regionRefresh.request({ triggerRepaint, allowCachedHit }, urgency);
+}
+
+/**
  * Fetch pivot regions from the backend and register them with the overlay system.
  * Also dispatches the PIVOT_REGIONS_UPDATED event for other components.
+ * Only ever run by `regionRefresh` -- one at a time.
  */
-async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedHit = false): Promise<void> {
-  // Re-entry guard: when we dispatch "grid:refresh" below, the pivot extension's
-  // own grid:refresh listener would call us again. Skip that redundant call.
-  if (isRefreshingPivotRegions) return;
-  isRefreshingPivotRegions = true;
-
+async function runPivotRegionRefresh(triggerRepaint: boolean, allowCachedHit: boolean): Promise<void> {
   // Capture the structural version at the START of this refresh.
   // If a structural change (row/col insert/delete) happens while we are
   // awaiting IPC, the version will increment and our fetched data is stale.
@@ -932,6 +966,11 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
       return;
     }
 
+    // A door's "fresh" flag on a pivot of ANOTHER sheet is never consumed by
+    // this refresh: settle it into an ordinary cached view, which a later
+    // change can mark stale (revD#1).
+    settleFreshPivotViewsNotIn(regions.map((r) => r.pivotId));
+
     // Fetch and cache pivot view data for styled rendering
     const t1 = performance.now();
     await refreshPivotViewCache(regions, allowCachedHit);
@@ -945,77 +984,11 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
       return;
     }
 
-    // Save current region bounds as transition bounds before updating.
-    // This allows the overlay renderer to draw a white background over the
-    // max(old, new) area, preventing stale cells from briefly showing through.
-    if (triggerRepaint) {
-      for (const [pivotId, bounds] of gridRegionsCache.entries()) {
-        transitionBounds.set(pivotId, { endRow: bounds.endRow, endCol: bounds.endCol });
-      }
-    }
-
-    // Update grid regions cache for coordinate conversion in click handlers
-    gridRegionsCache.clear();
-    for (const r of regions) {
-      gridRegionsCache.set(r.pivotId, {
-        startRow: r.startRow,
-        startCol: r.startCol,
-        endRow: r.endRow,
-        endCol: r.endCol,
-      });
-    }
-
-    // Atomically replace pivot regions and always notify listeners so the overlay
-    // redraws immediately with the freshly-cached pivotViewCache data.
-    // The transition bounds mechanism covers the old (larger) region area with a
-    // white fill, so stale cells underneath are hidden even before refreshCells()
-    // completes from the grid:refresh below.
-    //
-    // A CANVAS pivot (one with a `canvasFrame`) publishes a floating
-    // `pivot-visual` region INSTEAD of the cell-anchored `pivot` one: the Core
-    // paints no cell region on a canvas, but would keep its bottom-right
-    // resize handle live somewhere on the page.
-    // The persisted PivotTable style rides each region (WP-C): seed before
-    // publishing, so the very paint that shows the regions wears it -- and an
-    // undo of a style change comes back the same way.
-    seedPivotStylesFromRegions(regions);
-    const published = publishPivotRegions(regions, frameGenerationAtStart);
-    prunePivotVisualRecords(new Set(published.visual.map((r) => String(r.data?.pivotId ?? ""))));
-    if (published.cell.length === 0) {
-      // Only the worksheet overlay's paint clears its bound maps; with no
-      // worksheet pivot on this sheet it never paints, so clear them here.
-      clearOverlayIconBounds();
-    }
-
-    // Update BI connection status for overlay badges (non-blocking)
-    updateBiConnectionStatus(regions);
-
-    // Rebuild writeback editability contexts so edit guards stay synchronous (non-blocking)
-    prepareWritebackContexts(regions);
-
-    // Notify other components (selection handler, etc.)
-    emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions });
-
-    // Trigger a full grid refresh (cell data re-fetch + redraw) when pivot regions change.
-    // This is needed because when a pivot table collapses/expands, cells outside the new
-    // region need to be cleared from the canvas cell cache. The window "grid:refresh" event
-    // triggers refreshCells() in GridCanvas, unlike AppEvents.GRID_REFRESH which only redraws.
-    if (triggerRepaint) {
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
-      // Refresh styles so the frontend picks up new pivot cell styles from the backend
-      window.dispatchEvent(new CustomEvent("styles:refresh"));
-      // Also refresh column/row dimensions so auto-fit widths take effect
-      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
-
-      // Clear transition bounds after a short delay, giving refreshCells() time to
-      // complete so the stale cells are gone before we stop extending the white fill.
-      if (transitionCleanupTimer) clearTimeout(transitionCleanupTimer);
-      transitionCleanupTimer = setTimeout(() => {
-        transitionBounds.clear();
-        transitionCleanupTimer = null;
-        requestOverlayRedraw();
-      }, 150);
-    }
+    // From here to the end the refresh is SYNCHRONOUS and announces what it
+    // published: a request made by a listener of those announcements (the
+    // "grid:refresh" below reaches this extension's own listener) is the
+    // refresh's echo, never a new request.
+    regionRefresh.asEcho(() => publishRefreshedRegions(regions, triggerRepaint, frameGenerationAtStart));
 
     const totalMs = performance.now() - tTotal;
     console.log(
@@ -1023,11 +996,90 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
     );
   } catch (error) {
     console.error("[Pivot Extension] Failed to fetch pivot regions:", error);
-    removeGridRegionsByType("pivot");
-    removePivotVisualRegions();
-    emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions: [] });
-  } finally {
-    isRefreshingPivotRegions = false;
+    regionRefresh.asEcho(() => {
+      removeGridRegionsByType("pivot");
+      removePivotVisualRegions();
+      emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions: [] });
+    });
+  }
+}
+
+/** The synchronous tail of a region refresh: publish what the backend reported, then repaint. */
+function publishRefreshedRegions(
+  regions: PivotRegionData[],
+  triggerRepaint: boolean,
+  frameGenerationAtStart: number,
+): void {
+  // Save current region bounds as transition bounds before updating.
+  // This allows the overlay renderer to draw a white background over the
+  // max(old, new) area, preventing stale cells from briefly showing through.
+  if (triggerRepaint) {
+    for (const [pivotId, bounds] of gridRegionsCache.entries()) {
+      transitionBounds.set(pivotId, { endRow: bounds.endRow, endCol: bounds.endCol });
+    }
+  }
+
+  // Update grid regions cache for coordinate conversion in click handlers
+  gridRegionsCache.clear();
+  for (const r of regions) {
+    gridRegionsCache.set(r.pivotId, {
+      startRow: r.startRow,
+      startCol: r.startCol,
+      endRow: r.endRow,
+      endCol: r.endCol,
+    });
+  }
+
+  // Atomically replace pivot regions and always notify listeners so the overlay
+  // redraws immediately with the freshly-cached pivotViewCache data.
+  // The transition bounds mechanism covers the old (larger) region area with a
+  // white fill, so stale cells underneath are hidden even before refreshCells()
+  // completes from the grid:refresh below.
+  //
+  // A CANVAS pivot (one with a `canvasFrame`) publishes a floating
+  // `pivot-visual` region INSTEAD of the cell-anchored `pivot` one: the Core
+  // paints no cell region on a canvas, but would keep its bottom-right
+  // resize handle live somewhere on the page.
+  // The persisted PivotTable style rides each region (WP-C): seed before
+  // publishing, so the very paint that shows the regions wears it -- and an
+  // undo of a style change comes back the same way.
+  seedPivotStylesFromRegions(regions);
+  const published = publishPivotRegions(regions, frameGenerationAtStart);
+  prunePivotVisualRecords(new Set(published.visual.map((r) => String(r.data?.pivotId ?? ""))));
+  if (published.cell.length === 0) {
+    // Only the worksheet overlay's paint clears its bound maps; with no
+    // worksheet pivot on this sheet it never paints, so clear them here.
+    clearOverlayIconBounds();
+  }
+
+  // Update BI connection status for overlay badges (non-blocking)
+  updateBiConnectionStatus(regions);
+
+  // Rebuild writeback editability contexts so edit guards stay synchronous (non-blocking)
+  prepareWritebackContexts(regions);
+
+  // Notify other components (selection handler, etc.)
+  emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions });
+
+  // Trigger a full grid refresh (cell data re-fetch + redraw) when pivot regions change.
+  // This is needed because when a pivot table collapses/expands, cells outside the new
+  // region need to be cleared from the canvas cell cache. The window "grid:refresh" event
+  // triggers refreshCells() in GridCanvas, unlike AppEvents.GRID_REFRESH which only redraws.
+  if (triggerRepaint) {
+    window.dispatchEvent(new CustomEvent("grid:refresh"));
+    // Refresh styles so the frontend picks up new pivot cell styles from the backend
+    window.dispatchEvent(new CustomEvent("styles:refresh"));
+    // Also refresh column/row dimensions so auto-fit widths take effect
+    window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+
+    // Clear transition bounds after a short delay, giving refreshCells() time to
+    // complete so the stale cells are gone before we stop extending the white fill.
+    if (transitionCleanupTimer) clearTimeout(transitionCleanupTimer);
+    transitionCleanupTimer = setTimeout(() => {
+      transitionBounds.clear();
+      transitionCleanupTimer = null;
+      requestOverlayRedraw();
+    }, 150);
   }
 }
 
@@ -1727,9 +1779,22 @@ function activate(context: ExtensionContext): void {
 
   // Listen for pivot:refresh events (from filter changes, field updates, etc.)
   // These need a repaint since the grid isn't already refreshing.
-  const handlePivotRefresh = () => { refreshPivotRegions(true); };
-  window.addEventListener("pivot:refresh", handlePivotRefresh);
-  cleanupFunctions.push(() => window.removeEventListener("pivot:refresh", handlePivotRefresh));
+  // Every output-changing door in pivot-api announces itself on this event too
+  // (lib/pivotRegionRefresh.ts, BUG-0594), so a caller that forgets to -- the
+  // @api facade route did -- no longer leaves the region and cells stale; the
+  // announcement is coalesced, so a caller that ALSO dispatches it costs one
+  // event in all (revD#2).
+  // An event the doors did NOT make (a caller's own, the `pivot` mutation
+  // domain of an undo or an MCP edit, a slicer or filter bridge, the data
+  // aftermath) does not say which pivots changed: every cached view goes stale
+  // (revD#1), so the return to another sheet re-reads its pivots instead of
+  // painting a view from before the change. A view a door just cached is kept.
+  const handlePivotRefresh = (event: Event) => {
+    if (!isPivotOutputAnnouncement(event)) markAllCachedPivotViewsStale();
+    void refreshPivotRegions(true);
+  };
+  window.addEventListener(PIVOT_REFRESH_EVENT, handlePivotRefresh);
+  cleanupFunctions.push(() => window.removeEventListener(PIVOT_REFRESH_EVENT, handlePivotRefresh));
 
   // BI model changed (Model Editor): writeback column definitions may have
   // changed — drop the cached metas and rebuild editability contexts.
@@ -1772,21 +1837,24 @@ function activate(context: ExtensionContext): void {
     const { sourceStartRow, sourceStartCol, sourceEndRow, sourceEndCol, targetRow, targetCol } =
       (e as CustomEvent).detail;
     const regions = getCachedRegions();
-    for (const region of regions) {
-      const fullyContained =
-        region.startRow >= sourceStartRow && region.endRow <= sourceEndRow &&
-        region.startCol >= sourceStartCol && region.endCol <= sourceEndCol;
-      if (fullyContained) {
-        const newRow = region.startRow + (targetRow - sourceStartRow);
-        const newCol = region.startCol + (targetCol - sourceStartCol);
-        console.log(`[Pivot Extension] Relocating pivot ${region.pivotId} to (${newRow},${newCol})`);
-        try {
-          await relocatePivot(region.pivotId, newRow, newCol);
-        } catch (err) {
-          console.error(`[Pivot Extension] Failed to relocate pivot ${region.pivotId}:`, err);
+    // One announcement for every pivot the move relocates (revD#2).
+    await holdPivotOutputAnnouncements(async () => {
+      for (const region of regions) {
+        const fullyContained =
+          region.startRow >= sourceStartRow && region.endRow <= sourceEndRow &&
+          region.startCol >= sourceStartCol && region.endCol <= sourceEndCol;
+        if (fullyContained) {
+          const newRow = region.startRow + (targetRow - sourceStartRow);
+          const newCol = region.startCol + (targetCol - sourceStartCol);
+          console.log(`[Pivot Extension] Relocating pivot ${region.pivotId} to (${newRow},${newCol})`);
+          try {
+            await relocatePivot(region.pivotId, newRow, newCol);
+          } catch (err) {
+            console.error(`[Pivot Extension] Failed to relocate pivot ${region.pivotId}:`, err);
+          }
         }
       }
-    }
+    });
     // Refresh to pick up new positions
     refreshPivotRegions(true);
   };
@@ -1795,16 +1863,18 @@ function activate(context: ExtensionContext): void {
 
   // When a table's definition changes (resize, expand, etc.), refresh any
   // pivot tables that are linked to that table so their source range stays in sync.
+  // Each refresh caches the pivot's new view (most are on other sheets, whose
+  // views the region refresh never re-reads -- revD#1) and announces it; the
+  // loop is ONE announcement, and so one region refresh (revD#2).
   const handleTableDefsUpdated = async () => {
     try {
       const allPivots = await getAllPivotTables();
       const tableLinked = allPivots.filter((p) => p.sourceTableName);
-      for (const p of tableLinked) {
-        await refreshPivotCache(p.id);
-      }
-      if (tableLinked.length > 0) {
-        refreshPivotRegions(true);
-      }
+      await holdPivotOutputAnnouncements(async () => {
+        for (const p of tableLinked) {
+          await refreshPivotCache(p.id);
+        }
+      });
     } catch (err) {
       console.error("[Pivot Extension] Failed to refresh table-linked pivots:", err);
     }
@@ -1817,14 +1887,21 @@ function activate(context: ExtensionContext): void {
   // by the backend at RESPONSE time in the locale of that moment, so the
   // mounted pivots' views are re-fetched (never served from the view cache)
   // and repainted. Keys -- selections, filters -- are invariant and unchanged.
-  const handleLocaleChangedForPivots = () => { void refreshPivotRegions(true); };
+  // EVERY cached view is in the old locale, a door's fresh one too: the
+  // pivots of the other sheets are re-read on the return to them (revD#1).
+  const handleLocaleChangedForPivots = () => {
+    markAllCachedPivotViewsStale({ includeFresh: true });
+    void refreshPivotRegions(true);
+  };
   cleanupFunctions.push(
     onAppEvent(AppEvents.LOCALE_CHANGED, handleLocaleChangedForPivots),
   );
 
   // Also refresh regions when grid refreshes (sheet switch, etc.)
   // Do NOT trigger another repaint (triggerRepaint=false) to avoid infinite loop.
-  const handleGridRefreshForRegions = () => { refreshPivotRegions(false); };
+  // WEAK: the refresh dispatches "grid:refresh" itself, so arriving while one
+  // is in flight this asks for nothing new (the old re-entry guard's case).
+  const handleGridRefreshForRegions = () => { void refreshPivotRegions(false, false, "weak"); };
   window.addEventListener("grid:refresh", handleGridRefreshForRegions);
   cleanupFunctions.push(() => window.removeEventListener("grid:refresh", handleGridRefreshForRegions));
 
@@ -1854,9 +1931,11 @@ function activate(context: ExtensionContext): void {
   );
 
   // A pull, refresh or push of a .calp application can replace pivots and the
-  // canvas frames they are shown in; re-read regions AND views (no cache hit).
+  // canvas frames they are shown in; re-read regions AND views (no cache hit),
+  // and those of the other sheets on the return to them (revD#1).
   cleanupFunctions.push(
     context.events.on(AppEvents.PACKAGE_UPDATED, () => {
+      markAllCachedPivotViewsStale({ includeFresh: true });
       refreshPivotRegions(true);
     })
   );
@@ -1871,6 +1950,16 @@ function activate(context: ExtensionContext): void {
         resetPivotCellSelection();
         // ...nor a persisted style of the previous document's pivot 1.
         resetPersistedPivotStyles();
+        // ...nor its cached VIEW: the SHEET_CHANGED that follows a replaced
+        // document asks for a cached hit, which would paint the previous
+        // document's pivot 1 under this one's id (revD#1).
+        markAllCachedPivotViewsStale({ includeFresh: true });
+        // ...nor a door's announcement still pending (it goes out a macrotask
+        // later, or after a held chain): it names the previous document's
+        // pivot, and this document's pivot with that id would run its
+        // `pivot.onRefresh` hooks for a change it never had (rev3B#10). The
+        // new document's regions are read by the SHEET_CHANGED that follows.
+        resetPivotOutputAnnouncements();
       })
     );
   }
@@ -1967,6 +2056,11 @@ function deactivate(): void {
   // Reset handler state
   resetSelectionHandlerState();
   resetWritebackEditingState();
+
+  // No queued region refresh -- nor a pending door announcement -- outlives
+  // the extension.
+  regionRefresh.reset();
+  resetPivotOutputAnnouncements();
 
   // Clear transition state
   transitionBounds.clear();

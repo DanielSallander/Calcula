@@ -1729,8 +1729,26 @@ pub(crate) async fn get_slicer_items_core(
     // dropped here, before any other guard). Keys never depend on it.
     let display_locale = crate::pivot::utils::display_locale_of(state);
 
-    // Pre-resolve each active ribbon filter's cross-filter candidacy BEFORE
-    // taking the slicer lock: its field + selection, whether it explicitly
+    // THE SLICER STORE, COPIED AND RELEASED -- before every other read below
+    // and never held across one (BUG-0593). This command is async, so it runs
+    // on a worker thread, and the item reads below take `grids`, `tables`,
+    // `style_registry`, `locale` (a TABLE slicer) and `pivot_tables` (a pivot
+    // slicer). A cell writer -- `update_cell_impl`, which the MCP server, the
+    // AI chat and the notebook drive off the main thread too -- holds every
+    // one of those and THEN writes the slicers (it re-evaluates the slicers'
+    // computed properties), and delete / move / copy sheet reach the slicers
+    // under the grid locks through `cascade_sheet_removed`. Holding the store
+    // here while waiting for `grids` left each thread holding what the other
+    // waited for: a frozen window, nothing in the log. The crate's order is
+    // grid, grids, then everything else; a copy holds nothing, so this read
+    // adds no edge at all. Every slicer is copied (not just this one) because
+    // the cross filters below read the siblings' selections; a workbook holds
+    // a handful of slicers, so the copy costs nothing next to the column scan.
+    let slicers: HashMap<identity::EntityId, Slicer> =
+        slicer_state.slicers.read().map_err(|e| e.to_string())?.clone();
+
+    // Pre-resolve each active ribbon filter's cross-filter candidacy: its
+    // field + selection, whether it explicitly
     // targets this slicer, and its effective target-pivot set. Targets are
     // mode-aware — manual uses the stored list; bySheet/workbook resolve to
     // the pivots of the filter's model connection (mirrors the frontend
@@ -1778,18 +1796,14 @@ pub(crate) async fn get_slicer_items_core(
             .collect()
     };
 
-    // A MODEL slicer's page: the BI pivots of its connection on its sheet,
-    // resolved before the slicer lock too (the helper takes the pivot locks).
-    // Its page's visual interactions too (P4 2.5 lock order item 3): copied
-    // out of `sheet_kinds` and released here, never under the slicer lock.
+    // A MODEL slicer's page: the BI pivots of its connection on its sheet (the
+    // helper takes the pivot locks). Its page's visual interactions too (P4
+    // 2.5 lock order item 3): copied out of `sheet_kinds` and released here.
     let (model_page, page_interactions): (
         Option<std::collections::HashSet<identity::EntityId>>,
         Option<::persistence::CanvasInteractions>,
     ) = {
-        let head = slicer_state
-            .slicers
-            .read()
-            .unwrap()
+        let head = slicers
             .get(&slicer_id)
             .filter(|s| s.is_model_slicer())
             .map(|s| (s.cache_source_id, s.sheet_index));
@@ -1808,10 +1822,10 @@ pub(crate) async fn get_slicer_items_core(
         }
     };
 
-    // Everything lock-holding happens in this block (the command is async —
-    // no guard may live across an await). Clones what phase 2 needs.
+    // Phase 1, synchronous: every read below takes its own locks and releases
+    // them (the command is async -- no guard may live across an await), over
+    // the slicer COPY taken above. Clones what phase 2 needs.
     let (slicer, unique_values_sync, has_data_set, pinned_bi, model_cross) = {
-    let slicers = slicer_state.slicers.read().unwrap();
     let slicer = slicers
         .get(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
@@ -1928,7 +1942,7 @@ pub(crate) async fn get_slicer_items_core(
 
     (slicer.clone(), unique_values, has_data_set, pinned_bi, None)
     }
-    }; // locks drop here — phase 2 may await
+    }; // nothing is held here -- phase 2 may await
 
     // Phase 2 (async): model reads.
     let (unique_values, has_data_set): (Vec<MemberRef>, Option<std::collections::HashSet<String>>) =

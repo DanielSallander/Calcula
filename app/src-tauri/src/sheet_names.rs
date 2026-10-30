@@ -94,16 +94,28 @@ pub fn validate_sheet_name(raw: &str) -> Result<String, String> {
 /// allowing `sheet1` beside `Sheet1` created two sheets that every consumer
 /// downstream believed were one. `ignore_index` is the sheet being renamed —
 /// renaming `Data` to `Data` is not a collision with itself.
+///
+/// AND BEYOND ASCII (rev6A#8). The comparison was `eq_ignore_ascii_case`, so
+/// `Ärende` and `ärende` could coexist -- while the engine looks a sheet up by
+/// its name UPPERCASED (`MultiSheetContext`, the cube pre-fetch's per-sheet
+/// map), which makes the two one sheet there: `='ärende'!A1` read whichever
+/// was registered last, and a Calculate Now served one sheet's cube cells the
+/// other's members. Excel refuses that pair [LIVE, Excel 16: "That name is
+/// already taken"]. Names that uppercase alike are refused, which is also
+/// what the engine's lookups need: `Straße` beside `STRASSE` (Rust uppercases
+/// `ß` to `SS`) is refused too, although Excel accepts it [LIVE] -- two sheets
+/// every engine lookup would treat as one cannot be allowed.
 pub fn ensure_sheet_name_is_free(
     name: &str,
     existing: &[String],
     ignore_index: Option<usize>,
 ) -> Result<(), String> {
+    let folded = name.to_uppercase();
     for (i, other) in existing.iter().enumerate() {
         if Some(i) == ignore_index {
             continue;
         }
-        if other.eq_ignore_ascii_case(name) {
+        if other.eq_ignore_ascii_case(name) || other.to_uppercase() == folded {
             return Err(format!("Sheet '{}' already exists", other));
         }
     }
@@ -472,6 +484,28 @@ mod tests {
         // Renaming a sheet to the case-variant of its OWN name is not a clash.
         assert!(ensure_sheet_name_is_free("SHEET1", &existing, Some(0)).is_ok());
         assert!(ensure_sheet_name_is_free("Report", &existing, None).is_ok());
+    }
+
+    /// rev6A#8: the comparison was ASCII-only, so `Ärende` and `ärende` could
+    /// coexist while every engine lookup (`MultiSheetContext`, the cube
+    /// pre-fetch's per-sheet map) folds a name with `to_uppercase` and so saw
+    /// one sheet. Excel refuses the pair [LIVE].
+    #[test]
+    fn a_duplicate_is_refused_ignoring_case_beyond_ascii() {
+        let existing = vec!["\u{c4}rende".to_string(), "Stra\u{df}e".to_string()];
+        assert!(ensure_sheet_name_is_free("\u{e4}rende", &existing, None).is_err(), "Ärende beside ärende");
+        assert!(ensure_sheet_name_is_free("\u{c4}RENDE", &existing, None).is_err());
+        assert!(
+            ensure_sheet_name_is_free("STRASSE", &existing, None).is_err(),
+            "two names every engine lookup folds alike are one sheet there"
+        );
+        assert!(ensure_sheet_name_is_free("\u{e4}rende", &existing, Some(0)).is_ok(), "its own case-variant");
+        assert!(ensure_sheet_name_is_free("\u{c5}rende", &existing, None).is_ok(), "another letter is another name");
+        assert_eq!(
+            unique_sheet_name("\u{e4}rende", &existing),
+            "\u{e4}rende (2)",
+            "a generated name steps past the case-variant too"
+        );
     }
 
     #[test]

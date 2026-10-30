@@ -88,6 +88,13 @@ const h = vi.hoisted(() => {
     /** How many times the strip cleared the sheet group. */
     groupClears: 0,
     /**
+     * The group as the strip SET it (setSelectedSheetIndices), cleared by
+     * clearSheetGrouping: the strip asks `isSheetGroupingActive` at the click,
+     * so a group the user made must read as active, or a test that a click
+     * does NOT clear it could never fail.
+     */
+    group: [] as number[],
+    /**
      * A live EXTERNAL session (a floating grid's cell edit), or null: its host
      * by STABLE id (what Core's identity rule decides by), the TRUE index its
      * host had when it OPENED (the owner's fixed `hostSheetIndex`), and
@@ -332,15 +339,18 @@ vi.mock("../../../api", async () => {
     emitAppEvent: events.emitAppEvent,
     AppEvents: events.AppEvents,
     isFormulaExpectingReference: types.isFormulaExpectingReference,
-    setSelectedSheetIndices: () => {},
+    setSelectedSheetIndices: (indices: number[]) => {
+      h.m.group = [...indices];
+    },
     clearSheetGrouping: () => {
       h.m.groupClears += 1;
+      h.m.group = [];
     },
     toggleSheetInGroup: (index: number, active: number) => {
       h.m.groupToggles.push([index, active]);
       return [...h.m.nextGroup];
     },
-    isSheetGroupingActive: () => false,
+    isSheetGroupingActive: () => h.m.group.length > 1,
     getSelectedSheetIndices: () => [],
     primeSheetSwitch: async () => {},
     getSheetTabDecorations: () => [],
@@ -435,6 +445,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { SheetTabs } from "../SheetTabs";
 import { getSheetTabsController, STRUCTURE_LOCKED } from "../sheetCommands";
 import { abortEditorOpen, beginEditorOpen } from "../../../core/lib/editOpenBuffer";
+import {
+  clearSheetGrouping as clearCoreSheetGroup,
+  endSheetGroupUnlessMember,
+  setSelectedSheetIndices as setCoreSheetGroup,
+} from "../../../core/state/sheetGrouping";
 import { sheetDeleteNeedsConfirmation } from "../sheetDeletePolicy";
 import { registerCoreSheetContextMenu, sheetExtensions as coreSheetMenu } from "../../registries/sheetExtensions";
 import type { MoveOrCopySheetData } from "../../dialogs/MoveOrCopySheetDialog";
@@ -562,6 +577,7 @@ beforeEach(() => {
   h.m.groupToggles.length = 0;
   h.m.nextGroup = [];
   h.m.groupClears = 0;
+  h.m.group = [];
   h.m.session = null;
   abortEditorOpen();
   h.colorPicker.length = 0;
@@ -1838,6 +1854,35 @@ describe("the strip moves Core's sheet context WITH the sheet's stable id", () =
 // must be ignored BEFORE the strip's "a normal click clears the sheet group"
 // step -- otherwise a drag released on its own tab (no move) still clears a
 // group the user made on purpose.
+// Review revG#4 (BUG-0350): the strip kept its OWN copy of the sheet group in
+// React state, so a group Core ended -- an ordinary switch (Name Box, Go To, a
+// link, the command line) to a sheet outside it, which Excel ungroups on --
+// went on being highlighted. The strip now paints Core's group.
+describe("the strip paints Core's sheet group (review revG#4)", () => {
+  // SABOTAGE: subscribe to nothing (`useSyncExternalStore(() => () => {}, ...)`)
+  // -> the strip never hears the group change.
+  it("a group Core holds shows [Group]; Core ending it on a switch outside it stops showing it at once", async () => {
+    await mountOnDrill([
+      { id: "id-Sales", name: "Sales", ephemeral: false },
+      { id: "id-Costs", name: "Costs", ephemeral: false },
+      { id: "id-Summary", name: "Summary", ephemeral: false },
+    ]);
+    try {
+      expect(container.textContent).not.toContain("[Group]");
+      act(() => setCoreSheetGroup([0, 2]));
+      expect(container.textContent, "the strip does not show the group Core holds").toContain("[Group]");
+      // A switch to a member keeps it...
+      act(() => endSheetGroupUnlessMember(2));
+      expect(container.textContent).toContain("[Group]");
+      // ...a switch outside it ends it, and the strip follows.
+      act(() => endSheetGroupUnlessMember(1));
+      expect(container.textContent, "the strip still highlights a group Core ended").not.toContain("[Group]");
+    } finally {
+      act(() => clearCoreSheetGroup());
+    }
+  });
+});
+
 describe("a drag's click never clears an existing sheet group", () => {
   function layOutTabs(): void {
     const tabs = Array.from(container.querySelectorAll("button[data-sheet-tab]")) as HTMLElement[];

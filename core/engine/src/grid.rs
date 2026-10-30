@@ -39,6 +39,11 @@ pub struct Grid {
     /// Default style for an entire COLUMN, by column index. Excel's
     /// `<col s="..">` tier. Consulted after [`Grid::row_styles`].
     pub column_styles: FxHashMap<u32, usize>,
+
+    /// What this sheet's cube and custom-function calls answered, by argument
+    /// fingerprint -- DERIVED state, never saved. A clone SHARES it; see
+    /// [`crate::cube::CallMemo`] for why, and for the rule it serves.
+    call_memo: crate::cube::CallMemo,
 }
 
 impl Grid {
@@ -50,7 +55,28 @@ impl Grid {
             max_col: 0,
             row_styles: FxHashMap::default(),
             column_styles: FxHashMap::default(),
+            call_memo: crate::cube::CallMemo::default(),
         }
+    }
+
+    /// A new, empty Grid that SHARES `sheet`'s results cache -- for a restore
+    /// that rebuilds a sheet's cells from a snapshot (an undo of a grouped
+    /// structural edit, of a subscription reset). The cache is keyed by the
+    /// arguments of each call, never by cell, so every answer it holds is as
+    /// true of the rebuilt sheet as of the one it replaces; a plain
+    /// [`Grid::new`] would forget them all, and a recalculation without data
+    /// would then refuse every cube and custom-function cell on the sheet.
+    pub fn new_sharing_call_memo(sheet: &Grid) -> Self {
+        let mut grid = Grid::new();
+        grid.call_memo = sheet.call_memo.clone();
+        grid
+    }
+
+    /// The answers this sheet's cube and custom-function calls gave -- the
+    /// results cache a recalculation without cube data or a UDF resolver
+    /// answers each such call from ([`crate::cube::CallMemo`]).
+    pub fn call_memo(&self) -> &crate::cube::CallMemo {
+        &self.call_memo
     }
 
     /// The style index that actually applies at (row, col).

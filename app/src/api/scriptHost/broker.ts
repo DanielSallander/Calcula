@@ -572,6 +572,22 @@ interface ExposedMethod {
 const exposedMethods = new Map<string, ExposedMethod>();
 
 /**
+ * Exposures a RE-KEY displaced, by owner and method name, until their owner is
+ * re-keyed too (`rekeyExposed`).
+ *
+ * The backend moves several bindings in ONE step and announces them one by
+ * one: Insert Rows above two stacked scripted shapes moves control-0-5-2 to
+ * control-0-6-2 AND control-0-6-2 to control-0-7-2, and a sheet move rotates
+ * whole sheets of controls. Re-keying the first onto an address the second
+ * still held used to overwrite the second's entry, so the second's own re-key
+ * found nothing to move: its methods were gone, and its scheduled jobs failed
+ * every tick. The displaced entry is parked here instead and moved by its own
+ * owner's re-key. Unreachable while parked (no door reads this map), withdrawn
+ * by its registration's cleanup like any other.
+ */
+const displacedExposures = new Map<ScriptHandle, Map<string, ExposedMethod>>();
+
+/**
  * Name prefix reserved for entry points that ONLY trusted host code may invoke.
  *
  * WHY IT EXISTS. `expose(name, fn, { public: false })` is enough for ordinary
@@ -606,12 +622,42 @@ export function registerExposed(
   exposedMethods.set(key, { handler, owner, isPublic });
   return () => {
     // Only the current registration may remove itself (a remount must not
-    // delete its successor's entry).
-    const current = exposedMethods.get(key);
-    if (current && current.handler === handler) {
-      exposedMethods.delete(key);
-    }
+    // delete its successor's entry) -- found by WHAT it registered, never by
+    // the key it was registered under. A re-bind moves the entry to the
+    // script's new binding (`rekeyExposed`), and a cleanup that deleted the
+    // ORIGINAL key left the moved entry behind after the unmount: a scheduled
+    // job then passed the owner check and relayed into a terminated worker,
+    // timing out instead of failing, and listExposed() showed a method of a
+    // script that was gone (rev6B#1).
+    withdrawRegistration(owner, methodName, handler);
   };
+}
+
+/** Remove the entry `owner` registered for `handler`, wherever a re-key put it. */
+function withdrawRegistration(
+  owner: ScriptHandle,
+  methodName: string,
+  handler: (...args: unknown[]) => unknown,
+): void {
+  const parked = displacedExposures.get(owner);
+  if (parked?.get(methodName)?.handler === handler) {
+    parked.delete(methodName);
+    if (parked.size === 0) displacedExposures.delete(owner);
+    return;
+  }
+  // Where the owner's binding says it is now, else wherever it is.
+  const now = exposedKey(owner.objectType, owner.instanceId, methodName);
+  const there = exposedMethods.get(now);
+  if (there && there.handler === handler && there.owner === owner) {
+    exposedMethods.delete(now);
+    return;
+  }
+  for (const [key, entry] of exposedMethods) {
+    if (entry.handler === handler && entry.owner === owner) {
+      exposedMethods.delete(key);
+      return;
+    }
+  }
 }
 
 /**
@@ -625,7 +671,13 @@ export function registerExposed(
 export function unregisterExposed(owner: ScriptHandle, methodName: string): boolean {
   const key = exposedKey(owner.objectType, owner.instanceId, methodName);
   const current = exposedMethods.get(key);
-  if (!current || current.owner !== owner) return false;
+  if (!current || current.owner !== owner) {
+    // Displaced by another script's re-key and not yet moved by its own.
+    const parked = displacedExposures.get(owner);
+    if (!parked?.delete(methodName)) return false;
+    if (parked.size === 0) displacedExposures.delete(owner);
+    return true;
+  }
   exposedMethods.delete(key);
   return true;
 }
@@ -707,6 +759,84 @@ export function hostCallExposed(
   return target.handler(...args);
 }
 
+/**
+ * `hostCallExposed` for a caller that must know the call RAN: a SCHEDULED JOB
+ * (scheduler.ts). The method must be exposed under the address AND owned by
+ * `ownerScriptId` -- a job only ever calls a method its own script published
+ * (`scripting/scheduler.rs`'s invocation rule) -- or this THROWS.
+ *
+ * `hostCallExposed` answers a missing method with `undefined`, its documented
+ * public meaning (`callExposedMethod`), so a job whose address went stale --
+ * a named-range script whose name was renamed under a job saved with the old
+ * name -- reported every tick as a healthy run that did nothing (rev4B#1).
+ * A missing exposure is now a FAILED run, with the address in the reason.
+ */
+export function hostCallOwnExposed(
+  ownerScriptId: string,
+  targetType: string,
+  targetInstanceId: string | null,
+  methodName: string,
+  args: unknown[],
+): unknown {
+  const target = exposedMethods.get(exposedKey(targetType, targetInstanceId, methodName));
+  if (!target || target.owner.scriptId !== ownerScriptId) {
+    const where = targetInstanceId ? `${targetType} "${targetInstanceId}"` : targetType;
+    throw new BrokerError(
+      "UnknownMethod",
+      `The script does not expose ${methodName}() on ${where}, so the scheduled job had nothing to run.`,
+    );
+  }
+  return target.handler(...args);
+}
+
+/**
+ * Move every method `owner` exposed under its OLD instance id to the one
+ * `owner.instanceId` names now (the caller has already updated it). Returns
+ * how many moved.
+ *
+ * A mount's binding can move while it runs: a named-range script is bound by
+ * the name's TEXT, and a rename (or its undo) re-binds it. The exposure map is
+ * keyed by (objectType, instanceId, method), so re-keying only the mount left
+ * every exposed method reachable under the old name alone -- a scheduled job,
+ * a shortcut or the debugger calling it under the new one found nothing, and
+ * `unregisterExposed` (which keys by the handle) could no longer withdraw it.
+ * Owner-checked like `unregisterExposed`: an entry another script holds under
+ * the old key is left where it is.
+ *
+ * ONE STEP CAN MOVE SEVERAL SCRIPTS ONTO EACH OTHER'S ADDRESSES (rows inserted
+ * above two stacked scripted controls, a sheet move rotating the sheets), and
+ * each is re-keyed on its own announcement. An entry this re-key lands on that
+ * belongs to ANOTHER script is therefore parked, not overwritten, and moved by
+ * that script's own re-key -- which also collects this owner's parked entries.
+ */
+export function rekeyExposed(owner: ScriptHandle, oldInstanceId: string | null): number {
+  const prefix = `${owner.objectType}:${oldInstanceId || ""}:`;
+  const moving: Array<[string, ExposedMethod]> = [];
+  for (const [key, entry] of exposedMethods) {
+    if (key.startsWith(prefix) && entry.owner === owner) moving.push([key.slice(prefix.length), entry]);
+  }
+  for (const [methodName] of moving) exposedMethods.delete(prefix + methodName);
+  const parked = displacedExposures.get(owner);
+  if (parked) {
+    displacedExposures.delete(owner);
+    for (const [methodName, entry] of parked) moving.push([methodName, entry]);
+  }
+  for (const [methodName, entry] of moving) {
+    const key = exposedKey(owner.objectType, owner.instanceId, methodName);
+    const occupant = exposedMethods.get(key);
+    if (occupant && occupant.owner !== owner) {
+      let displaced = displacedExposures.get(occupant.owner);
+      if (!displaced) {
+        displaced = new Map();
+        displacedExposures.set(occupant.owner, displaced);
+      }
+      displaced.set(methodName, occupant);
+    }
+    exposedMethods.set(key, entry);
+  }
+  return moving.length;
+}
+
 /** All exposed methods (transparency panel / debugging). */
 export function listExposed(): Array<{
   objectType: string;
@@ -739,6 +869,7 @@ export function listExposed(): Array<{
 /** Drop every exposed method (workbook close / manager reset). */
 export function clearExposed(): void {
   exposedMethods.clear();
+  displacedExposures.clear();
 }
 
 // ============================================================================

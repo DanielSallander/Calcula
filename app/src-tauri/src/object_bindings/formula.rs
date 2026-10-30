@@ -275,11 +275,26 @@ pub fn default_ref_sheet(
 /// The sheet a chart's OWN data source names (`spec.data` of the definition
 /// envelope, or of a bare spec), as an index into `names`. `None` for a
 /// design-query / pivot / unqualified source, or a sheet that no longer exists.
+///
+/// A DEFINED NAME as the data (`"SalesData"`) is on the sheet
+/// `resolveDataSource` (Charts/lib/dataSourceResolver.ts) reads it from: the
+/// sheet its definition names (`=Inputs!$A$1:$C$5`), else -- an unqualified
+/// definition -- the sheet the name is scoped to. It used to fall through as
+/// an unqualified source, so a canvas chart over a name read its bound title's
+/// `=B1` on the first visible worksheet while its own param cells
+/// (`locateParamCell`) read the name's sheet. The rule is the one the
+/// structural shift of those param cells uses
+/// (`chart_range_shift.rs` `defined_name_key` / `name_definition_sheet`), so
+/// the three cannot drift apart. A name whose definition is no plain A1 range,
+/// or that is unqualified and workbook-scoped (read on whatever sheet is
+/// active), has no data sheet here either.
 pub fn chart_data_sheet(
     spec_json: &str,
     names: &[String],
     ids: &[identity::SheetId],
+    named_ranges: &HashMap<String, NamedRange>,
 ) -> Option<usize> {
+    use crate::chart_commands::range_shift::{defined_name_key, name_definition_sheet, NameSheet};
     let value: serde_json::Value = serde_json::from_str(spec_json).ok()?;
     let inner = match value.get("spec") {
         Some(spec) if spec.is_object() => spec,
@@ -287,10 +302,17 @@ pub fn chart_data_sheet(
     };
     let data = inner.get("data")?;
     let only_data = serde_json::json!({ "data": data });
-    match calp::chart_refs::chart_spec_source_sheets(&only_data).into_iter().next()? {
-        calp::chart_refs::ChartSourceSheet::Id(id) => ids.iter().position(|s| *s == id),
-        calp::chart_refs::ChartSourceSheet::Index(i) => (i < names.len()).then_some(i),
-        calp::chart_refs::ChartSourceSheet::Name(n) => names.iter().position(|s| s.eq_ignore_ascii_case(&n)),
+    if let Some(sheet) = calp::chart_refs::chart_spec_source_sheets(&only_data).into_iter().next() {
+        return match sheet {
+            calp::chart_refs::ChartSourceSheet::Id(id) => ids.iter().position(|s| *s == id),
+            calp::chart_refs::ChartSourceSheet::Index(i) => (i < names.len()).then_some(i),
+            calp::chart_refs::ChartSourceSheet::Name(n) => names.iter().position(|s| s.eq_ignore_ascii_case(&n)),
+        };
+    }
+    let name = named_ranges.get(&defined_name_key(data)?)?;
+    match name_definition_sheet(&name.refers_to, name.sheet_index)? {
+        NameSheet::Named(sheet) => names.iter().position(|s| s.eq_ignore_ascii_case(&sheet)),
+        NameSheet::Scope(index) => (index < names.len()).then_some(index),
     }
 }
 
@@ -842,8 +864,9 @@ pub struct FormulaWorld {
 
 impl FormulaWorld {
     pub fn read(state: &crate::AppState) -> FormulaWorld {
-        let sheet_names = state.sheet_names.read().map(|g| g.clone()).unwrap_or_default();
-        let sheet_ids = state.sheet_ids.read().map(|g| g.clone()).unwrap_or_default();
+        // Names and ids under ONE hold, `sheet_names` first (BUG-0590 /
+        // BUG-0592): they are paired by index.
+        let (sheet_ids, sheet_names) = crate::calp_commands::sheet_ids_and_names(state).unwrap_or_default();
         let sheet_kinds = state.sheet_kinds.read().map(|g| g.clone()).unwrap_or_default();
         let sheet_visibility = state.sheet_visibility.read().map(|g| g.clone()).unwrap_or_default();
         let tables = state.tables.read().map(|g| g.clone()).unwrap_or_default();

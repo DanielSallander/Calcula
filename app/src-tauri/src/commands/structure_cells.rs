@@ -33,7 +33,11 @@
 //!    on delete). Inserting is REFUSED when a non-empty cell -- a value, a
 //!    formula or only formatting -- would be pushed off the sheet.
 //! 3. CELL-ANCHORED THINGS move with their cell: formulas, values, formatting,
-//!    notes, comments, hyperlinks, cell types, controls.
+//!    notes, comments, hyperlinks, cell types, controls. Formatting includes
+//!    the look a ROW or COLUMN format gave a position: those formats stay on
+//!    their lines, so a moved position keeps its look explicitly where the
+//!    line under it changes (BUG-0354 follow-up, measured 2026-10-29;
+//!    `plan_carried_line_looks`).
 //! 4. CONDITIONAL FORMATS AND DATA VALIDATION are cut per cell: the part of a
 //!    range inside the band moves (as a reference, rule 1), the parts outside
 //!    stay. Insert B2:C3 down with a rule on A8:D9 -> A8:A9, D8:D9, B10:C11.
@@ -460,7 +464,8 @@ pub(crate) const INHERITED_CELLS_LIMIT: u64 = 2_000_000;
 /// the line just before the insertion -- the cell above (rows) or to the left
 /// (columns), Excel's "Format Same As Above / Left". Only a cell with a style
 /// of its own is copied (index 0 inherits its tiers, which the caller carries
-/// for whole lines); the copy is an EMPTY cell, never the neighbour's value.
+/// for whole lines, and `plan_carried_line_looks` for a band edit); the copy
+/// is an EMPTY cell, never the neighbour's value.
 /// An insertion at the first line has no neighbour and inherits nothing
 /// (measured: Excel's new row 1 / column A is unformatted).
 ///
@@ -502,6 +507,127 @@ pub(crate) fn inherit_neighbour_styles(grid: &mut engine::Grid, band: &BandEdit)
         }
     }
     Some(total)
+}
+
+/// Rule 3 for the EMPTY positions under a row/column format (BUG-0354
+/// follow-up). A band edit moves cells but never a row or column format (both
+/// are whole-line properties), so a position that SHOWED a line's format --
+/// or showed none -- would take the format of the line it lands on. Excel
+/// moves the look with the position [LIVE, Excel 16, lane `lineformat`
+/// probe2.ps1: with row 5 Bold, Delete Cells A3 shift up leaves the empty A4
+/// bold and a value typed into A5 afterwards plain; Insert Cells A3 shift down
+/// leaves a value typed into A5 plain and one typed into A6 bold], and rule 5
+/// gives an inserted position its neighbour's look -- including one that comes
+/// only from the neighbour's line [Insert Cells A5 shift down under a bold row
+/// 5 with a plain A4: a value typed into A5 is plain].
+///
+/// Returns the blank cells to write AFTER the move -- `(position, style)` --
+/// for the positions whose origin (or, for an inserted one, whose neighbour)
+/// holds no cell with a style of its own; a moved CELL carries its own look in
+/// the caller's lift loop. Planned on the PRE-move grid. Only the lines a line
+/// format can make differ are visited: a moved position's look can change only
+/// where its origin line and its destination line carry DIFFERENT formats on
+/// the shift axis (a row format for Up/Down; a column format for Left/Right,
+/// which a row format then outranks), so the walk is O(those lines x the
+/// band's width), not O(band) -- and Select All Bold, one equal format on
+/// every column, visits nothing. Past [`INHERITED_CELLS_LIMIT`] positions the
+/// edit still happens and the positions keep the line's look instead -- a
+/// lost format, never a lost value -- and the log says so (rule 5's own
+/// bound).
+pub(crate) fn plan_carried_line_looks(
+    grid: &engine::Grid,
+    styles: &mut engine::StyleRegistry,
+    band: &BandEdit,
+) -> Vec<((u32, u32), usize)> {
+    let (at, count, max) = (band.at(), band.count(), band.max_along());
+    let tiers = if band.moves_rows() { &grid.row_styles } else { &grid.column_styles };
+    let along_tiers: std::collections::BTreeSet<u32> =
+        tiers.iter().filter(|(_, &i)| i != 0).map(|(&line, _)| line).collect();
+    if along_tiers.is_empty() {
+        return Vec::new();
+    }
+    // The format of a whole line on the shift axis (0: none). Two lines with
+    // the same one show the same look at every perpendicular position.
+    let along_tier = |line: u32| tiers.get(&line).copied().unwrap_or(0);
+
+    // MOVED positions: destination line -> origin line.
+    let (first_dest, last_dest) = if band.inserting() {
+        (at as u64 + count as u64, max as u64)
+    } else {
+        (at as u64, (max as u64).saturating_sub(count as u64))
+    };
+    let origin_of = |dest: u32| if band.inserting() { dest - count } else { dest + count };
+    let mut moved: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    if first_dest <= last_dest {
+        for &t in &along_tiers {
+            // The line format at the destination ...
+            if (t as u64) >= first_dest && (t as u64) <= last_dest {
+                moved.insert(t);
+            }
+            // ... or at the origin.
+            let dest = if band.inserting() { t as u64 + count as u64 } else { (t as u64).wrapping_sub(count as u64) };
+            if (t as u64) >= at as u64 && dest >= first_dest && dest <= last_dest {
+                moved.insert(dest as u32);
+            }
+        }
+    }
+    moved.retain(|&dest| along_tier(origin_of(dest)) != along_tier(dest));
+
+    // INSERTED positions (rule 5): their neighbour on the line before `at`.
+    let mut inserted: Vec<u32> = Vec::new();
+    if band.inserting() && at > 0 {
+        let last = (at as u64 + count as u64 - 1).min(max as u64) as u32;
+        let neighbour_tier = along_tier(at - 1);
+        if neighbour_tier != 0 {
+            inserted.extend((at..=last).filter(|&line| along_tier(line) != neighbour_tier));
+        } else {
+            inserted.extend(along_tiers.range(at..=last).copied());
+        }
+    }
+
+    let width = u64::from(band.band_end - band.band_start) + 1;
+    let visits = (moved.len() as u64 + inserted.len() as u64) * width;
+    if visits > INHERITED_CELLS_LIMIT {
+        crate::log_warn!(
+            "STRUCT",
+            "a band edit at {} keeps the row/column formats where they are but does not carry the look of {} empty position(s) across them: over the {} limit",
+            at,
+            visits,
+            INHERITED_CELLS_LIMIT
+        );
+        return Vec::new();
+    }
+
+    let line_at = |(row, col): (u32, u32)| crate::commands::styles::line_format_index_at(grid, row, col);
+    let mut blanks = Vec::new();
+    for &dest in &moved {
+        let origin = origin_of(dest);
+        for perp in band.band_start..=band.band_end {
+            let from = band.join(origin, perp);
+            if grid.cells.contains_key(&from) {
+                continue; // a cell: it carries its own look (the lift loop)
+            }
+            let to = band.join(dest, perp);
+            let style = crate::commands::styles::carried_line_format(styles, line_at(from), line_at(to));
+            if style != 0 {
+                blanks.push((to, style));
+            }
+        }
+    }
+    for &line in &inserted {
+        for perp in band.band_start..=band.band_end {
+            let neighbour = band.join(at - 1, perp);
+            if grid.cells.get(&neighbour).is_some_and(|c| c.style_index != 0) {
+                continue; // `inherit_neighbour_styles` copies its own style
+            }
+            let to = band.join(line, perp);
+            let style = crate::commands::styles::carried_line_format(styles, line_at(neighbour), line_at(to));
+            if style != 0 {
+                blanks.push((to, style));
+            }
+        }
+    }
+    blanks
 }
 
 // ============================================================================
@@ -1102,6 +1228,10 @@ pub(crate) fn shift_cells_impl(
     // Object property BINDING formulas that read the band (WP-D).
     crate::object_bindings::cascade::shift_object_bindings_in_band(state, &effect, &mut undo_stack, &edited_sheet_name, &band);
     shift_range_strings_in_band(state, &effect, &mut undo_stack, active_sheet, &edited_sheet_name, &band);
+    // Chart and sparkline DATA RANGES reading the band (BUG-0357).
+    crate::chart_commands::range_shift::shift_chart_and_sparkline_ranges(
+        state, &effect, &mut undo_stack, active_sheet, &edited_sheet_name, &band,
+    );
     shift_controls_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
     shift_rule_ranges_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
     let cross_sheet_rewritten = shift_cross_sheet_formulas_in_band(
@@ -1144,6 +1274,12 @@ pub(crate) fn shift_cells_impl(
     // put the survivors down at their new positions -- two passes, so a moved
     // cell can never land on one not yet lifted.
     let at = band.at();
+    // Row/column formats do not move in a band edit, so every position keeps
+    // the look it showed by writing it where the line format under it changes
+    // (rule 3 for formats; `plan_carried_line_looks`). Planned on the PRE-move
+    // grid: which origins hold a cell decides what is a blank.
+    let mut styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
+    let carried_blanks = plan_carried_line_looks(&grid, &mut styles, &band);
     let lifted: Vec<((u32, u32), Cell)> = grid
         .cells
         .iter()
@@ -1156,11 +1292,22 @@ pub(crate) fn shift_cells_impl(
     for (pos, _) in &lifted {
         grid.cells.remove(pos);
     }
-    for ((r, c), cell) in lifted {
+    for ((r, c), mut cell) in lifted {
         // Kind 3 (stripe coverage): the old position's content changed.
         seeds.moved((r, c), false);
         if let Some(pos) = band.shift_cell(r, c) {
             seeds.moved(pos, cell.formula_string().is_some());
+            // A cell with no style of its own showed its line's format: it
+            // keeps that look where it lands [LIVE, Excel 16: Delete Cells
+            // shift up leaves the value moved into a bold row plain, Insert
+            // Cells shift down carries a bold row's value off it bold].
+            if cell.style_index == 0 {
+                cell.style_index = crate::commands::styles::carried_line_format(
+                    &mut styles,
+                    crate::commands::styles::line_format_index_at(&grid, r, c),
+                    crate::commands::styles::line_format_index_at(&grid, pos.0, pos.1),
+                );
+            }
             grid.cells.insert(pos, cell);
         }
     }
@@ -1168,6 +1315,13 @@ pub(crate) fn shift_cells_impl(
     // Rule 5: inserted cells take their neighbour's format (the one helper the
     // whole-line inserts use too).
     inherit_neighbour_styles(&mut grid, &band);
+    // ...and the EMPTY positions the edit moves or inserts keep (take) the
+    // look of where they came from (of their neighbour) where a line format
+    // would otherwise change it.
+    for (pos, style_index) in carried_blanks {
+        grid.cells.insert(pos, Cell { ast: None, value: engine::CellValue::Empty, style_index, rich_text: None });
+    }
+    drop(styles);
 
     grid.recalculate_bounds();
     if active_sheet < grids.len() {
@@ -1695,17 +1849,20 @@ fn shift_controls_in_band(
     if !changed {
         return;
     }
-    let previous_ids = {
+    // Through the one re-bind door, as `shift_controls`: the scripts' SCHEDULED
+    // JOBS move with their bindings and every window is told (rev6B#2).
+    let (previous_ids, rebound) = {
         let Ok(mut scripts) = state.object_scripts.write(effect) else { return };
         let mut prev = Vec::new();
+        let mut rebound = Vec::new();
         for script in scripts.iter_mut() {
             let Some(current) = script.instance_id.clone() else { continue };
             if let Some(moved_to) = id_moves.get(&current) {
                 prev.push((script.id.clone(), Some(current)));
-                script.instance_id = moved_to.clone();
+                rebound.extend(crate::scripting::script_rebind::rebind_script(effect, script, moved_to.clone()));
             }
         }
-        prev
+        (prev, rebound)
     };
     if let Ok(mut store) = state.controls.write(effect) {
         *store = rebuilt;
@@ -1715,6 +1872,8 @@ fn shift_controls_in_band(
         crate::undo_commands::controls_snapshot_bytes(previous_controls, previous_ids),
         "Shift controls",
     );
+    // The script store's guard is released (script_rebind::announce_rebinds).
+    crate::scripting::script_rebind::announce_rebinds(&rebound);
 }
 
 /// Conditional formats and data validations (rule 4 + rule 5), and the

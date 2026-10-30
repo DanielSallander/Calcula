@@ -203,25 +203,29 @@ pub(crate) struct SheetFacts {
 
 /// The sheets of the open workbook, for the private-sheet rule.
 ///
-/// LOCKS: one at a time, each released before the next -- the active-sheet
-/// mirror (`grid`) before `grids`, the crate's canonical order, then the names
-/// and the ids. A sheet whose grid cannot be found counts as holding cells:
-/// the rule fails closed.
+/// LOCKS: ONE hold, in the crate's canonical order -- the active-sheet mirror
+/// (`grid`), then `grids`, then the active index, then the names and the ids
+/// together, names first (`calp_commands::sheet_ids_and_names`) -- all
+/// released before this returns. Every fact below pairs `grids[i]` (and the
+/// active index) with `ids[i]`, so they must describe one moment: read in
+/// separate holds, a `move_sheet` landing between them judged one sheet by
+/// its neighbour's cells, and a private sheet that holds cells could read as
+/// blank and drop out of [`private_sheets`] (BUG-0590 / BUG-0592). A sheet
+/// whose grid cannot be found counts as holding cells: the rule fails closed.
 pub(crate) fn workbook_sheet_facts(state: &AppState) -> Result<Vec<SheetFacts>, String> {
+    let grid = state.grid.read().map_err(|e| e.to_string())?;
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    // Names and ids under ONE hold of their own, `sheet_names` first, while the
+    // grid guards above are still held.
+    let (ids, names): (Vec<SheetId>, Vec<String>) = crate::calp_commands::sheet_ids_and_names(state)?;
     // `grid` is the authoritative copy of the ACTIVE sheet; `grids[active]` may
     // lag behind it (BUG-0016), so a sheet the user just typed into is judged
     // by the mirror too.
-    let active_holds = !state.grid.read().map_err(|e| e.to_string())?.cells.is_empty();
-    let holds: Vec<bool> = state
-        .grids
-        .read()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(|g| !g.cells.is_empty())
-        .collect();
-    let names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
-    let ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let active_holds = !grid.cells.is_empty();
+    let holds: Vec<bool> = grids.iter().map(|g| !g.cells.is_empty()).collect();
+    drop(grids);
+    drop(grid);
     Ok(ids
         .iter()
         .enumerate()

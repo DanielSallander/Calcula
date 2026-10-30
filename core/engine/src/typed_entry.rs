@@ -102,7 +102,10 @@ pub fn entry_format_at(
 /// The typed-entry ladder, told which number format the entry is landing in.
 ///
 /// `target_format` is the format that ACTUALLY applies at the destination
-/// (`entry_format_at`), or `None` where there is no destination.
+/// (`entry_format_at`), or `None` where there is no destination -- and where
+/// the write is a PASTE of a copied formula or stored value rather than an
+/// entry (the app's `CellUpdateInput::pasted`): Excel's Text format governs
+/// typing, never a paste, so a pasted formula or number keeps its kind.
 ///
 /// THE ORDER, rung by rung, and why each one sits where it does:
 ///

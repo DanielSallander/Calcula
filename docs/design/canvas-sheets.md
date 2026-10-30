@@ -685,8 +685,9 @@ no-op because the ids are the application's own). Page-target NAMES (`actionTarg
 `pageOverrides[].sheetName`) follow the one rename authority, `calp::sheet_renames`
 (`visit_control_page_target_names`), exactly as binding formulas do (`visit_binding_formulas`; a control
 property that follows a formula is a binding since 2026-10-15): collision and subscriber renames on pull,
-restored on push, a gone sheet's name becomes `#REF!`. The dev pull renames none of these names and
-carries no bindings yet (BUG-0449 fixed; BUG-0471 open; open-items §2.ak).
+restored on push, a gone sheet's name becomes `#REF!`. The dev pull renames none of the page-target
+names (BUG-0449 fixed; open-items §2.ak), but it carries and lands the source's bindings by the real
+pull's carriage, collision-renamed with the cell formulas (BUG-0471 fixed; §15.7).
 **Bindings** (§15.7) travel in `bindings.json` with exactly the objects they bind; a publish that carries
 them stamps `min_app_version`; a pull remaps canvas-page ids and `pageOverrides/<sheetId>` path segments
 and lands a row only for an object it materialised; a refresh replaces the application's bindings and
@@ -1576,8 +1577,17 @@ sends `RefreshMeasures` on open, new, model change and model refresh.
   subscriber's pages; a collision rename reaches binding formulas; a refresh REPLACES the application's
   bindings and keeps the subscriber's own. A model is stored by its stable key (the data-source id), so it
   resolves on the subscriber's connection of the same source, else "(model not connected)". The version
-  diff reports a binding change spelling-blind; a binding-only push is not a code change. The dev pull
-  does not carry bindings yet (BUG-0471).
+  diff reports a binding change spelling-blind; a binding-only push is not a code change. A DEV pull
+  (`calp_dev_subscribe` / `calp_dev_refresh`, from a local `.cala`) carries them by the same rule,
+  narrowed to the families it brings -- the pulled sheets' controls, the pulled canvas pages and the
+  carried floating ranges (`calp::dev_mode::DevPullResult::object_bindings`) -- and lands them through the
+  same carriage (`PulledBindings::from_dev_pull` + `land_pulled_bindings`, a refresh replacing the dev
+  subscription's bindings), then migrates a pre-bindings source's formula-typed control properties
+  (BUG-0471) -- their sheet references first renamed to the names the pulled sheets landed under
+  (`object_bindings::migrate::rename_legacy_control_formulas`), because the migration resolves them
+  against the subscriber's own sheets and `=Data!A1` would otherwise bind the subscriber's "Data". The
+  real pull doors do the same right after their `rename_pull`: a subscribe or checkout
+  (`materialize_pull_result`) and a refresh (`prepare_refresh_payloads`).
 
 ### 15.8 Scripts, the AI, and seeing every binding
 

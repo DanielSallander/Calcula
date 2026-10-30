@@ -1024,9 +1024,11 @@ fn remember_original(
 ///   are dissolved and re-merged, a partial overlap still refuses.
 /// - `keep_first_value`: a region whose top-left holds nothing takes the first
 ///   cell in reading order that does (value, formula and style), and every
-///   formula ON THE BACKING SHEET that read the moved cell is re-pointed at
-///   the top-left -- the same-sheet re-pointing `relocate_cell_references`
-///   does for the sheet gesture, which cannot reach a backing sheet.
+///   formula ON THE BACKING SHEET is re-pointed for that move by the rule
+///   `relocate_cell_references` applies for the sheet gesture (which cannot
+///   reach a backing sheet): a reader of the moved cell follows it to the
+///   top-left, a reader of the empty top-left it overwrote is `#REF!`, and a
+///   reference to another sheet is left alone.
 /// - ONE owned undo step (joining the gesture's open step): the backing
 ///   cells (`script_grid_cells`) and the backing merge set
 ///   (`sheet_merge_regions`), so one Ctrl+Z restores content and geometry.
@@ -1119,6 +1121,16 @@ pub(crate) fn merge_cells_on_target(
     let Some(grid) = grids.get(backing) else {
         return Err("Floating range backing sheet is missing".to_string());
     };
+    // The backing sheet's name, which an unqualified reference in its formulas
+    // means: the value move below re-points them through it. Read here, under
+    // `grids` and before anything changes, so it cannot fail half-way.
+    let backing_name: String = state
+        .sheet_names
+        .read()
+        .map_err(|e| e.to_string())?
+        .get(backing)
+        .cloned()
+        .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
 
     // THE PLAN on the BACKING grid: Excel's data-loss count and the value rule.
     let stored = stored_cells_in(grid, &rect);
@@ -1197,25 +1209,41 @@ pub(crate) fn merge_cells_on_target(
                 }
             }
         }
-        // Readers of a MOVED value on the backing sheet follow it to the
-        // top-left cell (the sheet gesture's same-sheet re-pointing).
+        // Every formula on the backing sheet is re-pointed for the value move
+        // the way the sheet gesture's `relocate_cell_references_core` does it,
+        // through the same `relocate_references_for_move` with the backing sheet
+        // as both ends of the move. Excel [LIVE, Excel 16, 2026-10-30,
+        // shifters/probemerge.ps1] after merging A1:B1 with A1 empty:
+        // - a reader of the moved value follows it: `=B1` -> `=A1`,
+        //   `=Sheet1!B1` -> `=Sheet1!A1`, `=SUM(A1:B1)` -> `=SUM(A1:A1)`;
+        // - a reader of the top-left the value OVERWROTE is `#REF!`: `=A1` ->
+        //   `=#REF!` -- the moved formula itself included (`=A1+5` moved from
+        //   B1 becomes `=#REF!+5`), so the moved-to cell is not skipped;
+        // - a reference to ANOTHER sheet's B1 is not this B1 and stays.
+        // The sheet-blind `relocate_references_in_formula` this replaced got the
+        // last two wrong: the empty top-left's readers silently read the moved
+        // value, and a backing formula reading the host's B1 (`=Host!B1`) was
+        // renumbered to the host's A1. Only the backing sheet is scanned: a
+        // formula on another sheet or a defined name that names the backing
+        // sheet keeps its address (see mergeGestures.ts).
         for moved in &moved_cells {
-            let delta_row = moved.to_row as i32 - moved.from_row as i32;
-            let delta_col = moved.to_col as i32 - moved.from_col as i32;
+            let mv = crate::commands::structure::CellMove {
+                source_sheet: &backing_name,
+                dest_sheet: &backing_name,
+                block: (moved.from_row, moved.from_col, moved.from_row, moved.from_col),
+                delta_row: moved.to_row as i32 - moved.from_row as i32,
+                delta_col: moved.to_col as i32 - moved.from_col as i32,
+            };
             let mut rewrites: Vec<(u32, u32, String)> = grid
                 .cells
                 .iter()
-                .filter(|(&coord, _)| coord != (moved.to_row, moved.to_col))
                 .filter_map(|(&(row, col), cell)| {
                     let formula = crate::commands::structure::formula_to_rewrite(cell)?;
-                    let relocated = crate::commands::structure::relocate_references_in_formula(
+                    let relocated = crate::commands::structure::relocate_references_for_move(
                         &formula,
-                        moved.from_row,
-                        moved.from_col,
-                        moved.from_row,
-                        moved.from_col,
-                        delta_row,
-                        delta_col,
+                        &backing_name,
+                        &backing_name,
+                        &mv,
                     );
                     (relocated != formula).then_some((row, col, relocated))
                 })

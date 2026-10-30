@@ -1067,7 +1067,11 @@ pub struct EvalContext {
     /// Pre-fetched data for the CUBE function family (CUBEVALUE, CUBEMEMBER, ...).
     /// Built by an async pass in the app layer BEFORE this synchronous recalc
     /// (cube queries are async and cannot run under the recalc lock — see
-    /// app/src-tauri/src/bi/cube.rs). `None` => cube functions evaluate to #N/A.
+    /// app/src-tauri/src/bi/cube.rs). `None` (or a prefetch whose scope does not
+    /// cover the cell) => each cube call is answered from the sheet's results
+    /// cache for exactly the arguments it has now, wherever it sits in the
+    /// formula (`crate::cube::CallMemo`), and is `#N/A` when no answer is
+    /// recorded for them (`preserved_cube_value`).
     /// An `Arc` so it is cheap to attach to the per-cell `EvalContext` built in
     /// recalc loops without deep-cloning the (potentially large) prefetch.
     pub cube_prefetch: Option<std::sync::Arc<CubePrefetch>>,
@@ -1178,6 +1182,23 @@ pub struct Evaluator<'a> {
     /// the single choke point every lambda call goes through. See
     /// `MAX_LAMBDA_DEPTH` for why this exists.
     lambda_depth: std::cell::Cell<u32>,
+    /// How many cube / custom-function calls refused for lack of data during
+    /// this evaluator's life. A custom function whose ARGUMENTS contain such a
+    /// refusal has no exact fingerprint (the `#N/A` stands in for a value the
+    /// call never saw), so it is neither recorded in nor answered from the
+    /// results cache (`crate::cube::CallMemo`).
+    data_refusals: std::cell::Cell<u32>,
+    /// The subset of those refusals that are CERTAINLY a call nobody computed:
+    /// every cube call, and a custom function the workbook is known to define
+    /// (`CallMemo::knows_custom_function`) -- never a name that may be a typo.
+    /// A formula during whose evaluation it moved answers that refusal whole
+    /// (the sticky override in [`Self::evaluate`]).
+    certain_refusals: std::cell::Cell<u32>,
+    /// What the most recent of those refusals answered: 0 none, 1 `#N/A` (a
+    /// cube call), 2 `#NAME?` (a custom function). Read through
+    /// [`Self::last_data_refusal`] by a recalculation that must tell "this
+    /// formula's answer" from "this formula had no data for one of its calls".
+    last_refusal: std::cell::Cell<u8>,
     /// The work budget + cancellation flag. ALWAYS present: every constructor
     /// installs `EvalBudget::default_cell()`, and removing the ceiling requires
     /// naming `BudgetPolicy::Unmetered` at the call site. A construction path
@@ -1242,11 +1263,15 @@ pub const MAX_LAMBDA_DEPTH: u32 = 256;
 
 /// Adapter that lets the evaluator resolve cube arguments through the shared
 /// `crate::cube::CubeResolver` machinery, so the evaluator and the async
-/// pre-pass compute identical call keys. Borrows only `Grid` + `CubePrefetch`
-/// (both `Sync`) — NOT the whole `Evaluator` (whose `RefCell` scope is `!Sync`).
+/// pre-pass compute identical call keys. Borrows only `Grid`, `CubePrefetch`
+/// and the sheet table (all `Sync`) — NOT the whole `Evaluator` (whose
+/// `RefCell` scope is `!Sync`).
 struct EvalCubeResolver<'e> {
     prefetch: &'e CubePrefetch,
     grid: &'e Grid,
+    /// The workbook's sheets, for a sheet-QUALIFIED argument (`Inputs!B2`).
+    /// `None` in a single-sheet evaluation, where such an argument is refused.
+    sheets: Option<&'e MultiSheetContext<'e>>,
 }
 
 impl<'e> CubeResolver for EvalCubeResolver<'e> {
@@ -1254,13 +1279,127 @@ impl<'e> CubeResolver for EvalCubeResolver<'e> {
         self.prefetch.binding_at(row, col)
     }
     fn cell_text(&self, row: u32, col: u32) -> Option<String> {
-        let cell = self.grid.get_cell(row, col)?;
-        match &cell.value {
-            CellValue::Text(s) => Some(s.clone()),
-            CellValue::Number(n) => Some(format!("{}", n)),
-            CellValue::Boolean(b) => Some(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
-            _ => None,
+        crate::cube::cube_cell_text(&self.grid.get_cell(row, col)?.value)
+    }
+    fn is_own_sheet(&self, sheet: &str) -> bool {
+        self.sheets
+            .is_some_and(|ctx| sheet.to_uppercase() == ctx.current_sheet.to_uppercase())
+    }
+    fn qualified_cell_arg(&self, sheet: &str, row: u32, col: u32) -> Result<String, crate::cube::CubeError> {
+        // No sheet table: there is no way to tell which sheet is named, and
+        // reading this grid would answer for the wrong one (the trait default).
+        let Some(ctx) = self.sheets else {
+            return Err(crate::cube::CubeError::Value);
+        };
+        let target = if self.is_own_sheet(sheet) {
+            crate::cube::QualifiedCell::OwnSheet
+        } else {
+            match ctx.get_grid(sheet) {
+                Some(grid) => crate::cube::QualifiedCell::OtherSheet(grid.get_cell(row, col)),
+                None => crate::cube::QualifiedCell::NoSuchSheet,
+            }
+        };
+        crate::cube::qualified_cell_arg(self, target, row, col)
+    }
+}
+
+/// How deep a chain of cube-object cells a fingerprint follows
+/// (`=CUBEVALUE(.., B2)` where B2 is a CUBEMEMBER of a CUBESET in B1 ...)
+/// before it gives up and the call simply cannot be answered without data.
+const CUBE_FINGERPRINT_DEPTH: u32 = 8;
+
+/// Spells a cube call's arguments for the results cache
+/// (`crate::cube::CallMemo`) without any pre-fetched data, so the SAME
+/// fingerprint comes out when the call is served and when it is not.
+///
+/// It differs from [`EvalCubeResolver`] in one place only: a cell holding a
+/// cube OBJECT (its formula's root is CUBEMEMBER / CUBESET /
+/// CUBERANKEDMEMBER / CUBEKPIMEMBER -- the cells the pre-fetch binds) is
+/// spelled by that cell's own call fingerprint plus the value it shows,
+/// where the real key uses the binding the pre-fetch resolved. The cell's own
+/// arguments decide which member it carries, and its shown value changes when
+/// it is re-served or refused, so a member that changed can never be mistaken
+/// for the one an answer was recorded for. A plain cell is read exactly as the
+/// real key reads it (`cube_cell_text`), and a sheet-qualified argument goes
+/// through the shared rule (`crate::cube::qualified_cell_arg`), so the
+/// fingerprint is never coarser than the key: it can only refuse more.
+struct CubeFingerprintResolver<'e> {
+    grid: &'e Grid,
+    sheets: Option<&'e MultiSheetContext<'e>>,
+    depth: u32,
+    /// Set when an object chain ran past `CUBE_FINGERPRINT_DEPTH`: no exact
+    /// fingerprint exists. Atomic only because `CubeResolver` requires `Sync`.
+    incomplete: std::sync::atomic::AtomicBool,
+}
+
+impl<'e> CubeFingerprintResolver<'e> {
+    fn new(grid: &'e Grid, sheets: Option<&'e MultiSheetContext<'e>>, depth: u32) -> Self {
+        CubeFingerprintResolver {
+            grid,
+            sheets,
+            depth,
+            incomplete: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    fn incomplete(&self) -> bool {
+        self.incomplete.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn give_up(&self) -> Option<String> {
+        self.incomplete.store(true, std::sync::atomic::Ordering::Relaxed);
+        None
+    }
+}
+
+impl<'e> CubeResolver for CubeFingerprintResolver<'e> {
+    fn binding_at(&self, _row: u32, _col: u32) -> Option<&CubeBinding> {
+        None
+    }
+    fn cell_text(&self, row: u32, col: u32) -> Option<String> {
+        let cell = self.grid.get_cell(row, col)?;
+        match cell.get_ast() {
+            Some(Expression::FunctionCall { func, args, .. })
+                if crate::cube::is_cube_object_function(func) =>
+            {
+                if self.depth >= CUBE_FINGERPRINT_DEPTH {
+                    return self.give_up();
+                }
+                let name = crate::cube::cube_function_name(func)?;
+                let inner = CubeFingerprintResolver::new(self.grid, self.sheets, self.depth + 1);
+                let own = cube_call_key(name, args, &inner);
+                if inner.incomplete() {
+                    return self.give_up();
+                }
+                let own = match own {
+                    Ok(fingerprint) => fingerprint,
+                    Err(e) => format!("!{:?}", e),
+                };
+                // U+001D (group separator) brackets the object's spelling; it
+                // is neither whitespace (the caller trims) nor the key's own
+                // separator.
+                Some(format!("\u{1d}{}\u{1d}{:?}", own, cell.value))
+            }
+            _ => crate::cube::cube_cell_text(&cell.value),
+        }
+    }
+    fn is_own_sheet(&self, sheet: &str) -> bool {
+        self.sheets
+            .is_some_and(|ctx| sheet.to_uppercase() == ctx.current_sheet.to_uppercase())
+    }
+    fn qualified_cell_arg(&self, sheet: &str, row: u32, col: u32) -> Result<String, crate::cube::CubeError> {
+        let Some(ctx) = self.sheets else {
+            return Err(crate::cube::CubeError::Value);
+        };
+        let target = if self.is_own_sheet(sheet) {
+            crate::cube::QualifiedCell::OwnSheet
+        } else {
+            match ctx.get_grid(sheet) {
+                Some(grid) => crate::cube::QualifiedCell::OtherSheet(grid.get_cell(row, col)),
+                None => crate::cube::QualifiedCell::NoSuchSheet,
+            }
+        };
+        crate::cube::qualified_cell_arg(self, target, row, col)
     }
 }
 
@@ -1281,6 +1420,9 @@ impl<'a> Evaluator<'a> {
             locale: Box::new(LocaleSettings::invariant()),
             scope: RefCell::new(HashMap::new()),
             lambda_depth: std::cell::Cell::new(0),
+            data_refusals: std::cell::Cell::new(0),
+            certain_refusals: std::cell::Cell::new(0),
+            last_refusal: std::cell::Cell::new(0),
             // METERED BY DEFAULT. See BudgetPolicy for why the asymmetry (safe
             // default in, explicit word out) is the point.
             budget: EvalBudget::default_cell(),
@@ -1577,6 +1719,7 @@ impl<'a> Evaluator<'a> {
             let _dialect = crate::number_text::begin(
                 crate::number_text::NumberTextLocale::of(&self.locale),
             );
+            let refusals_before = self.certain_refusals.get();
             let result = self.eval_root(expr);
             // THE STICKY OVERRIDE, and it is not optional. Aggregates skip
             // error elements, IFERROR swallows them, TEXTJOIN drops them — any
@@ -1585,8 +1728,23 @@ impl<'a> Evaluator<'a> {
             // budget directly at the top frame makes the outcome immune to
             // whatever the intermediate builtins did, in ONE place instead of
             // several hundred.
+            //
+            // A CALL WITH NO DATA IS STICKY THE SAME WAY (BUG-0476,
+            // NEW-iferror-masks-a-refusal). A cube or custom-function call this
+            // recalculation could not answer -- no pre-fetched data, no
+            // resolver, nothing in the results cache for its exact arguments --
+            // is not "an error the formula may handle", it is "this formula's
+            // answer is unknown": `=IFERROR(MYFN(A1),0)` / `=IFNA(CUBEVALUE(..),0)`
+            // / `=ISNA(..)` answered a plausible 0 / FALSE, written as if
+            // computed, on every route without data. So the formula's result IS
+            // that refusal (`#NAME?` / `#N/A`). A call served from data or from
+            // the cache counts no refusal and is never affected; nor is a name
+            // the workbook is not known to define, which may be a typo -- that
+            // is Excel's `#NAME?`, and IFERROR may handle it (`certain_refusals`).
             let result = if self.budget.tripped() {
                 EvalResult::Error(CellError::Limit)
+            } else if self.certain_refusals.get() != refusals_before {
+                EvalResult::Error(self.last_data_refusal().unwrap_or(CellError::NA))
             } else {
                 result
             };
@@ -4023,9 +4181,24 @@ impl<'a> Evaluator<'a> {
                     // this synchronous, lock-held recalc).
                     _ => {
                         if let Some(udf) = self.udf_fn {
+                            let refusals_before = self.data_refusals.get();
                             let eval_args: Vec<EvalResult> =
                                 args.iter().map(|a| self.evaluate(a)).collect();
                             if let Some(result) = udf(&key, &eval_args) {
+                                // The resolver knows this name: it IS one of
+                                // the workbook's custom functions.
+                                self.grid.call_memo().note_custom_function(&key);
+                                // A served answer goes into the sheet's results
+                                // cache for a later recalculation without a
+                                // resolver -- wherever this call sits in its
+                                // formula, but only when no argument was itself
+                                // a refusal for lack of data (that `#N/A` stands
+                                // for a value this call never saw).
+                                if self.data_refusals.get() == refusals_before {
+                                    if let Some(fp) = crate::cube::udf_call_fingerprint(&key, &eval_args) {
+                                        self.grid.call_memo().remember(fp, &result);
+                                    }
+                                }
                                 return result;
                             }
                             // The resolver was wired and had its chance but does not
@@ -4034,12 +4207,10 @@ impl<'a> Evaluator<'a> {
                         }
                         // No UDF resolver was wired for THIS recalc (e.g. a full
                         // recalc / F9 / paste / calculate_now that did not pre-fetch
-                        // UDFs). Preserve the cell's last computed value rather than
-                        // clobbering a working custom-function result to #NAME?, just
-                        // as eval_cube preserves a cube cell with no prefetch. Falls
-                        // back to #NAME? when there is nothing to keep (first eval /
-                        // truly unknown name).
-                        self.preserved_udf_value()
+                        // UDFs). The call is answered from the results cache for
+                        // exactly the arguments it has NOW; #NAME? when none is
+                        // recorded (see `preserved_udf_value`).
+                        self.preserved_udf_value(&key, args)
                     }
                 }
             },
@@ -11002,62 +11173,249 @@ impl<'a> Evaluator<'a> {
         let prefetch = match self.context.cube_prefetch.as_deref() {
             Some(p) => p,
             // No cube data was pre-fetched for THIS recalc (e.g. an unrelated
-            // edit, a full recalc / F9, or a paste). Preserve the cell's last
-            // computed value rather than clobbering it to #N/A — cube cells
-            // refresh on a cube-bearing edit, and an unrelated recalc must not
-            // wipe them. Falls back to #N/A only when there is nothing to keep.
-            None => return self.preserved_cube_value(),
+            // edit, a full recalc / F9, or a paste). The call is answered from
+            // the sheet's results cache for exactly the arguments it has NOW;
+            // #N/A when none is recorded (`preserved_cube_value`).
+            None => return self.preserved_cube_value(func_name, args),
         };
-        let resolver = EvalCubeResolver { prefetch, grid: self.grid };
+        // A full refresh carries one pre-fetch per sheet: the one built for
+        // this formula's sheet. A prefetch that was not built for THIS cell (a
+        // scoped prefetch whose cells it is not among, or a cell on another
+        // sheet) is no prefetch at all for it: the same rule as above. Only a
+        // cell the prefetch covers can answer #N/A for a missing key -- see
+        // `CubePrefetchScope` for why that miss is a refusal.
+        let sheet = self.multi_sheet.as_ref().map(|ctx| ctx.current_sheet.as_str());
+        let prefetch = prefetch.for_sheet(sheet);
+        if !prefetch.covers(sheet, self.context.current_row, self.context.current_col) {
+            return self.preserved_cube_value(func_name, args);
+        }
+        let resolver = EvalCubeResolver {
+            prefetch,
+            grid: self.grid,
+            sheets: self.multi_sheet.as_ref(),
+        };
         let key = match cube_call_key(func_name, args, &resolver) {
             Ok(k) => k,
             Err(e) => return EvalResult::Error(e.to_cell_error()),
         };
-        match prefetch.result(&key) {
+        let served = match prefetch.result(&key) {
             Some(CubeCallResult::Number(n)) => EvalResult::Number(*n),
             Some(CubeCallResult::Text(s)) => EvalResult::Text(s.clone()),
             Some(CubeCallResult::Object { caption }) => EvalResult::Text(caption.clone()),
             Some(CubeCallResult::Error(e)) => EvalResult::Error(e.to_cell_error()),
-            None => EvalResult::Error(CellError::NA),
+            None => return EvalResult::Error(CellError::NA),
+        };
+        // A served answer goes into the sheet's results cache, wherever this
+        // call sits in its formula: a later recalculation without cube data
+        // answers the same call with it (`crate::cube::CallMemo`).
+        if let Ok(Some(fp)) = self.cube_call_fingerprint(func_name, args) {
+            self.grid.call_memo().remember(fp, &served);
+        }
+        served
+    }
+
+    /// The cube-call FINGERPRINT the served-call memo files answers under: the
+    /// [`crate::cube::CallKey`] of `cube_call_key` read through
+    /// [`CubeFingerprintResolver`], which spells a cube-object argument cell by
+    /// that cell's own call and value instead of by a pre-fetched binding -- so
+    /// it can be computed with no cube data at all, and identically when the
+    /// call is served and when it is not.
+    ///
+    /// `Err` is the error the call itself answers with whatever data it has
+    /// (a missing sheet, a cube object on another sheet, an argument shape no
+    /// key can spell); `Ok(None)` means no exact fingerprint exists (a chain
+    /// of cube objects deeper than `CUBE_FINGERPRINT_DEPTH`).
+    fn cube_call_fingerprint(
+        &self,
+        func_name: &str,
+        args: &[Expression],
+    ) -> Result<Option<crate::cube::CallKey>, crate::cube::CubeError> {
+        let resolver = CubeFingerprintResolver::new(self.grid, self.multi_sheet.as_ref(), 0);
+        let fingerprint = cube_call_key(func_name, args, &resolver)?;
+        Ok(if resolver.incomplete() { None } else { Some(crate::cube::CallKey::cube(&fingerprint)) })
+    }
+
+    /// What a cube call with NO data for it answers (rev3A#3, BUG-0476; the
+    /// results cache since round 6): the answer this sheet's
+    /// [`crate::cube::CallMemo`] recorded for EXACTLY the arguments the call has
+    /// now, wherever the call sits in its formula. `#N/A` when none is
+    /// recorded. The cell's stored value is never read, so it can never be fed
+    /// back to an operator (`=CUBEVALUE(..)/1000` once divided itself again at
+    /// every recalculation), and a changed argument (a new member name, from
+    /// any route) is a different fingerprint, so the previous member's number
+    /// is never shown for it. An `Err` from the fingerprint is the call's own
+    /// deterministic error (a missing sheet, a cube object on another sheet),
+    /// what it answers with or without data.
+    fn preserved_cube_value(&self, func_name: &str, args: &[Expression]) -> EvalResult {
+        let answer = match self.cube_call_fingerprint(func_name, args) {
+            Err(e) => return EvalResult::Error(e.to_cell_error()),
+            Ok(None) => None,
+            Ok(Some(fp)) => self.grid.call_memo().answer(&fp),
+        };
+        answer.unwrap_or_else(|| {
+            self.data_refusals.set(self.data_refusals.get().wrapping_add(1));
+            self.certain_refusals.set(self.certain_refusals.get().wrapping_add(1));
+            self.last_refusal.set(1);
+            EvalResult::Error(CellError::NA)
+        })
+    }
+
+    /// The custom-function twin of [`Self::preserved_cube_value`]: with no UDF
+    /// resolver wired, the call's arguments are evaluated and it is answered
+    /// with what the results cache recorded for exactly those values, wherever
+    /// it sits in its formula. `#NAME?` when none is recorded -- what a custom
+    /// function the recalculation cannot run has always shown. An argument
+    /// that is itself a refusal for lack of data (`=MYFN(CUBEVALUE(..))` with
+    /// no cube data and no recorded cube answer) leaves no exact fingerprint,
+    /// so it refuses too.
+    fn preserved_udf_value(&self, name_upper: &str, args: &[Expression]) -> EvalResult {
+        let refusals_before = self.data_refusals.get();
+        let eval_args: Vec<EvalResult> = args.iter().map(|a| self.evaluate(a)).collect();
+        let answer = if self.data_refusals.get() != refusals_before {
+            None
+        } else {
+            crate::cube::udf_call_fingerprint(name_upper, &eval_args)
+                .and_then(|fp| self.grid.call_memo().answer(&fp))
+        };
+        answer.unwrap_or_else(|| {
+            self.data_refusals.set(self.data_refusals.get().wrapping_add(1));
+            // Certainly a call nobody computed only when the workbook is known
+            // to define this function; an unknown name may be a typo, whose
+            // `#NAME?` an IFERROR around it handles as Excel's does.
+            if self.knows_custom_function(name_upper) {
+                self.certain_refusals.set(self.certain_refusals.get().wrapping_add(1));
+            }
+            self.last_refusal.set(2);
+            EvalResult::Error(CellError::Name)
+        })
+    }
+
+    /// Whether some sheet's results cache knows `name_upper` as one of the
+    /// workbook's custom functions (`CallMemo::knows_custom_function`): this
+    /// sheet's, or any sheet the evaluation can see -- the function is the
+    /// workbook's, wherever it was last served.
+    fn knows_custom_function(&self, name_upper: &str) -> bool {
+        self.grid.call_memo().knows_custom_function(name_upper)
+            || self
+                .multi_sheet
+                .as_ref()
+                .is_some_and(|ctx| ctx.grids.values().any(|g| g.call_memo().knows_custom_function(name_upper)))
+    }
+
+    /// Whether any cube or custom-function call this evaluator evaluated had
+    /// no data -- no pre-fetched cube result, no UDF resolver, and no answer in
+    /// the results cache for its exact arguments -- and so was REFUSED; and if
+    /// so, what the most recent such refusal answered (`#N/A` for a cube call,
+    /// `#NAME?` for a custom function). `None` when every call was answered.
+    ///
+    /// For a caller that evaluates ONE formula per evaluator and must tell
+    /// "this formula had no data for one of its calls" from an answer that
+    /// happens to be the same error: the full recalculation pass reads it
+    /// (`calculation::run_calculation_pass`) to decide whether the cell may
+    /// keep its stored result. (The formula's own result is already the
+    /// refusal -- `=IFERROR(MYFN(A1),0)` is never a plausible 0 -- see the
+    /// sticky override in [`Self::evaluate`].)
+    pub fn last_data_refusal(&self) -> Option<CellError> {
+        match self.last_refusal.get() {
+            1 => Some(CellError::NA),
+            2 => Some(CellError::Name),
+            _ => None,
         }
     }
 
-    /// The cube cell's existing stored value, used when no cube prefetch is
-    /// available so an unrelated recalc does not clobber a cube result. Returns
-    /// #N/A when the position is unknown or the cell is empty (e.g. first eval).
-    fn preserved_cube_value(&self) -> EvalResult {
-        if let (Some(r), Some(c)) = (self.context.current_row, self.context.current_col) {
-            if let Some(cell) = self.grid.get_cell(r, c) {
-                return match &cell.value {
-                    CellValue::Number(n) => EvalResult::Number(*n),
-                    CellValue::Text(s) => EvalResult::Text(s.clone()),
-                    CellValue::Boolean(b) => EvalResult::Boolean(*b),
-                    CellValue::Error(e) => EvalResult::Error(e.clone()),
-                    _ => EvalResult::Error(CellError::NA),
-                };
-            }
-        }
-        EvalResult::Error(CellError::NA)
+    /// LOAD-TIME seeding of the results cache: records the value the cell at
+    /// this evaluator's position holds as the answer of `expr` -- the cell's
+    /// formula, name-resolved the way recalculation resolves it -- for the
+    /// arguments it has now. Returns whether anything was recorded.
+    ///
+    /// ONLY for sheets whose values were just installed from saved state,
+    /// before anything has changed: a workbook just read from disk, or the
+    /// sheets a subscribe, a checkout or an update of an application has just
+    /// installed. A saved value was calculated for the arguments saved with
+    /// it, so it is that call's answer. Anywhere else it would be a lie -- the
+    /// arguments may have changed since the value was computed, which is
+    /// exactly the case the cache's fingerprint exists to catch. Records only a ROOT cube or
+    /// custom-function call holding a number, text or logical (an error or an
+    /// empty cell is nothing worth recording): a call inside a larger formula
+    /// has no saved value of its own, so it refuses until it is served. Nor
+    /// is a call seeded whose arguments read a volatile built-in or anything
+    /// else beyond their references (`=MYFN(TODAY())`): those arguments are
+    /// evaluated NOW, and need not be what the saved value was computed for.
+    pub fn remember_stored_call_result(&self, expr: &Expression) -> bool {
+        let (Some(r), Some(c)) = (self.context.current_row, self.context.current_col) else {
+            return false;
+        };
+        let Some(cell) = self.grid.get_cell(r, c) else {
+            return false;
+        };
+        let answer = match &cell.value {
+            CellValue::Number(n) => EvalResult::Number(*n),
+            CellValue::Text(s) => EvalResult::Text(s.clone()),
+            CellValue::Boolean(b) => EvalResult::Boolean(*b),
+            _ => return false,
+        };
+        self.remember_stored_call_answer(expr, answer)
     }
 
-    /// A UDF (custom-function) cell's existing stored value, used when no UDF
-    /// resolver is wired for this recalc so an unrelated recalc (F9 / paste /
-    /// calculate_now) does not clobber a working custom-function result. Returns
-    /// #NAME? when the position is unknown or the cell is empty (first eval /
-    /// genuinely unknown name) — preserving the "unrecognized function" meaning.
-    fn preserved_udf_value(&self) -> EvalResult {
-        if let (Some(r), Some(c)) = (self.context.current_row, self.context.current_col) {
-            if let Some(cell) = self.grid.get_cell(r, c) {
-                return match &cell.value {
-                    CellValue::Number(n) => EvalResult::Number(*n),
-                    CellValue::Text(s) => EvalResult::Text(s.clone()),
-                    CellValue::Boolean(b) => EvalResult::Boolean(*b),
-                    CellValue::Error(e) => EvalResult::Error(e.clone()),
-                    _ => EvalResult::Error(CellError::Name),
-                };
-            }
+    /// [`Self::remember_stored_call_result`] with the stored answer supplied by
+    /// the caller -- for a cell whose whole stored result is not its own value:
+    /// a dynamic-array ORIGIN, whose answer is the array its spilled footprint
+    /// holds (the cell itself stores only the first element). Recording that
+    /// first element instead would hand the next recalculation without data a
+    /// scalar, and it would collapse the spill (rev5B#2). The caller builds the
+    /// array in [`EvalResult::spill_dimensions`]' shape and vouches for it the
+    /// same way: the values were read from disk (or installed from a pulled
+    /// application) before anything could change an argument.
+    pub fn remember_stored_call_answer(&self, expr: &Expression, answer: EvalResult) -> bool {
+        let Expression::FunctionCall { func, args, .. } = expr else {
+            return false;
+        };
+        // An argument that reads something its references do not name -- the
+        // clock (`=DAYSLEFT(TODAY(),A1)`), the RNG, OFFSET / INDIRECT, a pivot,
+        // a control's value (`crate::cube::reads_beyond_its_references`) -- has
+        // a value NOW that need not be the one the saved answer was computed
+        // for: seeding would file Monday's answer under Tuesday's argument, and
+        // every recalculation without a resolver would serve it as Tuesday's
+        // (rev6A#3). Such a call is not seeded.
+        if args.iter().any(crate::cube::reads_beyond_its_references) {
+            return false;
         }
-        EvalResult::Error(CellError::Name)
+        let fingerprint = if let Some(name) = crate::cube::cube_function_name(func) {
+            match self.cube_call_fingerprint(name, args) {
+                Ok(Some(fp)) => fp,
+                _ => return false,
+            }
+        } else {
+            match func {
+                BuiltinFunction::Custom(name) if name != "__INVOKE__" => {
+                    // An argument containing a cube or custom-function call of
+                    // its own (at any depth) would be answered from whatever
+                    // the cache holds at this moment of the seeding -- which
+                    // depends on the order cells are seeded in, not on the
+                    // saved state. Such a call is simply not seeded.
+                    if args.iter().any(crate::cube::contains_memo_call) {
+                        return false;
+                    }
+                    let refusals_before = self.data_refusals.get();
+                    let eval_args: Vec<EvalResult> = args.iter().map(|a| self.evaluate(a)).collect();
+                    if self.data_refusals.get() != refusals_before {
+                        return false;
+                    }
+                    match crate::cube::udf_call_fingerprint(&name.to_uppercase(), &eval_args) {
+                        Some(fp) => {
+                            // A saved root call holding a value: the function
+                            // existed in the workbook that computed it.
+                            self.grid.call_memo().note_custom_function(&name.to_uppercase());
+                            fp
+                        }
+                        None => return false,
+                    }
+                }
+                _ => return false,
+            }
+        };
+        self.grid.call_memo().remember(fingerprint, &answer);
+        true
     }
 
     fn fn_cube_value(&self, args: &[Expression]) -> EvalResult {
@@ -18283,28 +18641,332 @@ mod tests {
         assert_eq!(eval.evaluate(&ast), EvalResult::Number(7.0));
     }
 
+    /// Evaluate `formula` as the cell at (row, col) of `grid` (Sheet1), with or
+    /// without a UDF resolver.
+    fn eval_udf_cell(
+        grid: &Grid,
+        row: u32,
+        col: u32,
+        formula: &str,
+        udf: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
+    ) -> EvalResult {
+        let mut ms = MultiSheetContext::new("Sheet1".to_string());
+        ms.add_grid("Sheet1".to_string(), grid);
+        let ctx = EvalContext { current_row: Some(row), current_col: Some(col), ..Default::default() };
+        let mut eval = Evaluator::with_context(grid, ms, ctx);
+        if let Some(f) = udf {
+            eval.set_udf_fn(f);
+        }
+        eval.evaluate(&parser::parse(formula).expect("parses"))
+    }
+
+    /// MYFUNC(x) = x * 10, as a pre-fetched resolver serves it.
+    fn times_ten(name: &str, args: &[EvalResult]) -> Option<EvalResult> {
+        if name != "MYFUNC" {
+            return None;
+        }
+        match args.first() {
+            Some(EvalResult::Number(n)) => Some(EvalResult::Number(n * 10.0)),
+            _ => Some(EvalResult::Error(CellError::Value)),
+        }
+    }
+
+    /// Put `value` into (row, col) as the stored value of `formula`.
+    fn stored_formula(grid: &mut Grid, row: u32, col: u32, formula: &str, value: CellValue) {
+        let mut cell = Cell::new_formula(formula.to_string());
+        cell.value = value;
+        grid.set_cell(row, col, cell);
+    }
+
     #[test]
     fn test_custom_without_udf_fn_preserves_existing_value() {
         // A full recalc / F9 / calculate_now does NOT wire a UDF resolver. In that
-        // case a =MYFUNC(...) cell must KEEP its last computed value rather than
-        // being clobbered to #NAME? (the HIGH lifecycle bug). Mirrors how a cube
-        // cell is preserved when no cube prefetch is present.
+        // case a =MYFUNC(...) cell must not be clobbered to #NAME? (the HIGH
+        // lifecycle bug): it is answered from the results cache, which holds
+        // what the resolver SERVED for these very arguments (rev3A#3; before,
+        // any stored value was kept).
         let mut grid = Grid::new();
-        grid.set_cell(2, 1, Cell::new_number(42.0)); // C2 already holds 42
-        let ctx = EvalContext {
-            current_row: Some(2),
-            current_col: Some(1),
-            ..Default::default()
-        };
-        let ms = MultiSheetContext::new("Sheet1".to_string());
-        let eval = Evaluator::with_context(&grid, ms, ctx); // no set_udf_fn
-        let expr = Expression::FunctionCall {
-            func: BuiltinFunction::Custom("MYFUNC".to_string()),
-            args: vec![Expression::Literal(Value::Number(1.0))],
-            ref_site_id: Default::default(),
-        };
+        grid.set_cell(0, 0, Cell::new_number(4.2)); // A1
+        let served = eval_udf_cell(&grid, 2, 1, "=MYFUNC(A1)", Some(&times_ten));
+        assert_eq!(served, EvalResult::Number(42.0));
+        stored_formula(&mut grid, 2, 1, "=MYFUNC(A1)", CellValue::Number(42.0));
         // Preserved, not #NAME?.
-        assert_eq!(eval.evaluate(&expr), EvalResult::Number(42.0));
+        assert_eq!(eval_udf_cell(&grid, 2, 1, "=MYFUNC(A1)", None), EvalResult::Number(42.0));
+    }
+
+    #[test]
+    fn a_custom_function_whose_argument_changed_is_refused_not_kept() {
+        // C2 = MYFUNC(A1) was served 42 for A1 = 4.2. A1 then changes on a route
+        // with no resolver (a cross-sheet edit, a fill, a Rust-side write): the
+        // 42 belongs to the OLD argument and must not be shown as current.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(4.2));
+        eval_udf_cell(&grid, 2, 1, "=MYFUNC(A1)", Some(&times_ten));
+        stored_formula(&mut grid, 2, 1, "=MYFUNC(A1)", CellValue::Number(42.0));
+
+        grid.set_cell(0, 0, Cell::new_number(5.0));
+        let refused = eval_udf_cell(&grid, 2, 1, "=MYFUNC(A1)", None);
+        assert_eq!(refused, EvalResult::Error(CellError::Name), "the answer for A1 = 4.2 was kept for A1 = 5");
+        // The recalculation stores its refusal, as every route does.
+        stored_formula(&mut grid, 2, 1, "=MYFUNC(A1)", refused.to_cell_value());
+
+        // Back to the argument it was served for: served again from the
+        // results cache, although the cell now HOLDS #NAME? (round 5 kept a
+        // value only while the cell still held it, so a refused cell stayed
+        // refused until the next recalculation with a resolver).
+        grid.set_cell(0, 0, Cell::new_number(4.2));
+        assert_eq!(
+            eval_udf_cell(&grid, 2, 1, "=MYFUNC(A1)", None),
+            EvalResult::Number(42.0),
+            "the argument went back to 4.2, whose answer is recorded"
+        );
+    }
+
+    #[test]
+    fn a_custom_function_inside_a_larger_formula_never_feeds_its_cells_value_to_the_operator() {
+        // C2 = MYFUNC(A1)*2 holds 84. The old preserve handed 84 back as
+        // MYFUNC's answer, so every recalculation without a resolver doubled
+        // it (168, 336, ...). The results cache answers MYFUNC(4.2) with the
+        // 42 the resolver served, so every such recalculation computes 84 --
+        // whatever the cell holds (999 below, which is nobody's answer).
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(4.2));
+        let served = eval_udf_cell(&grid, 2, 1, "=MYFUNC(A1)*2", Some(&times_ten));
+        assert_eq!(served, EvalResult::Number(84.0));
+        stored_formula(&mut grid, 2, 1, "=MYFUNC(A1)*2", CellValue::Number(999.0));
+        for pass in 1..=3 {
+            let result = eval_udf_cell(&grid, 2, 1, "=MYFUNC(A1)*2", None);
+            assert_eq!(
+                result,
+                EvalResult::Number(84.0),
+                "pass {}: a composite formula must compute from its CALL's recorded answer",
+                pass
+            );
+            stored_formula(&mut grid, 2, 1, "=MYFUNC(A1)*2", result.to_cell_value());
+        }
+        // Wrapped in IF, and in another cell that was never served itself: the
+        // call's answer is a fact about its arguments, wherever it sits.
+        assert_eq!(
+            eval_udf_cell(&grid, 3, 1, "=IF(A1>0,MYFUNC(A1)+1,0)", None),
+            EvalResult::Number(43.0)
+        );
+        // A changed argument has no recorded answer: refused, never 84.
+        grid.set_cell(0, 0, Cell::new_number(5.0));
+        assert_eq!(eval_udf_cell(&grid, 2, 1, "=MYFUNC(A1)*2", None), EvalResult::Error(CellError::Name));
+    }
+
+    #[test]
+    fn a_custom_function_whose_argument_is_a_refusal_is_not_kept() {
+        // =MYFUNC(CUBEVALUE(..)) with neither a resolver nor cube data: the
+        // argument is a #N/A standing for a value nobody computed, so there is
+        // no exact fingerprint to keep the stored value under.
+        let mut grid = Grid::new();
+        stored_formula(&mut grid, 0, 0, r#"=MYFUNC(CUBEVALUE("Sales","[Revenue]"))"#, CellValue::Number(7.0));
+        let memo = grid.call_memo().clone();
+        // Even an answer recorded for MYFUNC(#N/A) must not be borrowed.
+        memo.remember(
+            crate::cube::udf_call_fingerprint("MYFUNC", &[EvalResult::Error(CellError::NA)]).unwrap(),
+            &EvalResult::Number(7.0),
+        );
+        assert_eq!(
+            eval_udf_cell(&grid, 0, 0, r#"=MYFUNC(CUBEVALUE("Sales","[Revenue]"))"#, None),
+            EvalResult::Error(CellError::Name)
+        );
+    }
+
+    #[test]
+    fn a_workbook_just_opened_keeps_its_saved_custom_function_values() {
+        // The load path seeds the cache from the stored values (a saved value
+        // was calculated for the arguments saved with it): F9 right after an
+        // open keeps them; an argument changed after the open does not.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(3.0));
+        grid.set_cell(0, 1, Cell::new_number(5.0));
+        stored_formula(&mut grid, 1, 0, "=MYFUNC(A1)", CellValue::Number(30.0));
+        stored_formula(&mut grid, 1, 1, "=MYFUNC(A1)+1", CellValue::Number(31.0));
+        stored_formula(&mut grid, 1, 2, "=MYFUNC(B1)*2", CellValue::Number(100.0));
+        stored_formula(&mut grid, 1, 3, "=MYFUNC(1+MYFUNC(A1))", CellValue::Number(300.0));
+        {
+            for (col, formula) in [
+                (0, "=MYFUNC(A1)"),
+                (1, "=MYFUNC(A1)+1"),
+                (2, "=MYFUNC(B1)*2"),
+                (3, "=MYFUNC(1+MYFUNC(A1))"),
+            ] {
+                let mut ms = MultiSheetContext::new("Sheet1".to_string());
+                ms.add_grid("Sheet1".to_string(), &grid);
+                let ctx = EvalContext { current_row: Some(1), current_col: Some(col), ..Default::default() };
+                let ev = Evaluator::with_context(&grid, ms, ctx);
+                let seeded = ev.remember_stored_call_result(&parser::parse(formula).unwrap());
+                assert_eq!(
+                    seeded,
+                    col == 0,
+                    "only a ROOT call whose arguments hold no call of their own is seeded: {}",
+                    formula
+                );
+            }
+        }
+        assert_eq!(eval_udf_cell(&grid, 1, 0, "=MYFUNC(A1)", None), EvalResult::Number(30.0));
+        // The same CALL inside a larger formula is answered from the root's
+        // seeded answer: MYFUNC(3) is 30 wherever it sits.
+        assert_eq!(eval_udf_cell(&grid, 1, 1, "=MYFUNC(A1)+1", None), EvalResult::Number(31.0));
+        // A call that only ever sat inside a larger formula has no saved
+        // value of its own: it refuses until a recalculation serves it.
+        assert_eq!(eval_udf_cell(&grid, 1, 2, "=MYFUNC(B1)*2", None), EvalResult::Error(CellError::Name));
+        grid.set_cell(0, 0, Cell::new_number(4.0));
+        assert_eq!(eval_udf_cell(&grid, 1, 0, "=MYFUNC(A1)", None), EvalResult::Error(CellError::Name));
+    }
+
+    #[test]
+    fn a_spill_origin_is_seeded_with_its_whole_array_never_its_first_element() {
+        // rev5B#2: A1 = MYFUNC() spilled {1;2;3} over A1:A3. The origin stores
+        // only 1, and seeding that scalar made the next recalculation without
+        // a resolver answer 1 -- and collapse the spill. The open path hands
+        // the array its footprint holds; the cache must give it back whole.
+        let mut grid = Grid::new();
+        stored_formula(&mut grid, 0, 0, "=MYFUNC()", CellValue::Number(1.0));
+        grid.set_cell(1, 0, Cell::new_number(2.0));
+        grid.set_cell(2, 0, Cell::new_number(3.0));
+        let array = EvalResult::Array(vec![
+            EvalResult::Number(1.0),
+            EvalResult::Number(2.0),
+            EvalResult::Number(3.0),
+        ]);
+        {
+            let mut ms = MultiSheetContext::new("Sheet1".to_string());
+            ms.add_grid("Sheet1".to_string(), &grid);
+            let ctx = EvalContext { current_row: Some(0), current_col: Some(0), ..Default::default() };
+            let ev = Evaluator::with_context(&grid, ms, ctx);
+            assert!(ev.remember_stored_call_answer(&parser::parse("=MYFUNC()").unwrap(), array.clone()));
+        }
+        let answered = eval_udf_cell(&grid, 0, 0, "=MYFUNC()", None);
+        assert_eq!(answered, array, "the origin's call must come back as the array it spilled");
+        assert_eq!(answered.spill_dimensions(), (3, 1));
+    }
+
+    #[test]
+    fn an_evaluator_says_which_call_it_refused_for_lack_of_data() {
+        // The full recalculation must be able to tell "this formula had no
+        // data for one of its calls" from an answer (`last_data_refusal`).
+        // CHANGED ON PURPOSE (round 8, NEW-iferror-masks-a-refusal): a CUBE
+        // call's refusal is now the formula's result too -- it used to be
+        // IFERROR's plausible 0, which every route but the full pass wrote as
+        // computed. MYFUNC here was never served, so nothing says it is a
+        // function of this workbook rather than a typo: Excel's #NAME?, which
+        // IFERROR handles -- but the refusal is still reported.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(3.0));
+        let refused = |formula: &str| {
+            let mut ms = MultiSheetContext::new("Sheet1".to_string());
+            ms.add_grid("Sheet1".to_string(), &grid);
+            let ctx = EvalContext { current_row: Some(5), current_col: Some(5), ..Default::default() };
+            let ev = Evaluator::with_context(&grid, ms, ctx);
+            let result = ev.evaluate(&parser::parse(formula).unwrap());
+            (result, ev.last_data_refusal())
+        };
+        assert_eq!(refused("=IFERROR(MYFUNC(A1),0)"), (EvalResult::Number(0.0), Some(CellError::Name)));
+        assert_eq!(
+            refused(r#"=IFERROR(CUBEVALUE("Sales","[Revenue]"),0)"#),
+            (EvalResult::Error(CellError::NA), Some(CellError::NA))
+        );
+        assert_eq!(refused("=A1*2"), (EvalResult::Number(6.0), None), "no call, no refusal");
+        grid.call_memo().remember(
+            crate::cube::udf_call_fingerprint("MYFUNC", &[EvalResult::Number(3.0)]).unwrap(),
+            &EvalResult::Number(30.0),
+        );
+        assert_eq!(refused("=IFERROR(MYFUNC(A1),0)"), (EvalResult::Number(30.0), None), "answered from the cache");
+    }
+
+    #[test]
+    fn a_refused_call_is_the_formulas_answer_never_what_a_wrapper_makes_of_it() {
+        // NEW-iferror-masks-a-refusal (BUG-0476). A call with no data -- no
+        // pre-fetch, no resolver, nothing recorded for its arguments -- leaves
+        // the formula's answer unknown. Wrapped in IFERROR / IFNA / ISNA /
+        // ISERROR it used to come out as a plausible 0 or FALSE, which every
+        // recalculation without data wrote into the cell as computed.
+        let mut grid = Grid::new();
+        // MYFUNC is one of this workbook's functions: a resolver served it
+        // once, for another argument.
+        grid.set_cell(0, 0, Cell::new_number(9.0));
+        assert_eq!(eval_udf_cell(&grid, 4, 4, "=MYFUNC(A1)", Some(&times_ten)), EvalResult::Number(90.0));
+        grid.set_cell(0, 0, Cell::new_number(3.0));
+        let cube = r#"CUBEVALUE("Sales","[Revenue]")"#;
+        let cases = [
+            ("=IFERROR(MYFUNC(A1),0)".to_string(), CellError::Name),
+            ("=IF(ISERROR(MYFUNC(A1)),-1,1)".to_string(), CellError::Name),
+            (format!("=IFNA({},0)", cube), CellError::NA),
+            (format!("=ISNA({})", cube), CellError::NA),
+            (format!("=SUM(1,IFERROR({}/1000,0))", cube), CellError::NA),
+        ];
+        for (formula, refusal) in &cases {
+            assert_eq!(
+                eval_udf_cell(&grid, 5, 5, formula, None),
+                EvalResult::Error(refusal.clone()),
+                "{} answered around a call nobody computed",
+                formula
+            );
+        }
+        // A name the workbook is NOT known to define may be a typo: Excel's
+        // #NAME?, which IFERROR handles (ERROR.TYPE(NOSUCHFN()) is 5 too) --
+        // while the refusal is still REPORTED, for the full pass's keep rule.
+        let (typo, reported) = {
+            let mut ms = MultiSheetContext::new("Sheet1".to_string());
+            ms.add_grid("Sheet1".to_string(), &grid);
+            let ctx = EvalContext { current_row: Some(5), current_col: Some(5), ..Default::default() };
+            let ev = Evaluator::with_context(&grid, ms, ctx);
+            (ev.evaluate(&parser::parse("=IFERROR(NOSUCHFN(A1),0)").unwrap()), ev.last_data_refusal())
+        };
+        assert_eq!((typo, reported), (EvalResult::Number(0.0), Some(CellError::Name)));
+        // A call ANSWERED -- from the results cache, or by a resolver -- is
+        // never touched: the wrapper sees the answer.
+        grid.call_memo().remember(
+            crate::cube::udf_call_fingerprint("MYFUNC", &[EvalResult::Number(3.0)]).unwrap(),
+            &EvalResult::Number(30.0),
+        );
+        assert_eq!(eval_udf_cell(&grid, 5, 5, "=IFERROR(MYFUNC(A1),0)", None), EvalResult::Number(30.0));
+        grid.set_cell(0, 0, Cell::new_number(4.0));
+        assert_eq!(
+            eval_udf_cell(&grid, 5, 5, "=IFERROR(MYFUNC(A1),0)", Some(&times_ten)),
+            EvalResult::Number(40.0),
+            "a resolver's answer is never a refusal"
+        );
+        // A served ERROR is the call's real answer, and IFERROR handles it.
+        let failing = |_: &str, _: &[EvalResult]| Some(EvalResult::Error(CellError::Value));
+        assert_eq!(eval_udf_cell(&grid, 5, 5, "=IFERROR(MYFUNC(A1),0)", Some(&failing)), EvalResult::Number(0.0));
+        // The refusal belongs to ONE formula: an evaluator that refused one
+        // answers the next formula normally. (MYFUNC(5) was never answered.)
+        grid.set_cell(0, 0, Cell::new_number(5.0));
+        let mut ms = MultiSheetContext::new("Sheet1".to_string());
+        ms.add_grid("Sheet1".to_string(), &grid);
+        let ctx = EvalContext { current_row: Some(5), current_col: Some(5), ..Default::default() };
+        let ev = Evaluator::with_context(&grid, ms, ctx);
+        assert_eq!(ev.evaluate(&parser::parse("=IFERROR(MYFUNC(A1),0)").unwrap()), EvalResult::Error(CellError::Name));
+        assert_eq!(ev.evaluate(&parser::parse("=A1*2").unwrap()), EvalResult::Number(10.0));
+    }
+
+    #[test]
+    fn a_saved_value_is_never_filed_under_a_volatile_arguments_new_value() {
+        // rev6A#3: =MYFUNC(TODAY()) saved on Monday showing 5 is opened on
+        // Tuesday. Seeding evaluated TODAY() at OPEN time and filed Monday's 5
+        // under Tuesday's argument, so every recalculation without a resolver
+        // served it as Tuesday's answer. Such a call is not seeded.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(3.0));
+        stored_formula(&mut grid, 1, 0, "=MYFUNC(TODAY())", CellValue::Number(5.0));
+        stored_formula(&mut grid, 1, 1, "=MYFUNC(A1)", CellValue::Number(30.0));
+        for (col, formula, seeds) in [(0, "=MYFUNC(TODAY())", false), (1, "=MYFUNC(A1)", true)] {
+            let mut ms = MultiSheetContext::new("Sheet1".to_string());
+            ms.add_grid("Sheet1".to_string(), &grid);
+            let ctx = EvalContext { current_row: Some(1), current_col: Some(col), ..Default::default() };
+            let ev = Evaluator::with_context(&grid, ms, ctx);
+            assert_eq!(ev.remember_stored_call_result(&parser::parse(formula).unwrap()), seeds, "{}", formula);
+        }
+        assert_eq!(
+            eval_udf_cell(&grid, 1, 0, "=MYFUNC(TODAY())", None),
+            EvalResult::Error(CellError::Name),
+            "a value saved for another day was served as today's"
+        );
+        assert_eq!(eval_udf_cell(&grid, 1, 1, "=MYFUNC(A1)", None), EvalResult::Number(30.0), "control: a stable argument seeds");
     }
 
     #[test]
@@ -21941,6 +22603,397 @@ mod cube_serve_tests {
         let ast = parser::parse(r#"=CUBEVALUE("Sales","[Revenue]")"#).unwrap();
         let ev = Evaluator::new(&grid);
         assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::NA));
+    }
+
+    // ---- A sheet-QUALIFIED argument reads the sheet it names ----
+    //
+    // `resolve_cube_arg` matched `CellRef { col, row, .. }` and ignored `sheet`,
+    // so `=CUBEVALUE("Sales","[Revenue]",Inputs!B2)` keyed the call on the
+    // FORMULA's own B2. The pre-pass did the same, the keys agreed, and the
+    // cell was SERVED another member's number with no error at all.
+
+    /// USA's and UK's revenue, keyed exactly as a literal member argument keys
+    /// them (the key of a cell argument is the text it resolves to).
+    fn by_country() -> CubePrefetch {
+        let mut pf = CubePrefetch::default();
+        for (country, value) in [("USA", 175.0), ("UK", 50.0)] {
+            let args = [
+                Expression::Literal(Value::String("Sales".into())),
+                Expression::Literal(Value::String("[Revenue]".into())),
+                Expression::Literal(Value::String(format!("Sales[country]={}", country))),
+            ];
+            let key = cube_call_key("CUBEVALUE", &args, &PrefetchResolver { pf: &pf }).unwrap();
+            pf.results.insert(key, CubeCallResult::Number(value));
+        }
+        pf
+    }
+
+    /// Evaluate `formula` as Sheet1's cell at (row, col) in a workbook of
+    /// Sheet1 and Inputs, serving `pf`.
+    fn eval_on_sheet1(
+        sheet1: &Grid,
+        inputs: &Grid,
+        pf: CubePrefetch,
+        formula: &str,
+        at: Option<(u32, u32)>,
+    ) -> EvalResult {
+        let mut ctx = MultiSheetContext::new("Sheet1".to_string());
+        ctx.add_grid("Sheet1".to_string(), sheet1);
+        ctx.add_grid("Inputs".to_string(), inputs);
+        ctx.sheet_order = vec!["Sheet1".to_string(), "Inputs".to_string()];
+        let eval_ctx = EvalContext {
+            current_row: at.map(|(r, _)| r),
+            current_col: at.map(|(_, c)| c),
+            cube_prefetch: Some(Arc::new(pf)),
+            ..EvalContext::default()
+        };
+        let ev = Evaluator::with_context(sheet1, ctx, eval_ctx);
+        ev.evaluate(&parser::parse(formula).unwrap())
+    }
+
+    /// Sheet1!B2 names UK, Inputs!B2 names USA.
+    fn uk_here_usa_on_inputs() -> (Grid, Grid) {
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(1, 1, crate::cell::Cell::new_text("Sales[country]=UK".to_string()));
+        let mut inputs = Grid::new();
+        inputs.set_cell(1, 1, crate::cell::Cell::new_text("Sales[country]=USA".to_string()));
+        (sheet1, inputs)
+    }
+
+    #[test]
+    fn a_sheet_qualified_cube_argument_reads_the_sheet_it_names() {
+        let (sheet1, inputs) = uk_here_usa_on_inputs();
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, by_country(), r#"=CUBEVALUE("Sales","[Revenue]",Inputs!B2)"#, None),
+            EvalResult::Number(175.0),
+            "Inputs!B2 (USA) was read from the FORMULA's sheet (UK)"
+        );
+        // Control: the unqualified B2 is still the formula's own cell.
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, by_country(), r#"=CUBEVALUE("Sales","[Revenue]",B2)"#, None),
+            EvalResult::Number(50.0)
+        );
+    }
+
+    #[test]
+    fn a_reference_qualified_with_the_formulas_own_sheet_is_the_own_cell() {
+        let (sheet1, inputs) = uk_here_usa_on_inputs();
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, by_country(), r#"=CUBEVALUE("Sales","[Revenue]",Sheet1!B2)"#, None),
+            EvalResult::Number(50.0)
+        );
+    }
+
+    #[test]
+    fn a_qualified_argument_naming_a_missing_sheet_is_ref() {
+        let (sheet1, inputs) = uk_here_usa_on_inputs();
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, by_country(), r#"=CUBEVALUE("Sales","[Revenue]",Nowhere!B2)"#, None),
+            EvalResult::Error(CellError::Ref)
+        );
+    }
+
+    #[test]
+    fn a_cube_object_on_another_sheet_is_refused_never_keyed_on_its_caption() {
+        // Inputs!B2 holds a CUBEMEMBER whose last value is the caption "USA".
+        // Its member object is not resolved for another sheet, so a key built
+        // from what is visible would be a guess: refused with #VALUE!.
+        let (sheet1, _) = uk_here_usa_on_inputs();
+        let mut inputs = Grid::new();
+        let mut member = crate::cell::Cell::new_formula(r#"=CUBEMEMBER("Sales","Sales[country]=USA")"#.to_string());
+        member.value = CellValue::Text("USA".to_string());
+        inputs.set_cell(1, 1, member);
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, by_country(), r#"=CUBEVALUE("Sales","[Revenue]",Inputs!B2)"#, None),
+            EvalResult::Error(CellError::Value)
+        );
+    }
+
+    // ---- A scoped prefetch answers only the cells it was built for ----
+
+    /// A cube cell at Sheet1!D7 whose last value was 99.
+    fn sheet1_with_cube_cell_at_d7() -> Grid {
+        let mut grid = Grid::new();
+        let mut cell = crate::cell::Cell::new_formula(r#"=CUBEVALUE("Sales","[Revenue]",B2)"#.to_string());
+        cell.value = CellValue::Number(99.0);
+        grid.set_cell(6, 3, cell);
+        grid.set_cell(1, 1, crate::cell::Cell::new_text("Sales[country]=USA".to_string()));
+        grid
+    }
+
+    fn scoped(sheet: &str, cells: &[(u32, u32)]) -> CubePrefetch {
+        let mut pf = by_country();
+        pf.scope = Some(crate::cube::CubePrefetchScope {
+            sheet: sheet.to_string(),
+            covered: cells.iter().map(|&(r, c)| crate::cube::cell_key(r, c)).collect(),
+        });
+        pf
+    }
+
+    /// Evaluate `formula` as Sheet1's cell at `at` with NO cube data at all.
+    fn eval_on_sheet1_without_data(sheet1: &Grid, inputs: &Grid, formula: &str, at: (u32, u32)) -> EvalResult {
+        let mut ctx = MultiSheetContext::new("Sheet1".to_string());
+        ctx.add_grid("Sheet1".to_string(), sheet1);
+        ctx.add_grid("Inputs".to_string(), inputs);
+        ctx.sheet_order = vec!["Sheet1".to_string(), "Inputs".to_string()];
+        let eval_ctx = EvalContext {
+            current_row: Some(at.0),
+            current_col: Some(at.1),
+            ..EvalContext::default()
+        };
+        Evaluator::with_context(sheet1, ctx, eval_ctx).evaluate(&parser::parse(formula).unwrap())
+    }
+
+    /// What the open path does for a workbook just read from disk: the stored
+    /// value of Sheet1's cell at `at` is recorded as its formula's answer.
+    fn seed_as_opened(sheet1: &Grid, inputs: &Grid, formula: &str, at: (u32, u32)) -> bool {
+        let mut ctx = MultiSheetContext::new("Sheet1".to_string());
+        ctx.add_grid("Sheet1".to_string(), sheet1);
+        ctx.add_grid("Inputs".to_string(), inputs);
+        let eval_ctx = EvalContext { current_row: Some(at.0), current_col: Some(at.1), ..EvalContext::default() };
+        Evaluator::with_context(sheet1, ctx, eval_ctx).remember_stored_call_result(&parser::parse(formula).unwrap())
+    }
+
+    /// Store `value` as the last value of the formula cell at `at`.
+    fn store(grid: &mut Grid, at: (u32, u32), formula: &str, value: CellValue) {
+        let mut cell = crate::cell::Cell::new_formula(formula.to_string());
+        cell.value = value;
+        grid.set_cell(at.0, at.1, cell);
+    }
+
+    #[test]
+    fn a_cell_outside_a_scoped_prefetch_keeps_its_last_value() {
+        let sheet1 = sheet1_with_cube_cell_at_d7();
+        let inputs = Grid::new();
+        let formula = r#"=CUBEVALUE("Sales","[Revenue]",B2)"#;
+        // The workbook was opened with D7 = 99 for B2 = USA: that is the
+        // recorded answer a recalculation without data may keep (rev3A#3).
+        assert!(seed_as_opened(&sheet1, &inputs, formula, (6, 3)));
+        // Built for other cells: D7 is treated as if nothing was fetched.
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, scoped("Sheet1", &[(0, 0)]), formula, Some((6, 3))),
+            EvalResult::Number(99.0),
+            "a cell the prefetch was not built for was answered by key"
+        );
+        // Built for D7: served.
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, scoped("SHEET1", &[(6, 3)]), formula, Some((6, 3))),
+            EvalResult::Number(175.0)
+        );
+        // Built for D7 on ANOTHER sheet (a workbook pass serving the active
+        // sheet's prefetch to every sheet): not this cell. It is answered from
+        // the results cache, whose answer for B2 = USA is now the 175 just
+        // served -- the newest answer replaces the one the open recorded
+        // (changed on purpose in round 6; round 5 compared against the cell's
+        // stored 99 and kept that).
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, scoped("Inputs", &[(6, 3)]), formula, Some((6, 3))),
+            EvalResult::Number(175.0)
+        );
+    }
+
+    #[test]
+    fn a_full_refresh_serves_each_sheet_from_its_own_prefetch() {
+        // Calculate Now's full refresh carries the active sheet's pre-fetch and
+        // one per other sheet (`other_sheets`, NEW-f9-other-sheet-cube-na).
+        // Inputs!D7 = CUBEVALUE(.., B2) reads INPUTS's B2 (USA) and must be
+        // served from Inputs's own pre-fetch -- not refused as a cell the
+        // active sheet's pre-fetch does not cover.
+        let (sheet1, mut inputs) = uk_here_usa_on_inputs();
+        let formula = r#"=CUBEVALUE("Sales","[Revenue]",B2)"#;
+        store(&mut inputs, (6, 3), formula, CellValue::Number(-1.0));
+        let mut full = scoped("Sheet1", &[(6, 3)]);
+        full.other_sheets.insert("INPUTS".to_string(), scoped("Inputs", &[(6, 3)]));
+        let eval_as_inputs = |pf: CubePrefetch| {
+            let mut ctx = MultiSheetContext::new("Inputs".to_string());
+            ctx.add_grid("Sheet1".to_string(), &sheet1);
+            ctx.add_grid("Inputs".to_string(), &inputs);
+            ctx.sheet_order = vec!["Sheet1".to_string(), "Inputs".to_string()];
+            let eval_ctx = EvalContext {
+                current_row: Some(6),
+                current_col: Some(3),
+                cube_prefetch: Some(Arc::new(pf)),
+                ..EvalContext::default()
+            };
+            Evaluator::with_context(&inputs, ctx, eval_ctx).evaluate(&parser::parse(formula).unwrap())
+        };
+        assert_eq!(eval_as_inputs(full.clone()), EvalResult::Number(175.0), "Inputs's cell from Inputs's pre-fetch (USA)");
+        // Sheet1's own cell still takes the active sheet's pre-fetch (UK).
+        assert_eq!(eval_on_sheet1(&sheet1, &inputs, full, formula, Some((6, 3))), EvalResult::Number(50.0));
+    }
+
+    #[test]
+    fn a_covered_cell_whose_key_is_missing_is_refused_not_preserved() {
+        // The prefetch was built for D7 but holds no key for what D7 now asks
+        // (its argument changed in a way the prefetch could not see): keeping
+        // 99 would show the previous member's number as current.
+        let mut sheet1 = sheet1_with_cube_cell_at_d7();
+        sheet1.set_cell(1, 1, crate::cell::Cell::new_text("Sales[country]=France".to_string()));
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &Grid::new(), scoped("Sheet1", &[(6, 3)]), r#"=CUBEVALUE("Sales","[Revenue]",B2)"#, Some((6, 3))),
+            EvalResult::Error(CellError::NA)
+        );
+    }
+
+    // ---- rev3A#3: a value is kept only for the arguments that produced it,
+    //      and only when the cube call IS the formula ----
+
+    #[test]
+    fn a_served_cube_cell_keeps_its_value_while_its_argument_is_unchanged() {
+        let mut sheet1 = sheet1_with_cube_cell_at_d7(); // B2 = USA
+        let inputs = Grid::new();
+        let formula = r#"=CUBEVALUE("Sales","[Revenue]",B2)"#;
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, scoped("Sheet1", &[(6, 3)]), formula, Some((6, 3))),
+            EvalResult::Number(175.0)
+        );
+        store(&mut sheet1, (6, 3), formula, CellValue::Number(175.0));
+        assert_eq!(eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3)), EvalResult::Number(175.0));
+    }
+
+    #[test]
+    fn a_cube_cell_whose_argument_changed_is_refused_not_kept() {
+        // D7 was served USA's 175. B2 then names UK on a route with no cube
+        // data (the cross-sheet walk, a fill, a paste without a pre-fetch): 175
+        // is USA's number, and showing it beside "UK" is a silent wrong answer.
+        let mut sheet1 = sheet1_with_cube_cell_at_d7();
+        let inputs = Grid::new();
+        let formula = r#"=CUBEVALUE("Sales","[Revenue]",B2)"#;
+        eval_on_sheet1(&sheet1, &inputs, scoped("Sheet1", &[(6, 3)]), formula, Some((6, 3)));
+        store(&mut sheet1, (6, 3), formula, CellValue::Number(175.0));
+
+        sheet1.set_cell(1, 1, crate::cell::Cell::new_text("Sales[country]=UK".to_string()));
+        let refused = eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3));
+        assert_eq!(refused, EvalResult::Error(CellError::NA), "USA's revenue was kept for UK");
+        // A prefetch built for OTHER cells is no data for D7 either.
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, scoped("Sheet1", &[(0, 0)]), formula, Some((6, 3))),
+            EvalResult::Error(CellError::NA)
+        );
+        // The recalculation stores its refusal, as every route does.
+        store(&mut sheet1, (6, 3), formula, refused.to_cell_value());
+        // Back to USA: USA's recorded answer serves again, although the cell
+        // now holds #N/A (round 5 kept only a value the cell still held).
+        sheet1.set_cell(1, 1, crate::cell::Cell::new_text("Sales[country]=USA".to_string()));
+        assert_eq!(
+            eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3)),
+            EvalResult::Number(175.0),
+            "the argument went back to USA, whose answer is recorded"
+        );
+    }
+
+    #[test]
+    fn a_composite_cube_formula_is_answered_from_its_call_never_divided_again() {
+        // D7 = CUBEVALUE(..)/1000 shows 0.175. Handing the stored 0.175 back
+        // as CUBEVALUE's answer divided it once per recalculation. The results
+        // cache answers the CALL with its served 175, so every recalculation
+        // without data computes 0.175 -- never 0.000175. (Round 5 refused
+        // these with #N/A instead; changed on purpose in round 6.)
+        let mut sheet1 = sheet1_with_cube_cell_at_d7();
+        let inputs = Grid::new();
+        let formula = r#"=CUBEVALUE("Sales","[Revenue]",B2)/1000"#;
+        // Nothing served yet: a composite formula has no answer to compute
+        // from, and it is not seeded on open (it has no saved value of its
+        // own call): refused.
+        store(&mut sheet1, (6, 3), formula, CellValue::Number(0.175));
+        assert!(!seed_as_opened(&sheet1, &inputs, formula, (6, 3)));
+        assert_eq!(eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3)), EvalResult::Error(CellError::NA));
+
+        assert_eq!(
+            eval_on_sheet1(&sheet1, &inputs, scoped("Sheet1", &[(6, 3)]), formula, Some((6, 3))),
+            EvalResult::Number(0.175)
+        );
+        store(&mut sheet1, (6, 3), formula, CellValue::Number(0.175));
+        for pass in 1..=3 {
+            let result = eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3));
+            assert_eq!(
+                result,
+                EvalResult::Number(0.175),
+                "pass {}: the composite formula must compute from the call's answer, never from its stored quotient",
+                pass
+            );
+            store(&mut sheet1, (6, 3), formula, result.to_cell_value());
+        }
+        // Wrapped in IF: the same call, the same answer.
+        assert_eq!(
+            eval_on_sheet1_without_data(&sheet1, &inputs, r#"=IF(B2<>"",CUBEVALUE("Sales","[Revenue]",B2),0)"#, (7, 3)),
+            EvalResult::Number(175.0)
+        );
+        // A changed member has no recorded answer: refused, never USA's.
+        sheet1.set_cell(1, 1, crate::cell::Cell::new_text("Sales[country]=UK".to_string()));
+        assert_eq!(eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3)), EvalResult::Error(CellError::NA));
+    }
+
+    #[test]
+    fn a_composite_formula_computes_from_its_calls_newest_answer_never_from_its_cells_value() {
+        // The call was served at E7 (the bare call): 175. D7 =
+        // CUBEVALUE(..)/1000 was never served itself and holds 42 -- nobody's
+        // answer. Without data it computes from the CALL's answer. A model
+        // refresh re-serves the call (180 now): the newest answer replaces the
+        // old one, and D7 follows it. (Round 5's version of this test held the
+        // opposite rule: a composite formula never borrowed a recorded answer.)
+        let mut sheet1 = sheet1_with_cube_cell_at_d7();
+        let inputs = Grid::new();
+        let bare = r#"=CUBEVALUE("Sales","[Revenue]",B2)"#;
+        let formula = r#"=CUBEVALUE("Sales","[Revenue]",B2)/1000"#;
+        let mut pf = scoped("Sheet1", &[(6, 4)]);
+        assert_eq!(eval_on_sheet1(&sheet1, &inputs, pf.clone(), bare, Some((6, 4))), EvalResult::Number(175.0));
+
+        store(&mut sheet1, (6, 3), formula, CellValue::Number(42.0));
+        assert_eq!(
+            eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3)),
+            EvalResult::Number(0.175),
+            "a call inside a larger formula must be answered by its own recorded answer"
+        );
+
+        let usa = pf.results.values_mut().find(|r| **r == CubeCallResult::Number(175.0)).unwrap();
+        *usa = CubeCallResult::Number(180.0);
+        assert_eq!(eval_on_sheet1(&sheet1, &inputs, pf, bare, Some((6, 4))), EvalResult::Number(180.0));
+        assert_eq!(
+            eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3)),
+            EvalResult::Number(0.18),
+            "the refresh's answer replaces the old one"
+        );
+    }
+
+    #[test]
+    fn a_cube_object_argument_that_now_names_another_member_is_refused() {
+        // B3 = CUBEMEMBER("Sales", B2) shows "USA"; D7 = CUBEVALUE(.., B3) was
+        // served USA's 175 through B3's binding. B2 then names UK while B3
+        // still shows its old caption (nothing has re-served it): B3 carries a
+        // different member now, so D7's 175 cannot be kept.
+        let mut sheet1 = sheet1_with_cube_cell_at_d7(); // B2 = USA
+        let inputs = Grid::new();
+        let member = r#"=CUBEMEMBER("Sales",B2)"#;
+        store(&mut sheet1, (2, 1), member, CellValue::Text("USA".to_string()));
+        let formula = r#"=CUBEVALUE("Sales","[Revenue]",B3)"#;
+        let mut pf = scoped("Sheet1", &[(6, 3)]);
+        pf.insert_binding(
+            2,
+            1,
+            CubeBinding {
+                connection: "Sales".into(),
+                kind: CubeBindingKind::Member,
+                expression: "Sales[country]=USA".into(),
+                caption: "USA".into(),
+                members: vec![],
+                scalar: None,
+            },
+        );
+        assert_eq!(eval_on_sheet1(&sheet1, &inputs, pf, formula, Some((6, 3))), EvalResult::Number(175.0));
+        store(&mut sheet1, (6, 3), formula, CellValue::Number(175.0));
+        assert_eq!(
+            eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3)),
+            EvalResult::Number(175.0),
+            "control: nothing changed, the served value is kept"
+        );
+
+        sheet1.set_cell(1, 1, crate::cell::Cell::new_text("Sales[country]=UK".to_string()));
+        assert_eq!(
+            eval_on_sheet1_without_data(&sheet1, &inputs, formula, (6, 3)),
+            EvalResult::Error(CellError::NA),
+            "the member cell's own argument changed, so the member it carries did"
+        );
     }
 }
 

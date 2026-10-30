@@ -295,6 +295,9 @@ interface EmitContext {
   usesCaps: boolean;
   /** Connections already introduced with a name comment. */
   namedConnections: Set<string>;
+  /** The sheet the action being emitted was recorded on (`RecordedAction.sheetIndex`:
+   *  the sheet that was active). An event that names ANOTHER sheet replays there. */
+  sheet: number | null;
 }
 
 function push(ctx: EmitContext, line: string): void {
@@ -383,6 +386,36 @@ function emitCellWrites(
   push(ctx, `for (const w of ${name}) Calcula.setCellValue(w.row, w.col, w.value);`);
 }
 
+/**
+ * The sheets a recorded format reached, in replay order: `null` for the
+ * action's OWN sheet (an ordinary call, the active sheet at replay), then every
+ * OTHER sheet by index (a sheet-addressed call).
+ *
+ * `sheetIndices` absent = the action's sheet alone (as before the event
+ * carried its sheets). Present, it is EVERY sheet the one command formatted:
+ * a grouped gesture's group, the action's sheet among them -- recorded without
+ * it, a grouped Bold replayed on the active sheet alone -- or the sheets a
+ * script's off-sheet format named, which need not include the action's sheet
+ * (and then the action's sheet is left alone).
+ */
+function formattedSheets(ctx: EmitContext, sheetIndices: readonly number[] | undefined): Array<number | null> {
+  if (sheetIndices === undefined || sheetIndices.length === 0) return [null];
+  const others = sheetIndices.filter((s, i) => s !== ctx.sheet && sheetIndices.indexOf(s) === i);
+  return ctx.sheet !== null && sheetIndices.includes(ctx.sheet) ? [null, ...others] : others;
+}
+
+/** " on sheets 0, 2" for an event that names its sheets; "" for one that does not. */
+function namedSheetsLabel(ctx: EmitContext, sheetIndices: readonly number[] | undefined): string {
+  if (sheetIndices === undefined || sheetIndices.length === 0) return "";
+  const all = formattedSheets(ctx, sheetIndices).map((s) => (s === null ? ctx.sheet : s));
+  return ` on sheet${all.length === 1 ? "" : "s"} ${all.join(", ")}`;
+}
+
+/** The sheet an event NAMED when it is not the action's own; null otherwise. */
+function otherSheet(ctx: EmitContext, sheetIndex: number | undefined): number | null {
+  return sheetIndex !== undefined && sheetIndex !== ctx.sheet ? sheetIndex : null;
+}
+
 function emitFormatting(
   ctx: EmitContext,
   ev: RecordedGridEventOf<"formatting">,
@@ -396,7 +429,7 @@ function emitFormatting(
     unsupported(
       ctx,
       `format ${a1Range(rowRuns[0][0], colRuns[0][0], rowRuns[rowRuns.length - 1][1], colRuns[colRuns.length - 1][1])}` +
-        " — the notebook runtime has no formatting API",
+        `${namedSheetsLabel(ctx, ev.sheetIndices)} — the notebook runtime has no formatting API`,
     );
     return;
   }
@@ -409,60 +442,316 @@ function emitFormatting(
   }
   if (!literal) return;
 
-  for (const [r0, r1] of rowRuns) {
-    for (const [c0, c1] of colRuns) {
-      push(
-        ctx,
-        `await api.setRangeFormat(${r0}, ${c0}, ${r1}, ${c1}, ${literal}); // ${a1Range(r0, c0, r1, c1)}`,
-      );
+  // `api.setRangeFormat` is sheet-addressable (its sixth argument): another
+  // sheet is formatted where it stands, and the active sheet never moves.
+  for (const sheet of formattedSheets(ctx, ev.sheetIndices)) {
+    const sheetArg = sheet === null ? "" : `, ${sheet}`;
+    const sheetNote = sheet === null ? "" : ` on sheet ${sheet}`;
+    for (const [r0, r1] of rowRuns) {
+      for (const [c0, c1] of colRuns) {
+        push(
+          ctx,
+          `await api.setRangeFormat(${r0}, ${c0}, ${r1}, ${c1}, ${literal}${sheetArg}); // ${a1Range(r0, c0, r1, c1)}${sheetNote}`,
+        );
+      }
     }
   }
 }
 
+/**
+ * The most cells ONE script call may name: the broker's `MAX_RANGE_CELLS`
+ * (@api/scriptHost/validators -- `vRangeRef` refuses a bigger rectangle for
+ * `api.clearRange` / `api.clearRangeFormat`) and `api.updateCellsBatch`'s own
+ * limit (allowlist.ts). Restated rather than imported so this generator stays a
+ * pure, import-free function; clearRangeBoundedReplay.test.ts pins all three
+ * equal.
+ */
+export const SCRIPT_RANGE_MAX_CELLS = 100_000;
+
+/**
+ * The most positions a replayed big Clear Contents READS to find the cells that
+ * hold a value: the recorded rectangle cut to the sheet's used range, read in
+ * row bands of at most `SCRIPT_RANGE_MAX_CELLS` (at most about 60 reads). The
+ * used range is the BOUNDING BOX of everything stored, so one far-away cell
+ * (a value or a formatted blank at XFD1048576) stretches it over the whole
+ * sheet; a cut bigger than this is refused when the macro runs, with the
+ * reason, rather than read for hours.
+ */
+export const CLEAR_REPLAY_MAX_SCANNED_CELLS = 5_000_000;
+
+/**
+ * A recorded Clear (Delete / Clear Contents / Clear Formats / Clear All).
+ *
+ * NEVER UNBOUNDED. The gesture names a RECTANGLE, and a clicked column header
+ * is 1,048,576 positions, Select All about 17 billion. This used to replay as a
+ * loop pushing one update per position of the WHOLE rectangle (object script)
+ * or calling `setCellValue` once per position (notebook), so such a macro hung
+ * its run or ran out of memory. Now:
+ *
+ *   - a rectangle of at most `SCRIPT_RANGE_MAX_CELLS` replays as before: the
+ *     contents as ONE `api.updateCellsBatch` (a notebook: one loop), the
+ *     formats as ONE `api.clearRangeFormat`;
+ *   - a bigger one clears CONTENTS only in the cells that HOLD a value or a
+ *     formula. The recorded rectangle is cut to the sheet's used range, READ AT
+ *     REPLAY TIME (`getUsedRange`, Excel's UsedRange -- a position outside it
+ *     holds no value), and that cut is read in row bands of at most
+ *     `SCRIPT_RANGE_MAX_CELLS` cells (`getRangeValues`; a notebook's
+ *     `getRange`); "" is written only where a band holds something, so an
+ *     empty position costs no write, no undo record and no recalculation seed.
+ *     The used range is a bounding box, so a sparse sheet (A1:D100 plus one cell
+ *     at XFD1048576) makes the cut the whole sheet: a cut of more than
+ *     `CLEAR_REPLAY_MAX_SCANNED_CELLS` positions is REFUSED when the macro runs
+ *     (it throws, naming the size), never looped over -- the cut is only known
+ *     then, so it cannot be a generation-time note. Its FORMATS are not
+ *     replayable: a whole-column or whole-row format is a property of the line,
+ *     not of stored cells, so it can be neither cut to the used range nor
+ *     cleared in pieces (each piece would write an explicit-Normal cell per
+ *     position), and one call over the rectangle is refused by the script API.
+ *     Said out loud (`unsupported`), never dropped.
+ *
+ * The contents of the action's OWN sheet go through `api.updateCellsBatch`,
+ * not `api.clearRange`, on purpose: an application's macro that a person runs
+ * gets cell access only (owner decision B, `EXPLICIT_RUN_CELL_METHODS` in
+ * @api/scriptHost/explicitRunGrant), which admits `updateCellsBatch`,
+ * `getUsedRange` and `getRangeValues` but not `clearRange` -- a recorded Delete
+ * must keep working there.
+ *
+ * A clear the caller addressed to ANOTHER sheet -- a grouped clear reaches each
+ * OTHER grouped sheet this way, and so does a script's off-sheet clear --
+ * replays on THAT sheet (both script surfaces take the sheet as an argument, so
+ * the active sheet never moves). Emitted as if on the action's sheet, it
+ * cleared the active sheet instead and left the named one untouched.
+ */
 function emitClearRange(
   ctx: EmitContext,
   ev: RecordedGridEventOf<"clearRange">,
 ): void {
   const { startRow, startCol, endRow, endCol, applyTo } = ev;
-  const label = a1Range(startRow, startCol, endRow, endCol);
+  const sheet = otherSheet(ctx, ev.sheetIndex);
+  const label = a1Range(startRow, startCol, endRow, endCol) + (sheet === null ? "" : ` on sheet ${sheet}`);
   const clearsContents = applyTo === "all" || applyTo === "contents" || applyTo === "resetContents";
   const clearsFormats = applyTo === "all" || applyTo === "formats";
-  const other = !clearsContents && !clearsFormats;
 
-  if (other) {
+  if (!clearsContents && !clearsFormats) {
     unsupported(ctx, `clear "${applyTo}" on ${label} — no script API for that clear kind`);
     return;
   }
 
-  if (clearsContents) {
-    if (ctx.o.target === "objectScript") {
-      // A loop, not N literals: a cleared range is often thousands of cells,
-      // and updateCellsBatch takes the whole rectangle in one call.
-      push(ctx, `{ // clear contents of ${label}`);
-      push(ctx, `  const updates = [];`);
-      push(ctx, `  for (let r = ${startRow}; r <= ${endRow}; r++) {`);
-      push(ctx, `    for (let c = ${startCol}; c <= ${endCol}; c++) updates.push({ row: r, col: c, value: "" });`);
-      push(ctx, `  }`);
-      push(ctx, `  await api.updateCellsBatch(updates);`);
-      push(ctx, `}`);
-    } else {
-      push(ctx, `// clear contents of ${label}`);
-      push(ctx, `for (let r = ${startRow}; r <= ${endRow}; r++) {`);
-      push(ctx, `  for (let c = ${startCol}; c <= ${endCol}; c++) Calcula.setCellValue(r, c, "");`);
-      push(ctx, `}`);
+  const cells = (endRow - startRow + 1) * (endCol - startCol + 1);
+  const fits = cells <= SCRIPT_RANGE_MAX_CELLS;
+  const rect: ClearRect = { startRow, startCol, endRow, endCol, sheet, label };
+  if (ctx.o.target === "objectScript") {
+    if (rect.sheet !== null) {
+      // Another sheet: the sheet-addressable `api.clearRange` (`clearRangeFormat`
+      // refuses an off-sheet target, `updateCellsBatch` names no sheet).
+      if (fits) {
+        emitSheetAddressedClear(ctx, rect, clearsContents, clearsFormats);
+        return;
+      }
+      if (clearsContents) emitBoundedSheetAddressedContentsClear(ctx, rect);
+      if (clearsFormats) unsupported(ctx, bigFormatClearMessage(label, cells));
+      return;
     }
+    if (clearsContents) {
+      if (fits) emitContentsBatch(ctx, rect);
+      else emitBoundedContentsBatches(ctx, rect);
+    }
+    if (clearsFormats) {
+      if (fits) push(ctx, `await api.clearRangeFormat(${startRow}, ${startCol}, ${endRow}, ${endCol}); // ${label}`);
+      else unsupported(ctx, bigFormatClearMessage(label, cells));
+    }
+    return;
   }
 
-  if (clearsFormats) {
-    if (ctx.o.target === "objectScript") {
-      push(
-        ctx,
-        `await api.clearRangeFormat(${startRow}, ${startCol}, ${endRow}, ${endCol}); // ${label}`,
-      );
-    } else {
-      unsupported(ctx, `clear formats on ${label} — the notebook runtime has no formatting API`);
-    }
+  // Notebook: the QuickJS surface has a typed per-cell write (with a sheet
+  // argument) and no clear op and no formatting op.
+  if (clearsContents) {
+    if (cells <= SCRIPT_RANGE_MAX_CELLS) emitNotebookContentsLoop(ctx, rect);
+    else emitBoundedNotebookContentsClear(ctx, rect);
   }
+  if (clearsFormats) {
+    unsupported(ctx, `clear formats on ${label} — the notebook runtime has no formatting API`);
+  }
+}
+
+/** One recorded clear rectangle; `sheet` null = the action's own sheet. */
+interface ClearRect {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  sheet: number | null;
+  label: string;
+}
+
+function bigFormatClearMessage(label: string, cells: number): string {
+  return (
+    `clear formats on ${label} (${cells} cells) — the script API clears formats on at most ` +
+    `${SCRIPT_RANGE_MAX_CELLS} cells per call, and a whole-row or whole-column format cannot be cleared piece by piece`
+  );
+}
+
+/**
+ * Another sheet, a rectangle that fits one call: ONE
+ * `api.clearRange(..., { applyTo }, sheet)` -- the script API's own vocabulary
+ * (vClearRange: all / contents / formats), so "resetContents" replays as a
+ * contents clear.
+ */
+function emitSheetAddressedClear(
+  ctx: EmitContext,
+  r: ClearRect,
+  clearsContents: boolean,
+  clearsFormats: boolean,
+): void {
+  const scriptApplyTo = clearsContents && clearsFormats ? "all" : clearsContents ? "contents" : "formats";
+  const what = scriptApplyTo === "all" ? "contents and formats" : scriptApplyTo;
+  push(
+    ctx,
+    `await api.clearRange(${r.startRow}, ${r.startCol}, ${r.endRow}, ${r.endCol}, { applyTo: ${jsString(scriptApplyTo)} }, ${r.sheet}); // clear ${what} of ${r.label}`,
+  );
+}
+
+/**
+ * The replay-time cut of the recorded rectangle to the used range: declares
+ * `used`, `r0`, `r1`, `c0`, `c1`. `usedExpr` is the runtime's read of the used
+ * range (an object script awaits `api.getUsedRange`; a notebook parses the JSON
+ * text `Calcula.getUsedRange` returns).
+ */
+function pushUsedRangeCut(ctx: EmitContext, r: ClearRect, usedExpr: string): void {
+  push(ctx, `  const used = ${usedExpr};`);
+  push(ctx, `  const r0 = Math.max(${r.startRow}, used.startRow), r1 = Math.min(${r.endRow}, used.endRow);`);
+  push(ctx, `  const c0 = Math.max(${r.startCol}, used.startCol), c1 = Math.min(${r.endCol}, used.endCol);`);
+}
+
+/**
+ * Inside `if (the cut is not empty)`: refuse a cut too big to read
+ * (`CLEAR_REPLAY_MAX_SCANNED_CELLS`) with the reason, then declare `step`, the
+ * rows of one band of at most `SCRIPT_RANGE_MAX_CELLS` cells (a sheet has at
+ * most 16,384 columns, so a band is at least 6 rows).
+ */
+function pushScanGuardAndStep(ctx: EmitContext, r: ClearRect): void {
+  const what = jsString(`Clear Contents of ${r.label} was not replayed: inside it, the sheet's used range covers `);
+  const why = jsString(
+    ` cells, more than the ${CLEAR_REPLAY_MAX_SCANNED_CELLS} a replay reads to find the cells that hold a value. ` +
+      `Clear a smaller range, or delete the far-away cells that stretch the used range.`,
+  );
+  push(ctx, `    const scanned = (r1 - r0 + 1) * (c1 - c0 + 1);`);
+  push(ctx, `    if (scanned > ${CLEAR_REPLAY_MAX_SCANNED_CELLS}) throw new Error(${what} + scanned + ${why});`);
+  push(ctx, `    const step = Math.floor(${SCRIPT_RANGE_MAX_CELLS} / (c1 - c0 + 1));`);
+}
+
+/**
+ * Another sheet, a bigger rectangle: its cut to THAT sheet's used range read in
+ * row bands, and each band that holds a value cleared as ONE sheet-addressed
+ * `api.clearRange` over the rows and columns that hold one (an empty band costs
+ * a read and nothing else).
+ */
+function emitBoundedSheetAddressedContentsClear(ctx: EmitContext, r: ClearRect): void {
+  push(ctx, `{ // clear contents of ${r.label}: only where a cell holds a value, at most ${SCRIPT_RANGE_MAX_CELLS} cells per call`);
+  pushUsedRangeCut(ctx, r, `await api.getUsedRange(${r.sheet})`);
+  push(ctx, `  if (!used.empty && r0 <= r1 && c0 <= c1) {`);
+  pushScanGuardAndStep(ctx, r);
+  push(ctx, `    for (let r = r0; r <= r1; r += step) {`);
+  push(ctx, `      const band = await api.getRangeValues(r, c0, Math.min(r + step - 1, r1), c1, ${r.sheet});`);
+  push(ctx, `      let top = -1, bottom = -1, left = c1, right = c0;`);
+  push(ctx, `      for (let i = 0; i < band.length; i++) {`);
+  push(ctx, `        for (let k = 0; k < band[i].length; k++) {`);
+  push(ctx, `          if (band[i][k].type === "empty" && !band[i][k].formula) continue;`);
+  push(ctx, `          if (top < 0) top = r + i;`);
+  push(ctx, `          bottom = r + i;`);
+  push(ctx, `          left = Math.min(left, c0 + k);`);
+  push(ctx, `          right = Math.max(right, c0 + k);`);
+  push(ctx, `        }`);
+  push(ctx, `      }`);
+  push(ctx, `      if (top >= 0) await api.clearRange(top, left, bottom, right, { applyTo: "contents" }, ${r.sheet});`);
+  push(ctx, `    }`);
+  push(ctx, `  }`);
+  push(ctx, `}`);
+}
+
+/** The action's own sheet, at most SCRIPT_RANGE_MAX_CELLS positions: one loop and ONE batch call (as always). */
+function emitContentsBatch(ctx: EmitContext, r: ClearRect): void {
+  push(ctx, `{ // clear contents of ${r.label}`);
+  push(ctx, `  const updates = [];`);
+  push(ctx, `  for (let r = ${r.startRow}; r <= ${r.endRow}; r++) {`);
+  push(ctx, `    for (let c = ${r.startCol}; c <= ${r.endCol}; c++) updates.push({ row: r, col: c, value: "" });`);
+  push(ctx, `  }`);
+  push(ctx, `  await api.updateCellsBatch(updates);`);
+  push(ctx, `}`);
+}
+
+/**
+ * The action's own sheet, a bigger rectangle: its cut to the used range read in
+ * row bands (`api.getRangeValues`, which the explicit-run cell access admits),
+ * and "" written only to the cells that hold a value or a formula, in
+ * `api.updateCellsBatch` calls of at most SCRIPT_RANGE_MAX_CELLS.
+ */
+function emitBoundedContentsBatches(ctx: EmitContext, r: ClearRect): void {
+  push(ctx, `{ // clear contents of ${r.label}: only the cells that hold a value, at most ${SCRIPT_RANGE_MAX_CELLS} per call`);
+  pushUsedRangeCut(ctx, r, "await api.getUsedRange()");
+  push(ctx, `  if (!used.empty && r0 <= r1 && c0 <= c1) {`);
+  pushScanGuardAndStep(ctx, r);
+  push(ctx, `    let updates = [];`);
+  push(ctx, `    for (let r = r0; r <= r1; r += step) {`);
+  push(ctx, `      const band = await api.getRangeValues(r, c0, Math.min(r + step - 1, r1), c1);`);
+  push(ctx, `      for (let i = 0; i < band.length; i++) {`);
+  push(ctx, `        for (let k = 0; k < band[i].length; k++) {`);
+  push(ctx, `          if (band[i][k].type === "empty" && !band[i][k].formula) continue;`);
+  push(ctx, `          updates.push({ row: r + i, col: c0 + k, value: "" });`);
+  push(ctx, `          if (updates.length === ${SCRIPT_RANGE_MAX_CELLS}) {`);
+  push(ctx, `            await api.updateCellsBatch(updates);`);
+  push(ctx, `            updates = [];`);
+  push(ctx, `          }`);
+  push(ctx, `        }`);
+  push(ctx, `      }`);
+  push(ctx, `    }`);
+  push(ctx, `    if (updates.length > 0) await api.updateCellsBatch(updates);`);
+  push(ctx, `  }`);
+  push(ctx, `}`);
+}
+
+/** The notebook's typed write of an empty value, on the named sheet when there is one. */
+function notebookClearCall(r: ClearRect, row: string, col: string): string {
+  return `Calcula.setCellValue(${row}, ${col}, ""${r.sheet === null ? "" : `, ${r.sheet}`})`;
+}
+
+/**
+ * Notebook, a rectangle of at most SCRIPT_RANGE_MAX_CELLS: one loop. Another
+ * sheet is written through `setCellValue`'s sheet argument, never by switching
+ * to it and back (the old switch-back read `Calcula.getActiveSheet().index`,
+ * but that op returns a JSON STRING, so it switched to `undefined` and threw).
+ */
+function emitNotebookContentsLoop(ctx: EmitContext, r: ClearRect): void {
+  push(ctx, `// clear contents of ${r.label}`);
+  push(ctx, `for (let r = ${r.startRow}; r <= ${r.endRow}; r++) {`);
+  push(ctx, `  for (let c = ${r.startCol}; c <= ${r.endCol}; c++) ${notebookClearCall(r, "r", "c")};`);
+  push(ctx, `}`);
+}
+
+/**
+ * Notebook, a bigger rectangle: the cut to the used range read in row bands
+ * (`Calcula.getRange`, JSON text of display strings; the ops return JSON text),
+ * and "" written only where a cell holds something. A cell that reads "" can
+ * still hold a formula whose result is empty text, so such a position asks
+ * `Calcula.getCellFormula` -- an in-process read, bounded by the same scan cap.
+ */
+function emitBoundedNotebookContentsClear(ctx: EmitContext, r: ClearRect): void {
+  const sheetArg = r.sheet === null ? "" : `, ${r.sheet}`;
+  push(ctx, `{ // clear contents of ${r.label}: only the cells that hold a value`);
+  pushUsedRangeCut(ctx, r, `JSON.parse(Calcula.getUsedRange(${r.sheet === null ? "" : r.sheet}))`);
+  push(ctx, `  if (!used.empty && r0 <= r1 && c0 <= c1) {`);
+  pushScanGuardAndStep(ctx, r);
+  push(ctx, `    for (let r = r0; r <= r1; r += step) {`);
+  push(ctx, `      const band = JSON.parse(Calcula.getRange(r, c0, Math.min(r + step - 1, r1), c1${sheetArg}));`);
+  push(ctx, `      for (let i = 0; i < band.length; i++) {`);
+  push(ctx, `        for (let k = 0; k < band[i].length; k++) {`);
+  push(ctx, `          if (band[i][k] === "" && Calcula.getCellFormula(r + i, c0 + k${sheetArg}) === "") continue;`);
+  push(ctx, `          ${notebookClearCall(r, "r + i", "c0 + k")};`);
+  push(ctx, `        }`);
+  push(ctx, `      }`);
+  push(ctx, `    }`);
+  push(ctx, `  }`);
+  push(ctx, `}`);
 }
 
 function emitFillRange(
@@ -716,9 +1005,12 @@ function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
       return;
 
     case "borderPreset":
+      // Not replayable on any sheet; the note names every sheet it reached
+      // (a grouped preset's group), so the reader knows what to redo.
       unsupported(
         ctx,
         `border preset "${event.preset}" on ${a1Range(event.startRow, event.startCol, event.endRow, event.endCol)}` +
+          `${namedSheetsLabel(ctx, event.sheetIndices)}` +
           " — no script API for border presets; set the border sides individually",
       );
       return;
@@ -791,21 +1083,31 @@ function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
       );
       return;
 
-    case "mergeCells":
+    // A merge the caller addressed to ANOTHER sheet (a script's off-sheet
+    // merge) replays there: `api.mergeCells` / `api.unmergeCells` take the
+    // sheet as their last argument, and the active sheet never moves.
+    case "mergeCells": {
+      const sheet = otherSheet(ctx, event.sheetIndex);
+      const label =
+        a1Range(event.startRow, event.startCol, event.endRow, event.endCol) + (sheet === null ? "" : ` on sheet ${sheet}`);
       emitObjectScriptOnly(
         ctx,
-        `await api.mergeCells(${event.startRow}, ${event.startCol}, ${event.endRow}, ${event.endCol}); // ${a1Range(event.startRow, event.startCol, event.endRow, event.endCol)}`,
-        `merge ${a1Range(event.startRow, event.startCol, event.endRow, event.endCol)}`,
+        `await api.mergeCells(${event.startRow}, ${event.startCol}, ${event.endRow}, ${event.endCol}${sheet === null ? "" : `, ${sheet}`}); // ${label}`,
+        `merge ${label}`,
       );
       return;
+    }
 
-    case "unmergeCells":
+    case "unmergeCells": {
+      const sheet = otherSheet(ctx, event.sheetIndex);
+      const label = a1(event.row, event.col) + (sheet === null ? "" : ` on sheet ${sheet}`);
       emitObjectScriptOnly(
         ctx,
-        `await api.unmergeCells(${event.row}, ${event.col}); // ${a1(event.row, event.col)}`,
-        `unmerge at ${a1(event.row, event.col)}`,
+        `await api.unmergeCells(${event.row}, ${event.col}${sheet === null ? "" : `, ${sheet}`}); // ${label}`,
+        `unmerge at ${label}`,
       );
       return;
+    }
 
     case "rowHeight":
       emitObjectScriptOnly(
@@ -931,6 +1233,7 @@ function emitBody(actions: RecordedAction[], o: ResolvedOptions): {
     warnedInvariantFormula: false,
     usesCaps: false,
     namedConnections: new Set(),
+    sheet: null,
   };
 
   if (actions.length === 0) {
@@ -974,6 +1277,7 @@ function emitBody(actions: RecordedAction[], o: ResolvedOptions): {
       emittedSheet = action.sheetIndex;
     }
     first = false;
+    ctx.sheet = action.sheetIndex;
 
     // Merge a run of consecutive cell-write events on the same sheet into ONE
     // emitted call. Without this a 500-cell paste followed by a 500-cell fill

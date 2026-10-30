@@ -568,20 +568,30 @@ fn rename_col_walk(
 /// sheet there would put a whole-sheet walk on a per-keystroke gesture. The
 /// readers are exactly the cells whose edges can have moved.
 ///
-/// LOCK ORDER: sheet names, then the naming authorities, then the grid, then the
-/// dependency maps — the same order `rebuild_all_dependencies_from_grid` uses,
-/// so the two cannot deadlock against each other. THE CALLER MUST HOLD NONE OF
-/// THEM.
+/// LOCK ORDER: the grid FIRST, then sheet names, then the naming authorities,
+/// then the dependency maps -- the canonical order (grid, grids, then everything
+/// else) and exactly `undo_commands::rebuild_all_dependencies`'s, so the two
+/// cannot deadlock against each other. THE CALLER MUST HOLD NONE OF THEM.
+///
+/// The grid used to come LAST, after `named_ranges`, `tables` and
+/// `table_names` (rev5C#1, BUG-0592). Every name writer holds the grid locks
+/// while it takes the registry (`create_named_range_impl` and its siblings, the
+/// rename), and `create_named_range_impl` reads `table_names` under them too, so
+/// this function -- reached from a table auto-expand on the main thread --
+/// could hold the registry while an MCP name write (its own thread) held `grid`
+/// and waited for it. Each one-line `let .. else { return };` guard was also
+/// invisible to the lock-order censuses until they learned to read a block
+/// that opens and closes on one line.
 pub fn refresh_reader_edges(state: &crate::AppState, cells: &[(u32, u32)]) {
     if cells.is_empty() {
         return;
     }
+    let Ok(grid) = state.grid.read() else { return };
     let Ok(active_sheet) = state.active_sheet.read().map(|a| *a) else { return };
     let Ok(sheet_names) = state.sheet_names.read().map(|n| n.clone()) else { return };
     let Ok(named_ranges) = state.named_ranges.read() else { return };
     let Ok(tables) = state.tables.read() else { return };
     let Ok(table_names) = state.table_names.read() else { return };
-    let Ok(grid) = state.grid.read() else { return };
 
     let name_tables = crate::name_resolution::NameTables {
         named_ranges: &named_ranges,

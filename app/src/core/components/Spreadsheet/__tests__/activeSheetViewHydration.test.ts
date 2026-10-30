@@ -30,8 +30,13 @@ describe("per-sheet view state hydrates on ANY active-sheet change", () => {
   });
 
   it("the tab-strip switch listener no longer carries its own copy", () => {
-    const at = CODE.indexOf("const handleSheetSwitch = (event: Event)");
-    const body = CODE.slice(at, CODE.indexOf("const handleSheetReorder", at));
+    // The listener's grid half is `showView` since the switch rules moved to
+    // sheetSwitchListeners.ts (round 5, review rev3C#5); found, or this test
+    // would read an empty slice and pass.
+    const at = CODE.indexOf("showView: (newSheetIndex");
+    expect(at, "the switch listener's showView is gone").toBeGreaterThan(-1);
+    const body = CODE.slice(at, CODE.indexOf("focusGrid: () =>", at));
+    expect(body.length).toBeGreaterThan(100);
     expect(body).not.toContain("hydrateSheetView()");
     expect(body).not.toContain("hydrateSheetDisplayFlags()");
     expect(body).not.toContain("get_show_gridlines");

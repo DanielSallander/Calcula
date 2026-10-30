@@ -93,6 +93,7 @@ import { registerEmbeddedFormUx } from "./lib/embeddedFormUx";
 import { closeEmbeddedScriptForm, openEmbeddedScriptForm } from "@api/scriptHost/host";
 import { getActiveSheet } from "@api/lib";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
+import { installReboundScriptFollower, withStoredBinding } from "./lib/followReboundScripts";
 import { ShieldIcon } from "./components/shieldGlyph";
 import { createCodeStatusItem } from "./components/CodeStatusItem";
 import { CodeStatusSource } from "./lib/codeStatus";
@@ -1809,7 +1810,10 @@ async function activate(context: ExtensionContext): Promise<void> {
 
   // Handle save-and-apply requests from the editor window
   onSaveAndApply(async (payload) => {
-    const script = payload.script;
+    // Registered and mounted with the binding the backend STORED, not the
+    // editor's copy: a copy read before a name rename still carries the old
+    // name, and the save kept the stored one (lib/followReboundScripts.ts).
+    const script = await withStoredBinding(payload.script);
     ObjectScriptManager.registerScript(script);
 
     // Remount to apply changes. A mount failure must not be reported as
@@ -1840,6 +1844,13 @@ async function activate(context: ExtensionContext): Promise<void> {
   onRegisterScript((payload) => {
     ObjectScriptManager.registerScript(payload.script);
   }).then((fn) => cleanupFunctions.push(fn));
+
+  // A script the BACKEND re-bound (a named-range script following its name
+  // through a rename, a control script following its control when it moves
+  // with its cells, to another cell or with its sheet, and the undo / redo of
+  // each): this window's registry and the live mount follow it, in the event
+  // handler itself (lib/followReboundScripts.ts, rev4B#2, rev6B#2, rev6B#6).
+  cleanupFunctions.push(installReboundScriptFollower());
 
   // Handle toggle-access requests from the editor window
   onToggleAccess((payload) => {

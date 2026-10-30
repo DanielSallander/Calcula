@@ -1548,18 +1548,27 @@ pub fn insert_rows_fixed(grid: &mut Grid) {
 fn every_structural_rewrite_reads_the_raw_formula() {
     const STRUCTURE_RS: &str = include_str!("commands/structure.rs");
     const DATA_RS: &str = include_str!("commands/data.rs");
+    // (`relocate_references_in_formula` left this list with its last caller,
+    // the floating-grid merge, which now uses `relocate_references_for_move`.)
     const SHIFTERS: [&str; 4] = [
         "shift_formula_internal(",
         "shift_formula_rows_sheet_aware(",
         "shift_formula_cols_sheet_aware(",
-        "relocate_references_in_formula(",
+        "relocate_references_for_move(",
     ];
     /// How far back from a shifter call the binding of its input can sit.
     const WINDOW: usize = 12;
 
+    // The floating-grid merge re-points its backing sheet with the move rewriter.
+    const MERGE_RS: &str = include_str!("merge_commands.rs");
+
     let mut offenders: Vec<String> = Vec::new();
     let mut shifter_calls = 0usize;
-    for (file, text) in [("commands/structure.rs", STRUCTURE_RS), ("commands/data.rs", DATA_RS)] {
+    for (file, text) in [
+        ("commands/structure.rs", STRUCTURE_RS),
+        ("commands/data.rs", DATA_RS),
+        ("merge_commands.rs", MERGE_RS),
+    ] {
         for (name, body) in free_function_bodies(text) {
             // The shifters' own definitions take `&str`; they are not readers.
             if SHIFTERS.iter().any(|s| s.trim_end_matches('(') == name) {

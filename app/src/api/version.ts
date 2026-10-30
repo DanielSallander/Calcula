@@ -15,8 +15,16 @@
  * instead of handing it an `undefined` it never checks. Bump the minor version
  * whenever @api gains a member, and list it in API_CHANGELOG below
  * (src/api/__tests__/apiVersion.test.ts checks that every listed name exists).
+ *
+ * ONE ENTRY PER PROGRAMME, CLOSED WHEN IT IS COMMITTED. A programme's own
+ * review rounds add to its entry while the programme is uncommitted (1.6.0's
+ * rounds 10 and 11 did); once committed, a host built from that commit ANSWERS
+ * to the version, so a later addition appended to it would make two hosts with
+ * different @api surfaces claim the same version, and an extension's
+ * `apiVersion` could not tell them apart. The next programme opens the next
+ * minor entry instead.
  */
-export const API_VERSION = "1.6.0";
+export const API_VERSION = "1.7.0";
 
 /** One @api addition: a runtime export of `module` (a member of it when the
  *  name is dotted), or a TYPE-only member declared in `declaredIn`. */
@@ -70,8 +78,169 @@ export interface ApiChangelogEntry {
  * filter, the temporary-sheet flag on SheetInfo and the sheet primitives that
  * keep or discard such a sheet by its stable id;
  * docs/EXTENSION_GUIDE.md "New in API v1.6.0" mirrors it.
+ * 1.7.0 is the bug-ledger fix programme (2026-10-29), ONE entry for its rounds:
+ * a copy names its source sheet by the stable id (Paste Link after a rename),
+ * @api/sheetSwitch follows a sheet-list change the backend already made, and
+ * the macro recorder's grid events say which sheet a clear, a format, a border
+ * preset or a merge wrote, and a copy carries its cells' stored values so a
+ * paste of a constant writes the value, never its display text; a grouped or
+ * multi-area clear is one call (clearRangeOnSheets' options, ClearArea), and a
+ * row/column edit off the sheet on screen has an event of its own
+ * (STRUCTURAL_EDIT_ELSEWHERE, with its edits); a paste says it is one (CellUpdateInput.pasted)
+ * and a typed read says when it withheld a formula
+ * (TypedCellData.formulaWithheld); a switch can leave the keyboard where it is
+ * (SheetFocusOptions) and a formatting wrapper can be held to the active sheet
+ * (FormatPlacementOptions); the backend's announcement that it re-bound an
+ * object script names the new binding (ObjectScriptsChangedDetail.instanceId).
+ * Every type it names can be imported from @api
+ * (ClearArea from @api/lib, FormatPlacementOptions from @api/cellTarget);
+ * docs/EXTENSION_GUIDE.md "New in API v1.7.0" mirrors it.
  */
 export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
+  {
+    version: "1.7.0",
+    added: [
+      // ---- A copy names its source sheet by the STABLE id, so Paste Link
+      // after a rename spells the new name (BUG-0348). Was appended to the
+      // already-committed 1.6.0 entry in round 1; moved here (revE#6).
+      { name: "ClipboardData.sourceSheetId", declaredIn: "src/core/hooks/useClipboard.ts", pattern: "sourceSheetId\\?: string;" },
+      // ---- FOLLOW a sheet-list change the backend already made (an add, a
+      // delete, a hide that moved the active sheet): the tab strip's own switch
+      // (BUG-0464; the script host's private copy moved here). The renumbering
+      // a caller tells is removedIndex, insertedIndex (round 4: an insertion
+      // at or before the sheet on screen counts as a switch) or moved; a
+      // caller that tells none while the sheet on screen keeps its stable id
+      // at another index is not switched at all (round 5, rev3C#2).
+      { name: "announceSheetsChanged", module: "@api/sheetSwitch" },
+      { name: "changeSheetsAndFollow", module: "@api/sheetSwitch" },
+      { name: "FollowableSheetsResult", declaredIn: "src/api/sheetSwitch.ts", pattern: "export interface FollowableSheetsResult \\{" },
+      { name: "SheetsRenumbering", declaredIn: "src/api/sheetSwitch.ts", pattern: "export interface SheetsRenumbering \\{" },
+      // ---- A recorded grid event says which sheet it WROTE when that was not
+      // the active sheet, so a recorded grouped or off-sheet gesture replays
+      // there (each arm's own member; "kind:" never crossed by the pattern).
+      {
+        name: "RecordedGridEvent.clearRange.sheetIndex",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: 'kind: "clearRange";(?:(?!kind:)[\\s\\S])*?sheetIndex\\?: number;',
+      },
+      {
+        name: "RecordedGridEvent.formatting.sheetIndices",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: 'kind: "formatting";(?:(?!kind:)[\\s\\S])*?sheetIndices\\?: number\\[\\];',
+      },
+      {
+        name: "RecordedGridEvent.borderPreset.sheetIndices",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: 'kind: "borderPreset";(?:(?!kind:)[\\s\\S])*?sheetIndices\\?: number\\[\\];',
+      },
+      {
+        name: "RecordedGridEvent.mergeCells.sheetIndex",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: 'kind: "mergeCells";(?:(?!kind:)[\\s\\S])*?sheetIndex\\?: number;',
+      },
+      {
+        name: "RecordedGridEvent.unmergeCells.sheetIndex",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: 'kind: "unmergeCells";(?:(?!kind:)[\\s\\S])*?sheetIndex\\?: number;',
+      },
+      // ---- A copy carries its cells' STORED values, and a paste of a
+      // constant writes them through one rule -- never by re-typing the
+      // display text (round 4, NEW-paste-by-display-text).
+      {
+        name: "ClipboardData.values",
+        declaredIn: "src/core/hooks/useClipboard.ts",
+        pattern: "values\\?: \\(ClipboardCellValue \\| null\\)\\[\\]\\[\\];",
+      },
+      { name: "pastedConstantInput", module: "@api/lib" },
+      { name: "ClipboardCellValue", declaredIn: "src/core/lib/clipboardValues.ts", pattern: "export interface ClipboardCellValue \\{" },
+      { name: "PastedConstant", declaredIn: "src/core/lib/clipboardValues.ts", pattern: "export interface PastedConstant \\{" },
+      // ---- A grouped or multi-area clear is ONE call (round 3, revG#9 /
+      // rev3A#8): each further Ctrl+click block of `clearRangeOnSheets`'
+      // `options.moreAreas` has this shape (the wire type of
+      // `clear_range_on_sheets`' moreAreas, mirroring api_types::ClearArea).
+      // Imported from @api/lib (round 6: it was listed while only Core
+      // exported it).
+      { name: "ClearArea", declaredIn: "src/core/types/types.ts", pattern: "export interface ClearArea \\{" },
+      // ---- A row/column edit OFF the sheet on screen has an event of its
+      // own, so nothing on the sheet on screen is disturbed (round 4, review
+      // FU#5).
+      { name: "AppEvents.STRUCTURAL_EDIT_ELSEWHERE", module: "@api/events" },
+      {
+        name: "StructuralEditElsewherePayload",
+        declaredIn: "src/api/events.ts",
+        pattern: "export interface StructuralEditElsewherePayload \\{",
+      },
+      // ---- ...and that event carries its EDITS, every one in the order made
+      // (round 7, NEW-offsheet-structural-frontend-only-state): a store whose
+      // coordinates the backend never holds -- an embedded form's anchor, an
+      // anchor-derived control id -- replays them on the sheet named.
+      {
+        name: "StructuralEditElsewherePayload.edits",
+        declaredIn: "src/api/events.ts",
+        pattern:
+          "export interface StructuralEditElsewherePayload \\{(?:(?!\\n\\})[\\s\\S])*?edits: StructuralEditElsewhereEdit\\[\\];",
+      },
+      {
+        name: "StructuralEditElsewhereEdit",
+        declaredIn: "src/api/events.ts",
+        pattern: "export interface StructuralEditElsewhereEdit \\{",
+      },
+      // ---- A paste is a PASTE, not an entry: one flag keeps a pasted formula,
+      // number, boolean or error what it is in a Text-formatted (@) cell, in
+      // the same write (round 5, revE#2 / rev3B#1); PastedConstant carries it.
+      {
+        name: "CellUpdateInput.pasted",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface CellUpdateInput \\{(?:(?!\\n\\})[\\s\\S])*?pasted\\?: boolean;",
+      },
+      // ---- A typed read says when it WITHHELD a formula (a protected sheet
+      // hides it), so a read-modify-write never takes the value for the whole
+      // cell (round 5, revE#1 / rev3B#2 / rev3B#3).
+      {
+        name: "TypedCellData.formulaWithheld",
+        declaredIn: "src/core/types/types.ts",
+        pattern: "export interface TypedCellData \\{(?:(?!\\n\\})[\\s\\S])*?formulaWithheld\\?: boolean;",
+      },
+      // ---- A switch can leave the keyboard where it is: the command line's
+      // prompt (round 5, rev3C#3).
+      { name: "SheetFocusOptions", declaredIn: "src/api/sheetSwitch.ts", pattern: "export interface SheetFocusOptions \\{" },
+      // ---- A formatting wrapper held to the ACTIVE sheet, never the user's
+      // sheet group: a script's format (round 5,
+      // NEW-script-format-follows-ui-group). Imported from @api/cellTarget.
+      {
+        name: "FormatPlacementOptions",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface FormatPlacementOptions extends CellTargetOptions \\{\\s*activeSheetOnly\\?: boolean;",
+      },
+      // ---- A backend re-bind NAMES the binding the script has now, so a
+      // listener re-keys at once instead of reading it back (round 8, rev6B#6).
+      {
+        name: "ObjectScriptsChangedDetail.instanceId",
+        declaredIn: "src/api/objectScriptBackend.ts",
+        pattern:
+          "export interface ObjectScriptsChangedDetail \\{(?:(?!\\n\\})[\\s\\S])*?instanceId\\?: string \\| null;",
+      },
+    ],
+    changed: [
+      "handleGlobalKeyDown: prevents the default of every F5 and BrowserRefresh (with or without Ctrl or Shift) and every Ctrl+R / Ctrl+Shift+R (by character or virtual key 82, so on any layout) -- never with Alt -- that no binding took -- during a cell edit, in a text field, with the keyboard on a ribbon button or a pane -- so WebView2 never reloads the page (BUG-0393); the key still propagates",
+      "updateCellsBatch / updateCellOnSheets: a written CUBE formula shows its value instead of #N/A (BUG-0476): the write first asks the backend for exactly the cube data it evaluates (one cube_prefetch call more), which the backend serves to the cells it evaluates, and it latches the session's cube flag, so a later Calculate Now prefetches too; once the session has latched, EVERY updateCellsBatch on the sheet prefetches -- a paste, a fill or a setValue into a cube ARGUMENT cell re-evaluates the cube cell that reads it -- while a session that has written no CUBE formula keeps each batch ONE IPC call, and a batch on a floating grid's cells (target) never prefetches; updateCellOnSheets prefetches, one call per target sheet, only for a written CUBE formula -- any other value is one IPC call, latched or not",
+      "insertRows / insertColumns / deleteRows / deleteColumns on a sheet other than the active one, or on a floating grid's cells, announce STRUCTURAL_EDIT_ELSEWHERE (once per burst: the first call at once, the calls of the following 50 ms in one trailing announcement), TABLE_DEFINITIONS_UPDATED and a cell refetch (\"grid:refresh\"), plus MUTATION_REFRESH { domains: ['slicer', 'pivot', 'ribbonFilter'] } after a delete on another sheet -- never STRUCTURAL_UNDO or the objects domain, so nothing on the sheet on screen is disturbed -- and the stores that cache what the backend moved there re-read it on STRUCTURAL_EDIT_ELSEWHERE: the chart and sparkline ranges (BUG-0357) and @api/cellBehaviors' workbook-wide index (rev4A#1); its payload lists every edit of the burst in the order made (StructuralEditElsewherePayload.edits: sheetIndex, null for a floating grid's own lines, kind, at, count -- never folded), an on-screen insert or delete delivers the edits still waiting in the window before its own ROWS_ event, and the stores whose coordinates the backend never holds replay them on the sheet named: forms embedded on that sheet move with their anchor cells, and Controls re-keys the side state of the shapes there (html frame, canvas renderer, declared properties, container, script badge) as the backend re-keyed the controls",
+      "clearRangeOnSheets takes an optional options argument { applyTo: 'contents' | 'formats' | 'all' (default 'contents'), moreAreas: ClearArea[] (the other Ctrl+click blocks) } and returns the sheets it wrote (number[]: every listed sheet but the active one); the backend gates every listed sheet -- the active one included -- for every area before it writes anything and refuses the whole call if one refuses (one undo step, one recalculation), and the macro recorder hears one clearRange per written sheet per area",
+      "the @api pivot doors that change a pivot's output (pivot.create, updateFields, applyFilter, clearFilter, sortField, refreshCache, refreshAll, updateLayout, createFromBiModel, updateBiFields, ... -- every door the Pivot extension registers as an output door) announce \"pivot:refresh\" themselves, so a caller no longer has to (BUG-0594): ONE event a macrotask after the door resolves, none when the caller dispatched \"pivot:refresh\" itself meanwhile, one for a chain of awaited doors (held at most 1 s), with detail { pivotId, pivotIds } -- pivotId only when exactly one pivot changed, and a script's pivot.onRefresh hears an event naming another pivot no longer; pivot.refreshCache and pivot.refreshAll now cache the views they return",
+      "applyFormatting / applyBorderPreset / adjustNumberFormatDecimals send the selected sheet group only when the sheet on screen (Core's sheet context) belongs to it, and no group when that sheet is unknown, and take FormatPlacementOptions (CellTargetOptions plus activeSheetOnly): { activeSheetOnly: true } formats the active sheet alone whatever sheets the user has grouped -- Excel's ActiveSheet.Range, which a script's format passes -- and records no group",
+      "getGroupedSheetIndices / isSheetGroupingActive / getSelectedSheetIndices: getGroupedSheetIndices(active) answers [] when that sheet is not one of the group, and the group itself ENDS on an ordinary switch to a sheet outside it (sheet:normalSwitch: the Name Box, Go To, a link, the command line, a script, an undo that lands elsewhere -- formula point mode keeps it) and follows each renumbering announced on sheet:reorder, a deleted member leaving it -- Excel keeps the active sheet one of the selected sheets",
+      "updateCellsBatch's CellUpdateInput.styleIndex and setCellStyle's styleIndex name the LOOK the cell must show: 0 (Normal) under a row or column format is written as an explicit Normal, so the line's format does not show through, and with an empty value and a styleIndex the position keeps that look as an empty cell instead of being cleared (a pasted, filled or cut empty formatted cell carries its format, as in Excel); an omitted styleIndex changes nothing",
+      "clearRangeWithOptions records the sheetIndex its caller named on the recorded clearRange event (RecordedGridEvent.clearRange.sheetIndex), and the macro recorder replays the clear on that sheet",
+      "applyFormatting / applyBorderPreset / adjustNumberFormatDecimals record the sheet group they formatted (RecordedGridEvent.formatting / borderPreset .sheetIndices); applyFormattingToSheets now records its format with the sheets it named; mergeCells / unmergeCells record the sheetIndex their caller named -- and the macro recorder replays each on those sheets through the script API's sheet-addressed calls",
+      "CellRange.applyFormatting sends the range's distinct rows and columns once each, so a range of any size is formatted (it was refused from 2,000 cells up) and each cell is recorded once in undo (BUG-0354)",
+      "Paste, Cut + Paste, a drag move or Ctrl+drag copy and every Paste Special variant (core.clipboard.pasteSpecial and the quick-paste commands, on a sheet or a floating grid) write a copied CONSTANT -- and, under a values attribute, a formula's result -- from the stored value the copy read (ClipboardData.values), invariant, instead of re-typing its display text; they, Paste Link and a script's pasteRange flag every pasted formula or stored value CellUpdateInput.pasted, so a number, boolean, error or formula keeps its kind in a Text-formatted (@) cell in that one write (no General/@ detour; the cell's own style and protection stay as they are); text pasted from another program still goes through the entry ladder; and Paste Special's operations (Add, Subtract, Multiply, Divide) refuse exactly the cells whose formula the typed read withheld (TypedCellData.formulaWithheld) and compute over hidden blanks and constants",
+      "activateSheet: also takes keepFocus (SheetFocusOptions) -- { keepFocus: true } leaves the keyboard focus where it is instead of giving it to the grid once the switch lands (the command line's prompt); the sheet:normalSwitch window event then carries keepFocus: true, which Core honours",
+      "applyFormatting / applyFormattingToSheets: whole rows, whole columns, Select All and an almost-whole rectangle (A2:D1048576) are written as ONE row or column format per line plus only the cells whose look must differ or that hold a value -- what Excel stores, so a value typed there later takes the format -- and applyFormatting's FormattingResult.cells can then be empty while its styles carry the new style (refresh the grid rather than patching from cells); any other selection of more than 4,000,000 cells is refused before anything is written (BUG-0354)",
+      "adjustNumberFormatDecimals: its FormattingResult.styles lists every style carrying the new number format first, ahead of the old style an almost-whole range's left-out cells keep, so styles[0] carries the format the step wrote",
+      "clearRangeWithOptions / clearRangeOnSheets with applyTo 'formats' or 'all' leave every cleared position showing Normal, as Excel does: a whole row's or column's own format is removed (or replaced by an explicit Normal where another line's format would show through; an almost-whole range's left-out cells keep their look) instead of only the stored cells being reset, so a value typed there later is plain; a formats clear that would have to write more than 2,000,000 separate cells is refused before anything is written",
+      "onObjectScriptsChanged / ObjectScriptsChangedDetail.change / ObjectScriptsChangedDetail.instanceId: the BACKEND now announces OBJECT_SCRIPTS_CHANGED_EVENT itself when it moves or removes an object script, and change gains \"rebound\": the script moved to another object instance with its id, source and provenance unchanged, and instanceId names the binding it has now (null when it has none: its control went with a deleted row, column or sheet). Every re-bind is announced -- a named-range rename (by any route), a control moving with its cells (Insert / Delete Rows, Columns or Cells, on any sheet), a control moved to another cell, a sheet added, moved, deleted or copied (or an application pull's or refresh's sheet-order repair) renumbering its controls, and the undo or redo of each; the scripts a name delete prunes are announced \"deleted\"; the undo or redo of a name delete, a table delete or a Convert to Range announces each script it puts back \"saved\" and each it removes \"deleted\" (rev4B#2, rev6B#2, rev6B#5)",
+    ],
+  },
   {
     version: "1.6.0",
     added: [

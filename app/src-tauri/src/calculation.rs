@@ -51,11 +51,62 @@ pub fn set_calculation_mode(state: State<AppState>, mode: String) -> Result<Stri
         }
     };
 
-    let mut calc_mode = state.calculation_mode.lock().unwrap();
-    *calc_mode = valid_mode.clone();
+    set_calculation_mode_impl(&state, &valid_mode);
 
     log_exit_info!("CMD", "set_calculation_mode", "set to {}", valid_mode);
     Ok(valid_mode)
+}
+
+/// The body of [`set_calculation_mode`], callable without a Tauri runtime.
+///
+/// MANUAL CALCULATION LEAVES NO RECORD OF WHAT IT LEFT STALE: an edit under it
+/// recalculates no dependent, and no pending set says which ones. A full
+/// recalculation that has no data for a cube or custom-function call keeps the
+/// cell's stored result only when that result is vouched for (see
+/// `KeepWithoutData`) -- and a value left stale by manual calculation is not.
+/// While calculation is manual the commands ask whether the document was
+/// edited since it was opened or saved; once it LEAVES manual that question no
+/// longer tells (an edit under automatic is ordinary), so leaving marks every
+/// sheet's stored values as possibly stale (`CallMemo::note_values_may_be_stale`)
+/// until a completed Calculate Now evaluates every formula again. A script's
+/// `setCalculationMode("automatic")` recalculates nothing, so without the mark
+/// the stale values would outlive the switch.
+///
+/// Lock order: `grid`, `grids`, then the leaf `calculation_mode` -- held
+/// together, so no calculation pass can start between the mode changing and
+/// the sheets being marked.
+pub(crate) fn set_calculation_mode_impl(state: &AppState, mode: &str) {
+    let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    let mut calc_mode = state.calculation_mode.lock().unwrap();
+    if *calc_mode == "manual" && mode != "manual" {
+        note_values_may_be_stale_on(&grid, &grids);
+    }
+    *calc_mode = mode.to_string();
+}
+
+/// Marks every sheet's stored values as possibly stale (see
+/// [`set_calculation_mode_impl`]); the mirror shares `grids[active]`'s cache,
+/// and is marked too in case it does not.
+fn note_values_may_be_stale_on(grid: &engine::Grid, grids: &[engine::Grid]) {
+    grid.call_memo().note_values_may_be_stale();
+    for sheet in grids {
+        sheet.call_memo().note_values_may_be_stale();
+    }
+}
+
+/// For `persistence::save_file` when it saves WITHOUT recalculating
+/// (`calculate_before_save` off): under manual calculation an edited document's
+/// values may be stale, and the save is about to mark the document clean -- so
+/// the "edited since saved" question would vouch for them afterwards. Marks
+/// every sheet instead, until a completed Calculate Now.
+pub(crate) fn note_manual_edits_outlive_a_save(state: &AppState, document_edited: bool) {
+    let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    let manual = state.calculation_mode.lock().map(|m| *m == "manual").unwrap_or(true);
+    if manual && document_edited {
+        note_values_may_be_stale_on(&grid, &grids);
+    }
 }
 
 /// Get the current calculation mode
@@ -137,7 +188,10 @@ pub fn get_calculation_state(state: State<AppState>) -> String {
 // RECALCULATION COMMANDS
 // ============================================================================
 
-/// Evaluate a single formula cell, returning its CellValue.
+/// Evaluate a single formula cell, returning its raw result -- and, second,
+/// whether a cube or custom-function call in it had NO DATA and was refused
+/// (`#N/A` / `#NAME?`, `Evaluator::last_data_refusal`), so the pass can tell
+/// the formula's answer from "one of its calls could not be answered".
 /// Helper shared by calculate_now for both normal and iterative evaluation.
 fn evaluate_single_formula(
     row: u32,
@@ -155,7 +209,7 @@ fn evaluate_single_formula(
     column_widths: &std::collections::HashMap<u32, f64>,
     cube: Option<&std::sync::Arc<engine::CubePrefetch>>,
     control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
-) -> engine::EvalResult {
+) -> (engine::EvalResult, Option<engine::CellError>) {
     match parser::parse(formula) {
         Ok(parsed) => {
             // EVERY indirection a stored formula keeps, expanded through the ONE
@@ -185,7 +239,7 @@ fn evaluate_single_formula(
             // plausible number on every save, and a shrunk array kept its stale
             // tail. The caller hands this to `apply_spill_decision`, which is
             // the one place allowed to decide what an array does to the grid.
-            crate::evaluate_formula_raw_with_files_and_pivot(
+            crate::evaluate_formula_raw_reporting_refusal(
                 grids,
                 sheet_names,
                 active_sheet,
@@ -198,8 +252,309 @@ fn evaluate_single_formula(
                 None,
             )
         }
-        Err(_) => engine::EvalResult::Error(engine::CellError::Value),
+        Err(_) => (engine::EvalResult::Error(engine::CellError::Value), None),
     }
+}
+
+/// A CALL WITH NO DATA IN A FULL PASS (BUG-0476, round 7: rev5B#1, rev5B#2).
+///
+/// Calculate Now, Calculate Sheet and the save's own Calculate Now
+/// (`calculate_before_save`, on by default) evaluate EVERY formula, and none of
+/// them can run a custom function (no UDF resolver is ever wired into a pass),
+/// while a cube call has data only when the frontend pre-fetched it. A call
+/// with no data is answered from its sheet's results cache
+/// (`engine::cube::CallMemo`) for exactly its arguments; a call the cache has
+/// no answer for is REFUSED. Writing that refusal is right when the call's
+/// arguments changed. It is wrong when they did not: a composite formula
+/// (`=MYFN(A1)*2`) whose call was never served since the workbook was opened,
+/// a cell an install brought -- and the save then writes `#NAME?` / `#N/A`
+/// into the file for a value that was perfectly current.
+///
+/// THE RULE: a full pass KEEPS such a cell's stored result whole -- its value
+/// and its spilled footprint, never fed to an operator, so nothing compounds --
+/// exactly when that result is still the formula's answer, which is Excel's
+/// own F9: a cell nothing it reads has changed is not recalculated. The proof:
+/// every route that changes a precedent re-evaluates its dependents, with data
+/// or refusing (round 5/6), so in automatic calculation a stored value is its
+/// formula's current answer or an error. What can still make it stale, each
+/// checked here:
+///
+/// - manual calculation, which recalculates no dependent and records no
+///   pending set: under manual, no keep once the document has been edited
+///   since it was opened or saved (`FileState::is_dirty`, handed in by the
+///   commands; a caller that cannot say keeps nothing under manual); and none
+///   on a sheet whose values are marked possibly stale -- leaving manual marks
+///   every sheet (`set_calculation_mode_impl`), so does saving an edited
+///   manual-calculation document without recalculating it
+///   (`persistence::save_file`), and so does an install whose formulas read
+///   what it did not bring (`bi::cube::remember_installed_call_results`). A
+///   completed Calculate Now vouches for them again;
+/// - a cancelled pass's remainder (`pending_recalc`);
+/// - THIS pass: a volatile input, the cell's position, state outside the grid
+///   (`engine::cube::reads_beyond_its_references`), or any cell the formula
+///   references that this pass has already changed -- tracked here, footprints
+///   included.
+///
+/// A cell that may not be kept is refused WHOLE: its formula's own answer
+/// around a refused call is no answer (`=IFERROR(MYFN(A1),0)` would say 0; the
+/// engine now answers the refusal itself, `Evaluator::evaluate`'s sticky
+/// override). A recalculation that runs because a precedent changed -- an
+/// edit's cascade, the cross-sheet walk, a fill, a background write -- never
+/// keeps: there, a call the cache cannot answer has changed arguments.
+///
+/// ONE MORE USER: an application UPDATE's recalculation of the sheets it just
+/// installed ([`recalculate_installed_sheet_values`]). Their stored values are
+/// the publisher's, computed for the arguments installed beside them, so the
+/// same rule holds there with the cells the update itself wrote afterwards
+/// (the subscriber's overrides and writeback values, re-rendered pivot output)
+/// counted as changed from the start (`for_installed_sheets`).
+struct KeepWithoutData {
+    /// Automatic calculation, or manual calculation on a document nothing has
+    /// edited since it was opened or saved: only then can a stored value be
+    /// vouched for.
+    automatic: bool,
+    /// Per sheet: its results cache says its stored values may be stale.
+    stale: Vec<bool>,
+    /// The cells a cancelled pass left un-recalculated. Matched by (row, col)
+    /// on ANY sheet: the persisted marker's sheet attribution is approximate,
+    /// and over-matching only refuses.
+    pending: std::collections::HashSet<(u32, u32)>,
+    /// What this pass has changed so far: a cell whose value changed, plus the
+    /// old and new footprint of an array whose spilled result changed.
+    changed: std::collections::HashSet<(usize, u32, u32)>,
+    changed_by_sheet: std::collections::HashMap<usize, Vec<(u32, u32)>>,
+    /// Sheets this recalculation has NOT finished yet, for one that visits its
+    /// sheets one at a time ([`recalculate_installed_sheet_values`]): anything
+    /// on them may still change, so a reference to one counts as changed. Empty
+    /// for a full pass, whose one plan orders the whole workbook.
+    unsettled: std::collections::HashSet<usize>,
+}
+
+/// A formula cell's whole stored result: its value, and the values of the
+/// cells it spilled into (none for a scalar).
+type StoredResult = (engine::CellValue, Vec<((u32, u32), engine::CellValue)>);
+
+impl KeepWithoutData {
+    fn new(
+        state: &AppState,
+        grids: &[engine::Grid],
+        pending: Option<&PendingRecalc>,
+        manual_document_unedited: bool,
+    ) -> Self {
+        // `calculation_mode` is a leaf lock; the caller holds the grids.
+        // Automatic calculation vouches for the stored values by itself; manual
+        // calculation only while nothing was edited since they were computed.
+        let automatic = state
+            .calculation_mode
+            .lock()
+            .map(|mode| *mode == "automatic" || (*mode == "manual" && manual_document_unedited))
+            .unwrap_or(false);
+        KeepWithoutData {
+            automatic,
+            stale: grids.iter().map(|g| g.call_memo().values_may_be_stale()).collect(),
+            pending: pending
+                .map(|p| p.cells.iter().map(|c| (c.row, c.col)).collect())
+                .unwrap_or_default(),
+            changed: Default::default(),
+            changed_by_sheet: Default::default(),
+            unsettled: Default::default(),
+        }
+    }
+
+    /// The rule for the sheets an application update has just installed
+    /// ([`recalculate_installed_sheet_values`]). Their stored values were
+    /// computed by the publisher's workbook for the cells installed beside
+    /// them -- vouched for the way an open vouches for a file's, whatever the
+    /// calculation mode, because nothing of the subscriber's has touched them
+    /// but `written`: the cells the update wrote AFTER the install (overrides,
+    /// writeback values, re-rendered pivot output), which count as changed. A
+    /// sheet whose formulas read something the install did not bring was
+    /// marked stale by the seeding (`bi::cube::remember_installed_call_results`)
+    /// and keeps nothing.
+    fn for_installed_sheets(
+        grids: &[engine::Grid],
+        pending: Option<&PendingRecalc>,
+        written: &[(usize, u32, u32)],
+    ) -> Self {
+        let mut keep = KeepWithoutData {
+            automatic: true,
+            stale: grids.iter().map(|g| g.call_memo().values_may_be_stale()).collect(),
+            pending: pending
+                .map(|p| p.cells.iter().map(|c| (c.row, c.col)).collect())
+                .unwrap_or_default(),
+            changed: Default::default(),
+            changed_by_sheet: Default::default(),
+            unsettled: Default::default(),
+        };
+        for &(sheet, row, col) in written {
+            keep.note(sheet, row, col);
+        }
+        keep
+    }
+
+    /// Whether any cell could be kept at all -- and so whether changes need
+    /// tracking.
+    fn possible(&self) -> bool {
+        self.automatic && self.stale.iter().any(|stale| !stale)
+    }
+
+    /// The whole stored result of the formula cell at (sheet, row, col).
+    fn stored_result(state: &AppState, grids: &[engine::Grid], sheet: usize, row: u32, col: u32) -> StoredResult {
+        let value_at = |r: u32, c: u32| {
+            grids
+                .get(sheet)
+                .and_then(|g| g.get_cell(r, c))
+                .map(|cell| cell.value.clone())
+                .unwrap_or(engine::CellValue::Empty)
+        };
+        let footprint: Vec<(u32, u32)> = state
+            .spill_ranges
+            .read()
+            .ok()
+            .and_then(|ranges| ranges.get(&(sheet, row, col)).cloned())
+            .unwrap_or_default();
+        (value_at(row, col), footprint.into_iter().map(|(r, c)| ((r, c), value_at(r, c))).collect())
+    }
+
+    fn note(&mut self, sheet: usize, row: u32, col: u32) {
+        if self.changed.insert((sheet, row, col)) {
+            self.changed_by_sheet.entry(sheet).or_default().push((row, col));
+        }
+    }
+
+    /// Records the cell (and its footprint) as changed when its whole stored
+    /// result differs from `before`.
+    fn note_if_changed(&mut self, before: StoredResult, after: StoredResult, sheet: usize, row: u32, col: u32) {
+        if before == after {
+            return;
+        }
+        self.note(sheet, row, col);
+        for ((r, c), _) in before.1.into_iter().chain(after.1) {
+            self.note(sheet, r, c);
+        }
+    }
+
+    /// Records a cell this pass overwrote without evaluating it (an off-sheet
+    /// member of a cross-sheet cycle), with the footprint it is about to lose.
+    fn note_overwritten(&mut self, state: &AppState, grids: &[engine::Grid], sheet: usize, row: u32, col: u32) {
+        let (_, footprint) = Self::stored_result(state, grids, sheet, row, col);
+        self.note(sheet, row, col);
+        for ((r, c), _) in footprint {
+            self.note(sheet, r, c);
+        }
+    }
+
+    /// May the formula cell at (sheet, row, col), one of whose calls this pass
+    /// could not answer, keep its stored result? See the type's doc.
+    fn may_keep(
+        &self,
+        grids: &[engine::Grid],
+        sheet_names: &[String],
+        name_tables: crate::name_resolution::NameTables<'_>,
+        sheet: usize,
+        row: u32,
+        col: u32,
+    ) -> bool {
+        if !self.automatic || self.stale.get(sheet).copied().unwrap_or(true) {
+            return false;
+        }
+        if self.pending.contains(&(row, col)) {
+            return false;
+        }
+        let Some(cell) = grids.get(sheet).and_then(|g| g.get_cell(row, col)) else {
+            return false;
+        };
+        // A formula cell that holds nothing was never calculated: there is no
+        // result to keep.
+        if matches!(cell.value, engine::CellValue::Empty) {
+            return false;
+        }
+        let Some(stored) = cell.get_ast() else {
+            return false;
+        };
+        let resolved = crate::name_resolution::eval_ast(stored, &name_tables.at(sheet, row, col));
+        !engine::cube::reads_beyond_its_references(&resolved)
+            && !self.reads_a_changed_cell(&resolved, sheet, sheet_names)
+    }
+
+    /// Whether `expr` -- evaluated on `sheet` -- references a cell this pass
+    /// has changed. Errs towards "yes": an unresolved name or table, or a
+    /// range whose ends are not plain cells, counts as changed.
+    fn reads_a_changed_cell(&self, expr: &engine::Expression, sheet: usize, sheet_names: &[String]) -> bool {
+        use engine::Expression as E;
+        if self.changed.is_empty() && self.unsettled.is_empty() {
+            return false;
+        }
+        // A sheet qualifier is matched the way the evaluator resolves it
+        // (`MultiSheetContext` folds with `to_uppercase`), and one that names
+        // no sheet counts as changed -- erring towards "yes".
+        let find = |n: &str| {
+            sheet_names
+                .iter()
+                .position(|s| s.eq_ignore_ascii_case(n) || s.to_uppercase() == n.to_uppercase())
+        };
+        let target = |name: &Option<String>| -> Option<usize> {
+            match name {
+                None => Some(sheet),
+                Some(n) => find(n),
+            }
+        };
+        // A sheet this recalculation has not finished may still change
+        // anywhere: every reference into it counts as changed.
+        let unsettled = |on: usize| on != sheet && self.unsettled.contains(&on);
+        let touches = |on: usize, hit: &dyn Fn(u32, u32) -> bool| -> bool {
+            unsettled(on)
+                || self
+                    .changed_by_sheet
+                    .get(&on)
+                    .is_some_and(|cells| cells.iter().any(|&(r, c)| hit(r, c)))
+        };
+        let between = |x: u32, a: u32, b: u32| x >= a.min(b) && x <= a.max(b);
+        match expr {
+            E::CellRef { sheet: on, col, row, .. } => target(on).is_none_or(|t| {
+                unsettled(t) || self.changed.contains(&(t, row.saturating_sub(1), column_index(col)))
+            }),
+            E::Range { sheet: on, start, end, .. } => match (start.as_ref(), end.as_ref()) {
+                (
+                    E::CellRef { col: c0, row: r0, .. },
+                    E::CellRef { col: c1, row: r1, .. },
+                ) => {
+                    let (r0, r1) = (r0.saturating_sub(1), r1.saturating_sub(1));
+                    let (c0, c1) = (column_index(c0), column_index(c1));
+                    target(on).is_none_or(|t| touches(t, &|r, c| between(r, r0, r1) && between(c, c0, c1)))
+                }
+                _ => true,
+            },
+            E::ColumnRef { sheet: on, start_col, end_col, .. } => {
+                let (c0, c1) = (column_index(start_col), column_index(end_col));
+                target(on).is_none_or(|t| touches(t, &|_, c| between(c, c0, c1)))
+            }
+            E::RowRef { sheet: on, start_row, end_row, .. } => {
+                let (r0, r1) = (start_row.saturating_sub(1), end_row.saturating_sub(1));
+                target(on).is_none_or(|t| touches(t, &|r, _| between(r, r0, r1)))
+            }
+            E::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
+                match (find(start_sheet), find(end_sheet)) {
+                    (Some(a), Some(b)) => (a.min(b)..=a.max(b))
+                        .any(|on| unsettled(on) || self.reads_a_changed_cell(reference, on, sheet_names)),
+                    _ => true,
+                }
+            }
+            E::NamedRef { .. } | E::TableRef { .. } => true,
+            other => engine::cube::sub_expressions(other)
+                .into_iter()
+                .any(|e| self.reads_a_changed_cell(e, sheet, sheet_names)),
+        }
+    }
+}
+
+/// 0-based column index of a column's letters (`"A"` is 0), never panicking.
+fn column_index(letters: &str) -> u32 {
+    letters
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .fold(0u32, |acc, c| acc.saturating_mul(26).saturating_add(c.to_ascii_uppercase() as u32 - 'A' as u32 + 1))
+        .saturating_sub(1)
 }
 
 /// Extract the numeric value from a CellValue, returning 0.0 for non-numeric values.
@@ -1009,6 +1364,11 @@ fn build_workbook_plan(
 /// `Window` and cannot run in-process, which is why the cross-sheet behaviour
 /// of F9 used to be pinned by asserting on its SOURCE TEXT. It is now pinned by
 /// running it.
+///
+/// Under MANUAL calculation this entry point never keeps a cell whose call had
+/// no data (`KeepWithoutData`): it cannot know whether the document was edited
+/// since its values were computed. The commands, which can, call
+/// [`run_calculation_pass_with`].
 pub(crate) fn run_calculation_pass(
     scope: CalcScope,
     window: Option<tauri::Window>,
@@ -1018,6 +1378,36 @@ pub(crate) fn run_calculation_pass(
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     cube_results: Option<engine::CubePrefetch>,
+) -> Result<Vec<CellData>, String> {
+    run_calculation_pass_with(
+        scope,
+        window,
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        cube_results,
+        false,
+    )
+}
+
+/// [`run_calculation_pass`], told whether the document is UNEDITED since it
+/// was last opened or saved (`FileState::is_dirty` is false). Under manual
+/// calculation that is what vouches for the stored values: no edit, so no
+/// dependent left un-recalculated (`KeepWithoutData`). Ignored under automatic
+/// calculation, where every edit recalculates its dependents.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_calculation_pass_with(
+    scope: CalcScope,
+    window: Option<tauri::Window>,
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    cube_results: Option<engine::CubePrefetch>,
+    manual_document_unedited: bool,
 ) -> Result<Vec<CellData>, String> {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
@@ -1069,7 +1459,13 @@ pub(crate) fn run_calculation_pass(
     );
     // Pre-fetched CUBE data for this full recalc (built async by cube_prefetch_all
     // on the frontend before calling). Shared via Arc so each formula's eval gets
-    // it cheaply; None => cube cells preserve their last value (see eval_cube).
+    // it cheaply; None (or a cell it does not cover) => each cube call is
+    // answered from its sheet's results cache for exactly the arguments it has,
+    // and is #N/A when none is recorded (see eval_cube). Custom functions never
+    // run here: no UDF resolver is wired, and each call is answered from the
+    // same cache (#NAME? when nothing is recorded for its arguments). A cell
+    // with such a refusal KEEPS its stored result when nothing it reads has
+    // changed, and is refused whole otherwise (`KeepWithoutData`).
     let cube_arc = cube_results.map(std::sync::Arc::new);
     // GET.CONTROLVALUE snapshot: built ONCE per recalc, BEFORE the grid locks
     // below (canonical lock order: control stores first, grids last).
@@ -1106,6 +1502,41 @@ pub(crate) fn run_calculation_pass(
     if active_sheet < grids.len() {
         grids[active_sheet] = grid.clone();
     }
+    // A PASS THAT CARRIES CUBE DATA RE-SERVES EVERY CUBE CALL IT REACHES with
+    // the model as it is NOW -- which is why the frontend sends it after a
+    // measure edit, a data refresh, a connection or "view as" change
+    // (`recalcWithCube`), and on every F9 once the session has a CUBE formula.
+    // So the answers recorded BEFORE it are forgotten first (rev6A#1): one for
+    // an argument no cell holds at this moment would never be re-served, and a
+    // later recalculation without data handed it to the argument when it came
+    // back -- the old model's number, shown as current with no error. Custom-
+    // function answers stay: they are facts about their arguments. Only the
+    // sheets this pass evaluates are forgotten.
+    if cube_arc.is_some() {
+        grid.call_memo().forget_cube_answers();
+        match scope {
+            CalcScope::Workbook => grids.iter().for_each(|sheet| sheet.call_memo().forget_cube_answers()),
+            CalcScope::ActiveSheet => {
+                if let Some(sheet) = grids.get(active_sheet) {
+                    sheet.call_memo().forget_cube_answers();
+                }
+            }
+        }
+    }
+    // A CALL WITH NO DATA IN A FULL PASS: what may keep its stored result,
+    // and what this pass has changed (see `KeepWithoutData`). Read here, under
+    // the grid locks, so no mode switch or pending record can slip in between.
+    // `manual_document_unedited` is the caller's answer to "was anything edited
+    // since the document was opened or saved", which only matters under manual.
+    let mut keep = {
+        let pending = state.pending_recalc.read().map_err(|e| e.to_string())?;
+        KeepWithoutData::new(
+            state,
+            &grids,
+            pending.as_ref().filter(|p| !p.is_empty()),
+            manual_document_unedited,
+        )
+    };
     let mut styles = state.style_registry.write(&effect).unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -1210,6 +1641,8 @@ pub(crate) fn run_calculation_pass(
                 iteration_enabled,
             );
             for (sheet, row, col) in marked {
+                // Overwritten without being evaluated, so this pass changed it.
+                keep.note_overwritten(state, &grids, sheet, row, col);
                 // A member of a cross-sheet cycle produces no array, so the
                 // range it used to own is released here too — the same
                 // obligation the active sheet's own circular branch discharges,
@@ -1366,7 +1799,7 @@ pub(crate) fn run_calculation_pass(
                 other_column_widths.get(sheet).unwrap_or(&empty_dims),
             )
         };
-        let result = evaluate_single_formula(
+        let (result, refusal) = evaluate_single_formula(
             *row, *col, formula,
             &grids, &sheet_names, sheet,
             &styles, &user_files, &pivot_data_fn, &gather_fn,
@@ -1395,8 +1828,44 @@ pub(crate) fn run_calculation_pass(
             break;
         }
 
+        // A CALL WITH NO DATA (see `KeepWithoutData`): a cell nothing it reads
+        // has changed keeps its stored result whole -- value and spill, never
+        // fed to an operator -- and any other is refused WHOLE, never answered
+        // around the refusal (`=IFERROR(MYFN(A1),0)` would say 0).
+        let result = match refusal {
+            None => result,
+            Some(refused) => {
+                if keep.may_keep(
+                    &grids,
+                    &sheet_names,
+                    crate::name_resolution::NameTables {
+                        named_ranges: &named_ranges_map,
+                        tables: &tables_map,
+                        table_names: &table_names_map,
+                        sheet_names: &sheet_names,
+                        spill_ranges: &state.spill_ranges,
+                    },
+                    sheet,
+                    *row,
+                    *col,
+                ) {
+                    cells_done += 1;
+                    progress.tick(cells_done);
+                    continue;
+                }
+                if result.is_error() {
+                    result
+                } else {
+                    engine::EvalResult::Error(refused)
+                }
+            }
+        };
+
         let existing = grids[sheet].get_cell(*row, *col).cloned();
         if let Some(cell) = existing {
+            let before = keep
+                .possible()
+                .then(|| KeepWithoutData::stored_result(state, &grids, sheet, *row, *col));
             // §3bm. THE ONE SPILL DECISION — the same one an edit makes, on the
             // sheet this planned cell actually lives on. Without it the pass
             // wrote `to_cell_value()`, which collapses an array to its first
@@ -1443,6 +1912,10 @@ pub(crate) fn run_calculation_pass(
                     rich_text: None,
                     accounting_layout: None,
                 });
+            }
+            if let Some(before) = before {
+                let after = KeepWithoutData::stored_result(state, &grids, sheet, *row, *col);
+                keep.note_if_changed(before, after, sheet, *row, *col);
             }
         }
         cells_done += 1;
@@ -1573,7 +2046,8 @@ pub(crate) fn run_calculation_pass(
                         rh, cw,
                         cube_arc.as_ref(),
                         Some(&control_values),
-                    );
+                    )
+                    .0;
 
                     // ITERATION COLLAPSES AN ARRAY, deliberately and as it
                     // always has: convergence is measured on ONE number per
@@ -1730,6 +2204,17 @@ pub(crate) fn run_calculation_pass(
             *pending = None;
         }
     }
+    // A completed Calculate Now that planned EVERY formula of the workbook --
+    // not a resume, which evaluates only a remainder -- leaves each stored value
+    // its formula's answer or a refusal, so it vouches for every sheet's
+    // stored values again (`KeepWithoutData`: what manual calculation or a
+    // foreign install had marked possibly stale).
+    if !cancelled && scope == CalcScope::Workbook && resume.is_none() {
+        grid.call_memo().vouch_for_stored_values();
+        for sheet in grids.iter() {
+            sheet.call_memo().vouch_for_stored_values();
+        }
+    }
     progress.finish(cells_done, cancelled, pending_nodes.len());
 
     Ok(updated_cells)
@@ -1745,13 +2230,14 @@ pub(crate) fn run_calculation_pass(
 pub fn calculate_now(
     window: tauri::Window,
     state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     user_files_state: State<'_, UserFilesState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     cube_results: Option<engine::CubePrefetch>,
 ) -> Result<Vec<CellData>, String> {
-    run_calculation_pass(
+    run_calculation_pass_with(
         CalcScope::Workbook,
         Some(window),
         &state,
@@ -1760,6 +2246,9 @@ pub fn calculate_now(
         &pane_control_state,
         &ribbon_filter_state,
         cube_results,
+        // Under manual calculation the stored values are vouched for only
+        // while nothing has been edited since they were (see `KeepWithoutData`).
+        !file_state.is_dirty(),
     )
 }
 
@@ -1779,12 +2268,74 @@ pub fn calculate_now(
 /// workbook, Shift+F9 = active sheet): this one takes an explicit sheet, takes
 /// its own locks, returns nothing, and is called once per sheet by callers that
 /// already know which sheets they touched.
+///
+/// It runs because the sheet's content CHANGED, so a cube or custom-function
+/// call the results cache cannot answer is refused, never kept (see
+/// `KeepWithoutData`). An application update's sheets are the one exception,
+/// and take [`recalculate_installed_sheet_values`].
 pub(crate) fn recalculate_sheet_values(
     state: &AppState,
     user_files_state: &UserFilesState,
     pivot_state: &PivotState,
     sheet_index: usize,
     control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
+) {
+    recalculate_sheet_values_with(state, user_files_state, pivot_state, sheet_index, control_states, None);
+}
+
+/// THE RECALCULATION OF THE SHEETS AN APPLICATION UPDATE INSTALLED
+/// (`calp_commands::apply_refresh_payloads`; NEW-update-refuses-composite-formulas,
+/// BUG-0476).
+///
+/// Those sheets arrive with the values the publisher's workbook computed, and
+/// the update then writes the subscriber's own cells back over them: the
+/// overrides, the writeback values, and re-rendered pivot output (`written`).
+/// [`recalculate_sheet_values`] refuses every cube or custom-function call the
+/// results cache cannot answer -- and the cache is seeded only with ROOT calls
+/// (`bi::cube::remember_installed_call_results`) -- so every COMPOSITE such
+/// formula (`=MYFN(A1)*2`, `=CUBEVALUE(..)/1000`) became `#NAME?` / `#N/A` at
+/// the update, and the next save, which keeps a stored value nothing it reads
+/// has changed, kept the refusal.
+///
+/// This applies the full pass's rule instead (`KeepWithoutData::for_installed_sheets`):
+/// such a cell keeps the publisher's value while nothing it reads was written
+/// by the update or changed by this recalculation, and is refused whole
+/// otherwise. The sheets are visited one at a time, so a reference to one not
+/// yet visited counts as changed: its cells may still move.
+pub(crate) fn recalculate_installed_sheet_values(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    sheets: &[usize],
+    written: &[(usize, u32, u32)],
+    control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
+) {
+    let mut order: Vec<usize> = sheets.to_vec();
+    order.sort_unstable();
+    order.dedup();
+    // Read with `grids` alone and released before any sheet is visited (each
+    // visit takes `grid`, then `grids`, itself); `pending_recalc` is a leaf.
+    let mut keep = {
+        let Ok(grids) = state.grids.read() else { return };
+        let pending = state.pending_recalc.read().ok().and_then(|p| p.clone());
+        KeepWithoutData::for_installed_sheets(&grids, pending.as_ref().filter(|p| !p.is_empty()), written)
+    };
+    for (visited, &sheet) in order.iter().enumerate() {
+        keep.unsettled = order[visited + 1..].iter().copied().collect();
+        recalculate_sheet_values_with(state, user_files_state, pivot_state, sheet, control_states, Some(&mut keep));
+    }
+}
+
+/// The body of [`recalculate_sheet_values`] and
+/// [`recalculate_installed_sheet_values`]: `keep` is `None` for the first (a
+/// call with no data is refused) and the update's rule for the second.
+fn recalculate_sheet_values_with(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    sheet_index: usize,
+    control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
+    mut keep: Option<&mut KeepWithoutData>,
 ) {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
@@ -1927,6 +2478,15 @@ pub(crate) fn recalculate_sheet_values(
     let mut cancelled = false;
     let mut pending_cells: Vec<PendingCell> = Vec::new();
 
+    // An update's rule (`KeepWithoutData`): the members of a cycle are
+    // rewritten AFTER the cells below, so a cell reading one must not count it
+    // as unchanged.
+    if let Some(keep) = keep.as_deref_mut() {
+        for (row, col, _) in circular_groups.iter().flatten() {
+            keep.note(sheet_index, *row, *col);
+        }
+    }
+
     for (idx, (row, col, formula)) in non_circular.iter().enumerate() {
         if pass.cancelled() {
             cancelled = true;
@@ -1935,7 +2495,7 @@ pub(crate) fn recalculate_sheet_values(
             );
             break;
         }
-        let result = evaluate_single_formula(
+        let (result, refusal) = evaluate_single_formula(
             *row, *col, formula,
             &grids, &sheet_names, sheet_index,
             &styles, &user_files, &pivot_data_fn, &gather_fn,
@@ -1953,8 +2513,23 @@ pub(crate) fn recalculate_sheet_values(
             );
             break;
         }
+        // A CALL WITH NO DATA. This re-evaluation runs because the sheet's
+        // content CHANGED (an update, a reset), so a call the cache cannot
+        // answer is refused (the engine answers the refusal whole) -- unless
+        // this is an update's recalculation of the sheets it installed, where a
+        // cell nothing it reads has changed keeps the publisher's value
+        // (`KeepWithoutData::for_installed_sheets`).
+        if let (Some(_), Some(keep)) = (refusal.as_ref(), keep.as_deref()) {
+            if keep.may_keep(&grids, &sheet_names, plan_name_tables, sheet_index, *row, *col) {
+                continue;
+            }
+        }
         let existing = grids[sheet_index].get_cell(*row, *col).cloned();
         if let Some(cell) = existing {
+            let before = keep
+                .as_deref()
+                .filter(|keep| keep.possible())
+                .map(|_| KeepWithoutData::stored_result(state, &grids, sheet_index, *row, *col));
             // §3bm, background half. Same decision, same function, same rules.
             let value = crate::commands::data::apply_spill_decision(
                 state,
@@ -1974,6 +2549,10 @@ pub(crate) fn recalculate_sheet_values(
             grids[sheet_index].set_cell(*row, *col, updated.clone());
             if sheet_index == active_sheet {
                 grid_mirror.set_cell(*row, *col, updated);
+            }
+            if let (Some(before), Some(keep)) = (before, keep.as_deref_mut()) {
+                let after = KeepWithoutData::stored_result(state, &grids, sheet_index, *row, *col);
+                keep.note_if_changed(before, after, sheet_index, *row, *col);
             }
         }
     }
@@ -2030,7 +2609,8 @@ pub(crate) fn recalculate_sheet_values(
                         &row_heights, &column_widths,
                         None,
                         control_values.as_ref(),
-                    );
+                    )
+                    .0;
                     // Collapsed for the same reason the manual pass collapses an
                     // iterated member: convergence is one number per member.
                     let new_result = new_result.to_cell_value();
@@ -2090,16 +2670,19 @@ pub(crate) fn recalculate_sheet_values(
 /// stamped, not evaluated, because a sheet pass does not evaluate them.
 ///
 /// No `cube_results` parameter, deliberately: the frontend prefetches CUBE data
-/// for a FULL recalculation (`recalcAll`), which is F9's job. A sheet pass keeps
-/// its cube cells' last values, the same as any pass invoked without a prefetch.
+/// for a FULL recalculation (`recalcAll`), which is F9's job. A sheet pass
+/// answers its cube calls from the results cache, the same as any pass invoked
+/// without a prefetch: the answer recorded for exactly each call's arguments,
+/// and `#N/A` where none is (2.4 of
+/// docs/design/cube-formulas-and-custom-functions.md).
 ///
 /// `(async)` for the same reason F9 is — a sync command body runs on the
 /// WebView2 UI thread, and a recalculation there cannot be cancelled.
 #[tauri::command(async)]
-pub fn calculate_sheet(window: tauri::Window, state: State<'_, AppState>, user_files_state: State<'_, UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>) -> Result<Vec<CellData>, String> {
+pub fn calculate_sheet(window: tauri::Window, state: State<'_, AppState>, file_state: State<'_, crate::persistence::FileState>, user_files_state: State<'_, UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>) -> Result<Vec<CellData>, String> {
     log_enter_info!("CMD", "calculate_sheet");
 
-    let result = run_calculation_pass(
+    let result = run_calculation_pass_with(
         CalcScope::ActiveSheet,
         Some(window),
         &state,
@@ -2108,6 +2691,7 @@ pub fn calculate_sheet(window: tauri::Window, state: State<'_, AppState>, user_f
         &pane_control_state,
         &ribbon_filter_state,
         None,
+        !file_state.is_dirty(),
     );
 
     log_exit_info!("CMD", "calculate_sheet", "done");

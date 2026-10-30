@@ -53,7 +53,10 @@ export interface FormatCall {
   formatting: FormattingOptions;
 }
 
-/** `applyBorderPreset(rect, preset, style, color, width)` over the selection. */
+/**
+ * `applyBorderPreset(rect, preset, style, color, width)` over the selection.
+ * `width` 0 is no line: an inside-line preset then turns those lines OFF.
+ */
 export interface PresetCall {
   kind: "preset";
   preset: "none" | "outside" | "insideHorizontal" | "insideVertical";
@@ -137,6 +140,8 @@ function presetLine(side: BorderSide): Pick<PresetCall, "style" | "color" | "wid
     case "double":
       return { style: side.style, color: side.color, width: 1 };
     case "none":
+      // Width 0 is NO LINE: an inside-line preset with it REMOVES those sides
+      // (`BorderPresetDelta::new`, styles.rs); the None preset ignores it.
       return { style: "solid", color: side.color, width: 0 };
     default:
       return { style: "solid", color: side.color, width: 1 };
@@ -245,33 +250,28 @@ export function planFormatCellsWrites(
   }
 
   // ---- The inside lines (a range only) -----------------------------------------
+  // ON or OFF, ONE preset over the selection. Off is the preset with NO line
+  // (`presetLine` of a "none" side is width 0, which the backend reads as
+  // "remove"): it clears both cells' sides of every inner boundary, so no half
+  // of the shared line survives on either side, and it goes through the
+  // backend's whole-line planner. Off used to be two `format` calls over the
+  // strips startRow..endRow-1 and startRow+1..endRow, which for whole columns
+  // are rows 0..1048574 and 1..1048575: neither is a whole column, so the
+  // backend walked about a million cells per column, or refused four columns
+  // and up (round-2 review revA#3).
   const multiRow = rect.endRow > rect.startRow;
   const multiCol = rect.endCol > rect.startCol;
   if (
     multiRow &&
     (!sameSide(current.borderInsideHorizontal, borderBase.borderInsideHorizontal) || forcedSide("borderInsideHorizontal"))
   ) {
-    const line = current.borderInsideHorizontal;
-    if (line.style !== "none") {
-      calls.push({ kind: "preset", preset: "insideHorizontal", ...presetLine(line) });
-    } else {
-      // Off: both cells' sides of every inner row boundary, so no half of the
-      // shared line survives on either side.
-      calls.push({ kind: "format", rows: span(rect.startRow, rect.endRow - 1), cols, formatting: { borderBottom: { ...line } } });
-      calls.push({ kind: "format", rows: span(rect.startRow + 1, rect.endRow), cols, formatting: { borderTop: { ...line } } });
-    }
+    calls.push({ kind: "preset", preset: "insideHorizontal", ...presetLine(current.borderInsideHorizontal) });
   }
   if (
     multiCol &&
     (!sameSide(current.borderInsideVertical, borderBase.borderInsideVertical) || forcedSide("borderInsideVertical"))
   ) {
-    const line = current.borderInsideVertical;
-    if (line.style !== "none") {
-      calls.push({ kind: "preset", preset: "insideVertical", ...presetLine(line) });
-    } else {
-      calls.push({ kind: "format", rows, cols: span(rect.startCol, rect.endCol - 1), formatting: { borderRight: { ...line } } });
-      calls.push({ kind: "format", rows, cols: span(rect.startCol + 1, rect.endCol), formatting: { borderLeft: { ...line } } });
-    }
+    calls.push({ kind: "preset", preset: "insideVertical", ...presetLine(current.borderInsideVertical) });
   }
 
   const protection =

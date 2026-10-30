@@ -77,7 +77,8 @@ const ALLOWLIST: &[Allowed] = &[
 /// `state.locale` in its own body. (file, fn).
 const MUST_READ_STATE_LOCALE: &[(&str, &str)] = &[
     ("cell_target.rs", "get_cell_target_cells_inner"),
-    ("commands/data.rs", "get_range_cells_typed"),
+    // The body of the `get_range_cells_typed` command (testability split).
+    ("commands/data.rs", "range_cells_typed"),
     ("commands/data.rs", "get_cell_collection"),
     ("commands/data.rs", "sort_range"),
     ("formula_eval_plan.rs", "get_formula_eval_plan"),

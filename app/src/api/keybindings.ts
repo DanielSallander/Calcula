@@ -1835,22 +1835,43 @@ function coreGridHasACell(): boolean {
 
 /**
  * Whether this keystroke is one of the browser's RELOAD keys that no binding
- * took: F5, with or without Ctrl / Shift (the hard reloads).
+ * took: F5 and Ctrl+R, with or without Ctrl / Shift (the hard reloads:
+ * Ctrl+F5, Shift+F5, Ctrl+Shift+R), and a keyboard's own Refresh key.
  *
- * WebView2 reloads the page on an unprevented F5, which throws away the open
- * workbook's session -- and nothing in the app turns its browser accelerator
- * keys off. F5 is the registry's Go To ("not-editing"), and Core's grid handler
- * leaves it to the registry, so whenever Go To stands down (a cell edit open,
- * a text field focused, Go To remapped to another key) nothing took the key
- * and the page reloaded (review finding (a), 2026-10-04). During an edit the
- * key is SWALLOWED rather than run as Go To: Go To moves Core's selection, and
- * an edit owns the keyboard. Only the default is prevented -- the key still
- * propagates, so an editor that listens for it still hears it. (Ctrl+R, the
- * other reload key, is Fill Right and deliberately left unprevented during an
- * edit -- keybindings.editContext.test.ts -- so it is not in this set.)
+ * WebView2 reloads the page on an unprevented reload key, which throws away
+ * the open workbook's session. Every window of every build now also keeps
+ * WebView2 itself from acting on these keys, from the first keystroke, while
+ * the page still receives them (src-tauri/src/browser_accelerator_keys.rs,
+ * reviews revG#6 and rev3C#1, the same rule key for key); this guard stays
+ * as the document's own line of defence. A keystroke typed inside a
+ * script's `ui.html` frame is dispatched in the FRAME's document and never
+ * reaches this listener, so the frame loader carries the same rule
+ * (src-tauri/src/script_frame.rs; scriptFrameReloadKeys.test.ts runs both and
+ * checks they agree key for key). F5 is the registry's Go To ("not-editing"), and Core's
+ * grid handler leaves it to the registry, so whenever Go To stands down (a
+ * cell edit open, a text field focused, Go To remapped to another key) nothing
+ * took the key and the page reloaded (review finding (a), 2026-10-04). Ctrl+R
+ * is Fill Right, which is grid-scoped and stands down the same way -- during a
+ * cell edit, in a text field, with the keyboard on a ribbon button or a pane --
+ * and it reached the reload there (BUG-0393). Ctrl+Shift+R is bound by nothing
+ * unless a script takes it.
+ *
+ * During an edit the key is SWALLOWED rather than run: Go To moves Core's
+ * selection and Fill Right writes its cells, and an edit owns the keyboard.
+ * That is Excel's own answer for Ctrl+R (live, Microsoft 365, 2026-10-29: in
+ * edit mode Ctrl+R fills nothing and the typing goes on). Only the default is
+ * prevented -- the key still propagates, so an editor that listens for it
+ * still hears it.
+ *
+ * Ctrl+R is read by the key's CHARACTER and by its Windows virtual-key code
+ * (82, VK_R), because the accelerator WebView2 runs is keyed on the virtual key:
+ * on a Cyrillic layout the same key types "к" and still reloads. Alt (and so
+ * AltGr, which Windows reports as Ctrl+Alt) never reloads.
  */
 function isUnboundBrowserReloadKey(event: KeyboardEvent): boolean {
-  return event.key === "F5" && !event.altKey && !event.metaKey;
+  if (event.altKey || event.metaKey) return false;
+  if (event.key === "F5" || event.key === "BrowserRefresh") return true;
+  return event.ctrlKey && (event.key.toLowerCase() === "r" || event.keyCode === 82);
 }
 
 /**
@@ -1859,7 +1880,7 @@ function isUnboundBrowserReloadKey(event: KeyboardEvent): boolean {
  */
 export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
   const handled = dispatchGlobalKeyDown(event);
-  // Whatever stood down, F5 never reaches WebView2's reload (see above).
+  // Whatever stood down, F5 / Ctrl+R never reach WebView2's reload (see above).
   if (!handled && isUnboundBrowserReloadKey(event)) event.preventDefault();
   return handled;
 }

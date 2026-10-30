@@ -1094,7 +1094,13 @@ fn an_approved_application_notebook_asks_the_run_gate_before_the_clone() {
     assert!(approval < gate, "the run gate is asked before the approval");
     let cell = body_of(&src, "async fn run_cell_internal(");
     let consent = cell.find("require_distributed_notebook_consent(").expect("the cell no longer asks");
-    let clone = cell.find("app_state.grids.read()").expect("the grid clone moved");
+    // The clone is `read_cell_run_inputs`, which reads the grids, the sheet
+    // names and the ids under ONE hold (BUG-0592 follow-up).
+    let clone = cell.find("read_cell_run_inputs(").expect("the grid clone moved");
+    assert!(
+        body_of(&src, "fn read_cell_run_inputs(").contains("app_state.grids.read()"),
+        "`read_cell_run_inputs` no longer clones the grids"
+    );
     assert!(consent < clone, "the notebook clones the grids before it asks whose code this is");
 }
 

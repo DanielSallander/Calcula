@@ -644,11 +644,12 @@ turned its named assertion red and was restored.
 
 **Residuals** (also in open-items 2.aq): BUG-0589 (a working-copy push re-keys every data source; pivots, model slicers
 and ribbon filters lose their model at subscribers); an open edit follows its sheet by id, but undo / redo's sheet follow carries
-no id, sheet grouping is stored by index, and a delete of the edit's own sheet in the one IPC gap before the write would
+no id, sheet grouping is stored by index (re-keyed on every told `sheet:reorder` since 2026-10-29), and a delete of the edit's own sheet in the one IPC gap before the write would
 still land elsewhere; the clipboard's source index goes stale on a renumbering; the tab menu offers
 Delete on the last visible sheet; the Tab Color palette, a plain tab click and the MCP rename / move
 are still index-addressed, and `rename_floating_range` renames by index; a delete clears slicer filters by a store
-re-read rather than the ids it removed; Core's view cache hands a removed sheet's view to the next inserted one; other
+re-read rather than the ids it removed; Core's view cache handed a removed sheet's view to the next inserted one (fixed
+2026-10-29: a removal drops it, core/state/sheetRenumbering.ts); other
 pivot code still tells a calculation group by name; the table's row cap can refuse after a drill-from-drill discard
 (2.7); the
 Insert Chart dialog still seeds its own axis / legend / palette literals instead of the shared skeleton (a parity

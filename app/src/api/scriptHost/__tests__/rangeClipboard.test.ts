@@ -59,7 +59,7 @@ interface StyledCell {
   col: number;
   styleIndex: number;
 }
-type Update = { row: number; col: number; value: string; styleIndex?: number; invariant?: boolean };
+type Update = { row: number; col: number; value: string; styleIndex?: number; invariant?: boolean; pasted?: boolean };
 
 /** A recording stand-in for the @api/lib facade — only the members these
  *  helpers touch, so an accidental new backend call fails loudly here. */
@@ -196,9 +196,69 @@ describe("pasteRange writes what a user's Ctrl+V would write", () => {
     // The formula travels shifted, not evaluated.
     expect(at(10, 1).value).toBe("=A1*2|shifted(10,0)");
     expect(at(10, 1).styleIndex).toBe(6);
-    expect(at(11, 0).value).toBe("North");
+    // TEXT goes behind the verbatim apostrophe escape (round 5): "North" was
+    // harmless, but "007", "TRUE" or "=A1" held as text were re-read as a
+    // number, a boolean and a formula (see the kind test below).
+    expect(at(11, 0).value).toBe("'North");
     // A style-only source cell still carries its formatting.
     expect(at(11, 1).styleIndex).toBe(9);
+    // Every pasted value and formula is a PASTE: it keeps its kind in an @ cell.
+    expect(at(10, 0).pasted).toBe(true);
+    expect(at(10, 1).pasted).toBe(true);
+    expect(at(11, 0).pasted).toBe(true);
+  });
+
+  it("a pasted value keeps its KIND: text stays text, a number and a formula stay one in an @ cell (all three modes)", async () => {
+    const src = makeLib({
+      typed: [
+        { row: 0, col: 0, value: "007", display: "007", formula: null, type: "text" },
+        { row: 0, col: 1, value: "=A1", display: "=A1", formula: null, type: "text" },
+        { row: 0, col: 2, value: 5, display: "5", formula: null, type: "number" },
+        { row: 0, col: 3, value: 2, display: "2", formula: "=1+1", type: "number" },
+      ],
+      styled: [],
+    });
+    await copyRangeToScriptClipboard(asLib(src.lib), SCRIPT, undefined, 0, 0, 0, 3);
+    for (const mode of ["all", "values", "formulas"] as const) {
+      const dst = sampleSource();
+      await pasteScriptClipboard(asLib(dst.lib), SCRIPT, 5, 0, { mode });
+      const at = (c: number) => dst.updates.find((u) => u.row === 5 && u.col === c)!;
+      expect(at(0).value, `${mode}: the text 007 was sent as an entry`).toBe("'007");
+      expect(at(1).value, `${mode}: the text =A1 was sent as an entry`).toBe("'=A1");
+      expect(at(2)).toMatchObject({ value: "5", invariant: true, pasted: true });
+      expect(at(3).value).toBe(mode === "values" ? "2" : "=1+1|shifted(5,0)");
+      for (let c = 0; c < 4; c++) expect(at(c).pasted, `${mode}: (5,${c}) was not sent as a paste`).toBe(true);
+    }
+  });
+
+  // rev5B#3 (BUG-0346): copied TEXT goes behind the apostrophe INVARIANT. Sent
+  // as an entry, the localized ladder's apostrophe rung implies Text (@) for
+  // text that reads as a number, boolean, date or formula -- and in modes
+  // 'values' / 'formulas', with no styleIndex to keep the cell's own, a General
+  // destination became @ (a 5 typed there later stayed the TEXT "5"). The
+  // invariant ladder stores the rest verbatim and implies no format, as Excel's
+  // PasteSpecial xlPasteValues / xlPasteFormulas leave the cell General [LIVE].
+  it("copied text that looks like a number, boolean, date or formula is sent INVARIANT, so no format is implied (all three modes)", async () => {
+    const texts = ["007", "TRUE", "2020-06-01", "=A1", "North"];
+    const src = makeLib({
+      typed: texts.map((t, col) => ({ row: 0, col, value: t, display: t, formula: null, type: "text" })),
+      styled: [],
+    });
+    await copyRangeToScriptClipboard(asLib(src.lib), SCRIPT, undefined, 0, 0, 0, texts.length - 1);
+    for (const mode of ["all", "values", "formulas"] as const) {
+      const dst = sampleSource();
+      await pasteScriptClipboard(asLib(dst.lib), SCRIPT, 5, 0, { mode });
+      texts.forEach((t, col) => {
+        const u = dst.updates.find((x) => x.row === 5 && x.col === col)!;
+        expect(u.value, `${mode}: ${t}`).toBe(`'${t}`);
+        expect(
+          u.invariant,
+          `${mode}: the text ${t} was sent as an ENTRY, whose apostrophe implies @ on a General cell`,
+        ).toBe(true);
+        expect(u.pasted, `${mode}: ${t}`).toBe(true);
+        if (mode !== "all") expect(u.styleIndex, `${mode}: ${t} carried a style`).toBeUndefined();
+      });
+    }
   });
 
   it("mode 'values' drops BOTH the formulas and the formatting", async () => {

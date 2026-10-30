@@ -195,7 +195,12 @@ is a primary update).
 > cell's last value** (`preserved_udf_value`) when no resolver is wired, returning
 > `#NAME?` only when a resolver IS wired but does not recognize the name (a genuine
 > unknown), mirroring the cube preserve. See the cube/custom-functions design doc
-> §4.4.
+> §4.4. (Superseded in detail 2026-10-29: no stored value is read back any
+> more -- the call is answered from a per-sheet results cache, for exactly the
+> arguments it has, wherever it sits in its formula; a FULL recalculation that
+> cannot answer it leaves the cell's stored result in place when nothing the
+> cell reads has changed, and refuses it otherwise (round 7); §4.4 has the
+> current rule.)
 
 ---
 

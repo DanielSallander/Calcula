@@ -27,6 +27,11 @@ export function clearDeclaredProperties(instanceId: string): void {
   declaredPropertiesMap.delete(instanceId);
 }
 
+/** Every control id a script has declared properties for (an off-sheet re-key walks them). */
+export function declaredPropertyIds(): string[] {
+  return [...declaredPropertiesMap.keys()];
+}
+
 /** Migrate declared properties to a control's NEW id (structural re-key). */
 export function migrateDeclaredProperties(oldId: string, newId: string): void {
   if (oldId === newId) return;

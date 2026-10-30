@@ -127,6 +127,14 @@ export function hasShapeHitRegions(instanceId: string): boolean {
   return hitRegions.has(instanceId);
 }
 
+/**
+ * Every shape id holding a declaration -- what a re-key that cannot ask the
+ * floating store (an edit on another sheet, lib/controlSideState.ts) walks.
+ */
+export function shapeHitRegionIds(): string[] {
+  return [...hitRegions.keys()];
+}
+
 /** Drop a shape's declaration and every element it had over its frame. */
 export function clearShapeHitRegions(instanceId: string): void {
   hitRegions.delete(instanceId);

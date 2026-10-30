@@ -30,6 +30,32 @@
 //   (The comment / note / hyperlink range clears record their own undo
 //   entries since the rust-structure lane's change; the transaction below makes
 //   them one step with the rest.)
+// - GROUPED SHEETS (tabs Ctrl+clicked together; observed live in Microsoft 365,
+//   2026-10-29, BUG-0350): Delete, Clear Contents, Clear Formats and Clear All
+//   clear the same range on EVERY sheet of the group, and ONE Undo restores
+//   every sheet. ALL OR NOTHING: with one grouped sheet protected, Excel clears
+//   nothing on ANY sheet (live, review G#1). Here the group's write comes FIRST,
+//   as ONE call for every block (`clearRangeOnSheets`), which gates every
+//   grouped sheet -- the active one included -- for every block (protection, a
+//   pivot / report region, a spill, a writeback claim) before it writes any;
+//   only then does the active sheet's own clear run, in the same one undo step.
+//   The group counts only while the sheet on screen is one of it: Excel
+//   ungroups when you reach another sheet (Name Box, Go To, a link), and a
+//   group left behind must not be cleared off screen (review G#4). Clear
+//   Comments and Notes, Clear Hyperlinks and Remove Hyperlinks stay on the
+//   ACTIVE sheet: the comment, note and hyperlink stores have no sheet-
+//   addressed clear (the off-sheet clear refuses hyperlinks outright), so Clear
+//   All's comments, notes and links are removed on the active sheet only.
+//
+// THE ONE DOOR. Delete, the Home tab's Clear menu, the Edit menu, the
+// right-click menu and scripts all run these through the grid command, so
+// what the gesture does -- the group, the one-cell writeback edit below, the
+// one undo step -- is decided HERE. The group replication used to live in
+// useSpreadsheetSelection's own Delete handler, which the registry's Delete
+// binding pre-empts in the capture phase: Delete with grouped sheets cleared
+// the active sheet only (BUG-0350). Backspace is not one of these: as in Excel
+// it opens an empty entry in the ACTIVE cell (useSpreadsheetSelection's
+// handleDeleteContents, review G#7).
 
 import type { CellTargetRef, Selection } from "../../types";
 import {
@@ -39,6 +65,7 @@ import {
   clearHyperlinksInRange,
   clearNotesInRange,
   clearRange,
+  clearRangeOnSheets,
   clearRangeWithOptions,
   commitUndoTransaction,
   getHyperlinksInRange,
@@ -47,6 +74,10 @@ import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionClos
 import { alertAsync } from "../dialogs";
 import { cellEvents } from "../cellEvents";
 import { selectionBlocks, type Block } from "../merge/mergeGeometry";
+import { checkRangeGuards } from "../editGuards";
+import { commitGridCellText } from "../selectionOwner";
+import { getSelectedSheetIndices, isSheetGroupingActive } from "../../state/sheetGrouping";
+import { getGridStateSnapshot } from "../../state/GridContext";
 
 /** The six commands, named as their grid commands are. */
 export type ClearGestureKind =
@@ -123,6 +154,63 @@ function clearsFormats(kind: ClearGestureKind): boolean {
   return kind === "clearFormatting" || kind === "clearAll" || kind === "removeHyperlinks";
 }
 
+/** The commands a sheet group replicates (see THE RULES: Excel, live). */
+const REPLICATED_ACROSS_A_GROUP: ReadonlySet<ClearGestureKind> = new Set<ClearGestureKind>([
+  "clearContents",
+  "clearFormatting",
+  "clearAll",
+]);
+
+/** The sheet group a clear reaches: the sheet on screen and the OTHER grouped sheets. */
+interface ClearGroup {
+  active: number;
+  others: number[];
+}
+
+/**
+ * The sheet group `kind` clears -- null without a group, for a command the
+ * group does not replicate, when the sheet on screen is not known (nothing
+ * would tell the active sheet from the others), or when the sheet on screen is
+ * NOT one of the group (review G#4): the group was left behind by a switch
+ * that is not a tab click (the Name Box, Go To, a link, the command line), and
+ * Excel ungroups on such a switch, so clearing the old group's sheets off
+ * screen would be a silent edit Excel never makes.
+ */
+function groupedSheetsFor(kind: ClearGestureKind): ClearGroup | null {
+  if (!REPLICATED_ACROSS_A_GROUP.has(kind) || !isSheetGroupingActive()) return null;
+  const active = getGridStateSnapshot()?.sheetContext.activeSheetIndex;
+  if (active === undefined) return null;
+  const grouped = getSelectedSheetIndices();
+  if (!grouped.includes(active)) return null;
+  const others = grouped.filter((index) => index !== active);
+  return others.length > 0 ? { active, others } : null;
+}
+
+/** The backend's name for what a replicated `kind` clears. */
+function groupApplyTo(kind: ClearGestureKind): "contents" | "formats" | "all" {
+  return kind === "clearContents" ? "contents" : kind === "clearFormatting" ? "formats" : "all";
+}
+
+/**
+ * ONE CELL THAT TAKES ONE EDIT AT A TIME (Clear Contents on the active sheet).
+ * A range guard can admit a single-cell EDIT and refuse a bulk write -- a
+ * writeback cell collects one answer at a time, and its owner records it in
+ * its commit guard. A bulk clear there is refused by the backend; Delete on
+ * that one cell is the user clearing their answer, so it is ENTERED as an
+ * empty edit and the owner's commit guard sees it -- what F2, Backspace and
+ * Enter always did. True when the edit was entered; false leaves the clear to
+ * run (no committer, or the edit was refused, which says why itself), and its
+ * refusal names the remedy.
+ */
+async function enteredAsOneCellEdit(blocks: Block[]): Promise<boolean> {
+  if (blocks.length !== 1) return false;
+  const { startRow: r0, startCol: c0, endRow: r1, endCol: c1 } = blocks[0];
+  if (r0 !== r1 || c0 !== c1) return false;
+  if (!checkRangeGuards(r0, c0, r1, c1, "other")?.blocked) return false;
+  if (checkRangeGuards(r0, c0, r1, c1, "edit")?.blocked) return false;
+  return commitGridCellText("");
+}
+
 /**
  * The writes `kind` makes over `blocks`, in order: PHASE by phase, every
  * block's write of one phase before any block's write of the next.
@@ -136,20 +224,42 @@ function clearsFormats(kind: ClearGestureKind): boolean {
  * area's refusal (review finding (c), 2026-10-04). Phase by phase, a refused
  * area stops the gesture before ANY comment, note or link anywhere is removed.
  *
- * What this does NOT give is Excel's whole-selection refusal: the areas before
- * the refused one have had their first-phase write (for Clear All, their
- * contents and formats). Those are committed as the gesture's ONE undo step,
- * so one Ctrl+Z restores them (runClearGesture). Refusing the whole selection
- * before any write needs a backend command that gates several ranges in one
- * call -- the same multi-range clear that would make a scattered Delete one
- * call instead of one per area -- and there is none yet.
+ * What this does NOT give, WITHOUT a sheet group, is Excel's whole-selection
+ * refusal: the areas before the refused one have had their first-phase write
+ * (for Clear All, their contents and formats). Those are committed as the
+ * gesture's ONE undo step, so one Ctrl+Z restores them (runClearGesture).
+ *
+ * `group` is the sheet group (groupedSheetsFor). Its write is the VERY FIRST
+ * one: ONE `clearRangeOnSheets` over every block, listing the active sheet
+ * too, so the backend gates every grouped sheet -- the active one included --
+ * for every block before it writes anything (review G#1: Excel clears nothing
+ * anywhere when one grouped sheet refuses; the active sheet's clear used to run
+ * first and stay). It writes every other grouped sheet in one lock phase with
+ * one recalculation (review G#9: it was one call, and two whole-sheet passes,
+ * per block). The active sheet's own per-block writes follow it in the same
+ * phase, and a refusal anywhere stops the gesture before any comment, note or
+ * link is removed.
  */
-async function writesFor(kind: ClearGestureKind, blocks: Block[], target?: CellTargetRef): Promise<Write[]> {
+async function writesFor(
+  kind: ClearGestureKind,
+  blocks: Block[],
+  target: CellTargetRef | undefined,
+  group: ClearGroup | null,
+): Promise<Write[]> {
   if (target) return targetWritesFor(kind, blocks, target);
   const phases: Write[][] = [];
   const add = (phase: number, write: Write): void => {
     (phases[phase] ??= []).push(write);
   };
+  if (group && blocks.length > 0) {
+    const [first, ...rest] = blocks;
+    const sheets = [group.active, ...group.others];
+    const moreAreas = rest.map(({ startRow, startCol, endRow, endCol }) => ({ startRow, startCol, endRow, endCol }));
+    const applyTo = groupApplyTo(kind);
+    add(0, () =>
+      clearRangeOnSheets(sheets, first.startRow, first.startCol, first.endRow, first.endCol, { applyTo, moreAreas }),
+    );
+  }
   for (const b of blocks) {
     const { startRow: r0, startCol: c0, endRow: r1, endCol: c1 } = b;
     switch (kind) {
@@ -211,9 +321,14 @@ export async function runClearGesture(kind: ClearGestureKind, host: ClearGesture
   const blocks = selectionBlocks(host.selection);
   if (blocks.length === 0) return;
 
+  // The active sheet's own cells only: an object's cells have no range guards
+  // of the sheet's, and no sheet group.
+  if (!host.target && kind === "clearContents" && (await enteredAsOneCellEdit(blocks))) return;
+  const group = host.target ? null : groupedSheetsFor(kind);
+
   let writes: Write[];
   try {
-    writes = await writesFor(kind, blocks, host.target);
+    writes = await writesFor(kind, blocks, host.target, group);
   } catch (error) {
     console.error(`[clearGestures] ${kind}: reading the selection failed:`, error);
     await alertAsync(messageOf(error));
@@ -232,11 +347,12 @@ export async function runClearGesture(kind: ClearGestureKind, host: ClearGesture
     if (bracket) {
       tx = ownUndoTransaction(await beginUndoTransaction(STEP_LABELS[kind]), UNDO_CLOSES);
     }
-    // One backend call per area per phase, in sequence: the backend has no
-    // multi-range clear, so Delete over a scattered Go To Special result (up to
-    // MAX_MATCH_AREAS = 10,000 areas) is that many clear calls, each with its
-    // own dependents pass, inside this ONE undo step (review finding (d),
-    // 2026-10-04; the count is pinned in the tests).
+    // One backend call per area per phase, in sequence, on the active sheet:
+    // Delete over a scattered Go To Special result (up to MAX_MATCH_AREAS =
+    // 10,000 areas) is that many clear calls, each with its own targeted
+    // dependents pass, inside this ONE undo step (review finding (d),
+    // 2026-10-04; the count is pinned in the tests). The sheet group's other
+    // sheets are ONE call for every area (writesFor).
     for (const write of writes) {
       await write();
       landed++;

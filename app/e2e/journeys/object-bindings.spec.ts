@@ -613,9 +613,12 @@ test.describe("Object property bindings (D-BIND), live", () => {
 
     // The cross-check: the same measure through a worksheet CUBE cell.
     await setCells(page, inputsIndex, [["D1", `=CUBEVALUE("${CONNECTION_NAME}";"[Revenue]")`]]);
-    // setCells writes through @api CellRange.setValue (updateCellsBatch), which
-    // runs no cube prefetch (BUG-0476, pre-existing): force the cube round trip,
-    // the route fixall-calp W6 uses. The oracle comparison itself is unchanged.
+    // setCells writes through @api CellRange.setValue (updateCellsBatch, or
+    // updateCellOnSheets for a background sheet). Both doors now run a targeted
+    // cube prefetch for the CUBE formulas they write (BUG-0476); the explicit
+    // cube round trip below predates that fix (the route fixall-calp W6 uses)
+    // and is kept until this journey is re-proved live without it. The oracle
+    // comparison itself is unchanged.
     await callModule(page, MOD.TAURI_API, "recalcWithCube");
     await eventually(
       async () => parseLocaleNumber((await readCell(page, inputsIndex, "D1")).display),

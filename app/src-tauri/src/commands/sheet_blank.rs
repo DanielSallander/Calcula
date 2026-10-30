@@ -48,11 +48,14 @@ pub(crate) fn sheet_contents(
     timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     sheet: usize,
 ) -> Result<Vec<&'static str>, String> {
-    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    // The sheet's name and id under ONE hold, `sheet_names` first (BUG-0590 /
+    // BUG-0592): two reads let a delete or a move land between them and pair
+    // this sheet's name with its neighbour's id.
+    let (sheet_ids, sheet_names) = crate::calp_commands::sheet_ids_and_names(state)?;
     let Some(sheet_name) = sheet_names.get(sheet).cloned() else {
         return Err(format!("Sheet index {} out of range: workbook has {} sheet(s)", sheet, sheet_names.len()));
     };
-    let sheet_id = state.sheet_ids.read().map_err(|e| e.to_string())?.get(sheet).copied();
+    let sheet_id = sheet_ids.get(sheet).copied();
     let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let mut kinds: Vec<&'static str> = Vec::new();
     let mut note = |present: bool, kind: &'static str| {

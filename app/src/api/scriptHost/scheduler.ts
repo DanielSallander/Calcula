@@ -13,9 +13,15 @@
 //          interval from state Rust owns and hands back only what may run.
 //
 // INVOCATION: a job calls a method the script EXPOSED (context.expose), through
-//          the same callExposedMethod path the connector host uses. There is
-//          deliberately no second invocation path — a timer must not be able to
-//          reach anything an ordinary cross-script call could not.
+//          the broker's exposed-method registry -- the same one the connector
+//          host's callExposedMethod reaches. There is deliberately no second
+//          invocation path — a timer must not be able to reach anything an
+//          ordinary cross-script call could not. The job's door is the strict
+//          one (`hostCallOwnExposed`): the method must be exposed under the
+//          job's address BY THE JOB'S OWN SCRIPT, or the run FAILS. The lenient
+//          door answers a missing method with `undefined`, which made a job
+//          whose address went stale (a renamed name) report every tick as a
+//          healthy run that did nothing (rev4B#1).
 //
 // BOUNDED WORK: every firing is bounded twice over. In the renderer the relayed
 //          call carries METHOD_CALL_TIMEOUT_MS (30s, protocol.ts), so a wedged
@@ -25,7 +31,7 @@
 //          interrupt-handler deadline (core/script-engine/src/limits.rs).
 
 import { invokeBackend } from "../backend";
-import { listMountedHandles } from "./broker";
+import { hostCallOwnExposed, listMountedHandles } from "./broker";
 
 /** How often the renderer asks Rust "what is due?".
  *
@@ -106,7 +112,7 @@ async function tick(): Promise<void> {
     // Sequential on purpose: scheduled work is background work, and firing a
     // batch of jobs concurrently is the fastest way to make an automated
     // workbook feel like a hung one.
-    const { callExposedMethod } = await import("../scriptableObjects");
+    //
     // Dynamic: host.ts imports THIS module dynamically, so a static edge back
     // would close the cycle (and pull the whole host into the scheduler's graph).
     const { isScriptDebugPaused } = await import("./host");
@@ -142,13 +148,15 @@ async function tick(): Promise<void> {
         if (job.surface === CONNECTOR_SURFACE) {
           // A connector job runs the connector host's FEED cycle (fetch every
           // declared table, hand the rows to the volume-capped Rust gate).
-          // That cycle enters the script realm through exactly the same
-          // callExposedMethod call as everything else — this branch chooses
-          // which host-side wrapper runs, not how script code is reached.
+          // That cycle enters the script realm through the same exposed-method
+          // registry as everything else — this branch chooses which host-side
+          // wrapper runs, not how script code is reached.
           const { refreshScriptConnector } = await import("../scriptConnectors");
           await refreshScriptConnector(job.handler);
         } else {
-          await callExposedMethod(job.objectType, job.instanceId, job.handler);
+          // THROWS when the job's script exposes no such method under the
+          // job's address: a FAILED run (reported below), never a success.
+          await hostCallOwnExposed(job.scriptId, job.objectType, job.instanceId, job.handler, []);
         }
       } catch (e) {
         ok = false;

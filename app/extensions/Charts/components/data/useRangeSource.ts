@@ -11,7 +11,10 @@
 //          its exact behaviour: it hands the hook its own state setters
 //          (`detection`) and the hook re-detects series whenever the bound
 //          range, the header flag or the orientation changes, step for step as
-//          the effect that used to live in CreateChartDialog did.
+//          the effect that used to live in CreateChartDialog did -- except
+//          while the dialog holds an EDITED chart's stored series
+//          (`holdStoredSeries`, BUG-0481): opening Edit Chart seeds the range,
+//          and that seeding is not the reader asking for new series.
 //
 //          The pane does NOT auto-detect while the reader types: it commits on
 //          blur / Enter, and asks `detectRangeShape` for the series of the
@@ -207,6 +210,18 @@ export interface RangeSourceDetection {
   setSeries(value: ChartSeries[]): void;
   /** The range stopped binding (the dialog drops its preview data). */
   onUnbound?(): void;
+  /**
+   * True while the caller's series are a STORED chart's (Edit Chart / Select
+   * Data) and the reader has not yet changed the range, the header row or the
+   * orientation: detection holds off. The range binding as the dialog seeds
+   * it (and the empty field while the sheet list loads) is the dialog's own
+   * doing, not the reader's choice -- re-detecting then put back every series
+   * the reader had removed and moved the category column back (BUG-0481).
+   * The caller drops the hold IN THE SAME UPDATE as the reader's change, so
+   * detection runs for that change. An answer that lands while the hold is on
+   * is dropped too.
+   */
+  holdStoredSeries?: boolean;
 }
 
 export interface UseRangeSourceOptions {
@@ -308,9 +323,12 @@ export function useRangeSource(opts: UseRangeSourceOptions): RangeSourceState {
   const hasHeaders = detection?.hasHeaders ?? false;
 
   // Re-detect the series when the BOUND range changes (its cells or its sheet).
+  // Not while the caller holds a stored chart's series (see holdStoredSeries):
+  // the hold is read at run time, so the run the reader's change causes --
+  // which drops the hold in the same update -- detects.
   useEffect(() => {
     const d = detectionRef.current;
-    if (!d) return;
+    if (!d || d.holdStoredSeries) return;
     if (!boundRef) {
       d.setSeries([]);
       d.onUnbound?.();
@@ -341,7 +359,8 @@ export function useRangeSource(opts: UseRangeSourceOptions): RangeSourceState {
     autoDetectSeries(dataRange, hasHeaders)
       .then((detected) => {
         const now = detectionRef.current;
-        if (!now) return;
+        // A stored chart opened meanwhile (Edit Chart): its series win.
+        if (!now || now.holdStoredSeries) return;
         now.setCategoryIndex(detected.categoryIndex);
         now.setSeries(detected.series);
       })

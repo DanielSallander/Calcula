@@ -85,10 +85,15 @@ pub const MIN_ONCE_DELAY_SECS: u64 = 5;
 ///
 /// `object_type` / `instance_id` / `handler` together name the EXPOSED method
 /// the job invokes (`context.expose(...)`). That is the whole invocation
-/// surface: a job can only ever call a method the script itself published, via
-/// the same `callExposedMethod` path the connector host uses. There is no
-/// second way in — a job cannot name arbitrary source, an arbitrary command, or
-/// another script's private function.
+/// surface: a job can only ever call a method the script itself published,
+/// through the broker's exposed-method registry -- the one the connector host's
+/// `callExposedMethod` reaches -- by its strict door (`hostCallOwnExposed`):
+/// a method missing at the address, or exposed there by another script, is a
+/// FAILED run, never a silent success. There is no second way in — a job
+/// cannot name arbitrary source, an arbitrary command, or another script's
+/// private function. A script whose binding moves (a named-range script on a
+/// renamed name, a control script whose control moved) takes its jobs with it
+/// ([`rebind_script_jobs`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduledJob {
@@ -750,6 +755,59 @@ pub fn remove_script_jobs(script_id: &str) {
     inner.jobs.retain(|j| j.script_id != script_id);
 }
 
+/// Re-point the jobs a script registered on the object it WAS bound to
+/// (`from`) at the object it is bound to NOW (`to`). Returns how many moved.
+///
+/// WHY. A job addresses its exposed method by (object_type, instance_id,
+/// handler), and a named-range script is bound by the name's TEXT. A name
+/// rename re-binds the script (`named_ranges::repoint_named_range_scripts`),
+/// and its undo and redo re-bind it back and forth (the
+/// `obj_object_scripts_by_id` restore), but the persisted job kept the OLD
+/// name: after save and reopen the script mounted and exposed its method under
+/// the new name while the job still called the old one, and every tick did
+/// nothing (rev4B#1). A control script is bound by its anchor cell
+/// (`control-<sheet>-<row>-<col>`) and moved the same way, by more routes, with
+/// the same result (rev6B#2). Every re-bind therefore goes through ONE door,
+/// `scripting::script_rebind::rebind_script`, which calls this in the same
+/// step -- the rename and its undo / redo, a control moving with its cells
+/// (Insert / Delete Rows, Columns and Cells, on any sheet), a moved control, a
+/// sheet move / delete / copy renumbering its controls, and the undo / redo of
+/// a control step. (The by-id undo restore re-binds through
+/// `apply_object_scripts_by_id` and calls this itself.)
+///
+/// Matched by owning script id and the binding it had -- case-insensitively,
+/// as a name is matched everywhere else -- so another script's jobs, and this
+/// script's jobs on any other object, are untouched. Takes the caller's
+/// `DocumentEffect`: the jobs ride in the `.cala`, so moving them is a
+/// document change the caller has already decided on. The scheduler lock is a
+/// leaf (nothing is taken under it), so this is legal under any AppState guard.
+pub(crate) fn rebind_script_jobs(
+    _effect: &crate::document_effect::DocumentEffect,
+    script_id: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> usize {
+    let mut inner = scheduler().lock().unwrap();
+    rebind_jobs(&mut inner, script_id, from, to)
+}
+
+/// [`rebind_script_jobs`] over the job store (pure, unit-tested directly).
+fn rebind_jobs(inner: &mut SchedulerInner, script_id: &str, from: Option<&str>, to: Option<&str>) -> usize {
+    let bound_to_from = |instance: Option<&str>| match (instance, from) {
+        (Some(have), Some(was)) => have.eq_ignore_ascii_case(was),
+        (None, None) => true,
+        _ => false,
+    };
+    let mut moved = 0;
+    for job in inner.jobs.iter_mut() {
+        if job.script_id == script_id && bound_to_from(job.instance_id.as_deref()) {
+            job.instance_id = to.map(str::to_string);
+            moved += 1;
+        }
+    }
+    moved
+}
+
 /// The workbook's script-security level as the FIRING LOOP must read it.
 ///
 /// A POISONED lock reads as `"disabled"`, not `"prompt"`. The only test the
@@ -1311,6 +1369,49 @@ mod tests {
         remove_script_jobs("never-existed");
         assert_eq!(live_jobs().len(), 1);
         reset_jobs();
+    }
+
+    /// A re-bound script's jobs follow its binding: only that script's jobs,
+    /// only those on the binding it had (matched case-insensitively, as a name
+    /// is), and the move is exactly reversible.
+    ///
+    /// SABOTAGE: make `rebind_jobs` match nothing -- the first assertion fails.
+    #[test]
+    fn a_rebound_scripts_jobs_follow_its_binding_and_nothing_else_moves() {
+        let mut i = inner();
+        let job = |inner: &mut SchedulerInner, script: &str, instance: Option<&str>, handler: &str| {
+            upsert_job(
+                inner, script, "object-script", "namedRange", instance.map(str::to_string), handler,
+                CADENCE_EVERY, 60, 0, None, 0,
+            )
+            .expect("job should register")
+        };
+        job(&mut i, "s-rate", Some("rate"), "refresh");
+        job(&mut i, "s-rate", Some("Rate"), "snapshot");
+        job(&mut i, "s-rate", Some("Elsewhere"), "other");
+        job(&mut i, "s-other", Some("Rate"), "refresh");
+        job(&mut i, "s-none", None, "tick");
+
+        assert_eq!(rebind_jobs(&mut i, "s-rate", Some("RATE"), Some("Tax")), 2, "both of its jobs on the name move");
+        let instance_of = |inner: &SchedulerInner, script: &str, handler: &str| {
+            inner
+                .jobs
+                .iter()
+                .find(|j| j.script_id == script && j.handler == handler)
+                .and_then(|j| j.instance_id.clone())
+        };
+        assert_eq!(instance_of(&i, "s-rate", "refresh").as_deref(), Some("Tax"));
+        assert_eq!(instance_of(&i, "s-rate", "snapshot").as_deref(), Some("Tax"));
+        assert_eq!(instance_of(&i, "s-rate", "other").as_deref(), Some("Elsewhere"), "its job on another object stays");
+        assert_eq!(instance_of(&i, "s-other", "refresh").as_deref(), Some("Rate"), "another script's job on the same name stays");
+        assert_eq!(i.jobs.len(), 5, "nothing added, nothing removed");
+
+        // The undo of the rename: back again, exactly.
+        assert_eq!(rebind_jobs(&mut i, "s-rate", Some("Tax"), Some("Rate")), 2);
+        assert_eq!(instance_of(&i, "s-rate", "refresh").as_deref(), Some("Rate"));
+        // An unbound (primitive) script's jobs match only an unbound binding.
+        assert_eq!(rebind_jobs(&mut i, "s-none", Some("x"), Some("y")), 0);
+        assert_eq!(rebind_jobs(&mut i, "s-none", None, None), 1);
     }
 
     #[test]

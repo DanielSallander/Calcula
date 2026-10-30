@@ -431,3 +431,145 @@ fn a_delete_grows_a_range_on_the_last_line_exactly_as_excel_did() {
         vec![r(0, last_col - 1, 3, last_col)]
     );
 }
+
+// ===========================================================================
+// 3-D REFERENCES through the real insert/delete bodies
+// ===========================================================================
+
+/// Four sheets. Sheet2..Sheet4 hold A5 = 1/2/4, a B-column value 10/20/40 and
+/// a row-7 value 100/200/400. Sheet1 (active) reads them through 3-D spans, a
+/// plain `Sheet4!A5` and a workbook-scoped name over a span; Sheet3 -- a
+/// MIDDLE sheet of the span -- reads the same column span itself.
+fn three_d_book() -> Fx {
+    let fx = Fx::new(4);
+    for (sheet, scale) in [(1usize, 1.0), (2, 2.0), (3, 4.0)] {
+        fx.put(sheet, "A5", &format!("{}", scale));
+        fx.put(sheet, &format!("B{}", sheet), &format!("{}", 10.0 * scale));
+        fx.put(sheet, "E7", &format!("{}", 100.0 * scale));
+    }
+    let seed = crate::document_effect::test_seed_effect();
+    fx.state.named_ranges.write(&seed).unwrap().insert(
+        "SPAN".to_string(),
+        crate::named_ranges::NamedRange {
+            name: "SPAN".to_string(),
+            sheet_index: None,
+            refers_to: "=Sheet2:Sheet4!$A$5".to_string(),
+            comment: None,
+            folder: None,
+        },
+    );
+    fx.put(0, "H1", "=SUM(Sheet2:Sheet4!A5)");
+    fx.put(0, "H2", "=SUM(Sheet2:Sheet4!B:B)");
+    fx.put(0, "H3", "=Sheet4!A5");
+    fx.put(0, "H4", "=SUM(Sheet2:Sheet4!7:7)");
+    fx.put(0, "H5", "=SUM(SPAN)");
+    fx.put(2, "J1", "=SUM(Sheet2:Sheet4!B:B)");
+    fx.settle();
+    assert_eq!(
+        [fx.number(0, "H1"), fx.number(0, "H2"), fx.number(0, "H3"), fx.number(0, "H4"), fx.number(0, "H5")],
+        [7.0, 70.0, 4.0, 700.0, 7.0],
+        "precondition: the spans read all three sheets"
+    );
+    assert_eq!(fx.number(2, "J1"), 70.0);
+    fx
+}
+
+fn span_name(fx: &Fx) -> String {
+    fx.state.named_ranges.read().unwrap().get("SPAN").expect("SPAN").refers_to.clone()
+}
+
+/// One line of a 3-D check: `got` against Excel's answer, listed when they differ.
+fn differs(wrong: &mut Vec<String>, what: String, got: String, excel: &str) {
+    if got != excel {
+        wrong.push(format!("{what}: Excel {excel}, Calcula {got}"));
+    }
+}
+
+/// UPPERCASED: a 3-D span is stored uppercased, a single qualifier as typed,
+/// and these checks are about where a reference points.
+fn formula_text(fx: &Fx, sheet: usize, a1_ref: &str) -> String {
+    fx.formula(sheet, a1_ref).unwrap_or_default().to_ascii_uppercase()
+}
+
+fn value_text(fx: &Fx, sheet: usize, a1_ref: &str) -> String {
+    format!("{:?}", fx.value(sheet, a1_ref))
+}
+
+fn number_text(n: f64) -> String {
+    format!("{:?}", CellValue::Number(n))
+}
+
+/// NEW-structural-shift-rewrites-3d-span, through the commands. Excel [LIVE,
+/// Excel 16, 2026-10-30, shifters/probe3d.ps1] leaves a 3-D reference as
+/// written under every insert and delete -- on the span's last sheet, a middle
+/// sheet, and the formula's own sheet -- and the span then reads whatever the
+/// edit left at that address; `=Sheet4!A5` beside it follows its row.
+#[test]
+fn inserting_or_deleting_lines_on_any_sheet_leaves_a_3d_reference_as_written() {
+    // Every disagreement with Excel is listed, not just the first: formulas
+    // and names in `wrong`, the values they read in `values`.
+    let mut wrong: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+
+    // A row inserted on the span's LAST sheet (off-sheet): the cell pass read
+    // `:SHEET4!A5` as Sheet4's A5 and wrote `SHEET2:SHEET4!A6` everywhere.
+    let case = "insert row 1 on Sheet4";
+    let fx = three_d_book();
+    insert_rows(&fx, 0, 1, Some(3));
+    differs(&mut wrong, format!("{case}: Sheet1!H1"), formula_text(&fx, 0, "H1"), "=SUM(SHEET2:SHEET4!A5)");
+    // Control: the plain reference beside it follows its row.
+    differs(&mut wrong, format!("{case}: Sheet1!H3"), formula_text(&fx, 0, "H3"), "=SHEET4!A6");
+    differs(&mut wrong, format!("{case}: Sheet1!H4"), formula_text(&fx, 0, "H4"), "=SUM(SHEET2:SHEET4!7:7)");
+    differs(&mut wrong, format!("{case}: the name SPAN"), span_name(&fx), "=Sheet2:Sheet4!$A$5");
+    // Sheet4's A5 is now the inserted row (1+2+0) and its row 7 is row 8 (100+200+0).
+    differs(&mut values, format!("{case}: Sheet1!H1"), value_text(&fx, 0, "H1"), &number_text(3.0));
+    differs(&mut values, format!("{case}: Sheet1!H3"), value_text(&fx, 0, "H3"), &number_text(4.0));
+    differs(&mut values, format!("{case}: Sheet1!H4"), value_text(&fx, 0, "H4"), &number_text(300.0));
+    differs(&mut values, format!("{case}: Sheet1!H5 =SUM(SPAN)"), value_text(&fx, 0, "H5"), &number_text(3.0));
+
+    // A column inserted on the formula's OWN sheet (the active one): the line
+    // pass read `!B:B` as Sheet1's column B and wrote `...!C:C`.
+    let case = "insert column A on Sheet1";
+    let fx = three_d_book();
+    insert_columns(&fx, 0, 1, None);
+    differs(&mut wrong, format!("{case}: Sheet1!I1"), formula_text(&fx, 0, "I1"), "=SUM(SHEET2:SHEET4!A5)");
+    differs(&mut wrong, format!("{case}: Sheet1!I2"), formula_text(&fx, 0, "I2"), "=SUM(SHEET2:SHEET4!B:B)");
+    differs(&mut wrong, format!("{case}: Sheet1!I4"), formula_text(&fx, 0, "I4"), "=SUM(SHEET2:SHEET4!7:7)");
+    // Nothing moved on the span's sheets.
+    differs(&mut values, format!("{case}: Sheet1!I2"), value_text(&fx, 0, "I2"), &number_text(70.0));
+
+    // A column inserted on a MIDDLE sheet that holds a span formula of its own
+    // (off-sheet): its own `!B:B` was read as Sheet3's column B.
+    let case = "insert column A on Sheet3";
+    let fx = three_d_book();
+    insert_columns(&fx, 0, 1, Some(2));
+    differs(&mut wrong, format!("{case}: Sheet3!K1"), formula_text(&fx, 2, "K1"), "=SUM(SHEET2:SHEET4!B:B)");
+    differs(&mut wrong, format!("{case}: Sheet1!H2"), formula_text(&fx, 0, "H2"), "=SUM(SHEET2:SHEET4!B:B)");
+    // Sheet3's B2 (20) moved to C2 and its A5 (2) into column B: the span
+    // reads 10+2+40 from Sheet3 and from Sheet1. (Following the insert -- the
+    // defect -- read C:C instead: 0+20+0.)
+    differs(&mut values, format!("{case}: Sheet3!K1"), value_text(&fx, 2, "K1"), &number_text(52.0));
+    differs(&mut values, format!("{case}: Sheet1!H2"), value_text(&fx, 0, "H2"), &number_text(52.0));
+
+    // The very row the span reads deleted on its last sheet: no #REF! (Excel),
+    // and the defined name used to become the unparseable `=Sheet2:#REF!`.
+    let case = "delete row 5 on Sheet4";
+    let fx = three_d_book();
+    delete_rows_impl(&fx.state, &fx.file, &fx.pivots, &fx.files, &fx.pane, &fx.filters, &fx.slicer, &fx.timeline, 4, 1, Some(3))
+        .expect("delete rows");
+    differs(&mut wrong, format!("{case}: Sheet1!H1"), formula_text(&fx, 0, "H1"), "=SUM(SHEET2:SHEET4!A5)");
+    // Control: the plain reference lost its row.
+    differs(&mut wrong, format!("{case}: Sheet1!H3"), formula_text(&fx, 0, "H3"), "=#REF!");
+    differs(&mut wrong, format!("{case}: the name SPAN"), span_name(&fx), "=Sheet2:Sheet4!$A$5");
+    // Sheet4's old A6 (empty) is now A5 (1+2+0); its row 7 moved up to row 6.
+    differs(&mut values, format!("{case}: Sheet1!H1"), value_text(&fx, 0, "H1"), &number_text(3.0));
+    differs(&mut values, format!("{case}: Sheet1!H4"), value_text(&fx, 0, "H4"), &number_text(300.0));
+    differs(&mut values, format!("{case}: Sheet1!H5 =SUM(SPAN)"), value_text(&fx, 0, "H5"), &number_text(3.0));
+
+    assert!(
+        wrong.is_empty(),
+        "a structural edit rewrote a 3-D reference; Excel leaves it as written:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert!(values.is_empty(), "a 3-D reference reads the wrong cells after the edit:\n  {}", values.join("\n  "));
+}

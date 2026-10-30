@@ -664,15 +664,15 @@ pub(crate) fn recalc_control_dependents_core(
                         &cell,
                         &formula,
                         &user_files,
-                        // No UDF prefetch on this path (v1): UDF-bearing
-                        // dependents PRESERVE their stored value —
-                        // reevaluate_formula_cell threads the cell's own
-                        // position, so preserved_udf_value engages (#NAME?
-                        // only when there is nothing to keep).
+                        // No UDF prefetch on this path (v1): each custom
+                        // function call is answered from the results cache
+                        // (preserved_udf_value) for exactly the arguments it
+                        // has -- #NAME? when none is recorded (rev3A#3: a
+                        // control's new value in an argument is a changed
+                        // argument, answered only if it was served before).
                         None,
-                        // No CUBE prefetch: cube-bearing dependents preserve
-                        // their last value the same way (preserve-on-no-
-                        // prefetch invariant via preserved_cube_value).
+                        // No CUBE prefetch: cube-bearing dependents follow the
+                        // same rule through preserved_cube_value (#N/A).
                         None,
                         Some(&control_values),
                         &styles,

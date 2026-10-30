@@ -260,7 +260,7 @@ fn key(kind: ObjectBindingKind, id: &str, path: &str) -> BindingKey {
 /// the collision rename ("Data" arrived as "Data (2)"). The subscriber's own
 /// binding is untouched.
 ///
-/// SABOTAGE: drop the canvas-page id mapping in `PulledBindings::from_pull`
+/// SABOTAGE: drop the canvas-page id mapping in `PulledBindings::capture`
 /// (keep `row.clone()`) -- the page row lands under the PUBLISHER's sheet id,
 /// names no object here, and the page assertion fails.
 #[test]
@@ -455,6 +455,120 @@ fn a_pulled_legacy_formula_property_becomes_a_binding() {
     let meta = controls.values().find(|m| m.uid == "app-btn").expect("the button landed");
     assert_eq!(meta.properties["text"].value_type, "static");
     assert_eq!(meta.properties["text"].value, "");
+}
+
+/// The pre-bindings application WITH a collision rename (revC#1 on the REAL
+/// pull): the subscriber already has its own "Data" (A1 = 999), so the
+/// application's "Data" lands as "Data (2)". `rename_pull` renames the cell
+/// formulas and the `bindings.json` rows, but leaves a formula-typed control
+/// property alone (to it, a literal) -- and the migration at the end of the
+/// door resolves `=Data!A1` against THIS workbook's sheets, so the caption
+/// became a binding of the subscriber's OWN "Data" and painted 999: live,
+/// plausible and wrong, beside cells that read 21. The door now renames the
+/// old caption text right after `rename_pull`, as the dev doors do.
+///
+/// SABOTAGE: drop the `rename_legacy_control_formulas` call from
+/// `materialize_pull_result` -- the binding reads `=Data!A1` and the first
+/// assertion fails.
+#[test]
+fn a_pulled_pre_bindings_caption_whose_sheet_collides_binds_the_pulled_sheet() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    legacy_caption_app().publish(&dir, prof.path(), (1, 0, 0), None);
+
+    let h = Harness::with_own_data_sheet_reading(999.0);
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+
+    let caption = key(ObjectBindingKind::Control, "app-btn", "/properties/text");
+    assert_eq!(
+        h.bindings().get(&caption).map(|s| s.formula.as_str()),
+        Some("='Data (2)'!A1"),
+        "the migrated caption reads the PULLED sheet, under the name it landed as: {:#?}",
+        h.bindings()
+    );
+    assert_eq!(
+        h.painted_text("app-btn").as_deref(),
+        Some("21"),
+        "the caption paints the application's value, never the subscriber's own Data!A1 (999)"
+    );
+}
+
+/// The same on a REFRESH: the refresh replaces the application's bindings
+/// and migrates again, so whatever the subscribe left, the refresh's own
+/// rename (in `prepare_refresh_payloads`) decides the caption.
+///
+/// SABOTAGE: drop the `rename_legacy_control_formulas` call from
+/// `prepare_refresh_payloads` -- the refreshed binding reads `=Data!A1`.
+#[test]
+fn a_refreshed_pre_bindings_caption_whose_sheet_collides_binds_the_pulled_sheet() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let app = legacy_caption_app();
+    app.publish(&dir, prof.path(), (1, 0, 0), None);
+
+    let h = Harness::with_own_data_sheet_reading(999.0);
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    app.publish(&dir, prof.path(), (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(subscribe_pull(&dir, prof.path()));
+
+    let caption = key(ObjectBindingKind::Control, "app-btn", "/properties/text");
+    assert_eq!(
+        h.bindings().get(&caption).map(|s| s.formula.as_str()),
+        Some("='Data (2)'!A1"),
+        "the refreshed caption reads the PULLED sheet: {:#?}",
+        h.bindings()
+    );
+    assert_eq!(h.painted_text("app-btn").as_deref(), Some("21"));
+}
+
+/// An application published before bindings: the button's caption is the old
+/// `{valueType: "formula", value: "=Data!A1"}` spelling, no `bindings.json`.
+fn legacy_caption_app() -> App {
+    let mut app = App::new();
+    app.wb.object_bindings.clear();
+    app.wb.controls[0].controls = serde_json::json!([{
+        "row": 2, "col": 2, "controlType": "button", "uid": "app-btn",
+        "properties": { "text": { "valueType": "formula", "value": "=Data!A1" } }
+    }]);
+    app
+}
+
+impl Harness {
+    /// [`Harness::with_own_data_sheet`], its own "Data"!A1 holding `value`.
+    fn with_own_data_sheet_reading(value: f64) -> Self {
+        let h = Harness::with_own_data_sheet();
+        {
+            let mut grid = h.state.grid.write(&effect()).unwrap();
+            let mut grids = h.state.grids.write(&effect()).unwrap();
+            grid.set_cell(0, 0, Cell::new_number(value));
+            grids[0].set_cell(0, 0, Cell::new_number(value));
+        }
+        h
+    }
+
+    /// What the button `uid` paints as its caption, after the evaluator ran.
+    fn painted_text(&self, uid: &str) -> Option<String> {
+        let file = crate::persistence::FileState::default();
+        let user_files = crate::persistence::UserFilesState::default();
+        let cx = super::BindingCx {
+            state: &self.state,
+            file_state: &file,
+            slicers: &self.slicer,
+            timelines: &self.timeline,
+            pivots: &self.pivot,
+            pane: &self.pane,
+            ribbon: &self.ribbon,
+            user_files: &user_files,
+        };
+        super::resolve_all_core(&cx);
+        let anchor = {
+            let controls = self.state.controls.read().unwrap();
+            controls.iter().find(|(_, m)| m.uid == uid).map(|(k, _)| *k)?
+        };
+        crate::controls::resolve_control_properties_core(&self.state, anchor.0, anchor.1, anchor.2)
+            .get("text")
+            .cloned()
+    }
 }
 
 /// A pulled application chart and the subscriber's OWN chart whose titles are

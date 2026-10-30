@@ -110,13 +110,47 @@ describe("the Border tab on a RANGE (Excel's edges, not every cell's sides)", ()
     ]);
   });
 
-  it("turning an inside line OFF clears both cells' sides of every inner boundary", () => {
-    const baseline = { ...loaded(), borderInsideHorizontal: THIN };
-    const { calls } = planFormatCellsWrites(baseline, { ...baseline, borderInsideHorizontal: NONE }, RANGE, false);
+  // Round-2 review revA#3 CHANGED THIS ASSERTION deliberately: off used to be
+  // two `format` calls over the strips rows 1..2 and 2..3 (both cells' sides of
+  // each inner boundary). It is now ONE inside preset with NO line (width 0),
+  // which the backend reads as "remove those sides" -- the same two sides of
+  // every inner boundary -- and plans through its whole-line tiers.
+  it("turning an inside line OFF is ONE inside preset with no line", () => {
+    const baseline = { ...loaded(), borderInsideHorizontal: THIN, borderInsideVertical: THIN };
+    const current = { ...baseline, borderInsideHorizontal: NONE, borderInsideVertical: NONE };
+    const { calls } = planFormatCellsWrites(baseline, current, RANGE, false);
     expect(calls).toEqual([
-      { kind: "format", rows: [1, 2], cols: COLS, formatting: { borderBottom: { style: "none", color: "#000000" } } },
-      { kind: "format", rows: [2, 3], cols: COLS, formatting: { borderTop: { style: "none", color: "#000000" } } },
+      { kind: "preset", preset: "insideHorizontal", style: "solid", color: "#000000", width: 0 },
+      { kind: "preset", preset: "insideVertical", style: "solid", color: "#000000", width: 0 },
     ]);
+  });
+
+  // The freeze/refusal behind revA#3: on WHOLE columns the two strips were
+  // rows 0..1048574 and 1..1048575, neither a whole column, so the backend
+  // walked a million cells per column (and refused C:F outright). No call the
+  // plan makes for a whole-column or whole-row selection may be such a strip:
+  // every `format` call is a whole line or a single edge line, and the inside
+  // lines are presets over the selection itself.
+  it("inside lines OFF on whole columns and whole rows send no almost-whole strip", () => {
+    const LAST_ROW = 1_048_575;
+    const LAST_COL = 16_383;
+    const columns: FormatCellsRect = { startRow: 0, startCol: 2, endRow: LAST_ROW, endCol: 5 };
+    const rows: FormatCellsRect = { startRow: 4, startCol: 0, endRow: 9, endCol: LAST_COL };
+    for (const rect of [columns, rows]) {
+      const baseline = { ...loaded(), borderInsideHorizontal: THIN, borderInsideVertical: THIN };
+      const current = { ...baseline, borderInsideHorizontal: NONE, borderInsideVertical: NONE };
+      const { calls } = planFormatCellsWrites(baseline, current, rect, false);
+      expect(calls).toEqual([
+        { kind: "preset", preset: "insideHorizontal", style: "solid", color: "#000000", width: 0 },
+        { kind: "preset", preset: "insideVertical", style: "solid", color: "#000000", width: 0 },
+      ]);
+      for (const call of calls) {
+        if (call.kind !== "format") continue;
+        const wholeColumn = call.rows.length === LAST_ROW + 1;
+        const wholeRow = call.cols.length === LAST_COL + 1;
+        expect(wholeColumn || wholeRow || call.rows.length === 1 || call.cols.length === 1).toBe(true);
+      }
+    }
   });
 
   it("None clears the whole range first, and writes no redundant 'none' sides after it", () => {

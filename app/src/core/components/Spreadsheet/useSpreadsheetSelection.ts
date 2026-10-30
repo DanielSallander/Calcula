@@ -14,13 +14,12 @@ import {
   useClipboard,
   useFillHandle,
 } from "../../hooks";
+import { isCutModeLive } from "../../hooks/useClipboard";
 import { useGridState, useGridContext } from "../../state";
 import {
   getCell,
   setColumnWidth as setColumnWidthApi,
   setRowHeight as setRowHeightApi,
-  clearRange,
-  clearRangeOnSheets,
   undo as undoApi,
   redo as redoApi,
   applyFormatting,
@@ -53,8 +52,7 @@ import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { cancelCellPress, openCellPress, type CellPressDeps } from "../../lib/cellPressRelease";
 import { findPointerClaim } from "../../lib/pointerClaims";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
-import { checkEditGuards, checkRangeGuards } from "../../lib/editGuards";
-import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
+import { checkRangeGuards } from "../../lib/editGuards";
 import {
   setColumnWidth,
   setRowHeight,
@@ -100,8 +98,7 @@ import {
   type AutoFitCommandHost,
 } from "../../lib/autoFitCommands";
 import type { GridCommandContext } from "../../lib/gridCommands";
-import type { CellTarget } from "../../lib/selectionOwner";
-import { commitGridCellText } from "../../lib/selectionOwner";
+import { openGridCellEditor, type CellTarget } from "../../lib/selectionOwner";
 import { runClearGesture } from "../../lib/clearGestures";
 import { notifyCellTargetChanged, readTargetCell } from "../../../api/cellTarget";
 
@@ -673,14 +670,47 @@ export function useSpreadsheetSelection({
     autoFillToEdge();
   }, [autoFillToEdge]);
 
-  // Handle DELETE key - clear contents of selection
-  const handleDeleteContents = useCallback(async (target?: CellTarget) => {
+  // Handle the grid keyboard's bare Delete (Clear Contents) and Backspace (an
+  // empty entry in the active cell -- see BACKSPACE below).
+  //
+  // ONE DOOR (BUG-0350). This ran its OWN clear: the grouped-sheet replication
+  // (clearRangeOnSheets), a silent one-cell edit-guard check and the one-cell
+  // writeback edit, over the selection's LAST block only. But the registry's
+  // Delete binding runs core.edit.clearContents in the capture phase and
+  // stops the key, so only Backspace still reached this, and Delete with
+  // grouped sheets cleared the active sheet alone. A clear of the sheet's cells
+  // now runs the grid command -- the same handler Delete, the Clear menu, the Edit menu and
+  // the right-click menu reach (Spreadsheet's clearHandler ->
+  // core/lib/clearGestures), which decides the group, the one-cell writeback
+  // edit, every Ctrl+click block, the one undo step and every refusal shown,
+  // and which runs the command guards an extension registered for it.
+  //
+  // An OBJECT's cells (a floating grid's, P3) run the same gesture with the
+  // target the keyboard resolved -- what that command's handler does for one:
+  // Clear Contents through the target, one undo step, never Core's hidden
+  // cell under the object, and no sheet group (the command guards describe the
+  // active sheet and are not asked for an object either).
+  //
+  // The edit guards are not asked: a pivot region, a protected sheet and a
+  // writeback claim are refused by the backend's clear, WITH the reason, on
+  // every grouped sheet, and the one guard the backend does not know -- an
+  // armed Format Painter -- does not stop Excel's Delete either (live
+  // Microsoft 365, 2026-10-29: Delete with the painter armed cleared the cell).
+  //
+  // BACKSPACE IS NOT A CLEAR CONTENTS (review G#7). Excel [LIVE, Excel 16,
+  // 2026-10-29: A1:A5 + C1:C5 selected, C1 active, Backspace posted to the
+  // grid]: Backspace clears ONLY the active cell and enters Edit mode -- Esc
+  // then put C1's value back, Enter left C1 empty, kept A1:A5 and C2:C5, and
+  // moved down. So on Core's own cells Backspace opens Core's editor on the
+  // active cell with an empty entry (`openGridCellEditor("")`, startEditing's
+  // replace mode): Enter commits it -- to every grouped sheet, as any entry --
+  // Esc cancels it, and the edit guards a typed entry meets apply. It cleared
+  // the selection's last block (before 2026-10-29) and then every block on
+  // every grouped sheet (round 1 routed it through Clear Contents). An
+  // OBJECT's cells keep their clear: a floating grid's own editor is its own.
+  const handleDeleteContents = useCallback(async (target?: CellTarget, key?: "Delete" | "Backspace") => {
     const owned = objectTargetOf(target);
     if (owned) {
-      // An OBJECT's cells (a floating grid's, P3): Clear Contents through the
-      // target -- one undo step per block, bracketed into one -- never Core's
-      // hidden cell under the object, and no edit guard (the guards describe
-      // the ACTIVE sheet's regions; the backend gates the object's own cells).
       await runClearGesture("clearContents", {
         selection: owned.selection,
         target: owned.ref,
@@ -691,75 +721,9 @@ export function useSpreadsheetSelection({
       });
       return;
     }
-    if (!selection) {
-      console.log("[useSpreadsheetSelection] No selection to clear");
-      return;
-    }
-
-    // Check if any cell in the selection is edit-guarded (e.g., pivot region)
-    const guardResult = await checkEditGuards(selection.endRow, selection.endCol);
-    if (guardResult?.blocked) {
-      console.log("[useSpreadsheetSelection] Delete blocked by edit guard");
-      return;
-    }
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    // ONE CELL THAT TAKES ONE EDIT AT A TIME. A range guard can admit a
-    // single-cell EDIT and refuse a bulk write (a writeback cell collects one
-    // answer at a time, and its owner records it in its commit guard). A bulk
-    // clear there is refused by the backend; Delete on that one cell is the
-    // user clearing their answer, so it is ENTERED as an empty edit and the
-    // owner's commit guard sees it -- what F2, Backspace, Enter always did.
-    if (
-      minRow === maxRow &&
-      minCol === maxCol &&
-      !(selection.additionalRanges && selection.additionalRanges.length > 0) &&
-      checkRangeGuards(minRow, minCol, maxRow, maxCol, "other")?.blocked &&
-      !checkRangeGuards(minRow, minCol, maxRow, maxCol, "edit")?.blocked
-    ) {
-      if (await commitGridCellText("")) return;
-      // No committer (or the edit was refused, which says why itself): fall
-      // through to the clear, whose refusal names the remedy.
-    }
-
-    console.log(`[useSpreadsheetSelection] Clearing contents from (${minRow},${minCol}) to (${maxRow},${maxCol})`);
-
-    try {
-      const clearedCount = await clearRange(minRow, minCol, maxRow, maxCol);
-      console.log(`[useSpreadsheetSelection] Clear contents complete - ${clearedCount} cells cleared`);
-
-      // Sheet grouping: replicate clear to all grouped (non-active) sheets
-      if (isSheetGroupingActive()) {
-        try {
-          await clearRangeOnSheets(getSelectedSheetIndices(), minRow, minCol, maxRow, maxCol);
-          console.log("[useSpreadsheetSelection] Replicated clear to grouped sheets");
-        } catch (err) {
-          console.error("[useSpreadsheetSelection] Failed to replicate clear to grouped sheets:", err);
-          // A grouped sheet refusing (protection) means the sheets have now
-          // DIVERGED: the active sheet cleared, that one did not. Silence here
-          // would leave the user believing the group edit applied everywhere.
-          void alertAsync(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      // Emit a single event to trigger refresh
-      cellEvents.emit({
-        row: minRow,
-        col: minCol,
-        oldValue: undefined,
-        newValue: "",
-        formula: null,
-      });
-    } catch (error) {
-      // Show spill protection warning (or other backend errors) to the user
-      const message = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      void alertAsync(message);
-    }
-  }, [selection]);
+    if (key === "Backspace" && openGridCellEditor("")) return;
+    await gridCommands.execute("clearContents");
+  }, []);
 
   // Shared helper: refresh dimensions from backend and update Redux store.
   // Must be awaited before refreshing the canvas to avoid stale rendering.
@@ -2069,7 +2033,9 @@ export function useSpreadsheetSelection({
     // Object keyboard handling on a canvas belongs to the object families.
     enabled: isFocused && state.surface !== "canvas",
     onClearClipboard: clearClipboardState,
-    hasClipboardContent: clipboardMode !== "none",
+    // A pending CUT counts wherever it is: on a sheet other than its source (no
+    // ants drawn here) and in a floating grid (no ants at all), Esc ends it too.
+    hasClipboardContent: clipboardMode !== "none" || isCutModeLive(),
     onDelete: handleDeleteContents,
     onSelectColumn: selectColumn,
     onSelectRow: selectRow,

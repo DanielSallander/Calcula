@@ -681,6 +681,73 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
     }
 }
 
+/// Rebuild the CROSS-SHEET edges of every formula on each of `sheets` -- sheets
+/// that are NOT the active one -- from the trees their grids now hold: drop
+/// every edge those cells registered, then register what they read now. The
+/// off-sheet half of [`rebuild_all_dependencies_from_grid`]'s cross-sheet pass
+/// (same name expansion, same `normalize_cross_sheet_refs`), for a restore
+/// that rewrote a background sheet's formulas (`apply_changes`).
+///
+/// CANONICAL LOCK ORDER: `grids` first, then the name tables in
+/// `rebuild_all_dependencies`'s order; the name tables are released before the
+/// two cross-sheet maps are taken, and `grids` is held to the end so no writer
+/// can change a cell between reading its tree and registering its edges.
+fn rebuild_off_sheet_cross_sheet_edges(state: &AppState, sheets: &[usize]) {
+    let grids = state.grids.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap().clone();
+    let mut edges: Vec<((usize, u32, u32), rustc_hash::FxHashSet<(String, u32, u32)>)> = Vec::new();
+    {
+        let named_ranges = state.named_ranges.read().unwrap();
+        let tables = state.tables.read().unwrap();
+        let table_names = state.table_names.read().unwrap();
+        let name_tables = crate::name_resolution::NameTables {
+            named_ranges: &named_ranges,
+            tables: &tables,
+            table_names: &table_names,
+            sheet_names: &sheet_names,
+            spill_ranges: &state.spill_ranges,
+        };
+        for &sheet in sheets {
+            let Some(grid) = grids.get(sheet) else {
+                continue;
+            };
+            for (&(row, col), cell) in &grid.cells {
+                let Some(ast) = &cell.ast else {
+                    continue;
+                };
+                // Names expanded first, as the active-sheet rebuild does: a
+                // `NamedRef` has no coordinates of its own to give.
+                let expanded = crate::name_resolution::eval_ast(ast, &name_tables.at(sheet, row, col));
+                let refs = extract_all_references(&expanded, grid);
+                if !refs.cross_sheet_cells.is_empty() {
+                    edges.push((
+                        (sheet, row, col),
+                        crate::normalize_cross_sheet_refs(&refs.cross_sheet_cells, &sheet_names),
+                    ));
+                }
+            }
+        }
+    }
+    let mut cross_sheet_dependents = state.cross_sheet_dependents.lock().unwrap();
+    let mut cross_sheet_dependencies = state.cross_sheet_dependencies.lock().unwrap();
+    let stale: Vec<(usize, u32, u32)> = cross_sheet_dependencies
+        .keys()
+        .filter(|key| sheets.contains(&key.0))
+        .copied()
+        .collect();
+    for key in stale {
+        update_cross_sheet_dependencies(
+            key,
+            rustc_hash::FxHashSet::default(),
+            &mut cross_sheet_dependencies,
+            &mut cross_sheet_dependents,
+        );
+    }
+    for (key, refs) in edges {
+        update_cross_sheet_dependencies(key, refs, &mut cross_sheet_dependencies, &mut cross_sheet_dependents);
+    }
+}
+
 // ============================================================================
 // Undo-transaction TICKETS: close only the transaction YOUR begin opened
 // ============================================================================
@@ -1408,8 +1475,9 @@ fn apply_changes_with(
     // waited for `grid`; but every cell writer -- update_cell, clear_range,
     // sort_range, fill_range, set_cell_style, merge_cells, the structural
     // edits, the MCP formatting tool, ~40 functions -- records its step while
-    // it HOLDS `grid`/`grids` (and `set_column_width` / `set_row_height`
-    // while they hold their mirror), so the two orders were opposite. The MCP
+    // it HOLDS `grid`/`grids` (and `set_column_width` / `set_row_height`, which
+    // held their mirror there until round 8 and now release it first), so the
+    // two orders were opposite. The MCP
     // server's tools run off the main thread, so a Ctrl+Z overlapping one
     // could hang the app (fix round 4: found once the lock-order census could
     // see `lock_pending`). The stack is held across the restore only so no
@@ -1867,6 +1935,33 @@ fn apply_changes_with(
     });
     if structural_restore || formula_edges_changed {
         rebuild_all_dependencies(state);
+    }
+
+    // THE OFF-SHEET HALF OF THE SAME REBUILD. A restore that rewrote cells on
+    // another sheet put that sheet's formulas back, but its cross-sheet edges
+    // -- the only edges a background sheet keeps -- stayed as the undone
+    // operation left them. Undo a move of Sheet1!A1 to A5 and Sheet2!A1 got
+    // `=Sheet1!A1*2` back while `cross_sheet_dependents` still sent Sheet1's
+    // A5 to it and nothing sent A1: the next edit of Sheet1!A1 never reached
+    // it, and visiting Sheet2 rebuilt the edge but did not recalculate, so it
+    // showed the stale number until F9. `recalc_after_off_sheet_write` below
+    // re-evaluates these sheets but never re-registers an edge. Rebuilt per
+    // sheet from the restored trees, the way `rebuild_all_dependencies` does
+    // for the active one, so every restore that reports a sheet -- a
+    // sheet-tagged `SetCell`, `script_grid_cells`, `obj_cross_sheet_formulas`
+    // -- is covered by the one rescan rather than a per-restore patch. Must
+    // precede the cascade below, which walks these edges.
+    {
+        let active_now = *state.active_sheet.read().unwrap();
+        let off_sheets: Vec<usize> = report
+            .sheets_rewritten
+            .iter()
+            .copied()
+            .filter(|&sheet| sheet != active_now)
+            .collect();
+        if !off_sheets.is_empty() {
+            rebuild_off_sheet_cross_sheet_edges(state, &off_sheets);
+        }
     }
 
     // THE OFF-SHEET HALF OF THE CASCADE — what the restores just reported.
@@ -2330,6 +2425,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         ("obj_named_range", NONE), ("obj_freeze", NONE), ("obj_extension_data", NONE),
         ("obj_cell_types", NONE), ("obj_cell_behaviors", NONE),
         ("obj_writeback_regions", NONE), ("obj_object_scripts", NONE),
+        (OBJECT_SCRIPTS_BY_ID_RESTORE_KIND, NONE),
         // Per-sheet cell-keyed stores moved by a structural edit.
         ("obj_comments", MutationDomains::of(Annotations)),
         ("obj_notes", MutationDomains::of(Annotations)),
@@ -2717,7 +2813,12 @@ fn apply_sheet_structural_restore(
             column_styles: grids[idx].column_styles.iter().map(|(k, v)| (*k, *v)).collect(),
         };
 
-        let mut restored = engine::Grid::new();
+        // SHARING the sheet's results cache (rev5B#1): it is keyed by each
+        // call's arguments, never by cell, so every answer in it holds for the
+        // restored cells too -- a fresh `Grid::new()` forgot them all, and the
+        // save's recalculation then refused every cube and custom-function cell
+        // on the sheet.
+        let mut restored = engine::Grid::new_sharing_call_memo(&grids[idx]);
         for (row, col, cell) in &snapshot.cells {
             restored.set_cell(*row, *col, cell.clone());
         }
@@ -2937,7 +3038,9 @@ pub(crate) fn apply_calp_reset_restore(
                 spills: Vec::new(), // filled in the spill pass below
             };
 
-            let mut restored = engine::Grid::new();
+            // SHARING the sheet's results cache, as the structural restore
+            // does (rev5B#1): its answers are facts about arguments, not cells.
+            let mut restored = engine::Grid::new_sharing_call_memo(&grids[idx]);
             for (row, col, cell) in &sheet.cells {
                 restored.set_cell(*row, *col, cell.clone());
             }
@@ -4747,8 +4850,13 @@ fn apply_sheet_cell_map_restore<T>(
 ///
 /// Whole-list swap for the same reason as cell behaviors: scripts are
 /// workbook-level and few, and deleting one object can prune several at once.
-/// Exists so `delete_table`'s script pruning is undoable — restoring a table
-/// whose scripts stayed deleted is a half-undo.
+/// It was recorded by `delete_table`, `convert_to_range` and the name rename and
+/// delete so their script pruning (or re-binding) was undoable -- and it put
+/// back the list AS THE STEP FOUND IT, so undoing one of them after the user had
+/// edited or created ANOTHER script (a script save records no undo) reverted
+/// that edit or deleted the new script. Those steps record
+/// [`OBJECT_SCRIPTS_BY_ID_RESTORE_KIND`] instead; nothing records this kind any
+/// more, and it stays registered so the restore table keeps a handler for it.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ObjectScriptsObjSnapshot {
     previous: Vec<::persistence::SavedObjectScript>,
@@ -4756,10 +4864,121 @@ struct ObjectScriptsObjSnapshot {
 
 /// Serialized "obj_object_scripts" snapshot bytes (same in-open-transaction
 /// contract as cell_types_snapshot_bytes).
+#[allow(dead_code)]
 pub(crate) fn object_scripts_snapshot_bytes(
     previous: Vec<::persistence::SavedObjectScript>,
 ) -> Vec<u8> {
     serde_json::to_vec(&ObjectScriptsObjSnapshot { previous }).unwrap_or_default()
+}
+
+/// The object-script restore that touches ONLY the scripts one step moved or
+/// pruned, by script id.
+///
+/// WHY NOT THE WHOLE LIST. A script SAVE (`save_object_script`) records no undo
+/// step, so a whole-list snapshot taken by an earlier step is a copy of every
+/// OTHER script too: undoing a name rename or delete (or a table delete) after
+/// the user had edited another script, edited the renamed object's own script,
+/// or created a new one silently reverted the edit and deleted the new script.
+/// This kind names what the step did and nothing else:
+///   - `rebind`: put each listed script's binding (`instance_id`) back -- its
+///     source, name and ceiling stay as they are NOW (a rename moves a binding,
+///     not the code);
+///   - `resurrect`: put a pruned script back where it stood, only while no
+///     script with its id is present;
+///   - `remove_ids`: remove the listed scripts that are present (the mirror of
+///     a resurrect, so the redo prunes again).
+/// Applying it builds the exact mirror as its inverse, so undo and redo
+/// alternate without ever touching an unlisted script.
+pub(crate) const OBJECT_SCRIPTS_BY_ID_RESTORE_KIND: &str = "obj_object_scripts_by_id";
+
+/// A script a step re-bound, and the binding (`instance_id`) it had BEFORE.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ScriptRebind {
+    pub(crate) id: String,
+    pub(crate) instance_id: Option<String>,
+}
+
+/// A script a step removed, and its index in the list BEFORE the step.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RemovedObjectScript {
+    pub(crate) index: usize,
+    pub(crate) script: ::persistence::SavedObjectScript,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct ObjectScriptsByIdSnapshot {
+    #[serde(default)]
+    rebind: Vec<ScriptRebind>,
+    #[serde(default)]
+    resurrect: Vec<RemovedObjectScript>,
+    #[serde(default)]
+    remove_ids: Vec<String>,
+}
+
+/// Remove every script `doomed` matches, returning each with the index it held
+/// (empty when nothing matched) -- what [`object_scripts_pruned_bytes`] records.
+pub(crate) fn take_object_scripts(
+    scripts: &mut Vec<::persistence::SavedObjectScript>,
+    doomed: impl Fn(&::persistence::SavedObjectScript) -> bool,
+) -> Vec<RemovedObjectScript> {
+    let mut removed = Vec::new();
+    let mut kept = Vec::with_capacity(scripts.len());
+    for (index, script) in std::mem::take(scripts).into_iter().enumerate() {
+        if doomed(&script) {
+            removed.push(RemovedObjectScript { index, script });
+        } else {
+            kept.push(script);
+        }
+    }
+    *scripts = kept;
+    removed
+}
+
+/// Bytes undoing a PRUNE: exactly `removed` comes back (see
+/// [`OBJECT_SCRIPTS_BY_ID_RESTORE_KIND`]; same in-open-transaction contract as
+/// cell_types_snapshot_bytes).
+pub(crate) fn object_scripts_pruned_bytes(removed: Vec<RemovedObjectScript>) -> Vec<u8> {
+    serde_json::to_vec(&ObjectScriptsByIdSnapshot { resurrect: removed, ..Default::default() }).unwrap_or_default()
+}
+
+/// Bytes undoing a RE-BIND: each listed script gets its previous binding back
+/// (see [`OBJECT_SCRIPTS_BY_ID_RESTORE_KIND`]).
+pub(crate) fn object_scripts_rebound_bytes(rebound: Vec<ScriptRebind>) -> Vec<u8> {
+    serde_json::to_vec(&ObjectScriptsByIdSnapshot { rebind: rebound, ..Default::default() }).unwrap_or_default()
+}
+
+/// Apply one [`OBJECT_SCRIPTS_BY_ID_RESTORE_KIND`] snapshot to the list and
+/// return its exact mirror (the inverse the redo replays).
+fn apply_object_scripts_by_id(
+    scripts: &mut Vec<::persistence::SavedObjectScript>,
+    snap: ObjectScriptsByIdSnapshot,
+) -> ObjectScriptsByIdSnapshot {
+    let mut inverse = ObjectScriptsByIdSnapshot::default();
+    // 1. Bindings, on the scripts that still exist -- nothing else of theirs.
+    for rebind in snap.rebind {
+        if let Some(script) = scripts.iter_mut().find(|s| s.id == rebind.id) {
+            let now = std::mem::replace(&mut script.instance_id, rebind.instance_id);
+            inverse.rebind.push(ScriptRebind { id: rebind.id, instance_id: now });
+        }
+    }
+    // 2. Removals of the listed scripts that are present, each with the index
+    //    it held, so the mirror puts it back there.
+    if !snap.remove_ids.is_empty() {
+        inverse.resurrect = take_object_scripts(scripts, |s| snap.remove_ids.contains(&s.id));
+    }
+    // 3. Resurrections, in index order, of the listed scripts that are ABSENT;
+    //    a script with that id present now is the user's and stays as it is.
+    let mut resurrect = snap.resurrect;
+    resurrect.sort_by_key(|entry| entry.index);
+    for entry in resurrect {
+        if scripts.iter().any(|s| s.id == entry.script.id) {
+            continue;
+        }
+        inverse.remove_ids.push(entry.script.id.clone());
+        let at = entry.index.min(scripts.len());
+        scripts.insert(at, entry.script);
+    }
+    inverse
 }
 
 /// Serialized "obj_table" snapshot bytes, for callers recording several
@@ -4980,17 +5199,24 @@ fn apply_object_swap_restore(
                 Err(e) => { eprintln!("[undo] bad obj_chart snapshot: {}", e); return; }
             };
             let mut charts = state.charts.write(effect).unwrap();
-            let current = charts
-                .iter()
-                .position(|c| c.id == snap.chart_id)
-                .map(|i| charts.remove(i));
+            // Back IN PLACE when the chart is still there: the frontend lays the
+            // charts' overlay regions out in the store's order, and an undo
+            // that moved a restored chart to the end reordered them (a
+            // structural edit restores every chart whose range it shifted).
+            let slot = charts.iter().position(|c| c.id == snap.chart_id);
+            let current = match (slot, snap.previous) {
+                (Some(i), Some(prev)) => Some(std::mem::replace(&mut charts[i], prev)),
+                (Some(i), None) => Some(charts.remove(i)),
+                (None, Some(prev)) => {
+                    charts.push(prev);
+                    None
+                }
+                (None, None) => None,
+            };
             push_obj_inverse(inverse_transaction, kind, &ChartObjSnapshot {
                 chart_id: snap.chart_id,
                 previous: current,
             });
-            if let Some(prev) = snap.previous {
-                charts.push(prev);
-            }
         }
         "obj_floating_range" => {
             let snap: FloatingRangeObjSnapshot = match serde_json::from_slice(data) {
@@ -5213,17 +5439,23 @@ fn apply_object_swap_restore(
                 }
                 current
             };
-            let current_ids = {
+            // Each binding goes back through the one re-bind door
+            // (scripting/script_rebind.rs): the script's SCHEDULED JOBS move
+            // back with it, and every window is told once the store's guard is
+            // released, so the live mount re-keys too (rev6B#2).
+            let (current_ids, rebound) = {
                 let mut scripts = state.object_scripts.write(effect).unwrap();
                 let mut prev = Vec::new();
+                let mut rebound = Vec::new();
                 for (script_id, restore_to) in snap.script_instance_ids {
                     if let Some(script) = scripts.iter_mut().find(|s| s.id == script_id) {
                         prev.push((script_id, script.instance_id.clone()));
-                        script.instance_id = restore_to;
+                        rebound.extend(crate::scripting::script_rebind::rebind_script(effect, script, restore_to));
                     }
                 }
-                prev
+                (prev, rebound)
             };
+            crate::scripting::script_rebind::announce_rebinds(&rebound);
             push_obj_inverse(inverse_transaction, kind, &ControlsObjSnapshot {
                 controls: current_controls,
                 script_instance_ids: current_ids,
@@ -5503,6 +5735,55 @@ fn apply_object_swap_restore(
                 previous: current,
             });
             *scripts = snap.previous;
+        }
+        OBJECT_SCRIPTS_BY_ID_RESTORE_KIND => {
+            let snap: ObjectScriptsByIdSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad {} snapshot: {}", kind, e); return; }
+            };
+            let mut scripts = state.object_scripts.write(effect).unwrap();
+            let inverse = apply_object_scripts_by_id(&mut scripts, snap);
+            // A re-bound script's SCHEDULED JOBS follow its binding (rev4B#1):
+            // `inverse.rebind` holds each re-bound script's binding as it was
+            // BEFORE this apply, the store its binding now. The scheduler lock
+            // is a leaf, so it is legal under the store's guard.
+            let rebound: Vec<(String, Option<String>, Option<String>)> = inverse
+                .rebind
+                .iter()
+                .map(|r| {
+                    let now = scripts.iter().find(|s| s.id == r.id).and_then(|s| s.instance_id.clone());
+                    (r.id.clone(), r.instance_id.clone(), now)
+                })
+                .collect();
+            for (id, was, now) in &rebound {
+                crate::scripting::scheduler::rebind_script_jobs(effect, id, was.as_deref(), now.as_deref());
+            }
+            drop(scripts);
+            // Every window is told what this undo / redo moved, as the forward
+            // step told it (`rename_named_range_impl`, `delete_named_range_core`):
+            // Ctrl+Z reaches no frontend save that could announce it (rev4B#2).
+            // `inverse.resurrect` is what this apply REMOVED, `remove_ids` what
+            // it put BACK.
+            // A re-bind is announced with the binding it has now, through the
+            // one re-bind door's announcer (scripting/script_rebind.rs, rev6B#6).
+            use crate::scripting::object_script_commands::{announce_object_script_change, SCRIPT_DELETED, SCRIPT_SAVED};
+            crate::scripting::script_rebind::announce_rebinds(
+                &rebound
+                    .iter()
+                    .map(|(id, was, now)| crate::scripting::script_rebind::ScriptRebound {
+                        id: id.clone(),
+                        from: was.clone(),
+                        to: now.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            for removed in &inverse.resurrect {
+                announce_object_script_change(&removed.script.id, SCRIPT_DELETED);
+            }
+            for id in &inverse.remove_ids {
+                announce_object_script_change(id, SCRIPT_SAVED);
+            }
+            push_obj_inverse(inverse_transaction, kind, &inverse);
         }
         "obj_writeback_regions" => {
             let snap: WritebackRegionsObjSnapshot = match serde_json::from_slice(data) {
@@ -5955,8 +6236,7 @@ pub(crate) fn record_chart_undo(
     previous: Option<crate::api_types::ChartEntry>,
     description: &str,
 ) {
-    let snap = ChartObjSnapshot { chart_id, previous };
-    record_object_undo(state, "obj_chart", serde_json::to_vec(&snap).unwrap_or_default(), description);
+    record_object_undo(state, "obj_chart", chart_obj_snapshot_bytes(chart_id, previous), description);
 }
 
 /// Record an undoable change to one extension's persisted state. `previous` is the
@@ -5979,8 +6259,25 @@ pub(crate) fn record_sparklines_undo(
     previous: Option<String>,
     description: &str,
 ) {
-    let snap = SparklinesObjSnapshot { sheet_index, previous };
-    record_object_undo(state, "obj_sparklines", serde_json::to_vec(&snap).unwrap_or_default(), description);
+    record_object_undo(state, "obj_sparklines", sparklines_obj_snapshot_bytes(sheet_index, previous), description);
+}
+
+/// The "obj_chart" restore payload of ONE chart (undo puts `previous` back;
+/// `None` = the chart did not exist), for a caller that records it into a
+/// transaction it already holds -- a structural edit shifting chart ranges
+/// (`chart_commands::range_shift`). The same snapshot `record_chart_undo` writes.
+pub(crate) fn chart_obj_snapshot_bytes(
+    chart_id: identity::EntityId,
+    previous: Option<crate::api_types::ChartEntry>,
+) -> Vec<u8> {
+    serde_json::to_vec(&ChartObjSnapshot { chart_id, previous }).unwrap_or_default()
+}
+
+/// The "obj_sparklines" restore payload of one sheet's groups (`None` = the
+/// sheet had none), for a caller that records it into a transaction it
+/// already holds. The same snapshot `record_sparklines_undo` writes.
+pub(crate) fn sparklines_obj_snapshot_bytes(sheet_index: usize, previous: Option<String>) -> Vec<u8> {
+    serde_json::to_vec(&SparklinesObjSnapshot { sheet_index, previous }).unwrap_or_default()
 }
 
 pub(crate) fn record_table_undo(
@@ -6083,6 +6380,96 @@ pub(crate) fn record_freeze_undo(
 ) {
     let snap = FreezeObjSnapshot { sheet_index, previous };
     record_object_undo(state, "obj_freeze", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+#[cfg(test)]
+mod object_scripts_by_id_tests {
+    //! The "obj_object_scripts_by_id" restore touches ONLY the scripts its step
+    //! named. The whole-list "obj_object_scripts" swap it replaces put back the
+    //! list as the step found it, reverting every script edit made afterwards
+    //! (a script save records no undo).
+    use super::*;
+
+    fn script(id: &str, instance: &str, source: &str) -> ::persistence::SavedObjectScript {
+        ::persistence::SavedObjectScript {
+            id: id.to_string(),
+            name: format!("Script {id}"),
+            object_type: ::persistence::ScriptableObjectType::NamedRange,
+            instance_id: Some(instance.to_string()),
+            source: source.to_string(),
+            access_level: ::persistence::ScriptAccessLevel::Restricted,
+            description: None,
+            provenance: ::persistence::ScriptProvenance::Local,
+            package_name: None,
+            package_version: None,
+            declared_capabilities: Vec::new(),
+        }
+    }
+
+    fn ids(scripts: &[::persistence::SavedObjectScript]) -> Vec<&str> {
+        scripts.iter().map(|s| s.id.as_str()).collect()
+    }
+
+    fn decode(bytes: &[u8]) -> ObjectScriptsByIdSnapshot {
+        serde_json::from_slice(bytes).expect("the recorded bytes decode")
+    }
+
+    /// SABOTAGE: drop the "already present" check in step 3 of
+    /// `apply_object_scripts_by_id` -- the duplicate assertion fails.
+    #[test]
+    fn a_prune_is_undone_by_putting_back_only_what_it_took_where_it_stood() {
+        let mut scripts = vec![script("a", "A", "a0"), script("b", "B", "b0"), script("c", "C", "c0"), script("d", "B", "d0")];
+        let pruned = take_object_scripts(&mut scripts, |s| s.instance_id.as_deref() == Some("B"));
+        assert_eq!(ids(&scripts), vec!["a", "c"]);
+        let record = decode(&object_scripts_pruned_bytes(pruned));
+
+        // After the step: another script is edited, a new one created.
+        scripts[1].source = "c-edited".to_string();
+        scripts.push(script("e", "E", "e0"));
+
+        let inverse = apply_object_scripts_by_id(&mut scripts, record);
+        assert_eq!(ids(&scripts), vec!["a", "b", "c", "d", "e"], "each pruned script back where it stood, the new one kept");
+        assert_eq!(scripts[2].source, "c-edited", "an unlisted script's later edit survives the undo");
+        assert_eq!(inverse.remove_ids, vec!["b".to_string(), "d".to_string()], "the mirror prunes exactly those again");
+
+        // The redo: exactly b and d go again; the edit and the new script stay.
+        let undo_again = apply_object_scripts_by_id(&mut scripts, inverse);
+        assert_eq!(ids(&scripts), vec!["a", "c", "e"]);
+        assert_eq!(scripts[1].source, "c-edited");
+        assert_eq!(
+            undo_again.resurrect.iter().map(|r| (r.index, r.script.id.as_str())).collect::<Vec<_>>(),
+            vec![(1, "b"), (3, "d")],
+            "the redo's own mirror remembers where they stood"
+        );
+
+        // A script that is ALREADY present under a resurrected id is the user's: never duplicated.
+        scripts.push(script("b", "B", "b-recreated"));
+        let _ = apply_object_scripts_by_id(&mut scripts, undo_again);
+        assert_eq!(scripts.iter().filter(|s| s.id == "b").count(), 1, "a resurrect duplicated a script that was already there");
+        assert_eq!(scripts.iter().find(|s| s.id == "b").unwrap().source, "b-recreated");
+    }
+
+    /// SABOTAGE: drop step 1 (the re-bind) of `apply_object_scripts_by_id` --
+    /// the binding assertion fails.
+    #[test]
+    fn a_rebind_is_undone_by_putting_back_the_binding_alone() {
+        let mut scripts = vec![script("r", "Tax", "r-edited-after-the-rename"), script("o", "Other", "o0")];
+        let record = decode(&object_scripts_rebound_bytes(vec![
+            ScriptRebind { id: "r".to_string(), instance_id: Some("Rate".to_string()) },
+            ScriptRebind { id: "gone".to_string(), instance_id: Some("Rate".to_string()) },
+        ]));
+        let inverse = apply_object_scripts_by_id(&mut scripts, record);
+        assert_eq!(scripts[0].instance_id.as_deref(), Some("Rate"), "the binding goes back");
+        assert_eq!(scripts[0].source, "r-edited-after-the-rename", "the source the script has NOW is kept");
+        assert_eq!(ids(&scripts), vec!["r", "o"], "a re-bind never resurrects a script deleted since");
+        assert_eq!(
+            inverse.rebind,
+            vec![ScriptRebind { id: "r".to_string(), instance_id: Some("Tax".to_string()) }],
+            "the mirror re-binds only the script that is there"
+        );
+        let _ = apply_object_scripts_by_id(&mut scripts, inverse);
+        assert_eq!(scripts[0].instance_id.as_deref(), Some("Tax"), "redo moves the binding again");
+    }
 }
 
 #[cfg(test)]
@@ -6217,6 +6604,7 @@ mod restore_registry_tests {
             ("obj_cell_behaviors", true, OBJ),
             ("obj_writeback_regions", true, OBJ),
             ("obj_object_scripts", true, OBJ),
+            ("obj_object_scripts_by_id", true, OBJ),
             ("obj_comments", true, obj_plus(Annotations)),
             ("obj_notes", true, obj_plus(Annotations)),
             ("obj_hyperlinks", true, obj_plus(Hyperlinks)),
@@ -7202,6 +7590,98 @@ mod sheet_tagged_restore_tests {
         let redo_snapshot: SheetMergeRegionsSnapshot = serde_json::from_slice(redo).unwrap();
         assert_eq!(redo_snapshot.sheet_index, 1);
         assert_eq!(redo_snapshot.regions.len(), 1, "redo re-applies the post-merge set");
+    }
+
+    /// Sheet 2 as a workbook just opened holds it -- A1 = 3, B1 = MYFN(A1)
+    /// showing 42 -- with the open path's results-cache seeding run.
+    fn opened_sheet2_with_a_custom_function(state: &AppState) {
+        {
+            let mut grids = state.grids.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk)).unwrap();
+            grids[1].set_cell(0, 0, Cell::new_number(3.0));
+            let mut b1 = Cell::new_formula("=MYFN(A1)".to_string());
+            b1.value = CellValue::Number(42.0);
+            grids[1].set_cell(0, 1, b1);
+        }
+        crate::bi::cube::remember_loaded_call_results(state);
+    }
+
+    /// A recalculation of sheet 2 WITHOUT data -- the rule every route that is
+    /// not a full Calculate Now follows: a call is answered from the results
+    /// cache for its exact arguments, or refused.
+    fn recalculate_sheet2_without_data(state: &AppState) -> Option<CellValue> {
+        crate::calculation::recalculate_sheet_values(
+            state,
+            &crate::persistence::UserFilesState::default(),
+            &crate::pivot::types::PivotState::new(),
+            1,
+            None,
+        );
+        state.grids.read().unwrap()[1].get_cell(0, 1).map(|c| c.value.clone())
+    }
+
+    /// rev5B#1: an undo that rebuilds a sheet from its snapshot (a grouped
+    /// Insert Rows, then Ctrl+Z) built it from `Grid::new()` and so threw the
+    /// sheet's results cache away -- a cache keyed by each call's arguments,
+    /// as true of the restored cells as before. Every later recalculation
+    /// without data then refused MYFN(3), and Ctrl+S saved `#NAME?`.
+    ///
+    /// SABOTAGE: `engine::Grid::new()` back in `apply_sheet_structural_restore`.
+    #[test]
+    fn a_structural_undo_keeps_the_sheets_results_cache() {
+        let state = two_sheet_state();
+        opened_sheet2_with_a_custom_function(&state);
+        let snapshot = capture_sheet_structural_snapshot(&state, 1).expect("capture");
+        apply_sheet_structural_restore(
+            &state,
+            &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()),
+            &sheet_structural_snapshot_bytes(&snapshot),
+            &mut Transaction::new("test"),
+            &mut RestoreReport::default(),
+        );
+        assert_eq!(
+            recalculate_sheet2_without_data(&state),
+            Some(CellValue::Number(42.0)),
+            "the restored sheet lost the answer its open recorded for MYFN(3)"
+        );
+    }
+
+    /// The same for the undo of a subscription reset, which rebuilds each
+    /// sheet it restores the same way.
+    ///
+    /// SABOTAGE: `engine::Grid::new()` back in `apply_calp_reset_restore`.
+    #[test]
+    fn undoing_a_subscription_reset_keeps_the_sheets_results_cache() {
+        let state = two_sheet_state();
+        opened_sheet2_with_a_custom_function(&state);
+        let cells: Vec<(u32, u32, engine::Cell)> = state.grids.read().unwrap()[1]
+            .cells
+            .iter()
+            .map(|(&(r, c), cell)| (r, c, cell.clone()))
+            .collect();
+        let snapshot = crate::calp_commands::CalpResetSnapshot {
+            sheets: vec![crate::calp_commands::CalpResetSheetSnapshot {
+                sheet_index: 1,
+                cells,
+                column_widths: HashMap::new(),
+                row_heights: HashMap::new(),
+                merges: Vec::new(),
+                spills: Default::default(),
+            }],
+            override_sheet_ids: Vec::new(),
+            overrides: Vec::new(),
+        };
+        apply_calp_reset_restore(
+            &state,
+            &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()),
+            &serde_json::to_vec(&snapshot).unwrap(),
+            &mut Transaction::new("test"),
+            &mut RestoreReport::default(),
+        );
+        assert_eq!(
+            recalculate_sheet2_without_data(&state),
+            Some(CellValue::Number(42.0)),
+            "the restored sheet lost the answer its open recorded for MYFN(3)"
+        );
     }
 }
 

@@ -486,7 +486,9 @@ fn the_sheet_scoped_pass_marks_the_cycle_members_on_the_sheets_it_does_not_evalu
     // still look right on the sheet you are looking at and leave a plausible 0
     // one tab away.
     const CALCULATION_RS: &str = include_str!("../calculation.rs");
-    let body = body_of(CALCULATION_RS, "run_calculation_pass");
+    // `run_calculation_pass_with` is the pass's body (round 7: the plain
+    // `run_calculation_pass` became a one-line delegation to it).
+    let body = body_of(CALCULATION_RS, "run_calculation_pass_with");
     assert!(
         body.contains("mark_off_sheet_circular_cells("),
         "the SHEET-scoped pass (Shift+F9) merges the active sheet's cross-sheet \
@@ -656,7 +658,9 @@ fn every_bulk_cell_rewrite_seeds_the_shared_cascade() {
     let active: &[(&str, &str)] = &[
         ("clear_cell", DATA_RS),
         ("clear_range", DATA_RS),
-        ("clear_range_with_options", DATA_RS),
+        // The `clear_range_with_options` command is a one-line delegation to
+        // this body (testability split, review A#1).
+        ("clear_range_with_options_inner", DATA_RS),
         ("sort_range", DATA_RS),
         ("remove_duplicates", DATA_RS),
         ("replace_all", SEARCH_RS),
@@ -678,7 +682,9 @@ fn every_bulk_cell_rewrite_seeds_the_shared_cascade() {
 
     // OFF-sheet rewrites: whole-sheet evaluation through the off-sheet helper.
     let off_sheet: &[(&str, &str)] = &[
-        ("clear_range_on_sheets", DATA_RS),
+        // The `clear_range_on_sheets` command delegates here (testability
+        // split, review G#1/G#9).
+        ("clear_range_on_sheets_inner", DATA_RS),
         // P3 S4: the off-sheet bodies moved into `_at` twins that also re-check
         // a cell target under the held grid guard; the public names are thin
         // wrappers now.
@@ -774,9 +780,11 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("mcp/tools.rs", "apply_seeds", "IS NOT A DOCUMENT WRITE: seeds a DETACHED CLONE for a dry run (ai/dryrun.rs). Nothing downstream observes it, so there are no dependents to recalculate."),
         ("ai/preview_eval.rs", "build_grid", "IS NOT A DOCUMENT WRITE: fills a `Grid::new()` built inside the function from the caller's cell list, for the script preview's formula evaluator. The grid is dropped when `evaluate_preview` returns; the workbook is never reached, so there is nothing to recalculate."),
         ("ai/preview_eval.rs", "evaluate_preview", "IT IS AN EVALUATION LOOP, over a detached grid: it iterates its own formulas to a fixed point (PASS_CAP) and returns values. Pure — no Tauri state, no I/O — which is the same class as data_tables/goal_seek below, minus even the document."),
+        ("scripting/udf.rs", "collect_udf_calls_impl", "IS NOT A DOCUMENT WRITE: the UDF discovery pass writes the pending edits into a SCRATCH clone of the grids, evaluates there to learn which custom-function calls the edit's cascade needs, and drops it; the real write (update_cell / update_cells_batch) recalculates. It passed this census until 2026-10-29 only because its body spelled `recalc_order_from_seeds(` for its cell set, which it now takes from `active_sheet_write_cascade` -- it never recalculated anything."),
         ("insights/report.rs", "paint", "WRITES ONLY LITERALS, ONTO A SHEET THAT DID NOT EXIST. `insights_create_report_sheet` calls `add_sheet_inner` first — with a name `ensure_sheet_name_is_free` proved was not taken — and paints into a fresh `Grid::new()`. Nothing in the workbook can already depend on cells of a sheet created a moment ago, and `ReportCell` has no formula variant, so nothing painted needs evaluating either. Whether creating a sheet at all should recalculate is `add_sheet_inner`'s question, and it is the same question for every sheet the user adds by hand."),
         // -- It IS recalculation, or an inner step of it -------------------
-        ("calculation.rs", "run_calculation_pass", "the full-recalculation pass itself (F9 = workbook, Shift+F9 = active sheet)"),
+        ("calculation.rs", "run_calculation_pass_with", "the full-recalculation pass itself (F9 = workbook, Shift+F9 = active sheet; `run_calculation_pass` delegates to it)"),
+        ("calculation.rs", "recalculate_sheet_values_with", "the whole-sheet recalculation itself: `recalculate_sheet_values` and an update's `recalculate_installed_sheet_values` are its two entry points (round 8)"),
         ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of the SHEET-scoped pass: reports a cycle the pass already detected on the sheets it does not evaluate"),
         ("commands/data.rs", "reevaluate_formula_cell", "the cascade's per-cell evaluator"),
         ("commands/data.rs", "recalc_walked_cell", "the cross-sheet walk's per-cell step"),
@@ -805,8 +813,10 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("animation_commands.rs", "apply_set_ops_and_recalc", "transient frame playback; orders through the shared recalc_order_from_seeds"),
         // -- Style only: changes nothing a formula can read -----------------
         // The cell writes of apply_formatting (and apply_formatting_to_sheets)
-        // live in their walk, write_style_delta; the border presets' and
-        // adjust_number_format_decimals' in write_range_style_plan (2026-10-04).
+        // live in their walk, write_style_delta -- or, for whole rows, whole
+        // columns and Select All (BUG-0354), in write_range_style_plan, where
+        // the border presets' and adjust_number_format_decimals' live too
+        // (2026-10-04).
         ("commands/styles.rs", "write_style_delta", "style_index only"),
         ("commands/styles.rs", "set_cell_style", "style_index only"),
         ("commands/styles.rs", "set_cell_rich_text_core", "rich-text runs only (the body of set_cell_rich_text; P3 split it out so tests drive it)"),
@@ -816,7 +826,9 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
         ("computed_properties.rs", "apply_fill_color", "style_index only"),
         ("computed_properties.rs", "apply_style_change", "style_index only"),
-        ("mcp/tools.rs", "apply_cell_formatting", "style_index only"),
+        // (`mcp/tools.rs` `apply_cell_formatting` is no longer here: the AI's
+        // format tool writes through `apply_formatting_core`, never a walk of
+        // its own.)
         // -- Helper: the CALLER recalculates --------------------------------
         ("consolidate.rs", "consolidate_data_inner", "`consolidate_data` seeds from its updated_cells"),
         ("calp_commands.rs", "write_override_value", "all three override commands run recalculate_sheet_values after"),
@@ -827,9 +839,9 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("commands/structure.rs", "shift_cross_sheet_formulas", "helper of the structural edit, which recalculates"),
         ("commands/structure.rs", "shift_cross_sheet_formulas_for_off_sheet_edit", "helper of off_sheet_structural_edit, which recalculates"),
         ("tables.rs", "write_table_formula_cell", "helper: writes ONE totals cell with its resolved AST + edges; `set_totals_row_function` and `toggle_totals_row` seed the cascade over every cell they hand it"),
-        ("calp_commands.rs", "apply_override_value_to_grid", "helper of the three override commands; calp_revert_override, calp_accept_upstream and calp_refresh_apply each run recalculate_sheet_values after"),
-        ("calp_commands.rs", "reproject_writeback_layer_onto_grids", "helper of the refresh body (apply_refresh_payloads), called BEFORE its recalculate_sheet_values pass over every refreshed sheet index; it writes only onto the refreshed sheets it is handed, so that pass covers its writes exactly"),
-        ("calp_commands.rs", "apply_refreshed_pivots", "helper of calp_refresh_apply (§2.z), which runs recalculate_sheet_values over every REFRESHED sheet index before it returns. That covers this function's writes exactly, and the coverage is stated rather than assumed: a pivot adopted from an application writes its output to that application's own destination sheet, and a withdrawn pivot's cleared region sits on the sheet it was written to — both of which are, by construction, sheets this refresh touched and therefore sheets in `refreshed_indices`. A pivot naming a destination this workbook does not have is SKIPPED before any write, so it cannot escape that set"),
+        ("calp_commands.rs", "apply_override_value_to_grid", "helper of the three override commands; calp_revert_override and calp_accept_upstream run recalculate_sheet_values after, and calp_refresh_apply runs recalculate_installed_sheet_values over every refreshed sheet (with the overrides it painted counted as changed)"),
+        ("calp_commands.rs", "reproject_writeback_layer_onto_grids", "helper of the refresh body (apply_refresh_payloads), called BEFORE its recalculate_installed_sheet_values pass over every refreshed sheet index; it writes only onto the refreshed sheets it is handed, so that pass covers its writes exactly (and counts them as changed)"),
+        ("calp_commands.rs", "apply_refreshed_pivots", "helper of calp_refresh_apply (§2.z), which runs recalculate_installed_sheet_values over every REFRESHED sheet index before it returns. That covers this function's writes exactly, and the coverage is stated rather than assumed: a pivot adopted from an application writes its output to that application's own destination sheet, and a withdrawn pivot's cleared region sits on the sheet it was written to — both of which are, by construction, sheets this refresh touched and therefore sheets in `refreshed_indices`. A pivot naming a destination this workbook does not have is SKIPPED before any write, so it cannot escape that set"),
         ("commands/structure.rs", "shift_per_sheet_cell_stores", "helper of the four structural edits; wraps shift_per_sheet_cell_map over every per-sheet store"),
         // Insert/Delete Cells (`structure_cells.rs`): `shift_cells_impl` itself
         // seeds the shared cascade; these are its helpers.
@@ -845,8 +857,10 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("commands/data.rs", "clear_hyperlinks_apply_to", "style_index only (Remove Hyperlinks resets the linked cells' own format); values and formulas untouched"),
         ("lib.rs", "repair_all_formulas", "helper: rewrites formula ASTs across every sheet for a caller-supplied repair; `delete_sheet` recalculates the workbook after it and `rename_sheet` is exempt because a rename moves no value"),
         ("commands/data.rs", "erase_released_spill_cells", "helper: erases the cells a released spill owned; every caller is inside, or immediately followed by, the shared cascade"),
+        ("commands/data.rs", "clear_rect_on_background_sheet", "helper: clears ONE rectangle of a non-active sheet under its caller's guards; both callers (`clear_range_with_options_off_sheet_at`, `clear_range_on_sheets_inner`) run `recalc_after_off_sheet_write` once those guards drop, and it is in DELEGATING_HELPERS so they are held to it"),
         ("commands/data.rs", "apply_spill_decision", "THE ONE SPILL DECISION (§3bm): the inner step every per-cell evaluator ends in — the three edit paths, the cross-sheet walk and both recalculation passes. It decides what ONE already-evaluated result does to the grid; it never chooses which cells to evaluate, so it cannot seed anything"),
         ("commands/data.rs", "release_origin_spill", "helper: the tear-down half of apply_spill_decision, called directly only where a value is written WITHOUT an EvalResult to hand it (the #CIRCULAR! stamps)"),
+        ("commands/data.rs", "release_fresh_spill_under_write", "helper: inside `update_cells_batch_core`'s write loop it releases a spill an EARLIER write of the same batch made over the cell being written, erasing only that array's other DERIVED values; the batch's own cascade re-decides the array (it is a written cell), and it is in DELEGATING_HELPERS so the batch is held to it"),
         // The restore's body since the review of M6b (`apply_changes` is its wrapper).
         ("undo_commands.rs", "apply_changes_with", "drives the cascade for every restore kind"),
         ("undo_commands.rs", "apply_calp_reset_restore", "reports its sheet; apply_changes recalculates"),
@@ -1261,11 +1275,18 @@ const DELEGATING_HELPERS: &[&str] = &[
     // writer. `erase_released_spill_cells` is the spill tear-down's write.
     "repair_all_formulas",
     "erase_released_spill_cells",
+    // The per-rectangle body of the off-sheet and grouped-sheet clears (review
+    // A#1 / G#9); each caller owns the recalculation.
+    "clear_rect_on_background_sheet",
     // §3bm. THE ONE SPILL DECISION and its tear-down half: both write cells on
     // behalf of whoever called them, so the caller still owns the
     // recalculation decision, exactly like a direct writer.
     "apply_spill_decision",
     "release_origin_spill",
+    // A batch write into a spill the same batch made: the write loop's
+    // release of that array (round 5, rev3A#1); `update_cells_batch_core`
+    // owns the recalculation.
+    "release_fresh_spill_under_write",
     // §2aj. `rename_table_column_in_formulas` is the column rename's write, the
     // way `rename_table_refs_in_formulas` is the table rename's; its two callers
     // (`rename_table_column`, `enforce_table_header`) own the decision.
@@ -1322,10 +1343,16 @@ fn receiver_is_a_grid(before: &str) -> bool {
 }
 
 fn cell_writing_functions_with_helpers(text: &str, helpers: &[&str]) -> Vec<(String, bool)> {
-    const RECALC: [&str; 6] = [
+    const RECALC: [&str; 7] = [
         "recalc_after_active_sheet_bulk_rewrite(",
         "recalc_after_off_sheet_write(",
         "recalculate_sheet_values(",
+        // Round 8 (NEW-update-refuses-composite-formulas). Not a second
+        // whole-sheet pass: it runs `recalculate_sheet_values`' own body
+        // (`recalculate_sheet_values_with`) over each sheet an application
+        // update installed, with the full pass's keep rule for a cube or
+        // custom-function call that has no data.
+        "recalculate_installed_sheet_values(",
         "cascade_cross_sheet_dependents(",
         "recalc_order_from_seeds(",
         // §2aj. `recalc_after_table_change` is not a SIXTH cascade: it seeds the

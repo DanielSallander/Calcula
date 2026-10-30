@@ -440,7 +440,12 @@ pub fn get_sheet_summary(
     Ok(summary)
 }
 
-/// Apply formatting to a range of cells.
+/// Apply formatting to a range of cells (the MCP `apply_formatting` tool and the
+/// AI chat's tool of the same name).
+///
+/// The Tauri-handle half: the AI access ceiling, then the shared body, then the
+/// out-of-band repaint. Everything that decides or writes lives in
+/// [`apply_cell_formatting_core`], so the tests drive the real body.
 pub fn apply_cell_formatting(
     handle: &AppHandle,
     params: &ApplyFormattingParams,
@@ -456,131 +461,125 @@ pub fn apply_cell_formatting(
     )?;
 
     let state = handle.state::<AppState>();
-    // A canvas sheet has no cells to format. Decided BEFORE the effect and the
-    // grid locks: the active sheet is read on its own here so the refusal can
-    // come first (the read further down is the same value, taken under the
-    // locks this command then holds).
-    {
-        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
-        crate::sheets::ensure_not_canvas_in_state(&state, active_sheet, "format cells")?;
-    }
-    // Past the AI access-ceiling gate: this writes cell styles into the grid.
     let file_state = handle.state::<crate::persistence::FileState>();
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.write(&effect).map_err(|e| e.to_string())?;
-    let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
-    let mut styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
-    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let message = apply_cell_formatting_core(&state, &file_state, params)?;
 
-    // Make the AI/MCP format UNDOABLE in one transaction, like the in-app path.
-    let owned_txn = undo_stack.begin_owned_transaction(format!(
-        "Apply formatting ({}{}:{}{}) (AI)",
-        col_letter(params.start_col),
-        params.start_row + 1,
-        col_letter(params.end_col),
-        params.end_row + 1
-    ));
-
-    let mut count = 0u32;
-    for row in params.start_row..=params.end_row {
-        for col in params.start_col..=params.end_col {
-            let previous_cell = grid.get_cell(row, col).cloned();
-            let old_style_index = grid
-                .get_cell(row, col)
-                .map(|c| c.style_index)
-                .unwrap_or(0);
-
-            let mut new_style = styles.get(old_style_index).clone();
-
-            if let Some(bold) = params.bold {
-                new_style.font.bold = bold;
-            }
-            if let Some(italic) = params.italic {
-                new_style.font.italic = italic;
-            }
-            if let Some(ref color) = params.text_color {
-                if let Some(c) = engine::Color::from_hex(color) {
-                    new_style.font.color = engine::ThemeColor::Absolute(c);
-                }
-            }
-            if let Some(ref color) = params.background_color {
-                if let Some(c) = engine::Color::from_hex(color) {
-                    new_style.fill = engine::Fill::Solid { color: engine::ThemeColor::Absolute(c) };
-                }
-            }
-            if let Some(ref fmt) = params.number_format {
-                new_style.number_format = engine::NumberFormat::Custom {
-                    format: fmt.clone(),
-                };
-            }
-            if let Some(ref align) = params.text_align {
-                new_style.text_align = match align.as_str() {
-                    "left" => engine::TextAlign::Left,
-                    "center" => engine::TextAlign::Center,
-                    "right" => engine::TextAlign::Right,
-                    _ => engine::TextAlign::General,
-                };
-            }
-
-            let new_index = styles.get_or_create(new_style);
-
-            if let Some(cell) = grid.get_cell(row, col) {
-                let mut updated = cell.clone();
-                updated.style_index = new_index;
-                grid.set_cell(row, col, updated.clone());
-                if active_sheet < grids.len() {
-                    grids[active_sheet].set_cell(row, col, updated);
-                }
-            } else {
-                let cell = engine::Cell {
-                    value: engine::CellValue::Empty,
-                    ast: None,
-                    style_index: new_index,
-                    rich_text: None,
-                };
-                grid.set_cell(row, col, cell.clone());
-                if active_sheet < grids.len() {
-                    grids[active_sheet].set_cell(row, col, cell);
-                }
-            }
-            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
-            count += 1;
-        }
-    }
-
-    undo_stack.commit_owned(owned_txn);
-
-    // Mark dirty + live-refresh the open grid (mirrors execute_script:858) so the
-    // AI/MCP format participates in save state and repaints out-of-band.
-    let _ = crate::document_effect::DocumentEffect::mutates(
-        &handle.state::<crate::persistence::FileState>(),
-    );
+    // Live-refresh the open grid (mirrors execute_script) so the AI/MCP format
+    // repaints out-of-band; the grid's refresh also re-reads the style
+    // registry when it grew, which is how a new row/column tier's style
+    // reaches the painter.
     let _ = handle.emit("grid:refresh", ());
+    Ok(message)
+}
 
+/// The body of [`apply_cell_formatting`]: THE SHARED FORMATTING CORE, never a
+/// walk of its own.
+///
+/// This tool used to be a hand-written copy of the formatting walk, and it had
+/// drifted from the one every Home-tab button uses in three ways (the class of
+/// BUG-0354):
+///
+/// - it walked rows x columns, so an AI asking for Select All (A1:XFD1048576)
+///   ran 17.2 billion iterations, a cell and an undo entry each, and the app
+///   stopped responding;
+/// - it based each cell on the cell's OWN style index, so formatting a cell in
+///   a column whose default is italic (a column TIER) dropped the italic;
+/// - it had NO sheet-protection gate, so an AI agent could format a protected
+///   sheet the user cannot.
+///
+/// Now it states WHAT it wants (a rectangle and the fields the client set) and
+/// `apply_formatting_core` decides HOW, exactly as for a ribbon click: the
+/// formatCells option and the locked-cell gate under the held guards, whole
+/// rows / whole columns / Select All as ONE row or column tier entry per line,
+/// every other cell based on its EFFECTIVE style, one undo step, and the
+/// document dirtied only when something changed (`DocumentEffect` is minted
+/// there, after every gate).
+///
+/// The tool's contract is kept: the same fields with the same meanings (the
+/// number format is now read by the ribbon's parser, so a regional preset name
+/// means what it means in the app, and any other string stays a custom
+/// format), the same reply, and the same audit row. A rectangle reaching past
+/// the sheet is clipped to the sheet's last row and column (the label says
+/// so); one that starts past it is refused.
+///
+/// ONE READ DECIDES THE SHEET (review revFU#9). The tool read the active sheet
+/// for its canvas refusal and its audit row, and the core read it again under
+/// its own guards: a tab switch in between formatted one sheet -- possibly a
+/// canvas -- and audited another. Now the core reads it once, refuses a
+/// canvas there (its formatCells gate, `check_sheet_action_in`), and answers
+/// which sheet it formatted; the audit row names that one.
+pub(crate) fn apply_cell_formatting_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    params: &ApplyFormattingParams,
+) -> Result<String, String> {
+    // The rectangle, clipped to the sheet BEFORE any list is built: an end of
+    // u32::MAX would otherwise be a 16 GB row list.
+    if params.start_row > engine::EXCEL_MAX_ROW_INDEX || params.start_col > engine::EXCEL_MAX_COL_INDEX {
+        return Err(format!(
+            "The range starts outside the sheet (row {}, column {}); the last cell is {}{}.",
+            params.start_row + 1,
+            params.start_col + 1,
+            col_letter(engine::EXCEL_MAX_COL_INDEX),
+            engine::EXCEL_MAX_ROW_INDEX + 1
+        ));
+    }
+    let end_row = params.end_row.min(engine::EXCEL_MAX_ROW_INDEX);
+    let end_col = params.end_col.min(engine::EXCEL_MAX_COL_INDEX);
     let range_label = format!(
         "{}{}:{}{}",
         col_letter(params.start_col),
         params.start_row + 1,
-        col_letter(params.end_col),
-        params.end_row + 1
+        col_letter(end_col),
+        end_row + 1
     );
+    // u64: Select All is 17.2 billion cells, past u32.
+    let count: u64 = if params.start_row > end_row || params.start_col > end_col {
+        0
+    } else {
+        (u64::from(end_row - params.start_row) + 1) * (u64::from(end_col - params.start_col) + 1)
+    };
+
+    let formatted_sheet = if count == 0 {
+        // An empty (reversed) rectangle formats nothing and dirties nothing --
+        // but a canvas sheet, which has no cells to format, is still refused.
+        let sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        crate::sheets::ensure_not_canvas_in_state(state, sheet, "format cells")?;
+        sheet
+    } else {
+        let formatting = crate::api_types::FormattingParams {
+            rows: (params.start_row..=end_row).collect(),
+            cols: (params.start_col..=end_col).collect(),
+            bold: params.bold,
+            italic: params.italic,
+            text_color: params.text_color.clone(),
+            background_color: params.background_color.clone(),
+            number_format: params.number_format.clone(),
+            text_align: params.text_align.clone(),
+            ..Default::default()
+        };
+        // The active sheet only (no group): the tool has always formatted the
+        // sheet the user is looking at -- read, canvas-refused, gated and
+        // written under ONE set of guards, and named in the answer.
+        crate::commands::styles::apply_formatting_core_on_active(state, file_state, &formatting)?.1
+    };
+
     crate::scripting::commands::record_mcp_tool_action(
-        &state,
+        state,
         "apply_formatting",
         &format!(
             "An AI tool applied formatting to {} cell(s) ({}) on sheet {}",
             count,
             range_label,
-            active_sheet + 1
+            formatted_sheet + 1
         ),
         vec![
-            ("sheet", serde_json::json!(active_sheet)),
+            ("sheet", serde_json::json!(formatted_sheet)),
             ("cellsModified", serde_json::json!(count)),
             ("firstRow", serde_json::json!(params.start_row)),
-            ("lastRow", serde_json::json!(params.end_row)),
+            ("lastRow", serde_json::json!(end_row)),
             ("firstCol", serde_json::json!(params.start_col)),
-            ("lastCol", serde_json::json!(params.end_col)),
+            ("lastCol", serde_json::json!(end_col)),
         ],
     );
 
@@ -2609,3 +2608,9 @@ mod tests {
         assert!(format_canvas_interactions(&CanvasInteractions::default()).is_none(), "the default makes no line");
     }
 }
+
+// `apply_formatting` through the shared formatting core: protection, the
+// row/column tiers, and the tool's reply and audit row.
+#[cfg(test)]
+#[path = "apply_formatting_tests.rs"]
+mod apply_formatting_tests;

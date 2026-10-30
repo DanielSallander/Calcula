@@ -124,16 +124,64 @@ fn an_unqualified_ref_on_a_canvas_shape_reads_the_first_visible_worksheet_and_wa
 fn a_chart_data_sheet_is_read_from_the_spec_data_source() {
     let w = world();
     let by_name = r#"{"chartId":"c","sheetIndex":2,"spec":{"data":"inputs!A1:B5","layers":[{"data":"Sheet1!A1:A2"}]}}"#;
-    assert_eq!(chart_data_sheet(by_name, &w.sheet_names, &w.sheet_ids), Some(INPUTS), "case-insensitive, spec.data only");
+    let n = &w.named_ranges;
+    assert_eq!(chart_data_sheet(by_name, &w.sheet_names, &w.sheet_ids, n), Some(INPUTS), "case-insensitive, spec.data only");
     let by_id = format!(
         r#"{{"spec":{{"data":{{"sheetId":"{}","sheetIndex":0,"startRow":0,"startCol":0,"endRow":4,"endCol":1}}}}}}"#,
         w.sheet_ids[INPUTS]
     );
-    assert_eq!(chart_data_sheet(&by_id, &w.sheet_names, &w.sheet_ids), Some(INPUTS), "the sheetId wins over the index");
+    assert_eq!(chart_data_sheet(&by_id, &w.sheet_names, &w.sheet_ids, n), Some(INPUTS), "the sheetId wins over the index");
     let design_query = r#"{"spec":{"data":{"type":"designQuery","connectionId":"x"}}}"#;
-    assert_eq!(chart_data_sheet(design_query, &w.sheet_names, &w.sheet_ids), None);
+    assert_eq!(chart_data_sheet(design_query, &w.sheet_names, &w.sheet_ids, n), None);
     let unqualified = r#"{"spec":{"data":"A1:B5"}}"#;
-    assert_eq!(chart_data_sheet(unqualified, &w.sheet_names, &w.sheet_ids), None);
+    assert_eq!(chart_data_sheet(unqualified, &w.sheet_names, &w.sheet_ids, n), None);
+}
+
+/// A canvas chart whose data is a DEFINED NAME reads an unqualified bound
+/// title / property reference on the NAME's sheet -- the sheet
+/// `resolveDataSource` reads the name from and `locateParamCell` puts the
+/// chart's own param cells on -- never on the first visible worksheet with a
+/// "canvas page has no cells" warning.
+///
+/// SABOTAGE: make `chart_data_sheet` stop at the sheet-naming sources (return
+/// `None` instead of resolving the name) -- the first assertion fails with
+/// None, and the title reads `=Sheet1!B1` with the canvas warning.
+#[test]
+fn a_canvas_chart_over_a_defined_name_reads_on_the_names_sheet() {
+    let mut w = world();
+    add_name(&mut w, "SalesData", "=Inputs!$A$1:$C$5");
+    // An unqualified definition on a name scoped to Inputs: its scope sheet.
+    w.named_ranges.insert(
+        "LOCALDATA".to_string(),
+        NamedRange {
+            name: "LocalData".to_string(),
+            sheet_index: Some(INPUTS),
+            refers_to: "=$A$1:$B$4".to_string(),
+            comment: None,
+            folder: None,
+        },
+    );
+    // Workbook-scoped and unqualified: read on whatever sheet is ACTIVE.
+    add_name(&mut w, "Floating", "=$A$1:$B$4");
+    // A constant, not a range.
+    add_name(&mut w, "Rate", "=0.25");
+    let data_sheet = |data: &str| {
+        let spec = format!(r#"{{"chartId":"c","sheetIndex":2,"spec":{{"data":"{data}"}}}}"#);
+        chart_data_sheet(&spec, &w.sheet_names, &w.sheet_ids, &w.named_ranges)
+    };
+
+    assert_eq!(data_sheet("SalesData"), Some(INPUTS), "a name's data sheet is its definition's qualifier");
+    assert_eq!(data_sheet(" salesdata "), Some(INPUTS), "trimmed, case-insensitive, as resolveDataSource looks it up");
+    assert_eq!(data_sheet("LocalData"), Some(INPUTS), "an unqualified definition reads the name's scope sheet");
+    assert_eq!(data_sheet("Floating"), None, "a workbook-scoped unqualified name has no data sheet");
+    assert_eq!(data_sheet("Rate"), None, "a constant is no range");
+    assert_eq!(data_sheet("Missing"), None, "an unknown name is no source");
+
+    // The bound title `=B1` of that chart, through the context every binding
+    // route builds: the name's sheet, and no fallback warning.
+    let n = norm(&w, REPORT, data_sheet("SalesData"), "=B1").unwrap();
+    assert_eq!(n.text, "=Inputs!B1", "the bound title reads the sheet the chart's data is on");
+    assert_eq!(n.analysis.warning, None, "the name's sheet is no fallback");
 }
 
 #[test]

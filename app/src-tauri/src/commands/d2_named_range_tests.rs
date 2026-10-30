@@ -517,15 +517,29 @@ fn the_saved_formula_text_carries_the_name() {
 /// The four CRUD commands take `State<..>` and cannot run in-process, so the
 /// behavioural tests above drive `recalc_after_name_change` directly. This is
 /// the other half: the commands must actually call it. Same two-part split as
-/// `sort_range` / `clear_range`.
+/// `sort_range` / `clear_range`. Three of them delegate their whole body to a
+/// plain-reference `_core` (so the MCP tool runs the same rename and edit, and
+/// so a refusal is testable), and the core is where the call is.
 #[test]
 fn every_name_mutation_command_recalculates() {
     const NAMED_RANGES_RS: &str = include_str!("../named_ranges.rs");
+    for (command, delegate) in [
+        ("update_named_range", "update_named_range_core"),
+        ("delete_named_range", "delete_named_range_core"),
+        ("rename_named_range", "rename_named_range_core"),
+    ] {
+        assert!(
+            body_of(NAMED_RANGES_RS, command).contains(&format!("{}(", delegate)),
+            "`{}` no longer delegates to `{}` -- re-derive which body this pin reads",
+            command,
+            delegate
+        );
+    }
     for name in [
         "create_named_range",
-        "update_named_range",
-        "delete_named_range",
-        "rename_named_range",
+        "update_named_range_core",
+        "delete_named_range_core",
+        "rename_named_range_core",
     ] {
         let body = body_of(NAMED_RANGES_RS, name);
         assert!(

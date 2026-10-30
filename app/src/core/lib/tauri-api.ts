@@ -14,11 +14,13 @@ import type {
   DefaultDimensions,
   FormattingOptions,
   FormattingResult,
+  IndexRun,
   FunctionInfo,
   UpdateCellResult,
   SpillRangeInfo,
   UsedRangeResult,
   ClearApplyTo,
+  ClearArea,
   SplitConfig,
   MergedRegion,
   MergeResult,
@@ -29,7 +31,11 @@ import type {
   DeleteCellsShift,
   CellTargetRef,
 } from "../types";
-import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
+import { getGroupForActiveSheet } from "../state/sheetGrouping";
+// The sheet ON SCREEN, which `groupArgs` checks against the group (review G#4).
+// Precedent for this core/lib -> state snapshot read: clearGestures.ts,
+// pointModeSheetSwitch.ts, pointModeView.ts.
+import { getGridStateSnapshot } from "../state/GridContext";
 // The Rust commands that accept a cell target (P3): a target on any other
 // command is refused HERE, before invoke (see placementArgs).
 import { TARGET_COMMANDS } from "../../api/cellTargetCommands";
@@ -37,6 +43,7 @@ import { AppEvents, emitAppEvent } from "./events";
 // STRUCTURAL_UNDO lives only in the @api event table (Core's own table has no
 // entry for it); the cell-shift wrappers below announce through it.
 import { AppEvents as ApiAppEvents } from "../../api/events";
+import type { StructuralEditElsewhereEdit, StructuralEditElsewherePayload } from "../../api/events";
 
 /**
  * Announce a row/column insert or delete.
@@ -56,6 +63,12 @@ function emitStructuralEvent(
   event: string,
   detail: { startRow?: number; startCol?: number; count: number },
 ): void {
+  // An off-sheet edit still waiting in the open burst is delivered FIRST, so a
+  // store that replays both kinds of shift (the embedded forms, Controls' id-
+  // keyed state) sees every edit in the order it was made -- a script that
+  // inserts on Log, activates Log and inserts again within the burst window
+  // would otherwise have its second insert applied before its first.
+  flushPendingStructuralEditsElsewhere();
   emitAppEvent(event, detail);
 }
 
@@ -110,7 +123,9 @@ export function setUdfResolveHook(hook: UdfResolveHook | null): void {
 }
 
 /** Run the installed hook for `edits`. Best-effort by contract: a hook failure
- *  must never block the write (the UDF cells just keep their last value). */
+ *  must never block the write (each custom-function call is then answered
+ *  from the backend's results cache for exactly its arguments, and shows
+ *  #NAME? when no answer is recorded for them). */
 async function resolveUdfsFor(
   edits: UdfPendingEdit[],
 ): Promise<UdfResolveResult | undefined> {
@@ -171,6 +186,100 @@ function shouldPrefetchCube(input: string): boolean {
     return true;
   }
   return sessionHasCube;
+}
+
+/** Whether a written value IS a CUBE formula (not text that mentions one). */
+function isCubeFormulaInput(value: string): boolean {
+  return /^\s*=/.test(value) && inputReferencesCube(value);
+}
+
+/**
+ * The BATCH and BACKGROUND write doors (`updateCellsBatch`, `updateCellOnSheets`)
+ * and CUBE formulas (BUG-0476). True when some written value is a CUBE formula,
+ * and then -- only then -- the session latch is set, exactly as the grid
+ * editor's `updateCell` sets it: a later Calculate Now prefetches the cube data
+ * again. Without it a script's, an extension's or a paste's `=CUBEVALUE(...)`
+ * showed #N/A, and a later plain Calculate Now did not refresh it either
+ * (`workbookHasCubeFormulas()` was still false); only `recalcWithCube()` did.
+ */
+function noteCubeFormulaWrites(values: Iterable<string>): boolean {
+  for (const value of values) {
+    if (isCubeFormulaInput(value)) {
+      sessionHasCube = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a batch on the ACTIVE sheet should prefetch cube data: when it writes
+ * a CUBE formula (which latches the session), and -- like `shouldPrefetchCube`
+ * for the grid editor -- whenever the session has latched, because ANY batch
+ * may then feed a cube cell. A paste, a fill or a script's `setValue` into a
+ * cube ARGUMENT cell (`B2 = CUBEVALUE(..., A2)`, a new member name into A2)
+ * re-evaluates B2 in the batch's cascade; without cube data it kept the
+ * previous member's number beside the new name. A workbook with no CUBE
+ * formula never latches, so its batches stay ONE IPC call.
+ */
+function shouldPrefetchCubeForBatch(values: Iterable<string>): boolean {
+  return noteCubeFormulaWrites(values) || sessionHasCube;
+}
+
+/** The volatile custom-function cells a UDF pass found, for the cube prefetch. */
+function udfVolatileArg(resolved: UdfResolveResult | undefined): Record<string, unknown> {
+  return resolved && resolved.volatileCells.length > 0
+    ? { udfVolatileCells: resolved.volatileCells }
+    : {};
+}
+
+/**
+ * The TARGETED cube prefetch for a batch of writes (BUG-0476): the async
+ * `cube_prefetch` command, in its `edits` shape, resolves exactly the cube
+ * cells the write command evaluates -- each written CUBE formula as the batch
+ * evaluates it at its turn, and on the active sheet under automatic
+ * calculation every cell of its cascade, computed by the backend with the
+ * write's OWN cascade function -- the multi-edit twin of the single edit's
+ * prefetch in `updateCell`. `sheetIndex` names the sheet the writes land on
+ * (omitted: the active sheet), whose own cells a cube argument reads. Each
+ * write travels with its `styleIndex` and `invariant` flag, so a value is
+ * parsed exactly as the batch stores it; `udf` carries the volatile
+ * custom-function cells the same batch's cascade re-evaluates.
+ *
+ * No recalculation of anything: the write command serves the result to the
+ * cells it evaluates, so manual calculation keeps what the user left stale
+ * and nothing announces a recalculation that did not happen. Best-effort,
+ * like every cube prefetch: a failure returns `undefined` and the write goes
+ * ahead without cube data (each cube call is answered from the backend's
+ * results cache for exactly its arguments, and shows #N/A when none is
+ * recorded for them; a cube formula written by it shows #N/A until a cube
+ * refresh unless its exact call was answered before).
+ */
+async function prefetchCubeForWrites(
+  edits: ReadonlyArray<Pick<CellUpdateInput, "row" | "col" | "value" | "invariant" | "styleIndex" | "pasted">>,
+  sheetIndex?: number,
+  udf?: UdfResolveResult,
+): Promise<unknown | undefined> {
+  try {
+    const args: Record<string, unknown> = {
+      edits: edits.map((u) => ({
+        row: u.row,
+        col: u.col,
+        value: u.value,
+        invariant: u.invariant,
+        styleIndex: u.styleIndex,
+        // A pasted CUBE formula in an @ cell is a formula, so the pre-fetch
+        // must parse it as the batch stores it.
+        pasted: u.pasted,
+      })),
+      ...udfVolatileArg(udf),
+    };
+    if (sheetIndex !== undefined) args.sheetIndex = sheetIndex;
+    return await invoke("cube_prefetch", args);
+  } catch (e) {
+    console.warn("[cube] prefetch for a batch write failed; proceeding without cube data", e);
+    return undefined;
+  }
 }
 
 // ============================================================================
@@ -244,6 +353,15 @@ export type RecordedGridEvent =
       rows: number[];
       cols: number[];
       formatting: FormattingOptions;
+      /**
+       * EVERY sheet the one command formatted, when it was not just the
+       * active sheet: a grouped gesture's group (`groupArgs`, the active sheet
+       * included) or the sheets `applyFormattingToSheets` named (a script's
+       * off-sheet format; the active sheet NOT included). Absent = the active
+       * sheet only, as before. A replay formats exactly these sheets: the
+       * recorded group used to replay on the active sheet alone.
+       */
+      sheetIndices?: number[];
     }
   | {
       kind: "borderPreset";
@@ -255,6 +373,8 @@ export type RecordedGridEvent =
       style: string;
       color: string;
       width: number;
+      /** The grouped sheets the preset reached (`groupArgs`), as `formatting`'s. */
+      sheetIndices?: number[];
     }
   | {
       kind: "clearRange";
@@ -263,6 +383,16 @@ export type RecordedGridEvent =
       endRow: number;
       endCol: number;
       applyTo: ClearApplyTo;
+      /**
+       * The sheet the clear WROTE when it was not the active one:
+       * `clearRangeOnSheets` records one event per other grouped sheet per
+       * area (a grouped Delete / Clear Contents / Clear Formats / Clear All),
+       * `clearRangeWithOptions` the `sheetIndex` its caller named (a script's
+       * off-sheet clear). Absent = the active sheet, the implicit target of
+       * every other bridge event (the recorder stamps that one on the action).
+       * A replay clears THIS sheet, never the active one.
+       */
+      sheetIndex?: number;
     }
   | {
       kind: "fillRange";
@@ -285,8 +415,20 @@ export type RecordedGridEvent =
       startCol: number;
       endRow: number;
       endCol: number;
+      /**
+       * The sheet the caller NAMED (`mergeCells`' `sheetIndex`: a script's
+       * off-sheet merge). Absent = the active sheet. A replay merges THIS
+       * sheet, never the active one (as `clearRange`'s).
+       */
+      sheetIndex?: number;
     }
-  | { kind: "unmergeCells"; row: number; col: number }
+  | {
+      kind: "unmergeCells";
+      row: number;
+      col: number;
+      /** The sheet the caller named (`unmergeCells`' `sheetIndex`), as `mergeCells`'. */
+      sheetIndex?: number;
+    }
   | { kind: "rowHeight"; row: number; height: number }
   | { kind: "columnWidth"; col: number; width: number }
   | { kind: "freezePanes"; freezeRow: number | null; freezeCol: number | null }
@@ -496,11 +638,13 @@ export async function updateCell(
   const udf = await resolveUdfsFor([{ row, col, value: input }]);
   // Pre-resolve any CUBE formulas the edit affects so the synchronous backend
   // recalc can serve their BI-model results. Best-effort: failure must not block
-  // the edit (the cube cells just show #N/A until data is available).
+  // the edit (the cube cells just show #N/A until data is available). The
+  // volatile custom-function cells the UDF pass found ride along: the edit's
+  // cascade re-evaluates them too, so the prefetch must cover them.
   let cubeResults: unknown | undefined;
   if (shouldPrefetchCube(input)) {
     try {
-      cubeResults = await invoke("cube_prefetch", { row, col, value: input });
+      cubeResults = await invoke("cube_prefetch", { row, col, value: input, ...udfVolatileArg(udf) });
     } catch (e) {
       console.warn("[cube] prefetch failed; proceeding without cube data", e);
     }
@@ -523,10 +667,29 @@ export interface CellUpdateInput {
   row: number;
   col: number;
   value: string;
-  /** Optional style index. When provided, overrides the cell's style. */
+  /**
+   * Optional style index: the LOOK the cell must show (a paste or fill sends
+   * the source cell's displayed index). When provided it becomes the cell's own
+   * style -- `0` (Normal) under a row/column format is written as an explicit
+   * Normal, so the line's format does not show through -- and with an empty
+   * `value` the position keeps that look as an empty cell. Omitted, the cell
+   * keeps its own style (a typed value under a line format inherits it).
+   */
   styleIndex?: number;
   /** When true, the value is already in invariant (US) format — skip delocalization. */
   invariant?: boolean;
+  /**
+   * When true, this write is a PASTE -- a copied formula, or a copied cell's
+   * STORED value written back (Paste, Cut + Paste, a drag move or copy, Paste
+   * Special, a script's pasteRange) -- and not an entry someone typed. The
+   * backend's typed-entry ladder then skips its Text rung, so a formula stays a
+   * formula and a number, TRUE / FALSE or an error stays one in a
+   * Text-formatted (`@`) cell, which keeps its format (Excel keeps a pasted
+   * value's kind there; typing `=A1` into an `@` cell stores the text).
+   * Text is pasted behind the apostrophe escape and stays text either way.
+   * Omitted: a typed entry, as before. Mirrors Rust `CellUpdateInput.pasted`.
+   */
+  pasted?: boolean;
 }
 
 /**
@@ -539,6 +702,14 @@ export interface CellUpdateInput {
  * formula evaluated to #NAME? (nothing pre-fetched, and nothing stored to
  * preserve). The hook itself fast-paths to `undefined` when the workbook has no
  * custom functions, so an ordinary paste costs no extra IPC.
+ *
+ * CUBE formulas (BUG-0476): a batch that writes one sets the session's cube
+ * latch, as `updateCell` does; and once the session has latched, EVERY batch
+ * first asks `cube_prefetch` for exactly the cube data the batch evaluates
+ * (`prefetchCubeForWrites`) -- a paste into a cube argument cell re-evaluates
+ * the cube cell that reads it -- which the batch command serves to the cells it
+ * evaluates. No recalculation of anything else, so manual calculation is
+ * respected. A workbook with no CUBE formula never latches: ONE IPC call.
  *
  * @param updates - Array of cell updates with row, col, and value
  * @returns Array of all updated cells (including dependents)
@@ -563,8 +734,15 @@ export async function updateCellsBatch(
   const udf = await resolveUdfsFor(
     updates.map((u) => ({ row: u.row, col: u.col, value: u.value, invariant: u.invariant })),
   );
+  // A CUBE formula among the writes latches the session (BUG-0476); once
+  // latched, any batch may feed a cube cell, so it fetches the cube data its
+  // evaluation needs. A workbook with no cube stays ONE IPC call.
   const args: Record<string, unknown> = { updates };
   applyUdfArgs(args, udf);
+  if (shouldPrefetchCubeForBatch(updates.map((u) => u.value))) {
+    const cubeResults = await prefetchCubeForWrites(updates, undefined, udf);
+    if (cubeResults) args.cubeResults = cubeResults;
+  }
   const result = await invoke<CellData[]>("update_cells_batch", args);
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] updateCellsBatch(${updates.length}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`);
@@ -615,6 +793,12 @@ export async function clearRange(
  * `sheetIndex` (Wave 3): clear on a NON-ACTIVE sheet. State updates backend-
  * side only — the result's `updatedCells` is empty and the active canvas needs
  * no repaint (the target sheet re-materializes from its grid on switch).
+ *
+ * The macro recorder hears the sheet the caller named (`sheetIndex` on the
+ * `clearRange` event), so a script's off-sheet clear replays on THAT sheet.
+ * It used to record no sheet, and every such clear replayed on the sheet that
+ * was active. (A grouped clear's other sheets are recorded by
+ * `clearRangeOnSheets`, the door the gesture writes them through.)
  */
 export async function clearRangeWithOptions(
   startRow: number,
@@ -638,7 +822,17 @@ export async function clearRangeWithOptions(
       ...placed,
     },
   });
-  if (!placed.target) recordGridEvent({ kind: "clearRange", startRow, startCol, endRow, endCol, applyTo });
+  if (!placed.target) {
+    recordGridEvent({
+      kind: "clearRange",
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      applyTo,
+      ...(typeof sheetIndex === "number" ? { sheetIndex } : {}),
+    });
+  }
   return result;
 }
 
@@ -1111,7 +1305,10 @@ export async function getAllStyles(): Promise<StyleData[]> {
 }
 
 /**
- * Point a cell at an existing style index.
+ * Point a cell at an existing style index -- the LOOK it must show (callers
+ * pass a source cell's displayed index): `0` (Normal) under a row/column
+ * format is written as an explicit Normal, so the line's format does not show
+ * through.
  *
  * REJECTS when the cell is locked on a protected sheet. This command takes an
  * arbitrary style index, so it is the sharpest way to change a cell's
@@ -1193,9 +1390,21 @@ export function announceStyleEntries(result: FormattingResult): void {
  * active sheet was already formatted (and the refusal went to the console), and
  * a successful group took one Ctrl+Z per sheet plus one. The backend now gates
  * every sheet of the group before writing any and records ONE undo step.
+ *
+ * ONLY THE GROUP THE SHEET ON SCREEN BELONGS TO (review G#4). This sent the
+ * selected group whatever sheet was on screen, and the backend formats the
+ * active sheet PLUS every listed sheet -- so after a Name Box / Go To / link /
+ * command-line switch to a sheet outside the group (which Excel ungroups on),
+ * a Bold there also bolded the old group's sheets, off screen [LIVE, Excel 16:
+ * the same gesture bolds the sheet on screen only]. The group is now
+ * `getGroupForActiveSheet` (core/state/sheetGrouping.ts), the one membership
+ * rule the typed entry and the clear gestures apply too. Serves every
+ * formatting wrapper that takes `placementArgs`: applyFormatting,
+ * applyBorderPreset, adjustNumberFormatDecimals.
  */
 function groupArgs(): { sheetIndices?: number[] } {
-  return isSheetGroupingActive() ? { sheetIndices: getSelectedSheetIndices() } : {};
+  const group = getGroupForActiveSheet(getGridStateSnapshot()?.sheetContext.activeSheetIndex);
+  return group.length > 1 ? { sheetIndices: group } : {};
 }
 
 /**
@@ -1241,23 +1450,71 @@ export function cellTargetArg(
 }
 
 /**
+ * Where a formatting wrapper lands, as its caller names it: an object's cells
+ * (`target`), or the ACTIVE SHEET ALONE (`activeSheetOnly`) -- never the user's
+ * sheet group. Without either, the gesture reaches the group the sheet on
+ * screen belongs to (`groupArgs`), as a ribbon click does.
+ *
+ * `activeSheetOnly` is the SCRIPT's placement (review
+ * NEW-script-format-follows-ui-group): a script's `api.setRangeFormat` is
+ * Excel's `ActiveSheet.Range(...)`, which formats that sheet only, whatever
+ * sheets the user happens to have grouped [LIVE, Excel 16: Sheet1+Sheet3
+ * grouped, `ActiveSheet.Range("D4").Font.Bold = True` bolds Sheet1 only, while
+ * `Selection.Font.Italic` -- the user's selection -- reaches both]. Through the
+ * ambient group, a macro or a button that formatted one cell formatted every
+ * grouped sheet too, off screen.
+ */
+export interface FormatPlacementOptions extends CellTargetOptions {
+  activeSheetOnly?: boolean;
+}
+
+/**
  * Where a formatting command lands: `{ target }` for an object's cells (a
  * target ALWAYS drops the ambient sheet group -- an object's cells are not
- * grouped), else the group (`groupArgs`). Fails closed like `cellTargetArg`.
+ * grouped), nothing beyond the active sheet when the caller asked for it
+ * alone, else the group (`groupArgs`). Fails closed like `cellTargetArg`.
  */
 export function placementArgs(
   command: string,
-  opts?: CellTargetOptions,
+  opts?: FormatPlacementOptions,
 ): { target?: CellTargetRef; sheetIndices?: number[] } {
   const placed = cellTargetArg(command, opts);
-  return placed.target ? placed : groupArgs();
+  if (placed.target) return placed;
+  return opts?.activeSheetOnly === true ? {} : groupArgs();
+}
+
+/**
+ * The shortest ascending run `encodeIndexList` sends as an `IndexRun`. Below
+ * it a plain list costs nothing worth saving, and ordinary selections keep the
+ * plain shape every caller and test double already reads.
+ */
+export const INDEX_RUN_MIN_LENGTH = 64;
+
+/**
+ * A `rows` / `cols` list as `apply_formatting` takes it (BUG-0354): an
+ * ascending contiguous run of at least `INDEX_RUN_MIN_LENGTH` indices crosses
+ * the bridge as `{ first, last }`; anything else as the list itself.
+ *
+ * WHY. Select All builds all 1,048,576 row indices, and a whole column's Left
+ * Border (the Borders split's edge presets) the same million: about 7 MB of
+ * JSON per call, parsed on the Rust side into a million values, for what is
+ * two numbers. The backend expands the run back into its list
+ * (`deserialize_index_list`, api_types.rs), so nothing else changes. A list
+ * that is not ascending (the active cell first) or has a gap stays a list.
+ */
+export function encodeIndexList(list: number[]): number[] | IndexRun {
+  if (list.length < INDEX_RUN_MIN_LENGTH) return list;
+  for (let i = 1; i < list.length; i++) {
+    if (list[i] !== list[i - 1] + 1) return list;
+  }
+  return { first: list[0], last: list[list.length - 1] };
 }
 
 export async function applyFormatting(
   rows: number[],
   cols: number[],
   formatting: FormattingOptions,
-  opts?: CellTargetOptions,
+  opts?: FormatPlacementOptions,
 ): Promise<FormattingResult> {
   const placement = placementArgs("apply_formatting", opts);
   console.log(
@@ -1266,8 +1523,8 @@ export async function applyFormatting(
   );
   const result = await invoke<FormattingResult>("apply_formatting", {
     params: {
-      rows,
-      cols,
+      rows: encodeIndexList(rows),
+      cols: encodeIndexList(cols),
       bold: formatting.bold,
       italic: formatting.italic,
       underline: formatting.underline,
@@ -1310,9 +1567,22 @@ export async function applyFormatting(
   );
   announceStyleEntries(result);
   // An object's cells are not a gesture on the sheet: never recorded (P3).
-  if (!placement.target) recordGridEvent({ kind: "formatting", rows, cols, formatting });
-  // Grouped sheets were formatted by the SAME command (`groupArgs`).
+  // Grouped sheets were formatted by the SAME command (`groupArgs`), so the
+  // event names them: recorded without, a grouped Bold replayed on the active
+  // sheet alone.
+  if (!placement.target) {
+    recordGridEvent({ kind: "formatting", rows, cols, formatting, ...recordedSheets(placement.sheetIndices) });
+  }
   return result;
+}
+
+/**
+ * The `sheetIndices` a recorded formatting event carries: the sheets one
+ * command reached beyond "the active sheet" (a copy -- the grouping state is
+ * live), or nothing when it reached only the active sheet.
+ */
+function recordedSheets(sheetIndices: readonly number[] | undefined): { sheetIndices?: number[] } {
+  return sheetIndices !== undefined && sheetIndices.length > 0 ? { sheetIndices: [...sheetIndices] } : {};
 }
 
 export async function getStyleCount(): Promise<number> {
@@ -1348,7 +1618,7 @@ export async function applyBorderPreset(
   style: string,
   color: string,
   width: number,
-  opts?: CellTargetOptions,
+  opts?: FormatPlacementOptions,
 ): Promise<FormattingResult> {
   const placement = placementArgs("apply_border_preset", opts);
   const result = await invoke<FormattingResult>("apply_border_preset", {
@@ -1373,6 +1643,7 @@ export async function applyBorderPreset(
       style,
       color,
       width,
+      ...recordedSheets(placement.sheetIndices),
     });
   }
   announceStyleEntries(result);
@@ -1410,6 +1681,46 @@ export async function applyBorderPresetToSheets(
 }
 
 /**
+ * A `rows` / `cols` list whose FIRST entry is the active cell's line (the
+ * order `adjustNumberFormatDecimals` takes), as the bridge sends it.
+ *
+ *   - What `encodeIndexList` shortens (a long ascending run -- already led by
+ *     the active line) or leaves alone (a short list) goes as it says, with no
+ *     `lead`: the backend reads the active line from the list's first entry.
+ *   - `[lead, ...every other line of one contiguous run, ascending]` -- the
+ *     Home tab's `activeCellFirst` over a rectangle -- goes as that run, with
+ *     the active line as `lead` (the run alone has lost which line came first).
+ *   - Anything else (a gap, a repeat, an unordered tail) stays the list.
+ *
+ * O(length), no sort: Select All's million rows are walked once.
+ */
+export function encodeActiveFirstIndexList(list: number[]): { wire: number[] | IndexRun; lead?: number } {
+  const plain = encodeIndexList(list);
+  if (plain !== list || list.length < INDEX_RUN_MIN_LENGTH) return { wire: plain };
+  const lead = list[0];
+  const first = list[1];
+  let last = first;
+  // Whether the walk stepped over the lead's own place inside the run.
+  let skippedLead = false;
+  for (let i = 2; i < list.length; i++) {
+    const next = list[i];
+    if (next === last + 1) {
+      last = next;
+    } else if (!skippedLead && lead === last + 1 && next === last + 2) {
+      skippedLead = true;
+      last = next;
+    } else {
+      return { wire: list };
+    }
+  }
+  if (skippedLead) return { wire: { first, last }, lead };
+  // The lead sits just past the end (Ctrl+A: the active cell on the last line).
+  // Just BEFORE the start would make the list ascending, handled above.
+  if (lead === last + 1) return { wire: { first, last: lead }, lead };
+  return { wire: list };
+}
+
+/**
  * Excel's Home > Number > Increase Decimal (`delta` = 1) / Decrease Decimal
  * (`delta` = -1), decided by the backend on the TYPED number format.
  *
@@ -1431,30 +1742,56 @@ export async function applyBorderPresetToSheets(
  * (review finding, 2026-10-04: Select All used to walk 17.2 billion cells), so
  * `result.cells` may be empty while `result.styles` carries the new format:
  * refresh the grid rather than patching from `result.cells` alone.
+ *
+ * THE WIRE (BUG-0354 follow-up). The backend was bounded, but this still sent
+ * Select All's 1,048,576 row indices (and 16,384 columns) as JSON arrays, and
+ * `encodeIndexList` alone could not shorten them: the active cell comes FIRST,
+ * so the list is not ascending (Ctrl+A puts the active cell on the LAST row:
+ * `[1048575, 0, 1, ...]`). `encodeActiveFirstIndexList` sends such a list as
+ * the run it covers plus the active line on its own (`activeRow` /
+ * `activeCol`); the command reads the active cell from those when they are
+ * present, else from `rows[0]` / `cols[0]` as before. Short lists, ascending
+ * runs (already led by the active line) and scattered lists keep their shape.
  */
 export async function adjustNumberFormatDecimals(
   rows: number[],
   cols: number[],
   delta: 1 | -1,
-  opts?: CellTargetOptions,
+  opts?: FormatPlacementOptions,
 ): Promise<FormattingResult> {
   const placement = placementArgs("adjust_number_format_decimals", opts);
+  const rowWire = encodeActiveFirstIndexList(rows);
+  const colWire = encodeActiveFirstIndexList(cols);
   const result = await invoke<FormattingResult>("adjust_number_format_decimals", {
-    rows,
-    cols,
+    rows: rowWire.wire,
+    cols: colWire.wire,
     delta,
+    ...(rowWire.lead !== undefined ? { activeRow: rowWire.lead } : {}),
+    ...(colWire.lead !== undefined ? { activeCol: colWire.lead } : {}),
     ...placement,
   });
   announceStyleEntries(result);
 
-  // Every returned style carries the SAME number format (the active cell's,
-  // adjusted) -- the written cells' and the tiers' alike; its display name is a
-  // value applyFormatting parses back to the identical typed format (pinned in
-  // Rust by every_display_name_the_serializer_emits_round_trips), so it is what
-  // a recorded macro replays. Empty styles: Excel changed nothing.
+  // The FIRST returned style carries the new number format (the active cell's,
+  // adjusted): the backend lists every style carrying it -- the written cells'
+  // and the tiers' alike -- ahead of the rest. The rest are an almost-whole
+  // range's EXCEPTIONS (A2:A1048576 leaves A1 out), which keep their OLD style
+  // and were once sorted first by registry index, so a recorded step replayed
+  // `numberFormat: "General"` (round-3 review rev3A#6; pinned in Rust by
+  // the_decimal_step_names_the_new_format_first_on_an_almost_whole_column).
+  // Its display name is a value applyFormatting parses back to the identical
+  // typed format (every_display_name_the_serializer_emits_round_trips), so it
+  // is what a recorded macro replays. Empty styles: Excel changed nothing.
   const numberFormat = result.styles[0]?.style.numberFormat;
   if (numberFormat !== undefined && !placement.target) {
-    recordGridEvent({ kind: "formatting", rows, cols, formatting: { numberFormat } });
+    // With the group it reached, as applyFormatting records it.
+    recordGridEvent({
+      kind: "formatting",
+      rows,
+      cols,
+      formatting: { numberFormat },
+      ...recordedSheets(placement.sheetIndices),
+    });
   }
   return result;
 }
@@ -1469,6 +1806,23 @@ export async function adjustNumberFormatDecimals(
  * single-cell write. Dependent formulas (written sheets + active sheet) are
  * recalculated by the backend unless `recalc` is false — the bulk script path
  * passes false per cell and calls recalculateSheetsAfterScriptWrite ONCE.
+ *
+ * A CUBE formula written here (BUG-0476) sets the session's cube latch, so a
+ * later Calculate Now prefetches cube data, and is SERVED on write: one
+ * targeted `cube_prefetch` per target sheet, built from THAT sheet's cells
+ * (a cube argument naming a cell reads the sheet the formula lands on), goes
+ * to the command as `cubeResults`, aligned with `sheetIndices`. Sequential,
+ * so two sheets never race to connect the same model. Any other value is
+ * still ONE IPC call, latched session or not -- unlike `updateCellsBatch`,
+ * deliberately: the command serves cube data only to the cell it writes, and
+ * the whole-sheet recalculation that follows (`recalc_after_off_sheet_write`)
+ * takes none, so a prefetch for a plain value would have nothing to serve. A
+ * cube cell on that sheet reading the written cell is not refreshed until
+ * the next Calculate Now (whose full refresh covers every sheet): each of its
+ * calls is answered
+ * from the results cache for exactly its arguments, and shows #N/A when the
+ * write changed them to ones never answered
+ * (docs/design/cube-formulas-and-custom-functions.md sections 2.4 and 2.5).
  */
 export async function updateCellOnSheets(
   sheetIndices: number[],
@@ -1478,7 +1832,19 @@ export async function updateCellOnSheets(
   invariant?: boolean,
   recalc?: boolean
 ): Promise<number[]> {
-  return invoke<number[]>("update_cell_on_sheets", { sheetIndices, row, col, value, invariant, recalc });
+  const args: Record<string, unknown> = { sheetIndices, row, col, value, invariant, recalc };
+  if (noteCubeFormulaWrites([value])) {
+    const perSheet: unknown[] = [];
+    for (const sheetIndex of sheetIndices) {
+      const prefetch = await prefetchCubeForWrites([{ row, col, value, invariant }], sheetIndex);
+      if (!prefetch) break;
+      perSheet.push(prefetch);
+    }
+    // All or nothing: a list the command cannot align with the sheets would
+    // serve nothing anyway (Rust ignores a misaligned list).
+    if (perSheet.length === sheetIndices.length && perSheet.length > 0) args.cubeResults = perSheet;
+  }
+  return invoke<number[]>("update_cell_on_sheets", args);
 }
 
 /**
@@ -1493,8 +1859,12 @@ export async function recalculateSheetsAfterScriptWrite(
 }
 
 /**
- * Replicate formatting to multiple non-active sheets.
- * Used when sheet grouping is active.
+ * Replicate formatting to multiple non-active sheets. The script host's
+ * off-sheet `setRangeFormat` runs through it.
+ *
+ * Recorded, once it LANDED, as ONE `formatting` event naming exactly these
+ * sheets, so a replay formats them and not the active one; unrecorded, a
+ * script's off-sheet format run while recording vanished from the macro.
  */
 export async function applyFormattingToSheets(
   sheetIndices: number[],
@@ -1502,11 +1872,12 @@ export async function applyFormattingToSheets(
   cols: number[],
   formatting: FormattingOptions
 ): Promise<void> {
-  return invoke<void>("apply_formatting_to_sheets", {
+  await invoke<void>("apply_formatting_to_sheets", {
     sheetIndices,
     params: {
-      rows,
-      cols,
+      // The same wire shape as applyFormatting (BUG-0354).
+      rows: encodeIndexList(rows),
+      cols: encodeIndexList(cols),
       bold: formatting.bold,
       italic: formatting.italic,
       underline: formatting.underline,
@@ -1539,26 +1910,56 @@ export async function applyFormattingToSheets(
       formulaHidden: formatting.formulaHidden,
     },
   });
+  if (sheetIndices.length > 0) {
+    recordGridEvent({ kind: "formatting", rows, cols, formatting, sheetIndices: [...sheetIndices] });
+  }
 }
 
 /**
- * Clear a range of cells on multiple non-active sheets.
- * Used when sheet grouping is active.
+ * The sheet group's clear (Delete / Clear Contents / Clear Formats / Clear All
+ * with sheet tabs grouped): the rectangle, plus `options.moreAreas` (the other
+ * Ctrl+click blocks), on every listed sheet but the active one, as
+ * `options.applyTo` says (default "contents").
+ *
+ * ALL OR NOTHING. The backend gates EVERY listed sheet -- the active one
+ * included -- for every area before it writes anything, and refuses the whole
+ * call if one of them refuses (Excel: one protected grouped sheet and nothing
+ * is cleared anywhere). So the gesture lists the active sheet too and calls
+ * this FIRST, then clears the active sheet through its own command. One call
+ * for every area, one undo step, one recalculation.
+ *
+ * Returns the sheets it wrote (every listed sheet but the active one). The
+ * macro recorder hears ONE `clearRange` per written sheet per area, with that
+ * sheet, so a recorded grouped clear replays on every grouped sheet (it used to
+ * record nothing for them).
  */
 export async function clearRangeOnSheets(
   sheetIndices: number[],
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
-): Promise<void> {
-  return invoke<void>("clear_range_on_sheets", {
+  endCol: number,
+  options?: { applyTo?: "contents" | "formats" | "all"; moreAreas?: ClearArea[] },
+): Promise<number[]> {
+  const applyTo = options?.applyTo ?? "contents";
+  const moreAreas = options?.moreAreas ?? [];
+  const written = await invoke<number[] | null>("clear_range_on_sheets", {
     sheetIndices,
     startRow,
     startCol,
     endRow,
     endCol,
+    applyTo,
+    moreAreas,
   });
+  const sheets = Array.isArray(written) ? written : [];
+  const areas: ClearArea[] = [{ startRow, startCol, endRow, endCol }, ...moreAreas];
+  for (const sheetIndex of sheets) {
+    for (const area of areas) {
+      recordGridEvent({ kind: "clearRange", ...area, applyTo, sheetIndex });
+    }
+  }
+  return sheets;
 }
 
 // ============================================================================
@@ -1622,7 +2023,7 @@ function announceRecalcCompleted(
 }
 
 async function recalcAll(forceCube: boolean): Promise<CellData[]> {
-  // Pre-resolve cube formulas across the sheet so a full recalc refreshes them
+  // Pre-resolve cube formulas on every sheet so a full recalc refreshes them
   // against current model data (e.g. after a calculated measure changes, or F9).
   // Gated on the workbook having cube formulas (avoids the IPC otherwise) unless
   // forced. Best-effort: a failure must not block the recalc.
@@ -1631,7 +2032,7 @@ async function recalcAll(forceCube: boolean): Promise<CellData[]> {
     try {
       cubeResults = await invoke("cube_prefetch_all", {});
     } catch (e) {
-      console.warn("[cube] full prefetch failed; cube cells keep last values", e);
+      console.warn("[cube] full prefetch failed; cube calls are answered from the results cache", e);
     }
   }
   const startedAt = performance.now();
@@ -2206,7 +2607,8 @@ export async function previousSheet(): Promise<SheetsResult> {
  * off-sheet chain (state only) and the frontend must NOT emit its
  * active-canvas structural events — those shift frontend stores that
  * describe the VISIBLE sheet (pinned controls, selections, ...), which the
- * edit never touched. Returns true when the off-sheet path applies.
+ * edit never touched. It announces `announceStructuralEditElsewhere`
+ * instead. Returns true when the off-sheet path applies.
  */
 async function isOffSheetTarget(sheetIndex: number | undefined): Promise<boolean> {
   if (sheetIndex === undefined || sheetIndex === null) return false;
@@ -2215,12 +2617,145 @@ async function isOffSheetTarget(sheetIndex: number | undefined): Promise<boolean
 }
 
 /**
+ * A row/column edit landed OFF the active sheet's canvas: on a NON-ACTIVE
+ * sheet (`sheetIndex`: a script's, the CLI's) or on a floating grid's BACKING
+ * sheet (the cell-target route). The backend moved the chart and sparkline
+ * data ranges there as well, inside the edit's own undo step (BUG-0357,
+ * chart_range_shift.rs) -- and a chart PLACED on the active sheet may chart
+ * the sheet that moved. The Charts and Sparklines stores cache those ranges and
+ * write a record back whole, so while these routes announced nothing the
+ * stores kept the old range until a reload, and the next persist of such a
+ * chart (a drag, a title edit) wrote the OLD range back over the moved one.
+ *
+ * The ROWS_INSERTED family cannot say it: those events carry ACTIVE-sheet
+ * coordinates and their listeners shift active-sheet stores by them.
+ *
+ * WHAT IS ANNOUNCED, AND ONLY THAT (review FU#5). This used to announce what
+ * the UNDO of the same edit announces -- STRUCTURAL_UNDO and the `objects`
+ * domain -- and both reach far more than this edit changed: every
+ * STRUCTURAL_UNDO listener re-reads the VISIBLE sheet's store and several close
+ * open UI (an AutoFilter dropdown, a validation list or input prompt; Controls
+ * drops and reloads the sheet's controls; the chart store's reload deselects
+ * the selected chart), and the `objects` fan-out (charts:refresh) clears every
+ * chart's point selections, widget values and insight cues. So an edit on a
+ * sheet the user is not even looking at disturbed the sheet they are, more than
+ * an edit on that sheet itself does. Now, per burst:
+ *   - STRUCTURAL_EDIT_ELSEWHERE: every store that caches what the backend
+ *     keeps for OTHER sheets re-reads it -- the chart and sparkline ranges and
+ *     the author's designated writeback regions, through
+ *     `extensions/_shared/lib/structuralEditReload.ts`, and @api/cellBehaviors'
+ *     workbook-wide binding index (whose only off-sheet trigger was the
+ *     `objects` domain, rev4A#1); the chart store reconciles a pending save
+ *     with the moved range as after an on-sheet edit, and keeps the chart that
+ *     is selected;
+ *   - TABLE_DEFINITIONS_UPDATED: tables are workbook-wide, and the edited sheet's
+ *     moved;
+ *   - "grid:refresh": the sheet on screen re-reads its cells (a formula there
+ *     that points at the edited sheet was rewritten and recalculated), and so do
+ *     floating grids (the cell-target route edits one's backing sheet) and the
+ *     object bindings that read cells;
+ *   - after a DELETE, the BUG-0054 cascade (`announceStructuralDeleteCascade`):
+ *     a pivot the delete covered died with its slicers.
+ *
+ * ONE ANNOUNCEMENT PER BURST. Each call announced at once, so a script loop of
+ * N off-sheet inserts set off N rounds of re-reads, all fire-and-forget, piling
+ * up behind the loop. The first call of a burst announces AT ONCE (a single
+ * edit is never left unannounced); calls inside the following
+ * `STRUCTURAL_EDIT_ELSEWHERE_WINDOW_MS` fold into ONE trailing announcement at
+ * its end, and the window stays open while they keep coming. So every edit is
+ * announced within one window, and at most one announcement is made per window
+ * -- plus one more each time an on-screen insert or delete has to deliver the
+ * window's edits ahead of its own event (see below).
+ * The chart store's save cannot write an old range back meanwhile: the backend
+ * refuses a save made against a record it has since rewritten
+ * (CHART_RECORD_CHANGED) and the store merges.
+ *
+ * THE EDITS RIDE ALONG, NONE FOLDED (`StructuralEditElsewherePayload.edits`).
+ * A re-read cannot help a store whose coordinates the BACKEND never holds -- an
+ * embedded form's anchor, Controls' side state filed under an id derived from
+ * the anchor cell the backend just moved -- so each announcement lists every
+ * edit it covers, in order, and such a store replays them on the sheet named,
+ * as it replays the ROWS_ family's coordinates on the sheet on screen. The
+ * descriptions are folded (they name what happened); the edits never are. And
+ * an on-screen insert or delete flushes the trailing edits FIRST
+ * (`emitStructuralEvent`), so the two kinds of shift are heard in the order
+ * they were made.
+ *
+ * Called only after the invoke resolved: a refused edit throws first and
+ * announces nothing.
+ */
+function announceStructuralEditElsewhere(
+  description: string,
+  edit: StructuralEditElsewhereEdit,
+  options?: { deletes?: boolean },
+): void {
+  const deletes = options?.deletes === true;
+  if (elsewhereBurst === null) {
+    elsewhereBurst = { trailing: null };
+    flushStructuralEditElsewhere({ descriptions: [description], edits: [edit] }, deletes);
+    setTimeout(closeStructuralEditElsewhereWindow, STRUCTURAL_EDIT_ELSEWHERE_WINDOW_MS);
+    return;
+  }
+  const trailing =
+    elsewhereBurst.trailing ?? (elsewhereBurst.trailing = { descriptions: [], edits: [], deletes: false });
+  if (!trailing.descriptions.includes(description)) trailing.descriptions.push(description);
+  trailing.edits.push(edit);
+  trailing.deletes = trailing.deletes || deletes;
+}
+
+/** How long one off-canvas structural announcement covers the calls after it (see above). */
+const STRUCTURAL_EDIT_ELSEWHERE_WINDOW_MS = 50;
+
+/** What arrived inside an open window and is announced at its end. */
+interface TrailingStructuralEdits {
+  descriptions: string[];
+  edits: StructuralEditElsewhereEdit[];
+  deletes: boolean;
+}
+
+/** The open burst: null between bursts; `trailing` = what arrived inside the window. */
+let elsewhereBurst: { trailing: TrailingStructuralEdits | null } | null = null;
+
+function closeStructuralEditElsewhereWindow(): void {
+  const trailing = elsewhereBurst?.trailing ?? null;
+  if (trailing === null) {
+    elsewhereBurst = null;
+    return;
+  }
+  elsewhereBurst = { trailing: null };
+  flushStructuralEditElsewhere({ descriptions: trailing.descriptions, edits: trailing.edits }, trailing.deletes);
+  setTimeout(closeStructuralEditElsewhereWindow, STRUCTURAL_EDIT_ELSEWHERE_WINDOW_MS);
+}
+
+/**
+ * Announce NOW what the open window holds, if anything -- before an on-screen
+ * structural event (`emitStructuralEvent`), so no edit is heard after one made
+ * later. The window stays open: its timer still runs and ends the burst (or
+ * announces what arrives after this) as before.
+ */
+function flushPendingStructuralEditsElsewhere(): void {
+  const trailing = elsewhereBurst?.trailing ?? null;
+  if (elsewhereBurst === null || trailing === null) return;
+  elsewhereBurst.trailing = null;
+  flushStructuralEditElsewhere({ descriptions: trailing.descriptions, edits: trailing.edits }, trailing.deletes);
+}
+
+function flushStructuralEditElsewhere(payload: StructuralEditElsewherePayload, deletes: boolean): void {
+  emitAppEvent(ApiAppEvents.STRUCTURAL_EDIT_ELSEWHERE, payload);
+  emitAppEvent(ApiAppEvents.TABLE_DEFINITIONS_UPDATED);
+  emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+  if (deletes) announceStructuralDeleteCascade();
+}
+
+/**
  * Insert rows at the specified position, shifting existing rows down.
  * @param row - The row index where new rows will be inserted
  * @param count - Number of rows to insert
  * @param sheetIndex - Target sheet (0-based); omit for the active sheet.
  *   A non-active target updates backend state only (empty result, no
- *   canvas events) — the sheet re-materializes from its grid on switch.
+ *   canvas events) — the sheet re-materializes from its grid on switch — and
+ *   announces it off the canvas (`announceStructuralEditElsewhere`), with the
+ *   edit's sheet and lines.
  */
 export async function insertRows(
   row: number,
@@ -2234,11 +2769,16 @@ export async function insertRows(
     // An OBJECT's lines (P3, table semantics): the backend shifts the object's
     // backing sheet and grows or shrinks its window as ONE undo step. No
     // active-sheet structural event (the active sheet did not change) and no
-    // recording.
-    return invoke<CellData[]>("insert_rows", { row, count, ...placed });
+    // recording -- only the off-canvas announcement (no sheet index names a
+    // backing sheet, so its edit says null).
+    const result = await invoke<CellData[]>("insert_rows", { row, count, ...placed });
+    announceStructuralEditElsewhere("Insert Rows", { sheetIndex: null, kind: "rowInsert", at: row, count });
+    return result;
   }
   if (await isOffSheetTarget(sheetIndex)) {
-    return invoke<CellData[]>("insert_rows", { row, count, sheetIndex });
+    const result = await invoke<CellData[]>("insert_rows", { row, count, sheetIndex });
+    announceStructuralEditElsewhere("Insert Rows", { sheetIndex: sheetIndex as number, kind: "rowInsert", at: row, count });
+    return result;
   }
   const result = await invoke<CellData[]>("insert_rows", { row, count });
   console.log(`[tauri-api] insertRows returned ${result.length} updated cells`);
@@ -2265,11 +2805,16 @@ export async function insertColumns(
     // An OBJECT's lines (P3, table semantics): the backend shifts the object's
     // backing sheet and grows or shrinks its window as ONE undo step. No
     // active-sheet structural event (the active sheet did not change) and no
-    // recording.
-    return invoke<CellData[]>("insert_columns", { col, count, ...placed });
+    // recording -- only the off-canvas announcement (no sheet index names a
+    // backing sheet, so its edit says null).
+    const result = await invoke<CellData[]>("insert_columns", { col, count, ...placed });
+    announceStructuralEditElsewhere("Insert Columns", { sheetIndex: null, kind: "colInsert", at: col, count });
+    return result;
   }
   if (await isOffSheetTarget(sheetIndex)) {
-    return invoke<CellData[]>("insert_columns", { col, count, sheetIndex });
+    const result = await invoke<CellData[]>("insert_columns", { col, count, sheetIndex });
+    announceStructuralEditElsewhere("Insert Columns", { sheetIndex: sheetIndex as number, kind: "colInsert", at: col, count });
+    return result;
   }
   const result = await invoke<CellData[]>("insert_columns", { col, count });
   console.log(`[tauri-api] insertColumns returned ${result.length} updated cells`);
@@ -2296,12 +2841,20 @@ export async function deleteRows(
     // An OBJECT's lines (P3, table semantics): the backend shifts the object's
     // backing sheet and grows or shrinks its window as ONE undo step. No
     // active-sheet structural event (the active sheet did not change) and no
-    // recording.
-    return invoke<CellData[]>("delete_rows", { row, count, ...placed });
+    // recording -- only the off-canvas announcement (no sheet index names a
+    // backing sheet, so its edit says null).
+    const result = await invoke<CellData[]>("delete_rows", { row, count, ...placed });
+    announceStructuralEditElsewhere("Delete Rows", { sheetIndex: null, kind: "rowDelete", at: row, count });
+    return result;
   }
   if (await isOffSheetTarget(sheetIndex)) {
     const result = await invoke<CellData[]>("delete_rows", { row, count, sheetIndex });
-    announceStructuralDeleteCascade();
+    // The BUG-0054 cascade rides the same burst (one per burst, not per call).
+    announceStructuralEditElsewhere(
+      "Delete Rows",
+      { sheetIndex: sheetIndex as number, kind: "rowDelete", at: row, count },
+      { deletes: true },
+    );
     return result;
   }
   const result = await invoke<CellData[]>("delete_rows", { row, count });
@@ -2348,12 +2901,20 @@ export async function deleteColumns(
     // An OBJECT's lines (P3, table semantics): the backend shifts the object's
     // backing sheet and grows or shrinks its window as ONE undo step. No
     // active-sheet structural event (the active sheet did not change) and no
-    // recording.
-    return invoke<CellData[]>("delete_columns", { col, count, ...placed });
+    // recording -- only the off-canvas announcement (no sheet index names a
+    // backing sheet, so its edit says null).
+    const result = await invoke<CellData[]>("delete_columns", { col, count, ...placed });
+    announceStructuralEditElsewhere("Delete Columns", { sheetIndex: null, kind: "colDelete", at: col, count });
+    return result;
   }
   if (await isOffSheetTarget(sheetIndex)) {
     const result = await invoke<CellData[]>("delete_columns", { col, count, sheetIndex });
-    announceStructuralDeleteCascade();
+    // The BUG-0054 cascade rides the same burst (one per burst, not per call).
+    announceStructuralEditElsewhere(
+      "Delete Columns",
+      { sheetIndex: sheetIndex as number, kind: "colDelete", at: col, count },
+      { deletes: true },
+    );
     return result;
   }
   const result = await invoke<CellData[]>("delete_columns", { col, count });
@@ -2687,6 +3248,58 @@ export async function cancelUndoTransaction(ticket?: UndoTransactionTicket | nul
 }
 
 /**
+ * A point in the open undo transaction (Rust `UndoSavepoint`), handed out by
+ * {@link beginUndoSavepoint} and presented back, verbatim, to
+ * {@link rollBackToUndoSavepoint}.
+ */
+export interface UndoSavepoint {
+  /** The ticket of the transaction the point is in. */
+  transaction: number;
+  /** How many changes that transaction held at the point. */
+  changes: number;
+}
+
+/** What {@link beginUndoSavepoint} answers (Rust `UndoSavepointBegin`). */
+export interface UndoSavepointBegin {
+  /** The ticket when THIS call opened the transaction; null when it joined one. */
+  ticket: UndoTransactionTicket | null;
+  /** The point, or null when none can be named (nothing could be taken back to it). */
+  savepoint: UndoSavepoint | null;
+  /** Why there is no point, when the backend knows (another granted run holds the step). */
+  refused?: string | null;
+}
+
+/** What {@link rollBackToUndoSavepoint} answers (Rust `UndoRollback`). */
+export interface UndoRollback extends UndoResult {
+  /** Every cell the rollback took back, by its true sheet index. */
+  takenBackCells?: { sheet: number; row: number; col: number }[];
+}
+
+/**
+ * Mark a SAVEPOINT in the open undo transaction -- opening it first when none
+ * is open, or JOINING the one a caller holds (undo_commands.rs, "Undo
+ * SAVEPOINTS"). Everything recorded after the point can then be taken back
+ * EXACTLY with {@link rollBackToUndoSavepoint}, leaving the changes before it
+ * (a caller's, in a joined step) untouched. A gesture that already holds its
+ * own step (`beginUndoTransaction`) joins it here and gets the point inside it.
+ * No point (`savepoint: null`) when the open step is a granted run's
+ * (`refused` says so) or carries no ticket this door can name.
+ */
+export async function beginUndoSavepoint(description: string): Promise<UndoSavepointBegin> {
+  return invoke<UndoSavepointBegin>("begin_undo_savepoint", { description });
+}
+
+/**
+ * Take back exactly the changes recorded after `savepoint` -- through the
+ * restore Ctrl+Z uses, leaving no undo and no redo step -- or move nothing and
+ * say why in `refusal` (`success: false`). The open transaction is left open,
+ * holding what it held at the point: its opener still closes it.
+ */
+export async function rollBackToUndoSavepoint(savepoint: UndoSavepoint): Promise<UndoRollback> {
+  return invoke<UndoRollback>("roll_back_to_undo_savepoint", { savepoint });
+}
+
+/**
  * Get the current undo/redo state.
  */
 export async function getUndoState(): Promise<UndoState> {
@@ -3014,11 +3627,16 @@ export type { MergedRegion, MergeResult, MergeOptions, MovedCell } from "../type
  *  replays it with explicit coordinates: absorbed or rebuilt merges are taken
  *  apart first (an unmerge at each master), then every created region is
  *  merged. A Merge Across over N rows therefore records N merges, and the
- *  recorder's codegen needs no new event kind. */
-function recordMergeResult(result: MergeResult | null | undefined): void {
+ *  recorder's codegen needs no new event kind.
+ *
+ *  `sheetIndex`: the sheet the caller NAMED (a script's off-sheet merge),
+ *  carried on every event so the replay merges THAT sheet; recorded without
+ *  it, the regions replayed on the active sheet. */
+function recordMergeResult(result: MergeResult | null | undefined, sheetIndex?: number): void {
   if (!result || !result.success) return;
+  const onSheet = typeof sheetIndex === "number" ? { sheetIndex } : {};
   for (const r of result.removedRegions ?? []) {
-    recordGridEvent({ kind: "unmergeCells", row: r.startRow, col: r.startCol });
+    recordGridEvent({ kind: "unmergeCells", row: r.startRow, col: r.startCol, ...onSheet });
   }
   for (const r of result.createdRegions ?? []) {
     recordGridEvent({
@@ -3027,6 +3645,7 @@ function recordMergeResult(result: MergeResult | null | undefined): void {
       startCol: r.startCol,
       endRow: r.endRow,
       endCol: r.endCol,
+      ...onSheet,
     });
   }
 }
@@ -3062,7 +3681,7 @@ export async function mergeCells(
     options: options ?? null,
     ...placed,
   });
-  if (!options?.probe && !placed.target) recordMergeResult(result);
+  if (!options?.probe && !placed.target) recordMergeResult(result, sheetIndex);
   return result;
 }
 
@@ -3092,8 +3711,10 @@ export async function unmergeCells(
     ...placed,
   });
   if (result?.success && !placed.target) {
+    // With the sheet the caller named, as mergeCells records it.
+    const onSheet = typeof sheetIndex === "number" ? { sheetIndex } : {};
     for (const r of result.removedRegions ?? []) {
-      recordGridEvent({ kind: "unmergeCells", row: r.startRow, col: r.startCol });
+      recordGridEvent({ kind: "unmergeCells", row: r.startRow, col: r.startCol, ...onSheet });
     }
   }
   return result;
@@ -3233,9 +3854,15 @@ export async function fillRange(
 }
 
 /**
- * Relocate formula references in the current sheet that point into a source range,
- * making them point to a destination range instead.  Called after a drag-move so
- * that formulas referencing the moved cells are updated to the new location.
+ * Re-point every reference INTO a moved block -- on every sheet and in defined
+ * names -- to where the block landed on the ACTIVE sheet, the way Excel's move
+ * (drag, Cut + Paste) does; a reference to a cell the move overwrote becomes
+ * `#REF!`. Called after the move's writes (the moved formulas are written
+ * UNSHIFTED) and the source clear.
+ *
+ * `srcSheetIndex`: the sheet the block was cut FROM, when that is not the
+ * active sheet (a Cut on Sheet1 pasted on Sheet2). Omitted, the block moved on
+ * the active sheet itself.
  */
 export async function relocateCellReferences(
   srcStartRow: number,
@@ -3244,6 +3871,7 @@ export async function relocateCellReferences(
   srcEndCol: number,
   destStartRow: number,
   destStartCol: number,
+  srcSheetIndex?: number,
 ): Promise<CellData[]> {
   const result = await invoke<CellData[]>("relocate_cell_references", {
     srcStartRow,
@@ -3252,6 +3880,7 @@ export async function relocateCellReferences(
     srcEndCol,
     destStartRow,
     destStartCol,
+    ...(typeof srcSheetIndex === "number" ? { srcSheetIndex } : {}),
   });
   return result;
 }

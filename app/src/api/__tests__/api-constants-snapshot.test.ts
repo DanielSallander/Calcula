@@ -70,7 +70,7 @@ describe('AppEvents', () => {
     // door, and a script, an MCP tool or a .calp refresh can move it without
     // the Canvas ribbon tab. Payload-free like SHEET_DISPLAY_FLAGS_CHANGED; the
     // canvas sheet extension re-reads get_sheets on it.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`76`);
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`77`);
   });
 
   it('all values use the app: prefix', () => {

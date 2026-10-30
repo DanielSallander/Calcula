@@ -7,9 +7,11 @@ import { emitAppEvent, AppEvents } from './events';
 import { checkLifecycleGuards } from './lifecycleGuards';
 import { setCoreCellEditFlag } from './cellEditFlag';
 import { DISCARD_EDIT_EVENT } from './editOpenBuffer';
+import { clearSheetGrouping } from '../state/sheetGrouping';
 
 /**
- * A replaced document's open CORE cell edit is discarded, at once (E9).
+ * A replaced document's open CORE cell edit is discarded, at once (E9), and its
+ * sheet group ended (rev5C#2, below).
  *
  * The edit belongs to the document that is gone: committing it would write the
  * old document's text into the new one, and leaving it open left Core's edit
@@ -26,6 +28,14 @@ function discardEditOfReplacedDocument(): void {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(DISCARD_EDIT_EVENT));
   }
+  // The SHEET GROUP belonged to the replaced document too (review rev5C#2,
+  // BUG-0350). It is Core module state keyed by sheet INDEX, and nothing else
+  // ends it here: File > New / Open and a checkout fire no sheet switch. The new
+  // document opens on index 0 -- usually a member of the old group -- so the
+  // stale group stayed live: typing into the new Sheet1 also wrote the new
+  // Sheet2 off screen, and a Bold reached it too. Ended with the edit, BEFORE
+  // AFTER_NEW / AFTER_OPEN, whose listeners act on the new document. Idempotent.
+  clearSheetGrouping();
 }
 
 const CALCULA_FILTER = {
@@ -386,9 +396,10 @@ export async function openFileAtPath(path: string): Promise<CellData[] | null> {
  * THIS; none of them writes its own sequence.
  */
 export function announceBackendStateReplaced(): void {
-  // An open Core cell edit belonged to the replaced document (E9). newFile and
-  // openFileAtPath already discarded it before their AFTER_* event; this line
-  // covers every other replacement (calp_checkout). Idempotent.
+  // An open Core cell edit and the sheet group belonged to the replaced
+  // document (E9, rev5C#2). newFile and openFileAtPath already ended both
+  // before their AFTER_* event; this line covers every other replacement
+  // (calp_checkout). Idempotent.
   discardEditOfReplacedDocument();
   emitAppEvent(AppEvents.OUTLINE_CHANGED, { command: 'document_replaced' });
   emitAppEvent(AppEvents.HYPERLINKS_CHANGED, { sheetIndex: null });
@@ -421,7 +432,9 @@ export function announceBackendStateReplaced(): void {
   // as covered and the PREVIOUS document's cells stayed painted. A dedicated
   // event rather than `grid:refresh`, because a fetch already in flight was
   // issued against the previous document and must be discarded, not committed:
-  // GridCanvas answers it the way it answers a sheet switch.
+  // GridCanvas answers it the way it answers a sheet switch. A pending CUT ends
+  // on it too: the cells it would move were the replaced document's
+  // (core/hooks/useClipboard.ts, CUT MODE).
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('grid:documentReplaced'));
   }

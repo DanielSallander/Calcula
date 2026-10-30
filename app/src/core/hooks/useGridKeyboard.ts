@@ -53,12 +53,13 @@ interface UseGridKeyboardOptions {
   /** Whether clipboard has content (for ESC handling) */
   hasClipboardContent?: boolean;
   /**
-   * Callback for delete/clear contents operation. `target`: WHICH cells
-   * (P3) -- Core's selection (`kind: "grid"`) or a selection owner's own
-   * cells (`kind: "object"`, a floating grid's) -- resolved here for
-   * "clear".
+   * Callback for the bare Delete / Backspace. `target`: WHICH cells (P3) --
+   * Core's selection (`kind: "grid"`) or a selection owner's own cells
+   * (`kind: "object"`, a floating grid's) -- resolved here for "clear".
+   * `key` names which of the two it was: Excel's Backspace is not a Clear
+   * Contents (it clears the ACTIVE cell only and enters Edit mode, review G#7).
    */
-  onDelete?: (target?: CellTarget) => Promise<void>;
+  onDelete?: (target?: CellTarget, key?: "Delete" | "Backspace") => Promise<void>;
   /** Callback for selecting an entire column (Ctrl+Space) */
   onSelectColumn?: (col: number) => void;
   /** Callback for selecting an entire row (Shift+Space) */
@@ -447,10 +448,10 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
   const onDelete = useMemo(
     () =>
       rawOnDelete &&
-      (async (): Promise<void> => {
+      (async (key?: "Delete" | "Backspace"): Promise<void> => {
         const target = resolveCellTarget("Clear Contents", "clear");
         if (target === null) return;
-        await rawOnDelete(target);
+        await (key === undefined ? rawOnDelete(target) : rawOnDelete(target, key));
       }),
     [rawOnDelete]
   );
@@ -1099,7 +1100,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         event.preventDefault();
         event.stopPropagation();
         eventLog.keyboard('Grid', 'handleKeyDown', key, []);
-        onDelete();
+        onDelete(key === "Backspace" ? "Backspace" : "Delete");
         fnLog.exit('handleKeyDown', 'delete contents');
         return;
       }

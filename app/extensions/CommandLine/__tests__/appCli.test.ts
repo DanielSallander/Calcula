@@ -382,6 +382,65 @@ describe("sheet operations", () => {
   it("set sheet with no options errors at plan time", () => {
     expect(() => planApp("set sheet Sheet2")).toThrow(/at least one of/);
   });
+
+  // BUG-0464: hiding the ACTIVE sheet moves the backend's active sheet to a
+  // neighbour, and Core's wrapper announces nothing then. The gateway's hide
+  // (like its add and delete) now FOLLOWS the backend's answer itself
+  // (`@api/sheetSwitch` changeSheetsAndFollow; gatewaySheetSwitch.test.ts),
+  // so the writer only takes the answer into its session -- and never makes a
+  // second backend switch to "apply" it.
+  for (const [option, level] of [
+    ["hidden", undefined],
+    ["veryhidden", "veryHidden"],
+  ] as const) {
+    it(`set sheet <the ACTIVE sheet> visibility=${option}: the session takes the neighbour the backend moved to`, async () => {
+      const moved = { sheets: SHEETS_RESULT.sheets, activeIndex: 1 };
+      const { calls, session } = await runApp(`set sheet Sheet1 visibility=${option}`, {
+        hideSheet: () => Promise.resolve(moved),
+      });
+      expect(calls.hideSheet).toEqual([level === undefined ? [0] : [0, level]]);
+      expect(session.activeSheetIndex).toBe(1);
+      expect(calls.setActiveSheet, "the switch is the backend's, followed -- never made again").toBeUndefined();
+    });
+  }
+
+  it("add sheet: the session takes the new sheet the backend made active, with no second switch", async () => {
+    const added = {
+      sheets: [...SHEETS_RESULT.sheets, { index: 3, name: "Report", visibility: "visible" as const, sheetId: "id-Report" }],
+      activeIndex: 3,
+    };
+    const { calls, session } = await runApp("add sheet Report", { addSheet: () => Promise.resolve(added) });
+    expect(session.activeSheetIndex).toBe(3);
+    expect(calls.setActiveSheet).toBeUndefined();
+  });
+
+  // Review rev3C#8: the added sheet was named by LIST POSITION. Object-backed
+  // sheets are absent from the list while indices stay TRUE, so the position of
+  // the active index named another sheet, or none ("Added sheet 'sheet'.").
+  // SABOTAGE: `res.sheets[res.activeIndex]?.name` -> prints 'Sheet3' (or 'sheet').
+  it("add sheet with no name: the printed name is the sheet AT the active index, never at that list position", async () => {
+    // TRUE indices 0, 1, 3, 4: an object-backed sheet at 2 is not listed.
+    const added = {
+      sheets: [
+        { index: 0, name: "Sheet1", visibility: "visible" as const, sheetId: "id-Sheet1" },
+        { index: 1, name: "Sheet2", visibility: "visible" as const, sheetId: "id-Sheet2" },
+        { index: 3, name: "Sheet3", visibility: "visible" as const, sheetId: "id-Sheet3" },
+        { index: 4, name: "Sheet4", visibility: "visible" as const, sheetId: "id-Sheet4" },
+      ],
+      activeIndex: 4,
+    };
+    const { ok, lines } = await runApp("add sheet", { addSheet: () => Promise.resolve(added) });
+    expect(ok).toBe(true);
+    expect(lines.map((l) => l.text)).toContain("Added sheet 'Sheet4'.");
+  });
+
+  it("control: a refused hide (the last visible sheet) fails the line and leaves the session alone", async () => {
+    const { ok, session } = await runApp("set sheet Sheet1 visibility=hidden", {
+      hideSheet: () => Promise.reject(new Error("A workbook must contain at least one visible sheet.")),
+    });
+    expect(ok).toBe(false);
+    expect(session.activeSheetIndex).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

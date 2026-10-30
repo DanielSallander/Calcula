@@ -16,13 +16,24 @@
 //            format (which replays through applyFormatting). A Select All writes
 //            column TIERS and no cell, so the record follows the returned
 //            styles, not the returned cells.
-//          Only Tauri's `invoke` is doubled; the module under test is real.
+//          - ONLY THE GROUP THE SHEET ON SCREEN BELONGS TO (review G#4): a group
+//            left behind by a Name Box / Go To / link switch to a sheet outside
+//            it (Excel ungroups there) is never sent.
+//          Only Tauri's `invoke` and the grid's sheet context (the sheet on
+//          screen) are doubled; the module under test is real.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const calls: Array<{ cmd: string; args: Record<string, unknown> | undefined }> = [];
 let nextResult: unknown = null;
 let refuse: string | null = null;
+
+/** The sheet on screen (Core's sheet context); null = not known. */
+const grid = vi.hoisted(() => ({ activeSheetIndex: 0 as number | null }));
+vi.mock("../../state/GridContext", () => ({
+  getGridStateSnapshot: () =>
+    grid.activeSheetIndex === null ? null : { sheetContext: { activeSheetIndex: grid.activeSheetIndex } },
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string, args?: Record<string, unknown>) => {
@@ -62,6 +73,7 @@ beforeEach(() => {
   recorded.length = 0;
   refuse = null;
   nextResult = { cells: [], styles: [] };
+  grid.activeSheetIndex = 0;
   clearSheetGrouping();
   setGridRecorderHook((event) => recorded.push(event));
 });
@@ -177,6 +189,51 @@ describe("adjustNumberFormatDecimals", () => {
     await adjustNumberFormatDecimals([0], [0], 1);
     expect(recorded).toEqual([]);
     expect(calls.map((c) => c.cmd)).toEqual(["adjust_number_format_decimals"]);
+  });
+});
+
+// review G#4: the group is ended only by a plain tab click, so a switch by the
+// Name Box / Go To / a link / the command line to a sheet OUTSIDE the group
+// left it selected, and every formatting wrapper sent it anyway -- the backend
+// formats the active sheet plus every listed sheet, so a Bold on Sheet2 also
+// bolded the old group's Sheet1 and Sheet3, off screen. Excel [LIVE, Excel 16:
+// Sheet1+Sheet3 grouped, Application.Goto Sheet2!A1, ExecuteMso "Bold"] bolds
+// Sheet2!A1 only.
+// SABOTAGE: make groupArgs (core/lib/tauri-api.ts) send the selected group
+// whatever the sheet on screen -> the three "outside the group" cases send
+// sheetIndices [0, 2].
+describe("a group the sheet on screen is NOT in is never sent (review G#4)", () => {
+  beforeEach(() => {
+    setSelectedSheetIndices([0, 2]);
+    grid.activeSheetIndex = 1;
+  });
+
+  it("applyFormatting: the Bold reaches the sheet on screen alone", async () => {
+    await applyFormatting([0], [0], { bold: true });
+    expect(calls.map((c) => c.cmd)).toEqual(["apply_formatting"]);
+    expect(calls[0].args, "the old group's sheets must not be formatted off screen").not.toHaveProperty("sheetIndices");
+  });
+
+  it("applyBorderPreset: the preset reaches the sheet on screen alone", async () => {
+    await applyBorderPreset(1, 2, 3, 4, "outside", "solid", "#112233", 3);
+    expect(calls[0].args).not.toHaveProperty("sheetIndices");
+  });
+
+  it("adjustNumberFormatDecimals: the step reaches the sheet on screen alone", async () => {
+    await adjustNumberFormatDecimals([0], [0], 1);
+    expect(calls[0].args).not.toHaveProperty("sheetIndices");
+  });
+
+  it("back on a sheet of the group, the group is sent again (Excel keeps a group across a switch to a member)", async () => {
+    grid.activeSheetIndex = 2;
+    await applyFormatting([0], [0], { italic: true });
+    expect(calls[0].args?.sheetIndices).toEqual([0, 2]);
+  });
+
+  it("the sheet on screen not known: no group (nothing could tell it from the others)", async () => {
+    grid.activeSheetIndex = null;
+    await applyFormatting([0], [0], { italic: true });
+    expect(calls[0].args).not.toHaveProperty("sheetIndices");
   });
 });
 

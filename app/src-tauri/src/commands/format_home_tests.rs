@@ -599,15 +599,16 @@ fn no_border_on_a_range_without_borders_changes_nothing() {
     assert_eq!(b.undo_depth(), 0);
 }
 
-/// A partial rectangle too large to style cell by cell is refused, cleanly
-/// (B2 to the sheet's corner is 17 billion cells and spans no whole axis).
+/// A partial rectangle too large to style cell by cell is refused, cleanly.
+/// CHANGED DELIBERATELY (round-2 review revA#4): this used B2 to the sheet's
+/// corner, which is ALMOST whole columns -- every column but A, short by row
+/// 1 -- and is now written as column tiers plus one exception row
+/// (`CellRect::line_extent`), as Excel stores it. A truly interior rectangle
+/// (3,000 rows x 2,000 columns, nowhere near a whole line) is still refused.
 #[test]
 fn a_huge_partial_rectangle_is_refused_without_touching_anything() {
     let b = Book::new(1);
-    let verdict = b.border(
-        (1, 1, engine::EXCEL_MAX_ROW_INDEX, engine::EXCEL_MAX_COL_INDEX),
-        "allBorders",
-    );
+    let verdict = b.border((1_000, 100, 3_999, 2_099), "allBorders");
     assert!(verdict.is_err());
     assert!(!b.file.is_dirty());
     assert_eq!(b.undo_depth(), 0);
@@ -823,8 +824,10 @@ fn style_and_cell_shift_commands_gate_plan_and_write_in_one_critical_section() {
     const CELLS: &str = include_str!("structure_cells.rs");
     let cases = [
         (STYLES, "fn border_preset_on_sheets(", "gate_style_targets("),
-        // The body moved into the target-aware twin (P3); _core delegates to it.
-        (STYLES, "pub(crate) fn adjust_number_format_decimals_on(", "gate_style_targets("),
+        // The body moved into the target-aware twin (P3), and then below the
+        // active-cell resolution (the wire's activeRow / activeCol); _core and
+        // _on delegate to it.
+        (STYLES, "fn adjust_number_format_decimals_at(", "gate_style_targets("),
         (STYLES, "fn format_cells_on_sheets(", "gate_style_targets("),
         (CELLS, "pub(crate) fn shift_cells_impl(", "ensure_not_canvas_in_state("),
     ];
@@ -1221,4 +1224,1084 @@ fn targeted_style_commands_run_beside_the_styled_read_without_deadlocking() {
     for handle in handles {
         handle.join().expect("every worker ran to the end without an error");
     }
+}
+
+// ---------------------------------------------------------------------------
+// 8. BUG-0354: apply_formatting over whole rows, whole columns and Select All
+// ---------------------------------------------------------------------------
+//
+// `apply_formatting` walked every (row, col) of its lists: Ctrl+A then Ctrl+B
+// is 17.2 billion positions and the app stopped responding; the Borders
+// split's Left/Right edge presets (and Top/Bottom on whole rows) come through
+// the same command, so Left Border on a whole column wrote a million cells.
+// Whole-line selections now go through the row/column TIERS. Each test below
+// asserts on WHAT WAS WRITTEN -- tier entries versus cells -- and on what a
+// position reads back through the normal style read, not on wall-clock alone
+// (`within` only keeps a regression from hanging the suite). Excel facts are
+// [LIVE] from Excel 16 on 2026-10-29: each case saved as .xlsx and its sheet
+// XML read back (lane scratchpad laneA/probe.ps1, probe2.ps1).
+
+impl Book {
+    /// Type `value` at (row, col) on the active sheet through the REAL
+    /// single-cell entry path, as the cell editor does.
+    fn type_value(&self, row: u32, col: u32, value: &str) {
+        crate::commands::data::update_cell_impl(
+            &self.state,
+            &self.file,
+            &self.files,
+            &self.slicer,
+            &self.pivots,
+            &self.pane,
+            &self.filters,
+            row,
+            col,
+            value.to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("typing at ({row}, {col}) failed: {e}"));
+    }
+
+    /// A whole-ROW default style on the active sheet (both mirrors).
+    fn seed_row_tier(&self, row: u32, style: CellStyle) {
+        let seed = crate::document_effect::test_seed_effect();
+        let idx = self.state.style_registry.write(&seed).unwrap().get_or_create_explicit(style);
+        self.state.grid.write(&seed).unwrap().set_row_style(row, idx);
+        self.state.grids.write(&seed).unwrap()[0].set_row_style(row, idx);
+    }
+
+    /// (stored cells, row tiers, column tiers) on the active sheet's live grid.
+    fn written(&self) -> (usize, usize, usize) {
+        let grid = self.state.grid.read().unwrap();
+        (grid.cells.len(), grid.row_styles.len(), grid.column_styles.len())
+    }
+}
+
+fn thin_side() -> crate::api_types::BorderSideParam {
+    crate::api_types::BorderSideParam { style: "thin".to_string(), color: "#000000".to_string() }
+}
+
+const EVERY_COLUMN: usize = engine::EXCEL_MAX_COL_INDEX as usize + 1;
+
+/// Ctrl+A, Ctrl+B. ONE tier entry per column (every one the SAME style, as
+/// Excel's single `<col min=1 max=16384>`), no cell materialised, a stored
+/// cell with a style of its own keeps it and gains bold, a populated cell that
+/// inherited takes the format AS ITS OWN (round-2 review revA#2 [LIVE]: Excel
+/// saves `<c r=C3 s=bold>` for a value there) but is not REPORTED, an empty
+/// position reads bold, the frontend is told the tier's style, and ONE Ctrl+Z
+/// restores all of it.
+#[test]
+fn select_all_bold_writes_one_tier_per_column_and_no_cell() {
+    let b = std::sync::Arc::new(Book::new(1));
+    b.seed_cell(0, 10, 3, CellValue::Number(1.0), CellStyle::new().with_italic(true));
+    b.seed_cell(0, 20, 5, CellValue::Number(2.0), CellStyle::new());
+    let runner = b.clone();
+    let result = within(60, move || runner.format(every_row(), every_col(), |p| p.bold = Some(true)))
+        .expect("Select All + Bold");
+
+    assert_eq!(b.written(), (2, 0, EVERY_COLUMN), "(cells, row tiers, column tiers): tiers, not cells");
+    let tier = {
+        let grid = b.state.grid.read().unwrap();
+        let mut indices: Vec<usize> = grid.column_styles.values().copied().collect();
+        indices.sort_unstable();
+        indices.dedup();
+        assert_eq!(indices.len(), 1, "every column shares ONE tier style");
+        // CHANGED DELIBERATELY (round-2 review revA#2): this asserted "an
+        // inheriting cell is not rewritten" (style 0). Excel gives an existing
+        // value the line's format as its own, so it travels with the value on
+        // Sort / Insert Cells / Cut; style 0 left it on the line.
+        assert_eq!(
+            grid.get_cell(20, 5).unwrap().style_index,
+            indices[0],
+            "a stored value takes the line's format as its OWN style"
+        );
+        let mirror = &b.state.grids.read().unwrap()[0];
+        assert_eq!(mirror.column_styles.len(), EVERY_COLUMN, "the second copy of the active sheet too");
+        assert_eq!(mirror.get_cell(20, 5).unwrap().style_index, indices[0], "in the second copy too");
+        indices[0]
+    };
+    let own = b.style_at(10, 3);
+    assert!(own.font.bold && own.font.italic, "a cell's own style keeps its italic and gains bold");
+    assert!(b.style_at(20, 5).font.bold, "a populated cell that inherits reads bold");
+    assert!(b.style_at(1_000_000, 16_000).font.bold, "an empty position nobody stored reads bold");
+    assert!(result.styles.iter().any(|e| e.index == tier), "the tier's style reaches the frontend cache");
+    assert!(
+        result.cells.iter().all(|c| (c.row, c.col) == (10, 3)),
+        "only the cell whose look differs from the tier is REPORTED: {:?}",
+        result.cells.iter().map(|c| (c.row, c.col)).collect::<Vec<_>>()
+    );
+    assert!(b.file.is_dirty());
+    assert_eq!(b.undo_depth(), 1, "ONE undo step");
+
+    b.undo();
+    assert_eq!(b.written(), (2, 0, 0), "Undo removes every tier");
+    assert!(!b.style_at(10, 3).font.bold && b.style_at(10, 3).font.italic, "the own style is back");
+    assert!(!b.style_at(20, 5).font.bold);
+    assert_eq!(b.state.grid.read().unwrap().get_cell(20, 5).unwrap().style_index, 0, "Undo gives back the inheriting cell");
+    assert!(!b.style_at(1_000_000, 16_000).font.bold);
+    assert_eq!(b.value_on(0, 20, 5), CellValue::Number(2.0), "values untouched");
+}
+
+/// Excel semantics: formatting a whole sheet or column sets the LINE's
+/// default, so a cell typed there LATER -- through the real entry path --
+/// inherits it ([LIVE] Select All Bold, then 42 typed in C7: bold).
+#[test]
+fn a_cell_typed_after_formatting_whole_lines_inherits_the_format() {
+    let b = std::sync::Arc::new(Book::new(1));
+    let runner = b.clone();
+    within(60, move || runner.format(every_row(), every_col(), |p| p.bold = Some(true))).expect("Select All + Bold");
+    let runner = b.clone();
+    within(60, move || runner.format(every_row(), vec![2], |p| p.background_color = Some("#FFFF00".to_string())))
+        .expect("column C yellow");
+
+    b.type_value(500, 7, "42");
+    b.type_value(300_000, 2, "hello");
+    assert_eq!(b.value_on(0, 500, 7), CellValue::Number(42.0));
+    assert!(b.style_at(500, 7).font.bold, "typed after Select All Bold: bold");
+    let typed = b.style_at(300_000, 2);
+    assert!(typed.font.bold, "typed in the yellow column: still bold");
+    assert_eq!(typed.fill, yellow_fill(), "typed in the yellow column: yellow");
+    assert_eq!(
+        b.state.grid.read().unwrap().get_cell(300_000, 2).unwrap().style_index,
+        0,
+        "the typed cell inherits; it carries no style of its own"
+    );
+}
+
+/// The Borders split's Left Border on a WHOLE COLUMN (it sends every row and
+/// the one column to apply_formatting): ONE column tier, no cell beyond the
+/// stored ones; populated (own style and inheriting) and empty positions read
+/// the border; the neighbour column is untouched; Undo restores. Bottom
+/// Border on a whole ROW is one row tier the same way.
+#[test]
+fn edge_borders_on_whole_lines_are_one_tier_entry() {
+    let b = std::sync::Arc::new(Book::new(1));
+    b.seed_cell(0, 7, 2, CellValue::Number(1.0), CellStyle::new().with_bold(true));
+    b.seed_cell(0, 8, 2, CellValue::Number(2.0), CellStyle::new());
+    let runner = b.clone();
+    within(60, move || runner.format(every_row(), vec![2], |p| p.border_left = Some(thin_side())))
+        .expect("Left Border on column C");
+
+    assert_eq!(b.written(), (2, 0, 1), "(cells, row tiers, column tiers): one column tier");
+    assert_eq!(b.style_at(500_000, 2).borders.left, thin(), "an empty position");
+    assert_eq!(b.style_at(8, 2).borders.left, thin(), "a populated cell that inherits");
+    let own = b.style_at(7, 2);
+    assert!(own.font.bold, "a cell's own style keeps its bold");
+    assert_eq!(own.borders.left, thin());
+    assert_eq!(b.style_at(500_000, 3).borders, engine::Borders::default(), "the next column is untouched");
+    assert_eq!(b.undo_depth(), 1);
+    b.undo();
+    assert_eq!(b.written(), (2, 0, 0));
+    assert_eq!(b.style_at(500_000, 2).borders.left, engine::BorderStyle::default());
+    assert!(b.style_at(7, 2).font.bold);
+    assert_eq!(b.style_at(7, 2).borders.left, engine::BorderStyle::default());
+
+    let runner = b.clone();
+    within(60, move || runner.format(vec![4], every_col(), |p| p.border_bottom = Some(thin_side())))
+        .expect("Bottom Border on row 5");
+    assert_eq!(b.written(), (2, 1, 0), "one row tier");
+    assert_eq!(b.style_at(4, 16_000).borders.bottom, thin());
+    assert_eq!(b.style_at(5, 16_000).borders.bottom, engine::BorderStyle::default());
+}
+
+/// Whole ROWS 1:10 Bold: ten row tiers and no cell beyond the stored one --
+/// the cell walk wrote 163,840 cells here.
+#[test]
+fn whole_rows_bold_writes_row_tiers_not_cells() {
+    let b = Book::new(1);
+    b.seed_cell(0, 3, 9, CellValue::Text("kept".to_string()), CellStyle::new());
+    b.format((0..10).collect(), every_col(), |p| p.bold = Some(true)).expect("rows 1:10 Bold");
+    assert_eq!(b.written(), (1, 10, 0), "(cells, row tiers, column tiers)");
+    assert!(b.style_at(9, engine::EXCEL_MAX_COL_INDEX).font.bold);
+    assert!(b.style_at(3, 9).font.bold, "the stored value takes its row's format");
+    assert!(!b.style_at(10, 0).font.bold, "row 11 is not in the selection");
+    assert_eq!(b.value_on(0, 3, 9), CellValue::Text("kept".to_string()));
+}
+
+/// SELECT ALL REWRITES EVERY ROW FORMAT [LIVE: row 3 bold, then Select All
+/// Italic -- row 3's own format is bold italic, no cell is written in it]. The
+/// planner used to write one crossing cell per row tier per COLUMN (16,384
+/// per formatted row) and refused a sheet with more than 122 formatted rows.
+#[test]
+fn select_all_rewrites_existing_row_formats_instead_of_writing_crossings() {
+    let b = std::sync::Arc::new(Book::new(1));
+    for row in [2u32, 3, 4] {
+        b.seed_row_tier(row, CellStyle::new().with_bold(true));
+    }
+    let runner = b.clone();
+    within(60, move || runner.format(every_row(), every_col(), |p| p.italic = Some(true))).expect("Select All + Italic");
+
+    assert_eq!(b.written(), (0, 3, EVERY_COLUMN), "no crossing cell: the three row tiers took the change");
+    let row = b.style_at(3, 16_000);
+    assert!(row.font.bold && row.font.italic, "the row keeps its bold and gains italic");
+    let other = b.style_at(8, 0);
+    assert!(other.font.italic && !other.font.bold, "an unformatted row reads the column tier");
+    b.undo();
+    let row = b.style_at(3, 16_000);
+    assert!(row.font.bold && !row.font.italic, "Undo restores the row tier");
+    assert_eq!(b.written(), (0, 3, 0));
+}
+
+/// A WHOLE ROW is based on the format every column shares, else on the
+/// default [LIVE]: after Select All Bold, row 5 yellow is bold + yellow with
+/// NO cell written (the used range stays A5); with 16,383 of the 16,384
+/// columns bold, row 5 yellow is plain yellow and each bold column's crossing
+/// is a cell (XFD5 not bold, A5 bold + yellow).
+#[test]
+fn a_whole_row_is_based_on_the_format_every_column_shares() {
+    let b = std::sync::Arc::new(Book::new(1));
+    let runner = b.clone();
+    within(60, move || runner.format(every_row(), every_col(), |p| p.bold = Some(true))).expect("Select All + Bold");
+    let runner = b.clone();
+    within(60, move || runner.format(vec![4], every_col(), |p| p.background_color = Some("#FFFF00".to_string())))
+        .expect("row 5 yellow");
+    assert_eq!(b.written(), (0, 1, EVERY_COLUMN), "one row tier and no crossing cell");
+    let crossing = b.style_at(4, 16_000);
+    assert!(crossing.font.bold, "the row tier is based on the shared bold");
+    assert_eq!(crossing.fill, yellow_fill());
+
+    let b = std::sync::Arc::new(Book::new(1));
+    let runner = b.clone();
+    let all_but_last: Vec<u32> = (0..engine::EXCEL_MAX_COL_INDEX).collect();
+    within(60, move || runner.format(every_row(), all_but_last, |p| p.bold = Some(true))).expect("A:XFC Bold");
+    let runner = b.clone();
+    within(60, move || runner.format(vec![4], every_col(), |p| p.background_color = Some("#FFFF00".to_string())))
+        .expect("row 5 yellow");
+    let last = b.style_at(4, engine::EXCEL_MAX_COL_INDEX);
+    assert!(!last.font.bold, "XFD5: the row is based on the default");
+    assert_eq!(last.fill, yellow_fill());
+    let first = b.style_at(4, 0);
+    assert!(first.font.bold, "A5: the bold column's crossing keeps its bold");
+    assert_eq!(first.fill, yellow_fill());
+    assert_eq!(b.written(), (EVERY_COLUMN - 1, 1, EVERY_COLUMN - 1), "each crossing with a column format is a cell");
+}
+
+/// The RANGE form of the protection gate: a protected sheet whose every
+/// column is unlocked through its tier allows Select All + Bold, answered
+/// without enumerating 17.2 billion positions (the cell form did); a sheet
+/// whose cells are locked refuses it before anything is written.
+#[test]
+fn select_all_bold_on_a_protected_sheet_is_gated_by_range() {
+    let b = std::sync::Arc::new(Book::new(1));
+    let mut unlocked = CellStyle::new();
+    unlocked.locked = false;
+    for col in 0..=engine::EXCEL_MAX_COL_INDEX {
+        b.seed_column_tier(col, unlocked.clone());
+    }
+    let seed = crate::document_effect::test_seed_effect();
+    {
+        let mut protection = b.state.sheet_protection.write(&seed).unwrap();
+        let sheet = protection.entry(0).or_default();
+        sheet.protected = true;
+        sheet.options.allow_format_cells = true;
+    }
+    let runner = b.clone();
+    within(60, move || runner.format(every_row(), every_col(), |p| p.bold = Some(true)))
+        .expect("every position is unlocked");
+    let s = b.style_at(500_000, 9_000);
+    assert!(s.font.bold && !s.locked, "bold, and still unlocked");
+
+    let b = std::sync::Arc::new(Book::new(1));
+    {
+        let mut protection = b.state.sheet_protection.write(&seed).unwrap();
+        let sheet = protection.entry(0).or_default();
+        sheet.protected = true;
+        sheet.options.allow_format_cells = true;
+    }
+    let runner = b.clone();
+    let verdict = within(60, move || runner.format(every_row(), every_col(), |p| p.bold = Some(true)));
+    assert!(verdict.is_err(), "locked cells refuse Select All + Bold");
+    assert_eq!(b.written(), (0, 0, 0));
+    assert!(!b.file.is_dirty());
+    assert_eq!(b.undo_depth(), 0);
+}
+
+/// Grouped sheets: Select All + Bold reaches every sheet of the group as ONE
+/// undo step, and a protected grouped sheet refuses the whole group before
+/// the active sheet is written.
+#[test]
+fn grouped_select_all_bold_is_one_step_and_gated_whole() {
+    let b = std::sync::Arc::new(Book::new(2));
+    let runner = b.clone();
+    within(60, move || {
+        let params = FormattingParams { rows: every_row(), cols: every_col(), bold: Some(true), ..Default::default() };
+        apply_formatting_core(&runner.state, &runner.file, &params, &[0, 1])
+    })
+    .expect("grouped Select All + Bold");
+    assert!(b.style_at(700_000, 100).font.bold);
+    assert!(b.style_on(1, 700_000, 100).font.bold, "the grouped sheet");
+    assert_eq!(b.state.grids.read().unwrap()[1].cells.len(), 0, "no cell on the grouped sheet either");
+    assert_eq!(b.undo_depth(), 1, "ONE undo step for the group");
+    b.undo();
+    assert!(!b.style_at(700_000, 100).font.bold);
+    assert!(!b.style_on(1, 700_000, 100).font.bold);
+
+    let b = std::sync::Arc::new(Book::new(2));
+    let seed = crate::document_effect::test_seed_effect();
+    b.state.sheet_protection.write(&seed).unwrap().entry(1).or_default().protected = true;
+    let runner = b.clone();
+    let verdict = within(60, move || {
+        let params = FormattingParams { rows: every_row(), cols: every_col(), bold: Some(true), ..Default::default() };
+        apply_formatting_core(&runner.state, &runner.file, &params, &[0, 1])
+    });
+    assert!(verdict.is_err());
+    assert_eq!(b.written(), (0, 0, 0), "the active sheet was not formatted first");
+    assert!(!b.file.is_dirty());
+}
+
+/// A partial rectangle too large to style cell by cell (spanning no whole
+/// line, and too far from one to be whole lines plus exceptions) is refused
+/// cleanly, before any guard, instead of walked: B2:F850001 (4.25 million
+/// cells, just past the bound; its whole columns would need 992,880
+/// exceptions) and a 3,000 x 2,000 interior block. CHANGED DELIBERATELY
+/// (round-2 review revA#4): the second case was B2 to the sheet's corner,
+/// which is almost-whole columns and is now ACCEPTED -- see
+/// `an_almost_whole_rectangle_is_whole_lines_plus_exceptions`.
+#[test]
+fn a_huge_partial_rectangle_is_refused_by_apply_formatting() {
+    let b = std::sync::Arc::new(Book::new(1));
+    let runner = b.clone();
+    // A written result is never Debug-printed: it would be millions of cells.
+    let refusal = |verdict: Result<FormattingResult, String>, what: &str| -> String {
+        match verdict {
+            Err(message) => message,
+            Ok(result) => panic!("{what} were written, not refused ({} cells reported)", result.cells.len()),
+        }
+    };
+    let runner = b.clone();
+    let verdict = within(120, move || runner.format((1..=850_000).collect(), (1..=5).collect(), |p| p.bold = Some(true)));
+    let message = refusal(verdict, "4.25 million cells");
+    assert!(message.starts_with("Formatting can be applied to at most"), "{message}");
+    assert_eq!(b.written(), (0, 0, 0));
+
+    let runner = b.clone();
+    let verdict = within(60, move || runner.format((1_000..4_000).collect(), (100..2_100).collect(), |p| p.bold = Some(true)));
+    let message = refusal(verdict, "6 million interior cells");
+    assert!(message.starts_with("Formatting can be applied to at most"), "{message}");
+    assert_eq!(b.written(), (0, 0, 0));
+    assert!(!b.file.is_dirty());
+    assert_eq!(b.undo_depth(), 0);
+}
+
+/// THE WIRE (BUG-0354): `rows` / `cols` arrive as a plain list or as an
+/// `IndexRun` `{ first, last }` -- what the frontend's `encodeIndexList`
+/// sends for a whole column instead of a million numbers -- and are the same
+/// list in Rust. A reversed run, or one longer than a whole column, is refused
+/// rather than allocated.
+#[test]
+fn formatting_params_take_a_run_or_a_list() {
+    let params: FormattingParams = serde_json::from_value(serde_json::json!({
+        "rows": { "first": 0, "last": engine::EXCEL_MAX_ROW_INDEX },
+        "cols": [2],
+        "bold": true,
+    }))
+    .expect("a run deserialises");
+    assert_eq!(params.rows, every_row(), "a run is the whole list");
+    assert_eq!(params.cols, vec![2]);
+    assert_eq!(params.bold, Some(true));
+
+    let params: FormattingParams =
+        serde_json::from_value(serde_json::json!({ "rows": [5, 3, 4], "cols": { "first": 7, "last": 9 } }))
+            .expect("a list and a short run");
+    assert_eq!(params.rows, vec![5, 3, 4], "a list keeps its order (the active cell may come first)");
+    assert_eq!(params.cols, vec![7, 8, 9]);
+
+    let reversed = serde_json::from_value::<FormattingParams>(serde_json::json!({ "rows": { "first": 5, "last": 4 } }));
+    assert!(reversed.is_err(), "a reversed run is refused");
+    let huge = serde_json::from_value::<FormattingParams>(serde_json::json!({ "rows": { "first": 0, "last": 4_000_000_000u32 } }));
+    assert!(huge.is_err(), "a run longer than a whole column is refused, not allocated");
+    let absent: FormattingParams = serde_json::from_value(serde_json::json!({ "bold": true })).expect("absent lists");
+    assert!(absent.rows.is_empty() && absent.cols.is_empty());
+}
+
+/// THE DECIMAL STEP'S WIRE (BUG-0354 follow-up). `adjust_number_format_decimals`
+/// takes `rows` / `cols` as a list OR as an `IndexRun` (`IndexListArg`, in
+/// api_types.rs beside `IndexRun`: the two shapes `FormattingParams` takes),
+/// so the wrapper no longer sends Select
+/// All's million row indices. A run has lost which line came first -- and the
+/// Home tab puts the ACTIVE line first (Ctrl+A: `[1048575, 0, 1, ...]`) -- so
+/// the wire names it apart (`activeRow` / `activeCol`), and the step must
+/// decide from THAT cell, not from the run's first line.
+// SABOTAGE: drop the `deserialize_with` on IndexListArg (api_types.rs) -> the run
+// does not deserialise; resolve the active cell from `list.first()` only in
+// adjust_number_format_decimals_from_wire -> the empty C1 decides and nothing
+// is written.
+#[test]
+fn the_decimal_step_takes_a_run_and_decides_from_the_named_active_cell() {
+    let last = engine::EXCEL_MAX_ROW_INDEX;
+    let rows: IndexListArg =
+        serde_json::from_value(serde_json::json!({ "first": 0, "last": last })).expect("a run deserialises");
+    assert_eq!(rows.0, every_row(), "a run is the whole list");
+    let list: IndexListArg = serde_json::from_value(serde_json::json!([5, 3, 4])).expect("a list deserialises");
+    assert_eq!(list.0, vec![5, 3, 4], "a list keeps its order (the active line first)");
+    assert!(
+        serde_json::from_value::<IndexListArg>(serde_json::json!({ "first": 5, "last": 4 })).is_err(),
+        "a reversed run is refused"
+    );
+    assert!(
+        serde_json::from_value::<IndexListArg>(serde_json::json!({ "first": 0, "last": 4_000_000_000u32 })).is_err(),
+        "a run longer than a whole column is refused, not allocated"
+    );
+
+    // Column C selected whole, the active cell on its LAST row holding 1.5 as
+    // `0.0`. The run's first line, C1, is EMPTY -- where Excel changes nothing --
+    // so a step decided from `rows[0]` would write nothing at all.
+    let b = std::sync::Arc::new(Book::new(1));
+    b.seed_cell(0, last, 2, CellValue::Number(1.5), CellStyle::new().with_number_format(num(1, false)));
+    let runner = b.clone();
+    let result = within(60, move || {
+        adjust_number_format_decimals_from_wire(&runner.state, &runner.file, &rows.0, &[2], 1, (Some(last), None), &[], None)
+    })
+    .expect("the step");
+    assert!(!result.styles.is_empty(), "the NAMED active cell decided, so a format was written");
+    assert_eq!(b.style_at(last, 2).number_format, num(2, false), "the active cell: 0.0 -> 0.00");
+    assert_eq!(b.style_at(0, 2).number_format, num(2, false), "the whole column follows");
+    assert_eq!(b.undo_depth(), 1, "ONE undo step");
+
+    // Without a named line, `rows[0]` decides exactly as before.
+    let b = Book::new(1);
+    b.seed_cell(0, 3, 0, CellValue::Number(2.5), CellStyle::new().with_number_format(num(1, false)));
+    b.seed_cell(0, 4, 0, CellValue::Number(7.0), CellStyle::new().with_number_format(num(3, false)));
+    adjust_number_format_decimals_from_wire(&b.state, &b.file, &[3, 4], &[0], 1, (None, None), &[], None).unwrap();
+    assert_eq!(b.style_at(4, 0).number_format, num(2, false), "row 3 (first) decided: 0.0 -> 0.00");
+
+    // A named line OUTSIDE the selection is refused before anything is written.
+    let b = Book::new(1);
+    b.seed_cell(0, 7, 0, CellValue::Number(1.5), CellStyle::new());
+    for active in [(Some(7), None), (None, Some(9))] {
+        let err = adjust_number_format_decimals_from_wire(&b.state, &b.file, &[0, 1], &[0], 1, active, &[], None)
+            .expect_err("an active line outside the selection");
+        assert!(err.contains("not inside the selection"), "{err}");
+    }
+    assert!(!b.file.is_dirty());
+    assert_eq!(b.undo_depth(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 9. Round-2 review of BUG-0354 (revA#2, revA#3, revA#4)
+// ---------------------------------------------------------------------------
+//
+// Excel facts are [LIVE] from Excel 16 on 2026-10-29, each case saved as .xlsx
+// and its sheet XML read back (review scratchpad revA/probe.ps1, probe2.ps1).
+
+const LAST_ROW: u32 = engine::EXCEL_MAX_ROW_INDEX;
+const LAST_COL: u32 = engine::EXCEL_MAX_COL_INDEX;
+
+impl Book {
+    /// Sort `rect` on `sheet` (not the active sheet) by its first column,
+    /// ascending, through the real off-sheet sort.
+    fn sort_by_first_column(&self, sheet: usize, rect: (u32, u32, u32, u32)) {
+        let params = crate::api_types::SortRangeParams {
+            start_row: rect.0,
+            start_col: rect.1,
+            end_row: rect.2,
+            end_col: rect.3,
+            fields: vec![crate::api_types::SortField {
+                key: 0,
+                ascending: true,
+                sort_on: Default::default(),
+                color: None,
+                icon: None,
+                data_option: Default::default(),
+                sub_field: None,
+                custom_order: None,
+            }],
+            match_case: false,
+            has_headers: false,
+            orientation: crate::api_types::SortOrientation::Rows,
+            sheet_index: Some(sheet),
+            target: None,
+        };
+        let result = crate::commands::data::sort_range_off_sheet(
+            &self.state, &self.file, &self.files, &self.pivots, &self.pane, &self.filters, sheet, params,
+        )
+        .expect("the sort runs");
+        assert!(result.success, "{:?}", result.error);
+    }
+
+    /// The style index a STORED cell on the active sheet carries itself.
+    fn own_style(&self, row: u32, col: u32) -> usize {
+        self.state.grid.read().unwrap().get_cell(row, col).map_or(0, |c| c.style_index)
+    }
+}
+
+/// revA#2. [LIVE] Row 5 Bold over A5:B5 holding values saves the row format
+/// AND `<c r=A5 s=bold>`, `<c r=B5 s=bold>`: an existing value takes the
+/// line's format as its OWN style. It is written but not reported (every
+/// caller repaints after a whole-line format), and Undo gives back the
+/// inheriting cell.
+// SABOTAGE: drop the `else if changes && own_style == 0 ...` branch of
+// plan_range_style's candidate loop -> A5 stays at style 0.
+#[test]
+fn a_stored_value_takes_the_whole_line_format_as_its_own() {
+    let b = Book::new(1);
+    b.seed_cell(0, 4, 0, CellValue::Number(4.0), CellStyle::new());
+    b.seed_cell(0, 4, 1, CellValue::Text("t5".to_string()), CellStyle::new());
+    let result = b.format(vec![4], every_col(), |p| p.bold = Some(true)).expect("row 5 Bold");
+    let tier = b.state.grid.read().unwrap().row_styles.get(&4).copied().expect("row 5 has its format");
+    assert_eq!(b.own_style(4, 0), tier, "A5 carries the row's format itself");
+    assert_eq!(b.own_style(4, 1), tier, "B5 too");
+    assert_eq!(b.written(), (2, 1, 0), "no cell beyond the two values");
+    assert!(result.cells.is_empty(), "the carried values are not reported");
+    assert!(result.styles.iter().any(|e| e.index == tier), "the style reaches the frontend cache");
+    b.undo();
+    assert_eq!(b.own_style(4, 0), 0, "Undo gives back the inheriting cell");
+    assert!(!b.style_at(4, 0).font.bold);
+
+    // A format the value already shows writes nothing, and the file stays clean.
+    let b = Book::new(1);
+    b.seed_column_tier(2, CellStyle::new().with_bold(true));
+    b.seed_cell(0, 6, 2, CellValue::Number(1.0), CellStyle::new());
+    let result = b.format(every_row(), vec![2], |p| p.bold = Some(true)).expect("column C Bold again");
+    assert!(result.cells.is_empty() && result.styles.is_empty());
+    assert_eq!(b.own_style(6, 2), 0, "nothing changed, so nothing was written");
+    assert!(!b.file.is_dirty());
+    assert_eq!(b.undo_depth(), 0);
+}
+
+/// revA#2, the scenario. [LIVE] A1:B8 = (8, "t1") .. (1, "t8"), row 5 Bold,
+/// Sort A1:B8 by A: Excel saves the MOVED record (4, "t5") at row 4 with
+/// s=bold on both cells, and row 5 keeps its row format. The record's format
+/// went with it. (Before this, the values in row 5 only inherited the row's
+/// format and the sort moved them off it plain.)
+#[test]
+fn sorting_after_a_row_format_moves_the_format_with_the_record() {
+    let b = Book::new(2);
+    for r in 0..8u32 {
+        b.seed_cell(1, r, 0, CellValue::Number(f64::from(8 - r)), CellStyle::new());
+        b.seed_cell(1, r, 1, CellValue::Text(format!("t{}", r + 1)), CellStyle::new());
+    }
+    let params = FormattingParams { rows: vec![4], cols: every_col(), bold: Some(true), ..Default::default() };
+    apply_formatting_to_sheets_core(&b.state, &b.file, &[1], &params).expect("row 5 Bold on Sheet2");
+    b.sort_by_first_column(1, (0, 0, 7, 1));
+
+    assert_eq!(b.value_on(1, 3, 0), CellValue::Number(4.0), "the record (4, t5) sorts to row 4");
+    assert_eq!(b.value_on(1, 3, 1), CellValue::Text("t5".to_string()));
+    assert!(b.style_on(1, 3, 0).font.bold, "A4: the moved record keeps its bold");
+    assert!(b.style_on(1, 3, 1).font.bold, "B4 too");
+    assert!(b.style_on(1, 4, 9).font.bold, "row 5 keeps its own format where nothing is stored");
+    assert!(!b.style_on(1, 2, 0).font.bold, "a record that was never in row 5 stays plain");
+}
+
+/// revA#2, the Insert Cells route: Insert Cells at A5 (shift down) moves A5's
+/// value off the formatted row, and -- carrying the format as its own, as in
+/// Excel -- it keeps its bold at A6.
+#[test]
+fn insert_cells_after_a_row_format_moves_the_format_with_the_value() {
+    let b = Book::new(1);
+    b.seed_cell(0, 4, 0, CellValue::Number(42.0), CellStyle::new());
+    b.format(vec![4], every_col(), |p| p.bold = Some(true)).expect("row 5 Bold");
+    crate::commands::structure::structure_cells::shift_cells_impl(
+        &b.state, &b.file, &b.pivots, &b.files, &b.pane, &b.filters, &b.slicer, &b.timelines, 4, 0, 4, 0,
+        crate::commands::structure::structure_cells::CellShift::Down, false,
+    )
+    .expect("Insert Cells at A5, shift down");
+    assert_eq!(b.value_on(0, 5, 0), CellValue::Number(42.0), "the value moved to A6");
+    assert!(b.style_at(5, 0).font.bold, "and took its bold with it");
+}
+
+/// revA#3. Format Cells > Border, inside horizontal OFF, on WHOLE columns C:F
+/// after All Borders: one `insideHorizontal` preset with NO line (width 0)
+/// through the tiers -- not two almost-whole strips that walked a million
+/// cells per column (or were refused from four columns up). The interior
+/// loses its top and bottom, the sheet's first row keeps its top edge and the
+/// last row its bottom edge [LIVE: Excel's column format after this is left +
+/// right only], the left/right lines stay. Whole rows with inside vertical
+/// off are the same with the axes swapped; on an ordinary range it is both
+/// sides of each inner boundary, and the outline stays.
+// SABOTAGE: drop the `width == 0 || style == "none"` early return in
+// BorderPresetDelta::new -> the "removed" sides are a solid zero-width line,
+// not the empty side, and the interior assertions fail.
+#[test]
+fn inside_lines_off_on_whole_lines_go_through_the_tiers() {
+    let none = engine::BorderStyle::default();
+    let b = std::sync::Arc::new(Book::new(1));
+    b.seed_cell(0, 9, 3, CellValue::Number(1.0), CellStyle::new());
+    b.border((0, 2, LAST_ROW, 5), "allBorders").expect("All Borders on C:F");
+    let runner = b.clone();
+    within(60, move || {
+        apply_border_preset_core(&runner.state, &runner.file, CellRect::new(0, 2, LAST_ROW, 5), "insideHorizontal", "solid", "#000000", 0, &[])
+    })
+    .expect("inside horizontal off on C:F");
+    let interior = b.style_at(500, 3).borders;
+    assert_eq!((interior.top.clone(), interior.bottom.clone()), (none.clone(), none.clone()), "the inside lines are gone");
+    assert_eq!((interior.left.clone(), interior.right.clone()), (thin(), thin()), "the vertical lines stay");
+    assert_eq!(b.style_at(9, 3).borders.top, none, "the stored value too");
+    assert_eq!(b.style_at(0, 3).borders.top, thin(), "row 1 keeps the top edge");
+    assert_eq!(b.style_at(0, 3).borders.bottom, none);
+    assert_eq!(b.style_at(LAST_ROW, 3).borders.bottom, thin(), "the last row keeps the bottom edge");
+    assert_eq!(b.style_at(LAST_ROW, 3).borders.top, none);
+    assert_eq!(b.written(), (9, 0, 4), "four column tiers, the two edge rows' cells and the value");
+    assert_eq!(b.undo_depth(), 2);
+    b.undo();
+    assert_eq!(b.style_at(500, 3).borders.top, thin(), "Undo brings the inside lines back");
+
+    let b = std::sync::Arc::new(Book::new(1));
+    b.border((4, 0, 9, LAST_COL), "allBorders").expect("All Borders on rows 5:10");
+    let runner = b.clone();
+    within(60, move || {
+        apply_border_preset_core(&runner.state, &runner.file, CellRect::new(4, 0, 9, LAST_COL), "insideVertical", "solid", "#000000", 0, &[])
+    })
+    .expect("inside vertical off on rows 5:10");
+    let interior = b.style_at(6, 9_000).borders;
+    assert_eq!((interior.left.clone(), interior.right.clone()), (none.clone(), none.clone()));
+    assert_eq!((interior.top.clone(), interior.bottom.clone()), (thin(), thin()));
+    assert_eq!(b.style_at(6, 0).borders.left, thin(), "column A keeps the left edge");
+    assert_eq!(b.style_at(6, LAST_COL).borders.right, thin(), "XFD keeps the right edge");
+    assert_eq!(b.written(), (12, 6, 0), "six row tiers and the two edge columns' cells");
+
+    let b = Book::new(1);
+    b.border((1, 1, 3, 3), "allBorders").unwrap();
+    apply_border_preset_core(&b.state, &b.file, CellRect::new(1, 1, 3, 3), "insideHorizontal", "solid", "#000000", 0, &[])
+        .unwrap();
+    assert_eq!(b.style_at(1, 2).borders.top, thin(), "B2:D4: the outline's top stays");
+    assert_eq!(b.style_at(1, 2).borders.bottom, none, "both sides of the inner boundary go");
+    assert_eq!(b.style_at(2, 2).borders.top, none);
+    assert_eq!(b.style_at(3, 2).borders.bottom, thin());
+}
+
+/// revA#4. Click A2, Ctrl+Shift+Down, Shift+Right x3, Ctrl+B: A2:D1048576 is
+/// 4,194,300 cells, one row short of four whole columns. It was REFUSED
+/// ("at most 4000000 cells"), and A2:A1048576 alone walked a million cells.
+/// [LIVE] Excel stores it as the column format over A:D plus an exception
+/// for row 1, and no cell. Here: four column tiers, and row 1 keeps what it
+/// showed as a ROW format (round-3 review rev3A#7; [LIVE, lane clearfmt
+/// probe.ps1] `<row r=1 customFormat=1/>`, no cell); a value inside takes the
+/// format, typed cells later inherit it. The same for almost-whole ROWS
+/// (B5:XFD10: six row tiers, A5:A10 kept as cells, as in Excel), and for B2
+/// to the sheet's corner (17 billion cells: the column tiers of B:XFD and
+/// row 1's format). CHANGED DELIBERATELY (rev3A#7): the excluded row 1 was
+/// kept as one cell per column -- A1:D1, A1, and the 16,383 cells B1:XFD1
+/// that ran the used range to XFD.
+// SABOTAGE: make CellRect::line_extent return None unless whole_columns() ||
+// whole_rows() -> A2:D1048576 is refused again.
+#[test]
+fn an_almost_whole_rectangle_is_whole_lines_plus_exceptions() {
+    let b = std::sync::Arc::new(Book::new(1));
+    b.seed_cell(0, 0, 0, CellValue::Text("Name".to_string()), CellStyle::new());
+    b.seed_cell(0, 5, 1, CellValue::Number(3.0), CellStyle::new());
+    let runner = b.clone();
+    let result = within(60, move || runner.format((1..=LAST_ROW).collect(), (0..4).collect(), |p| p.bold = Some(true)))
+        .expect("A2:D1048576 Bold is applied, not refused");
+    assert_eq!(b.written(), (2, 1, 4), "four column tiers and row 1's format; no cell beyond A1's and B6's values");
+    for col in 0..4 {
+        assert!(!b.style_at(0, col).font.bold, "row 1 is not in the selection (column {col})");
+        assert!(b.style_at(1, col).font.bold && b.style_at(LAST_ROW, col).font.bold, "column {col}");
+    }
+    assert!(b.style_at(5, 1).font.bold, "B6's value");
+    assert_ne!(b.own_style(5, 1), 0, "and it carries the format itself");
+    assert!(!b.style_at(1, 4).font.bold && !b.style_at(0, 4).font.bold, "column E is not selected");
+    assert!(result.cells.len() <= 4, "only the exceptions are reported ({})", result.cells.len());
+    assert_eq!(b.undo_depth(), 1);
+    b.undo();
+    assert_eq!(b.written(), (2, 0, 0), "Undo removes the tiers and the exception cells");
+    assert!(!b.style_at(1, 0).font.bold);
+
+    // One column: A2:A1048576 is one column tier and one exception, at once.
+    let b = std::sync::Arc::new(Book::new(1));
+    let runner = b.clone();
+    within(60, move || runner.format((1..=LAST_ROW).collect(), vec![0], |p| p.bold = Some(true))).expect("A2:A1048576");
+    assert_eq!(b.written(), (0, 1, 1), "one column tier and row 1's format [LIVE: Excel's own two records]");
+    assert!(!b.style_at(0, 0).font.bold && b.style_at(700_000, 0).font.bold);
+    b.type_value(800_000, 0, "typed");
+    assert!(b.style_at(800_000, 0).font.bold, "a value typed later inherits the column's format");
+
+    // Almost-whole ROWS: B5:XFD10.
+    let b = std::sync::Arc::new(Book::new(1));
+    let runner = b.clone();
+    within(60, move || runner.format((4..10).collect(), (1..=LAST_COL).collect(), |p| p.italic = Some(true)))
+        .expect("B5:XFD10");
+    assert_eq!(b.written(), (6, 6, 0), "six row tiers and A5:A10 kept");
+    assert!(!b.style_at(4, 0).font.italic && !b.style_at(9, 0).font.italic, "column A is not selected");
+    assert!(b.style_at(4, 1).font.italic && b.style_at(9, LAST_COL).font.italic);
+    assert!(!b.style_at(10, 5).font.italic, "row 11 is not selected");
+
+    // B2 to the sheet's corner: 17 billion cells, almost-whole columns B:XFD.
+    let b = std::sync::Arc::new(Book::new(1));
+    let runner = b.clone();
+    within(60, move || runner.format((1..=LAST_ROW).collect(), (1..=LAST_COL).collect(), |p| p.bold = Some(true)))
+        .expect("B2:XFD1048576");
+    assert_eq!(b.written(), (0, 1, LAST_COL as usize), "B:XFD's tiers and row 1's format, no cell");
+    assert_eq!(b.state.grid.read().unwrap().max_col, 0, "the used range no longer runs to XFD");
+    assert!(!b.style_at(500, 0).font.bold, "column A is not selected");
+    assert!(!b.style_at(0, 1).font.bold, "B1 is not selected");
+    assert!(!b.style_at(0, LAST_COL).font.bold, "XFD1 is not selected");
+    assert!(b.style_at(1, 1).font.bold && b.style_at(LAST_ROW, LAST_COL).font.bold);
+}
+
+/// rev3A#7, the crossing. [LIVE, lane clearfmt probe.ps1] Column F italic,
+/// then A2:A1048576 Bold: Excel writes the column format over A, row 1's
+/// format AND `<c r=F1 s=italic/>` -- the row format would otherwise hide
+/// column F's italic at F1. Here the same three records. And where a column
+/// OUTSIDE the range has a format and the range's own columns do not share
+/// one look, the excluded positions stay cells (A2:B1048576 over a bold A and
+/// a plain B: no row format can show both).
+// SABOTAGE: make excluded_row_format return None -> A1 is kept as a cell and
+// row 1 gets no format.
+#[test]
+fn an_excluded_row_keeps_its_look_as_a_row_format_with_its_crossings() {
+    let b = std::sync::Arc::new(Book::new(1));
+    b.seed_column_tier(5, CellStyle::new().with_italic(true));
+    let runner = b.clone();
+    within(60, move || runner.format((1..=LAST_ROW).collect(), vec![0], |p| p.bold = Some(true))).expect("A2:A1048576 Bold");
+    {
+        let grid = b.state.grid.read().unwrap();
+        assert!(grid.row_styles.contains_key(&0), "row 1 keeps its look as a row format");
+        assert!(grid.get_cell(0, 0).is_none(), "A1 is no cell of its own");
+        assert!(grid.get_cell(0, 5).is_some(), "F1 is the crossing the row format would hide");
+        assert_eq!(grid.cells.len(), 1);
+    }
+    assert!(!b.style_at(0, 0).font.bold, "A1 is not selected");
+    assert!(b.style_at(1, 0).font.bold && b.style_at(LAST_ROW, 0).font.bold);
+    assert!(b.style_at(0, 5).font.italic, "F1 keeps column F's italic");
+    assert!(b.style_at(7, 5).font.italic);
+    assert!(!b.style_at(0, 9).font.italic && !b.style_at(0, 9).font.bold, "J1 stays plain");
+    b.undo();
+    assert_eq!(b.written(), (0, 0, 1), "Undo takes back the column format, the row format and the crossing");
+
+    // Columns A (bold) and B (plain) show two looks on row 1: no single row
+    // format holds both, so A1:B1 stay cells.
+    let b = std::sync::Arc::new(Book::new(1));
+    b.seed_column_tier(0, CellStyle::new().with_bold(true));
+    let runner = b.clone();
+    within(60, move || runner.format((1..=LAST_ROW).collect(), vec![0, 1], |p| p.italic = Some(true))).expect("A2:B1048576");
+    assert!(b.state.grid.read().unwrap().row_styles.is_empty(), "no row format");
+    assert!(b.style_at(0, 0).font.bold && !b.style_at(0, 0).font.italic, "A1 keeps bold, not italic");
+    assert!(!b.style_at(0, 1).font.italic, "B1 stays plain");
+    assert!(b.style_at(1, 1).font.italic && b.style_at(1, 0).font.bold && b.style_at(1, 0).font.italic);
+
+    // Nothing changes on the range's columns (un-Bold on a plain C2:C1048576):
+    // row 1 needs nothing to keep its look, so no row format is written and
+    // the document stays clean.
+    let b = std::sync::Arc::new(Book::new(1));
+    let runner = b.clone();
+    within(60, move || runner.format((1..=LAST_ROW).collect(), vec![2], |p| p.bold = Some(false))).expect("C2:C1048576");
+    assert_eq!(b.written(), (0, 0, 0), "nothing written");
+    assert!(!b.file.is_dirty());
+}
+
+/// rev3A#6. The decimal step's reply lists the NEW format first, so the
+/// wrapper's recorded `styles[0].numberFormat` is the format the selection
+/// took. An almost-whole range's excluded positions keep their old style --
+/// here row 1's, the registry's memoised explicit default, made earlier in
+/// the session (Clear Formats under a tier makes it) -- and that LOWER index
+/// used to sort first: the recorder recorded `numberFormat: "General"` over
+/// A2:A1048576, and replaying the macro removed the decimals.
+#[test]
+fn the_decimal_step_names_the_new_format_first_on_an_almost_whole_column() {
+    let b = std::sync::Arc::new(Book::new(1));
+    let explicit_default = {
+        let seed = crate::document_effect::test_seed_effect();
+        let mut registry = b.state.style_registry.write(&seed).unwrap();
+        let normal = registry.default_style().clone();
+        registry.get_or_create_explicit(normal)
+    };
+    b.seed_cell(0, 0, 0, CellValue::Text("Amount".to_string()), CellStyle::new());
+    b.seed_cell(0, 1, 0, CellValue::Number(1.5), CellStyle::new());
+    let runner = b.clone();
+    let result = within(60, move || runner.decimals((1..=LAST_ROW).collect(), vec![0], 1)).expect("Increase Decimal");
+    assert_eq!(b.style_at(1, 0).number_format, num(2, false), "A2: General 1.5 -> 0.00");
+    assert_eq!(b.style_at(0, 0).number_format, NumberFormat::General, "A1 is not selected");
+    assert!(
+        result.styles.iter().any(|e| e.index == explicit_default),
+        "precondition: the excluded row's style is reported too (indices {:?})",
+        result.styles.iter().map(|e| e.index).collect::<Vec<_>>()
+    );
+    let registry = b.state.style_registry.read().unwrap().clone();
+    assert_eq!(
+        registry.get(result.styles[0].index).number_format,
+        num(2, false),
+        "styles[0] -- what the recorder records -- must carry the new format, not the exception's {:?}",
+        result.styles[0].style.number_format
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A cell that MOVES keeps its look (BUG-0354 follow-up, round 4)
+// ---------------------------------------------------------------------------
+//
+// A whole-line format is ONE row/column tier, and a stored cell with style 0
+// INHERITS it. Excel has no inheriting cell: every cell carries its own style
+// and a line format applies only where no cell exists, so a moved cell keeps
+// the look it showed and a cell landing under a line format does not pick it
+// up. [LIVE] Excel 16, 2026-10-29, lane `lineformat` scratchpad probe.ps1 and
+// probe2.ps1 (a fresh hidden instance and a new unsaved workbook per case,
+// Font.Bold read back): with row 5 Bold --
+//   - Sort A1:A8 typed AFTER the format: A4 = 4 bold, A5 = 5 plain;
+//   - Delete Cells A5 shift up (A1:A8 typed after): A5 = 6 plain;
+//   - Insert Cells A5 shift down (typed after): A6 = 5 bold, a value typed
+//     into the inserted A5 plain;
+//   - Delete Cells A3 shift up, A5:A8 empty: the empty A4 bold, a value typed
+//     into A5 plain; Insert Cells A3 shift down, nothing stored: typed A5
+//     plain, typed A6 bold;
+//   - Copy / Cut A1 (plain) to C5 / D5, Fill Down A1:A8, Paste Special >
+//     Formats of A1 onto F5: plain; an EMPTY plain position cut or copied
+//     into A5: a value typed there afterwards plain.
+// Typing is unchanged: a value typed under a line format inherits it
+// (`a_cell_typed_after_formatting_whole_lines_inherits_the_format`).
+
+impl Book {
+    /// Insert / Delete Cells on the active sheet through the real body.
+    fn shift_cells(&self, rect: (u32, u32, u32, u32), shift: crate::commands::structure::structure_cells::CellShift) {
+        crate::commands::structure::structure_cells::shift_cells_impl(
+            &self.state, &self.file, &self.pivots, &self.files, &self.pane, &self.filters, &self.slicer, &self.timelines,
+            rect.0, rect.1, rect.2, rect.3, shift, false,
+        )
+        .expect("the shift runs");
+    }
+
+    /// The style index a STORED cell on `sheet` carries itself (`None`: no cell).
+    fn own_on(&self, sheet: usize, row: u32, col: u32) -> Option<usize> {
+        self.state.grids.read().unwrap()[sheet].get_cell(row, col).map(|c| c.style_index)
+    }
+
+    /// A paste / fill / script batch through the REAL batch body:
+    /// `(row, col, value, styleIndex)`.
+    fn batch(&self, updates: &[(u32, u32, &str, Option<usize>)]) {
+        let updates = updates
+            .iter()
+            .map(|&(row, col, value, style_index)| crate::api_types::CellUpdateInput {
+                row,
+                col,
+                value: value.to_string(),
+                style_index,
+                invariant: None,
+                pasted: None,
+            })
+            .collect();
+        crate::commands::data::update_cells_batch_core(
+            &self.state, &self.file, &self.files, &self.pivots, updates, None, None, None, None,
+        )
+        .expect("the batch runs");
+    }
+
+    /// Row 5 Bold on the active sheet, then A1:A8 = 1..8 TYPED (so A5 only
+    /// inherits the row's bold).
+    fn typed_after_a_bold_row_5() -> Book {
+        let b = Book::new(1);
+        b.format(vec![4], every_col(), |p| p.bold = Some(true)).expect("row 5 Bold");
+        for r in 0..8u32 {
+            b.type_value(r, 0, &(r + 1).to_string());
+        }
+        assert_eq!(b.own_style(4, 0), 0, "precondition: the typed A5 inherits the row's bold");
+        assert!(b.style_at(4, 0).font.bold);
+        b
+    }
+}
+
+/// Sort: the record from the bold row takes its bold along, the record sorted
+/// INTO the bold row stays plain [LIVE `sort_values_typed_AFTER_row5_bold`],
+/// an empty position keeps the row's format [LIVE probe2
+/// `sort_with_empty_position_in_bold_row`], and one Ctrl+Z restores exactly.
+/// Driven through the off-sheet sort; the active one, a `#[tauri::command]`
+/// taking `State`, is pinned on the source below.
+// SABOTAGE: drop the `if inherits[col_offset]` carry in the row arm of
+// sort_range_off_sheet_at -> A4 plain, A5 bold.
+#[test]
+fn a_sort_moves_each_record_with_its_look_across_a_row_format() {
+    let b = Book::new(2);
+    let params = FormattingParams { rows: vec![4], cols: every_col(), bold: Some(true), ..Default::default() };
+    apply_formatting_to_sheets_core(&b.state, &b.file, &[1], &params).expect("row 5 Bold on Sheet2");
+    for r in 0..8u32 {
+        b.seed_cell(1, r, 0, CellValue::Number(f64::from(8 - r)), CellStyle::new());
+    }
+    assert_eq!(b.own_on(1, 4, 0), Some(0), "precondition: A5 (4) inherits the row's bold");
+    assert!(b.style_on(1, 4, 0).font.bold);
+    let depth = b.undo_depth();
+
+    b.sort_by_first_column(1, (0, 0, 7, 1));
+
+    assert_eq!(b.value_on(1, 3, 0), CellValue::Number(4.0));
+    assert!(b.style_on(1, 3, 0).font.bold, "A4: the record from the bold row keeps its bold");
+    assert_eq!(b.value_on(1, 4, 0), CellValue::Number(5.0));
+    assert!(!b.style_on(1, 4, 0).font.bold, "A5: the record sorted INTO the bold row stays plain");
+    assert_ne!(b.own_on(1, 4, 0), Some(0), "A5 is plain by a style of its own (explicit Normal), not by inheriting");
+    assert!(b.style_on(1, 4, 1).font.bold, "B5 holds nothing: the row's format stays where it is");
+    assert_eq!(b.own_on(1, 0, 0), Some(0), "nothing is written where no line format changes the look");
+    assert!(!b.style_on(1, 0, 0).font.bold && !b.style_on(1, 7, 0).font.bold);
+
+    assert_eq!(b.undo_depth(), depth + 1, "one undo step");
+    b.undo();
+    assert_eq!(b.value_on(1, 4, 0), CellValue::Number(4.0), "Undo puts the record back");
+    assert_eq!(b.own_on(1, 4, 0), Some(0), "inheriting again");
+    assert_eq!(b.own_on(1, 3, 0), Some(0));
+    assert!(b.style_on(1, 4, 0).font.bold && !b.style_on(1, 3, 0).font.bold);
+}
+
+/// The ACTIVE sheet's sort is a `#[tauri::command]` taking `State`, which a
+/// unit test cannot build (see `writeback_range_guard_wiring_tests` in
+/// data.rs), so its carry is pinned on the source: BOTH orientations of BOTH
+/// sorts carry an inheriting cell's look through `carried_line_format`, from
+/// the line it came FROM to the line it lands on.
+// SABOTAGE: drop the carry from the column arm of `sort_range` -> one call.
+#[test]
+fn every_sort_arm_carries_an_inheriting_cells_look() {
+    const DATA: &str = include_str!("data.rs");
+    let data = DATA.replace("\r\n", "\n");
+    for signature in ["pub fn sort_range(", "fn sort_range_off_sheet_at("] {
+        let start = data.find(signature).unwrap_or_else(|| panic!("{signature} not found"));
+        let rest = &data[start..];
+        let body = &rest[..rest.find("\n}\n").expect("end of fn")];
+        assert_eq!(
+            body.matches("carried_line_format(").count(),
+            2,
+            "{signature}: the row arm AND the column arm must carry an inheriting cell's look"
+        );
+        for origin in ["*original_row, target_col)", "target_row, *original_col)"] {
+            assert!(body.contains(origin), "{signature}: the look must come from the ORIGINAL line ({origin})");
+        }
+        assert_eq!(body.matches("inherits.push(").count(), 2, "{signature}: both extractions mark the inheriting cells");
+    }
+}
+
+/// Insert / Delete Cells move cells inside a band, but a row format never
+/// moves: every position keeps (or, inserted, takes from its neighbour) the
+/// look it showed. The four [LIVE] cases in the section comment.
+// SABOTAGE: (1) drop the `cell.style_index == 0` carry in shift_cells_impl's
+// lift loop -> Delete Cells A5 leaves A5 bold; (2) make plan_carried_line_looks
+// return no blanks -> a value typed into the inserted A5 comes out bold (and
+// the empty-position cases after it invert).
+#[test]
+fn insert_and_delete_cells_keep_each_positions_look_across_a_row_format() {
+    use crate::commands::structure::structure_cells::CellShift;
+
+    // Delete Cells A5, shift up: A6's 6 moves INTO the bold row and stays plain.
+    let b = Book::typed_after_a_bold_row_5();
+    b.shift_cells((4, 0, 4, 0), CellShift::Up);
+    assert_eq!(b.value_on(0, 4, 0), CellValue::Number(6.0));
+    assert!(!b.style_at(4, 0).font.bold, "A5: the value moved into the bold row stays plain");
+    assert_ne!(b.own_style(4, 0), 0, "by a style of its own");
+    assert!(!b.style_at(3, 0).font.bold && !b.style_at(5, 0).font.bold, "A4 and A6 stay plain");
+    assert!(b.style_at(4, 1).font.bold, "B5, outside the band, keeps the row's bold");
+    b.undo();
+    assert_eq!(b.value_on(0, 4, 0), CellValue::Number(5.0), "Undo restores the cells");
+    assert_eq!(b.own_style(4, 0), 0, "and A5 inherits again");
+    assert!(b.style_at(4, 0).font.bold);
+
+    // Insert Cells A5, shift down: A5's 5 is carried OFF the bold row, bold;
+    // the inserted A5 takes its neighbour A4's look.
+    let b = Book::typed_after_a_bold_row_5();
+    b.shift_cells((4, 0, 4, 0), CellShift::Down);
+    assert_eq!(b.value_on(0, 5, 0), CellValue::Number(5.0));
+    assert!(b.style_at(5, 0).font.bold, "A6: the value carried off the bold row keeps its bold");
+    assert!(!b.style_at(6, 0).font.bold, "A7 (was A6) stays plain");
+    b.type_value(4, 0, "new");
+    assert!(!b.style_at(4, 0).font.bold, "a value typed into the inserted A5 is plain, as its neighbour A4");
+
+    // Delete Cells A3, shift up, with A5:A8 EMPTY: the empty positions move too.
+    let b = Book::new(1);
+    for r in 0..4u32 {
+        b.type_value(r, 0, &(r + 1).to_string());
+    }
+    b.format(vec![4], every_col(), |p| p.bold = Some(true)).expect("row 5 Bold");
+    b.shift_cells((2, 0, 2, 0), CellShift::Up);
+    assert!(b.style_at(3, 0).font.bold, "the empty A5's bold moved up to A4 with the position");
+    b.type_value(3, 0, "t4");
+    b.type_value(4, 0, "t5");
+    assert!(b.style_at(3, 0).font.bold, "a value typed into A4 is bold");
+    assert!(!b.style_at(4, 0).font.bold, "a value typed into A5 is plain (A6's look moved up)");
+    assert!(b.style_at(4, 1).font.bold, "B5, outside the band, keeps the row's bold");
+
+    // Insert Cells A3, shift down, nothing stored.
+    let b = Book::new(1);
+    b.format(vec![4], every_col(), |p| p.bold = Some(true)).expect("row 5 Bold");
+    b.shift_cells((2, 0, 2, 0), CellShift::Down);
+    b.type_value(4, 0, "t5");
+    b.type_value(5, 0, "t6");
+    assert!(!b.style_at(4, 0).font.bold, "typed A5 is plain (A4's look moved down)");
+    assert!(b.style_at(5, 0).font.bold, "typed A6 is bold (A5's look moved down)");
+
+    // The other axis: Delete Cells B1, shift LEFT, under a COLUMN format.
+    let b = Book::new(1);
+    b.format(every_row(), vec![2], |p| p.bold = Some(true)).expect("column C Bold");
+    for c in 0..5u32 {
+        b.type_value(0, c, &(c + 1).to_string());
+    }
+    b.shift_cells((0, 1, 0, 1), CellShift::Left);
+    assert_eq!(b.value_on(0, 0, 1), CellValue::Number(3.0));
+    assert!(b.style_at(0, 1).font.bold, "B1: the value from the bold column keeps its bold");
+    assert_eq!(b.value_on(0, 0, 2), CellValue::Number(4.0));
+    assert!(!b.style_at(0, 2).font.bold, "C1: the value moved into the bold column stays plain");
+    assert!(b.style_at(1, 2).font.bold, "C2, outside the band, keeps the column's bold");
+}
+
+/// Copy / Cut + Paste, Fill and a script's paste "all" send the source cell's
+/// DISPLAYED index, so `styleIndex: 0` means "look Normal": under a line
+/// format it is written as the explicit Normal, and a pasted EMPTY position
+/// keeps its look as an empty cell. A batch write naming no style still
+/// inherits, like typing. [LIVE] copy / cut / fill / empty-position cases in
+/// the section comment.
+// SABOTAGE: make own_index_for_requested_look return `requested` unchanged ->
+// C5 comes out bold; route the empty value straight to clear_cell -> E5 and D8
+// hold nothing.
+#[test]
+fn a_pasted_or_filled_plain_cell_stays_plain_in_a_formatted_row() {
+    let b = Book::new(1);
+    b.format(vec![4], every_col(), |p| p.bold = Some(true)).expect("row 5 Bold");
+    let bold = b.state.grid.read().unwrap().row_styles[&4];
+    let yellow = {
+        let mut style = CellStyle::new();
+        style.fill = yellow_fill();
+        b.state.style_registry.write(&crate::document_effect::test_seed_effect()).unwrap().get_or_create(style)
+    };
+    let depth = b.undo_depth();
+
+    b.batch(&[
+        (4, 2, "1", Some(0)),      // C5: a plain cell pasted into the bold row
+        (4, 3, "x", None),         // D5: written with no style named
+        (4, 4, "", Some(0)),       // E5: an empty plain position pasted there
+        (4, 5, "", Some(bold)),    // F5: an empty position that looked like the row
+        (7, 2, "2", Some(0)),      // C8: a plain cell where no line format sits
+        (7, 3, "", Some(yellow)),  // D8: an empty yellow position (Excel pastes its fill)
+        (7, 4, "", None),          // E8: a clear
+    ]);
+
+    assert!(!b.style_at(4, 2).font.bold, "C5: a plain cell pasted into a bold row stays plain");
+    assert_ne!(b.own_style(4, 2), 0, "by the explicit Normal, not index 0 (which inherits)");
+    assert!(b.style_at(4, 3).font.bold, "D5: a write naming no style inherits the row, like typing");
+    assert_eq!(b.own_style(4, 3), 0);
+    assert!(!b.style_at(4, 4).font.bold, "E5: the pasted empty position keeps its plain look");
+    b.type_value(4, 4, "typed");
+    assert!(!b.style_at(4, 4).font.bold, "and a value typed there afterwards is plain");
+    assert!(b.own_on(0, 4, 5).is_none(), "F5: the same look as the row needs no cell");
+    assert!(b.style_at(4, 5).font.bold);
+    assert_eq!(b.own_style(7, 2), 0, "C8: no line format, so 0 stays 0 -- nothing interned for it");
+    assert_eq!(b.style_at(7, 3).fill, yellow_fill(), "D8: a pasted empty yellow position stays yellow");
+    assert!(b.own_on(0, 7, 4).is_none(), "E8: a value-less write naming no style still clears");
+    assert_eq!(b.undo_depth(), depth + 2, "the batch, then the typed value");
+
+    b.undo();
+    b.undo();
+    assert_eq!(b.written(), (0, 1, 0), "Undo leaves only the row's format");
+}
+
+/// Drag-move, Format Painter and Paste Special > Formats write through
+/// `set_cell_style` with the source's DISPLAYED index (a `#[tauri::command]`
+/// taking `State`): its decision is `own_index_for_requested_look`, proved
+/// here, and the wiring is pinned on the source. [LIVE] probe.ps1
+/// `paste_formats_plain_onto_bold_row`: Paste Special > Formats of a plain A1
+/// onto F5 (typed after row 5 Bold) leaves F5 plain.
+// SABOTAGE: drop the `own_index_for_requested_look` call from set_cell_style.
+#[test]
+fn a_style_written_by_look_is_the_explicit_normal_only_where_a_line_format_shows_through() {
+    let b = Book::new(1);
+    b.format(vec![4], every_col(), |p| p.bold = Some(true)).expect("row 5 Bold");
+    {
+        let grid = b.state.grid.read().unwrap();
+        let mut styles = b.state.style_registry.write(&crate::document_effect::test_seed_effect()).unwrap();
+        let in_row = own_index_for_requested_look(&mut styles, &grid, 4, 5, 0);
+        assert_ne!(in_row, 0, "under the bold row, Normal must be explicit");
+        assert_eq!(styles.get(in_row), styles.default_style(), "and look Normal");
+        assert_eq!(own_index_for_requested_look(&mut styles, &grid, 6, 5, 0), 0, "no line format: 0 stays 0");
+        assert_eq!(own_index_for_requested_look(&mut styles, &grid, 4, 5, 7), 7, "a named non-zero style is kept");
+    }
+    const STYLES: &str = include_str!("styles.rs");
+    let styles_rs = STYLES.replace("\r\n", "\n");
+    let start = styles_rs.find("pub fn set_cell_style(").expect("set_cell_style");
+    let rest = &styles_rs[start..];
+    let body = &rest[..rest.find("\n}\n").expect("end of fn")];
+    let decide = body.find("own_index_for_requested_look(").expect("set_cell_style decides the own index by look");
+    let write = body.find("grid.set_cell(").expect("set_cell_style writes the cell");
+    assert!(decide < write, "set_cell_style must decide the own index BEFORE it writes the cell");
 }

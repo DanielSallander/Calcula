@@ -10,6 +10,12 @@ use crate::persistence::FileState;
 use crate::AppState;
 use tauri::State;
 
+// Chart (and sparkline) data ranges follow insert/delete rows, columns and
+// cells (BUG-0357): the structural commands call
+// `range_shift::shift_chart_and_sparkline_ranges` inside their undo step.
+#[path = "chart_range_shift.rs"]
+pub(crate) mod range_shift;
+
 // CHARTS ARE PERSISTED (`workbook.charts`), so all three mutators dirty the document.
 // They already recorded undo entries -- an unambiguous declaration that the change is
 // user-meaningful and must survive -- while marking nothing dirty, so inserting a chart
@@ -81,30 +87,59 @@ pub(crate) fn save_chart_core(
     Ok(())
 }
 
+/// The refusal [`update_chart`] answers when the write was made against a
+/// record the store no longer holds (its `base`). The chart store
+/// (Charts/lib/chartStore.ts) matches this prefix, re-reads the chart, merges
+/// its pending edit into what is stored now, and writes again.
+pub(crate) const CHART_RECORD_CHANGED: &str = "CHART_RECORD_CHANGED";
+
 /// Update an existing chart entry.
 ///
 /// `sheet_id_stamp`: the write carries NOTHING but source-sheet ids, and says
 /// which step of the chart store it completes (see
 /// [`record_chart_sheet_id_stamp`]). It is verified to be exactly a stamp, and
 /// is then recorded without an undo step.
+///
+/// `base`: the record this write was MADE AGAINST -- the entry exactly as the
+/// caller last saw it stored. When given and the store now holds anything
+/// else, the write is refused with [`CHART_RECORD_CHANGED`] and changes
+/// nothing. The chart store sends the record WHOLE some time after the edit
+/// (its saves are debounced), and the backend rewrites stored records on its
+/// own in between: a structural edit moves their data ranges (BUG-0357,
+/// `chart_range_shift.rs`), a sheet operation remaps their sheet index, an
+/// undo puts an older record back. A whole-record write made before such a
+/// rewrite and landing after it -- the debounce firing while an Insert Rows
+/// runs -- used to put the old range back over the moved one (revF#4).
 #[tauri::command]
 pub fn update_chart(
     state: State<AppState>,
     file_state: State<FileState>,
     entry: ChartEntry,
     sheet_id_stamp: Option<ChartSheetIdStamp>,
+    base: Option<ChartEntry>,
 ) -> Result<(), String> {
-    update_chart_core(&state, &file_state, entry, sheet_id_stamp)
+    update_chart_against(&state, &file_state, entry, sheet_id_stamp, base.as_ref())
 }
 
-/// [`update_chart`] over borrowed state, so the whole path -- protection gate,
-/// the stamp verification, the dirty flag and the undo entry -- is testable
-/// with `create_app_state()`.
+/// [`update_chart`] over borrowed state with no `base` (an unconditional
+/// write), so the whole path -- protection gate, the stamp verification, the
+/// dirty flag and the undo entry -- is testable with `create_app_state()`.
 pub(crate) fn update_chart_core(
     state: &AppState,
     file_state: &FileState,
     entry: ChartEntry,
     sheet_id_stamp: Option<ChartSheetIdStamp>,
+) -> Result<(), String> {
+    update_chart_against(state, file_state, entry, sheet_id_stamp, None)
+}
+
+/// [`update_chart`] over borrowed state, `base` included.
+pub(crate) fn update_chart_against(
+    state: &AppState,
+    file_state: &FileState,
+    entry: ChartEntry,
+    sheet_id_stamp: Option<ChartSheetIdStamp>,
+    base: Option<&ChartEntry>,
 ) -> Result<(), String> {
     // allowEditObjects option gate — charts are the "objects" the flag names.
     crate::protection::check_sheet_action(
@@ -138,13 +173,31 @@ pub(crate) fn update_chart_core(
     if chart_moves(&previous, &entry) {
         crate::sheets::ensure_canvas_objects_unlocked(state, previous.sheet_index, "move or resize a chart")?;
     }
-    let effect = DocumentEffect::mutates(file_state);
-    {
-        let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
-        if let Some(existing) = charts.iter_mut().find(|c| c.id == entry.id) {
-            *existing = entry.clone();
+    // THE BASE CHECK AND THE WRITE IN ONE CRITICAL SECTION: a rewrite that
+    // lands between a check and a later lock would be overwritten all the
+    // same. The record put on the undo stack is the one actually replaced.
+    let previous = {
+        let pending = state.charts.lock_pending().map_err(|e| e.to_string())?;
+        let slot = pending
+            .iter()
+            .position(|c| c.id == entry.id)
+            .ok_or_else(|| format!("Chart with id {} not found", entry.id))?;
+        if let Some(base) = base {
+            let stored = &pending[slot];
+            if stored.sheet_index != base.sheet_index || stored.spec_json != base.spec_json {
+                return Err(format!(
+                    "{CHART_RECORD_CHANGED}: chart {} changed in the workbook after this edit was made; \
+                     the edit was not written over it.",
+                    entry.id
+                ));
+            }
         }
-    }
+        let previous = pending[slot].clone();
+        let effect = DocumentEffect::mutates(file_state);
+        let mut charts = pending.authorize(&effect);
+        charts[slot] = entry.clone();
+        previous
+    };
     crate::undo_commands::record_chart_undo(state, entry.id, Some(previous), "Edit chart");
     Ok(())
 }
@@ -899,5 +952,81 @@ mod sheet_id_stamp_tests {
         let late = super::stamp_chart_record_sheet_ids(&state.charts.read().unwrap()[0].spec_json, &|i| current.get(i).cloned());
         assert!(late.is_none(), "a late stamp still found an index-only range to pin against the NEW sheet list");
         assert_eq!(stored_json(&state)["spec"]["data"]["sheetId"], json!(data_id));
+    }
+}
+
+#[cfg(test)]
+mod base_check_tests {
+    //! revF#4: the chart store writes a record WHOLE, 300 ms after the edit, so a
+    //! write made before a backend rewrite of the record (a structural edit's
+    //! range shift, a sheet remap, an undo) could land after it and put the old
+    //! record back. `update_chart`'s `base` names the record the write was made
+    //! against, and a write whose base the store no longer holds is refused.
+    use super::{update_chart_against, CHART_RECORD_CHANGED};
+    use crate::api_types::ChartEntry;
+    use crate::document_effect::test_seed_effect;
+    use serde_json::json;
+
+    fn record(end_row: u32, title: &str) -> String {
+        json!({
+            "chartId": "c1", "name": "Chart 1", "sheetIndex": 0, "x": 0, "y": 0, "width": 300, "height": 200,
+            "spec": {
+                "mark": "bar",
+                "data": { "sheetIndex": 0, "startRow": 0, "startCol": 0, "endRow": end_row, "endCol": 2 },
+                "series": [{ "name": "Sales", "sourceIndex": 1, "color": null }],
+                "title": title
+            }
+        })
+        .to_string()
+    }
+
+    fn same(a: &ChartEntry, b: &ChartEntry) -> bool {
+        a.id == b.id && a.sheet_index == b.sheet_index && a.spec_json == b.spec_json
+    }
+
+    #[test]
+    fn a_write_against_a_record_the_store_no_longer_holds_is_refused_and_changes_nothing() {
+        let state = crate::create_app_state();
+        let fs = crate::persistence::FileState::default();
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let seen = ChartEntry { id, sheet_index: 0, spec_json: record(4, "Old") };
+        state.charts.write(&test_seed_effect()).unwrap().push(seen.clone());
+        // The backend moves the range (an Insert Rows) after the store read it.
+        let shifted = ChartEntry { id, sheet_index: 0, spec_json: record(5, "Old") };
+        state.charts.write(&test_seed_effect()).unwrap()[0] = shifted.clone();
+
+        // The store's pending retitle, made against the record it SAW.
+        let edit = ChartEntry { id, sheet_index: 0, spec_json: record(4, "Mine") };
+        let refused = update_chart_against(&state, &fs, edit.clone(), None, Some(&seen)).unwrap_err();
+        assert!(refused.starts_with(CHART_RECORD_CHANGED), "{refused}");
+        assert!(same(&state.charts.read().unwrap()[0], &shifted), "the moved range is kept");
+        assert!(!fs.is_dirty(), "a refused write leaves the document clean");
+        assert!(!state.undo_stack.lock().unwrap().can_undo(), "and records no undo step");
+
+        // A sheet remap changes only the index: that is a different record too.
+        let remapped_base = ChartEntry { sheet_index: 1, ..shifted.clone() };
+        assert!(update_chart_against(&state, &fs, edit.clone(), None, Some(&remapped_base)).is_err());
+
+        // Made against what IS stored: written, dirty, one undo step.
+        let rebased = ChartEntry { id, sheet_index: 0, spec_json: record(5, "Mine") };
+        update_chart_against(&state, &fs, rebased.clone(), None, Some(&shifted)).expect("the base matches");
+        assert!(same(&state.charts.read().unwrap()[0], &rebased));
+        assert!(fs.is_dirty());
+        assert!(state.undo_stack.lock().unwrap().can_undo());
+
+        // No base: the write is unconditional, as every other caller's is.
+        let unconditional = ChartEntry { id, sheet_index: 0, spec_json: record(9, "Script") };
+        update_chart_against(&state, &fs, unconditional.clone(), None, None).expect("no base, no check");
+        assert!(same(&state.charts.read().unwrap()[0], &unconditional));
+    }
+
+    #[test]
+    fn the_base_travels_as_a_camel_case_chart_entry() {
+        // `invoke("update_chart", { entry, base })`: the same shape as `entry`.
+        let base: ChartEntry = serde_json::from_value(json!({
+            "id": "01912345-6789-7abc-8def-0123456789ab", "sheetIndex": 2, "specJson": "{}"
+        }))
+        .expect("a ChartEntry from the store's wire shape");
+        assert_eq!(base.sheet_index, 2);
     }
 }

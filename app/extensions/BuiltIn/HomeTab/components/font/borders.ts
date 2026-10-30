@@ -55,7 +55,9 @@
 //          replicates to grouped sheets). Edge presets go through
 //          `applyFormatting` on the edge row or column, as the survey
 //          (font.md section 3) prescribes: the preset command has no "one
-//          outer edge" preset.
+//          outer edge" preset. That is bounded too (BUG-0354): Left Border on
+//          a whole column sends its rows as one run and the backend writes ONE
+//          column tier, not a million cells.
 
 import type { RibbonIconKey } from "@api";
 import { CoreCommands } from "@api/commands";

@@ -1761,6 +1761,7 @@ mod tests {
             controls: Vec::new(),
             media: std::collections::HashMap::new(),
             floating_ranges: Vec::new(),
+            object_bindings: Vec::new(),
         };
         let made = crate::dev_mode::make_dev_subscription("C:/w/book.cala", &pulled, "now");
         assert_eq!(made.environment, None);

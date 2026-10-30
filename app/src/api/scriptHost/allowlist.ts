@@ -948,9 +948,11 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              validate: vConnectorRemove,
                              desc: "Remove its own data connector (and the model tables it feeds)" },
   // ---- schedule: the Application.OnTime replacement. A job invokes a method
-  //      the script itself EXPOSED (context.expose) — reusing the connector
-  //      host's callExposedMethod path exactly, so there is no second way for
-  //      a timer to enter a script realm.
+  //      the script itself EXPOSED (context.expose) — through the same
+  //      exposed-method registry the connector host's callExposedMethod
+  //      reaches, by its strict door (hostCallOwnExposed: a method missing at
+  //      the job's address, or another script's, is a FAILED run), so there is
+  //      no second way for a timer to enter a script realm.
   //
   //      WHAT MAKES THIS CAPABILITY DIFFERENT: its effects OUTLIVE the session
   //      that consented to them. Jobs are persisted in the workbook, so this is
@@ -1290,9 +1292,9 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Turn the sheet you would print into a PDF and ask you where to save it (you choose the folder and the name; it is never told where anything on your computer is)" },
   // ---- ui.shortcut (G2): the Application.OnKey replacement. A script binds
   //      ONE combination to a method it already published with context.expose,
-  //      and pressing those keys calls it — through callExposedMethod, the same
-  //      door a scheduled job and a cross-script call use, so a keystroke can
-  //      never reach anything an ordinary call could not.
+  //      and pressing those keys calls it — through the exposed-method
+  //      registry a scheduled job and a cross-script call use, so a keystroke
+  //      can never reach anything an ordinary call could not.
   //
   //      WHY A CAPABILITY AND NOT JUST A TIER. Every other row on this table
   //      answers "what may it touch?". This one answers something different: it

@@ -738,7 +738,11 @@ describe("the keyboard on a ribbon tab's or a pane's BUTTON (review 2026-09-28)"
       const e = press(key, init);
       await flush();
       expect(lateCapture, combo).toHaveBeenCalledTimes(1);
-      expect(e.defaultPrevented, combo).toBe(false);
+      // Ctrl+R's only meaning off the grid is WebView2's page reload, which
+      // would throw away unsaved work (BUG-0393): Fill Right still stands
+      // down, but the reload default is prevented. Every other key keeps its
+      // browser meaning.
+      expect(e.defaultPrevented, combo).toBe(combo === "Ctrl+R");
     }
     expect(toasts).toEqual([]);
     expect(ran).toEqual([]);

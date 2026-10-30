@@ -18,6 +18,7 @@ import {
   listExposed,
   HOST_ONLY_EXPOSED_PREFIX,
   registerExposed,
+  rekeyExposed,
   unregisterExposed,
   registerMountedHandle,
   scriptEmitEventName,
@@ -68,6 +69,10 @@ import { appendAudit } from "./auditRing";
 import type { CapabilityId } from "./capabilityIds";
 import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS, checkCellWriteValue } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
+// The sheet-switch seam's "follow the backend's answer" (BUG-0464), shared with
+// the command line. Imported statically: its own grid reach is loaded on use.
+import { announceSheetsChanged as announceSheetsChangedThroughSeam } from "../sheetSwitch";
+import type { SheetsRenumbering } from "../sheetSwitch";
 import type { ControlValue } from "../controlValues";
 import type { AutoFilterColumnCriteria } from "../autoFilterService";
 import type { ScriptCell } from "../scriptableObjects";
@@ -5760,7 +5765,9 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     // ---- unlocked: sheet CRUD (B2) ----
     case "api.addSheet": {
       // [name?, position?, kind?] — the work (and its reasoning) lives in
-      // executeAddSheet, exported so the kind forwarding is testable.
+      // executeAddSheet, exported so the kind forwarding is testable. It
+      // announces the add itself, straight from the backend's answer; the
+      // batch resumes after (see announceSheetsChanged below).
       const [name, position, kind] = args as [
         (string | null)?,
         ({ before?: number | string | null; after?: number | string | null } | null)?,
@@ -5774,12 +5781,13 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "api.deleteSheet": {
       // [ref] — the work (and its reasoning: the delete names its sheet by the
       // STABLE id read with the index) lives in executeDeleteSheet, exported so
-      // a renumbering between the read and the delete is testable.
+      // a renumbering between the read and the delete is testable. Followed
+      // FIRST, with the index it removed, then the batch resumes (an IPC).
       const [ref] = args as [number | string];
       const lib = await getLib();
       const result = await executeDeleteSheet(lib, ref);
+      await announceSheetsChanged(result, { removedIndex: result.removedIndex });
       await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
-      await announceSheetsChanged(result);
       return undefined;
     }
     case "api.renameSheet": {
@@ -5788,8 +5796,8 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const index = await resolveSheetRef(lib, ref, "renameSheet");
       await assertSheetNameFree(lib, newName, index);
       const result = await lib.renameSheet(index, newName);
-      await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
       await announceSheetsChanged(result);
+      await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
       return undefined;
     }
     case "api.setSheetVisibility": {
@@ -5823,8 +5831,10 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         );
       }
       const result = await lib.moveSheet(fromIndex, toIndex);
+      // move_sheet's rotate, told to Core's per-sheet view memory as the tab
+      // strip tells its own drag.
+      await announceSheetsChanged(result, { moved: { fromIndex, toIndex } });
       await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
-      await announceSheetsChanged(result);
       return undefined;
     }
     case "api.copySheet": {
@@ -7291,14 +7301,14 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     //   - it passes `{ combo }` and nothing else. Not the DOM event, not the
     //     key, not the target, not a repeat flag. A script learns that ITS
     //     shortcut fired, never what the user typed.
-    // Invocation goes through callExposedMethod — the same door a scheduled job
-    // and a cross-script call use. There is no second way into a script realm.
+    // Invocation goes through the exposed-method registry — the one a scheduled
+    // job (by its strict door, hostCallOwnExposed) and a cross-script call use.
+    // There is no second way into a script realm.
     case "cap.shortcutBind": {
       const [combo, handler, options] = args as [string, string, { label?: string } | undefined];
       const kb = await import("../keybindings");
       const scriptId = definition.id;
       const objectType = definition.objectType;
-      const boundInstanceId = definition.instanceId;
       const handlerName = handler.trim();
       const result = kb.registerScriptKeybinding({
         scriptId,
@@ -7308,6 +7318,9 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         label: options?.label,
         run: (firedCombo: string) => {
           if (mounted.get(scriptId) !== mw) return;
+          // Read at FIRE time: a named-range script's binding can move while
+          // it runs (`hostRebindMountedScript`), and its exposures move with it.
+          const boundInstanceId = mw.definition.instanceId;
           const exposed = listExposed().find(
             (m) =>
               m.ownerScriptId === scriptId &&
@@ -8104,10 +8117,11 @@ async function executeSetState(
     }
     case "namedRange.update": {
       // Edit the DEFINITION of the name (refersTo / scope / comment / the name
-      // itself), mirroring MCP update_named_range — with one improvement: a
-      // rename lands as ONE undo step (delete+create inside a host-side undo
-      // transaction) instead of the MCP's two. Returns { name } so the worker
-      // handle can re-key itself after a rename.
+      // itself), mirroring MCP update_named_range: a rename is the Name
+      // Manager's rename (the readers and the name's scripts follow it), then
+      // its edit for what else changed -- with one improvement: both land as
+      // ONE undo step (a host-side undo transaction) instead of the MCP's two.
+      // Returns { name } so the worker handle can re-key itself after a rename.
       const [patch] = args as [ScriptNamedRangeUpdate];
       return executeNamedRangeUpdate(instanceId, patch);
     }
@@ -8700,12 +8714,29 @@ export interface ScriptNamedRangeUpdate {
 }
 
 /**
- * Mirrors MCP update_named_range, with two improvements the frontend can
- * afford: a RENAME lands as ONE undo step (delete+create inside a host-side
- * undo transaction — record_object_undo joins an open transaction), and the
- * name's attached object scripts are re-keyed instead of silently pruned.
- * A rename is refused while a DISTRIBUTED script is attached: re-creating one
- * through the save command would launder its provenance to "local".
+ * Mirrors MCP update_named_range. A RENAME is the Name Manager's own rename
+ * (`rename_named_range`): the move, every formula that reads the name
+ * repointed -- across sheets and inside other names' definitions -- and the
+ * name's object scripts re-pointed, all in Rust. Then, only when the scope,
+ * the target or the comment changes too, the Name Manager's EDIT addressed to
+ * the new spelling, exactly as NewNameDialog does it. Both run inside ONE
+ * host-side undo transaction (withScriptUndoBatch; each command's record joins
+ * it), so the script's edit is one Ctrl+Z.
+ *
+ * It used to rename by DELETE + CREATE, on the ground that the rename command
+ * recorded no undo entry and skipped the name-vs-table check (both long
+ * fixed): the delete rewrites no formula and the create repoints none, so
+ * after a script renamed Rate to Tax every `=Rate*2` showed #NAME?.
+ *
+ * A case-only rename ("MyName" -> "myname") is a rename too: it re-spells the
+ * name and its readers. Compared case-insensitively, as it once was, it took
+ * the edit-only path, which keeps the old spelling, and changed nothing.
+ *
+ * A rename is still refused while a DISTRIBUTED script is attached. The
+ * delete + create route refused it because re-saving the script would have
+ * laundered its provenance to "local"; the backend's re-point now keeps the
+ * provenance, and the refusal stays as the conservative boundary: a script
+ * does not move another package's code onto a different name.
  *
  * Returns `{ name }` — the (possibly new) name — so worker handles re-key.
  */
@@ -8729,7 +8760,8 @@ export async function executeNamedRangeUpdate(
       : await resolveSheetRef(lib, patch.sheetIndex, "namedRange.update");
   }
   const targetName = patch.newName ?? existing.name;
-  const renaming = targetName.toUpperCase() !== existing.name.toUpperCase();
+  // Exact comparison: a case-only change is a rename (see above).
+  const renaming = targetName !== existing.name;
 
   if (!renaming) {
     const result = await lib.updateNamedRange(
@@ -8742,11 +8774,6 @@ export async function executeNamedRangeUpdate(
     return { name: existing.name };
   }
 
-  // RENAME = delete + create (both fully validated + undoable — the raw
-  // rename_named_range command records no undo entry and skips the
-  // name-vs-table collision check, which is why MCP shuns it too). The
-  // delete PRUNES scripts attached to the name, so they are captured first
-  // and re-saved pointing at the new name afterwards.
   const scriptBackend = await import("../objectScriptBackend");
   const summaries = (await scriptBackend.listObjectScripts()).filter(
     (s) => s.objectType === "namedRange" &&
@@ -8759,52 +8786,105 @@ export async function executeNamedRangeUpdate(
         "Detach the script (or copy it to a local one) first.",
     );
   }
-  const attached = await Promise.all(summaries.map((s) => scriptBackend.getObjectScript(s.id)));
 
-  await withScriptUndoBatch(lib, `Rename name ${existing.name} -> ${targetName}`, async () => {
-    const removed = await lib.deleteNamedRange(existing.name);
-    if (!removed.success) {
-      throw new BrokerError(
-        "ValidationError",
-        removed.error || `Failed to remove named range "${existing.name}"`,
-      );
-    }
-    const created = await lib.createNamedRange(
-      targetName, targetScope, targetRefersTo, targetComment, existing.folder,
-    );
-    if (!created.success) {
-      // Put the original back so a rejected rename is not a silent delete
-      // (the throw below also cancels the undo transaction).
-      await lib.createNamedRange(
-        existing.name, existing.sheetIndex, existing.refersTo, existing.comment, existing.folder,
-      );
-      throw new BrokerError(
-        "ValidationError",
-        created.error || `Failed to create named range "${targetName}"`,
-      );
-    }
-  });
+  const redefining =
+    targetRefersTo !== existing.refersTo ||
+    (targetComment ?? null) !== (existing.comment ?? null) ||
+    (targetScope ?? null) !== (existing.sheetIndex ?? null);
 
-  // Re-key the rescued scripts at the new name (persisted store)...
-  for (const script of attached) {
-    await scriptBackend.saveObjectScript({
-      ...script,
-      instanceId: targetName,
-    } as Parameters<typeof scriptBackend.saveObjectScript>[0]);
-  }
-  // ...and the LIVE mounts, so an attached script's own-object aspects keep
-  // resolving after the rename (instanceId is pinned at mount).
-  for (const other of mounted.values()) {
+  // The rename, then the edit for what else changed -- ONE undo step. A
+  // refused rename throws (nothing moved, and cancelling the bracket drops an
+  // empty record). An edit refused AFTER the rename landed must NOT throw in
+  // here: the throw would cancel the bracket, which drops its undo record and
+  // KEEPS the rename -- a rename the user cannot undo. It is reported after
+  // the bracket has committed the rename as its step.
+  const editRefusal = await withScriptUndoBatch(
+    lib,
+    `Rename name ${existing.name} -> ${targetName}`,
+    async (): Promise<string | null> => {
+      const renamed = await lib.renameNamedRange(existing.name, targetName);
+      if (!renamed.success) {
+        throw new BrokerError(
+          "ValidationError",
+          renamed.error || `Failed to rename named range "${existing.name}"`,
+        );
+      }
+      if (!redefining) return null;
+      // From here the entry is keyed by the NEW name.
+      try {
+        const updated = await lib.updateNamedRange(
+          targetName, targetScope, targetRefersTo, targetComment, existing.folder,
+        );
+        return updated.success ? null : updated.error || "namedRange.update failed";
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+    },
+  );
+
+  // The backend re-pointed the name's scripts in the store (inside the
+  // rename's undo step), so nothing is re-saved here. The LIVE mounts are
+  // re-keyed NOW, synchronously, so an attached script's own-object aspects
+  // keep resolving the moment its own `rename()` returns (instanceId is pinned
+  // at mount). The backend also announces the re-bind to every window
+  // (`workbook:object-scripts-changed`, "rebound"); the main window's follower
+  // re-keys through the same `hostRebindMountedScript`, which is a no-op for
+  // a mount already re-keyed here.
+  for (const other of [...mounted.values()]) {
     if (
       other.definition.objectType === "namedRange" &&
       (other.definition.instanceId ?? "").toUpperCase() === existing.name.toUpperCase()
     ) {
-      other.definition.instanceId = targetName;
-      other.handle.instanceId = targetName;
+      hostRebindMountedScript(other.definition.id, targetName);
     }
   }
   emitAppEvent(AppEvents.NAMED_RANGES_CHANGED, {});
+  if (editRefusal !== null) {
+    throw new BrokerError(
+      "ValidationError",
+      `Renamed "${existing.name}" to "${targetName}", but could not change its definition: ${editRefusal}`,
+    );
+  }
   return { name: targetName };
+}
+
+/**
+ * Re-key a LIVE mount whose script the backend re-bound to another instance
+ * (a named-range script follows its name through a rename; a control script
+ * follows its control when it moves with its cells, to another cell or with
+ * its sheet; and the undo / redo of each). Returns true when the mount moved;
+ * false when the script is not mounted or already bound there.
+ *
+ * The mount is RE-KEYED, not remounted: the script that renamed its own name
+ * is waiting on that very call, and a remount would terminate its realm under
+ * it. What moves is everything that addresses the script by its binding --
+ * the mount's definition (own-object aspects resolve through it), the broker
+ * handle, every method the script exposed (the exposure map is keyed by the
+ * instance id, so a scheduled job, a shortcut or the debugger calling the
+ * method under the new binding found nothing while it stayed under the old
+ * one), and its hook forwarders, which read the binding when an event arrives
+ * (`wireHookForwarder`; a captured id kept a namedRange.onChange filtering and
+ * mirroring the OLD name, rev6B#3). A canvas-rendered shape's bitmap filed
+ * under the old id is dropped, so no control that lands on that cell later
+ * paints it. It used to be done inline on the script host's own rename route
+ * only, and without the exposures; every route now reaches this one function
+ * -- the host's route directly, every other route (the Name Manager, the
+ * command line, MCP, a structural edit, a control move, a sheet move, undo /
+ * redo) through the backend's "rebound" announcement
+ * (`scripting/script_rebind.rs`).
+ */
+export function hostRebindMountedScript(scriptId: string, instanceId: string | null): boolean {
+  const mw = mounted.get(scriptId);
+  if (!mw) return false;
+  const before = mw.definition.instanceId ?? null;
+  if (before === instanceId) return false;
+  mw.definition.instanceId = instanceId;
+  mw.handle.instanceId = instanceId;
+  rekeyExposed(mw.handle, before);
+  if (before) invalidateBitmap("shape", before);
+  // A trigger the debugger offers carries the address too.
+  refreshIdleDebugTriggers(mw);
+  return true;
 }
 
 // ============================================================================
@@ -9278,6 +9358,20 @@ export async function pasteScriptClipboard(
     col: number;
     value: string;
     invariant: boolean;
+    /**
+     * A copied formula or stored value: written as a PASTE
+     * (`CellUpdateInput.pasted`), so it keeps its kind in a Text-formatted (@)
+     * cell -- Excel's PasteSpecial xlPasteFormulas / xlPasteValues keep a
+     * formula a formula and a number a number there.
+     */
+    pasted?: boolean;
+    /**
+     * What the BATCH writes when it differs from `value`: copied TEXT goes
+     * behind the apostrophe escape, so "007", "TRUE" or "=A1" held as text is
+     * stored as that text and never re-read as a number, a boolean or a
+     * formula. The writeback draft gate is handed `value`, the plain text.
+     */
+    batchValue?: string;
     styleIndex?: number;
     shiftIndex?: number;
   }
@@ -9295,7 +9389,7 @@ export async function pasteScriptClipboard(
         pending.push({ row: destRow, col: destCol, value: "", invariant: false });
         continue;
       }
-      const entry: Pending = { row: destRow, col: destCol, value: "", invariant: false };
+      const entry: Pending = { row: destRow, col: destCol, value: "", invariant: false, pasted: true };
       if (mode !== "values" && cell.formula) {
         const rowDelta = destRow - (clip.startRow + r);
         const colDelta = destCol - (clip.startCol + c);
@@ -9309,6 +9403,20 @@ export async function pasteScriptClipboard(
         const v = clipboardValueString(cell);
         entry.value = v.value;
         entry.invariant = v.invariant;
+        if (cell.type === "text") {
+          // INVARIANT, so the apostrophe stores the text verbatim and implies
+          // no format (review rev5B#3, BUG-0346). Sent as an ENTRY, the
+          // localized ladder's apostrophe rung implied Text (@) for text that
+          // reads as a number, boolean, date or formula ("007", "TRUE",
+          // "2020-06-01", "=A1"), and in modes 'values' / 'formulas' -- no
+          // styleIndex to hold the cell's own -- the General destination became
+          // @, so a 5 typed there later was stored as the TEXT "5". Excel's
+          // PasteSpecial xlPasteValues / xlPasteFormulas of such text leave
+          // the destination General [LIVE]. Core's pastedConstantInput sends
+          // copied text the same way.
+          entry.batchValue = `'${v.value}`;
+          entry.invariant = true;
+        }
       }
       if (mode === "all") entry.styleIndex = cell.styleIndex;
       pending.push(entry);
@@ -9334,13 +9442,14 @@ export async function pasteScriptClipboard(
   const byCoord = new Map(pending.map((p) => [`${p.row},${p.col}`, p]));
   const updates = plain.map((w) => {
     const p = byCoord.get(`${w.row},${w.col}`);
-    const update: { row: number; col: number; value: string; styleIndex?: number; invariant?: boolean } = {
+    const update: { row: number; col: number; value: string; styleIndex?: number; invariant?: boolean; pasted?: boolean } = {
       row: w.row,
       col: w.col,
-      value: w.value,
+      value: p?.batchValue ?? w.value,
     };
     if (p?.styleIndex !== undefined) update.styleIndex = p.styleIndex;
     if (p?.invariant) update.invariant = true;
+    if (p?.pasted) update.pasted = true;
     return update;
   });
   await withScriptUndoBatch(lib, `Paste ${pending.length} cells`, async () => {
@@ -10702,29 +10811,27 @@ async function syncDimensionToGrid(
 
 /** Sheet list changed (add / delete / rename / visibility): sync Core's sheet
  *  context and fire the one event the tab bar + extensions already listen to
- *  (SheetTabs reloads its list from SHEET_CHANGED). */
+ *  (SheetTabs reloads its list from SHEET_CHANGED). ONE body, shared with the
+ *  command line (BUG-0464): `@api/sheetSwitch`'s `announceSheetsChanged`,
+ *  which loads the grid modules it reaches on use, as this always did.
+ *
+ *  `renumbering`: what the change did to the sheet indices -- a delete's
+ *  removed index, an add's or a copy's landing index, a move's two ends --
+ *  exactly what the tab strip tells for its own (review revG#3). Untold, Core
+ *  re-keyed no per-sheet view memory, and every later sheet came back with
+ *  its neighbour's selection and scroll.
+ *
+ *  CALL IT STRAIGHT FROM THE BACKEND'S ANSWER, before any other await -- in
+ *  particular before `resumeScriptBatchAfterHistoryEnded`, which makes an IPC
+ *  call when the script has a batch open. The wrapper's own announcement
+ *  starts a tab-strip reload, and one that lands first moves Core's context
+ *  alone; the follow then judges the switch already made and skips the save
+ *  and restore of the two sheets' views. */
 async function announceSheetsChanged(
   result: { sheets: Array<{ index: number; name: string; kind?: string; sheetId?: string }>; activeIndex: number },
+  renumbering?: SheetsRenumbering,
 ): Promise<void> {
-  const active = result.sheets.find((s) => s.index === result.activeIndex) ?? result.sheets[0];
-  const [gridApi, dispatchMod] = await Promise.all([import("../grid"), import("../gridDispatch")]);
-  if (active) {
-    // The surface rides the same dispatch as the context (a canvas never tears),
-    // and so does the sheet's STABLE id when the list carries one: an open
-    // edit follows its sheet by it (a dispatch without one clears it).
-    const surface = active.kind === "canvas" ? "canvas" : "grid";
-    dispatchMod.dispatchGridAction(
-      typeof active.sheetId === "string" && active.sheetId !== ""
-        ? gridApi.setActiveSheet(active.index, active.name, surface, active.sheetId)
-        : gridApi.setActiveSheet(active.index, active.name, surface),
-    );
-  }
-  emitAppEvent(AppEvents.SHEET_CHANGED, {
-    sheetIndex: active?.index ?? result.activeIndex,
-    sheetName: active?.name ?? "",
-  });
-  gridApi.refreshGridDimensions();
-  gridApi.refreshGridData();
+  await announceSheetsChangedThroughSeam(result, renumbering);
 }
 
 /** Reject a duplicate sheet name BEFORE the backend does, so the script gets a
@@ -10796,12 +10903,15 @@ export async function executeCopySheet(
   // list WITHOUT the copy, and move_sheet rotates the copy there — which
   // yields exactly "the base list with the copy inserted at target".
   const target = resolveSheetPosition(before.sheets, position, "copySheet");
-  let result;
+  const beforeNames = new Set(before.sheets.map((s) => s.name));
   let added: { index: number; name: string } | undefined;
   if (target === null) {
-    result = await lib.copySheet(sourceIndex, newName ?? undefined);
-    const beforeNames = new Set(before.sheets.map((s) => s.name));
+    const result = await lib.copySheet(sourceIndex, newName ?? undefined);
     added = result.sheets.find((s) => !beforeNames.has(s.name));
+    // Followed straight from the answer, with where the copy landed (every
+    // sheet from there on moved up one -- the tab strip tells its own copy
+    // the same way).
+    await announceSheetsChanged(result, added ? { insertedIndex: added.index } : undefined);
   } else {
     // Copy + move under ONE bracket, through withScriptUndoBatch -- so inside a
     // script's open batch it JOINS and never closes that batch. Today the
@@ -10810,20 +10920,24 @@ export async function executeCopySheet(
     // commit closes nothing. It keeps the two ONE step should a sheet change
     // ever become undoable. A batch the script has open resumes after the call
     // (resumeScriptBatchAfterHistoryEnded).
-    const positioned = await withScriptUndoBatch(lib, "Copy sheet", async () => {
-      let copied = await lib.copySheet(sourceIndex, newName ?? undefined);
-      const beforeNames = new Set(before.sheets.map((s) => s.name));
+    //
+    // EACH STEP IS FOLLOWED STRAIGHT FROM ITS OWN ANSWER: the copy (the grid
+    // switches to it, every later sheet's view memory moves up one), then the
+    // move (the rotate). One follow after both would judge the switch against
+    // a context the copy's own tab-strip reload may already have moved, and a
+    // move that failed would leave the grid on a sheet the backend had left.
+    added = await withScriptUndoBatch(lib, "Copy sheet", async () => {
+      const copied = await lib.copySheet(sourceIndex, newName ?? undefined);
       const copy = copied.sheets.find((s) => !beforeNames.has(s.name));
+      await announceSheetsChanged(copied, copy ? { insertedIndex: copy.index } : undefined);
       if (copy && copy.index !== target) {
-        copied = await lib.moveSheet(copy.index, target);
-        return { result: copied, added: copied.sheets.find((s) => s.name === copy.name) };
+        const moved = await lib.moveSheet(copy.index, target);
+        await announceSheetsChanged(moved, { moved: { fromIndex: copy.index, toIndex: target } });
+        return moved.sheets.find((s) => s.name === copy.name);
       }
-      return { result: copied, added: copy };
+      return copy;
     });
-    result = positioned.result;
-    added = positioned.added;
   }
-  await announceSheetsChanged(result);
   if (!added) {
     throw new BrokerError("HostError", "The sheet was copied but the new sheet could not be identified");
   }
@@ -10849,11 +10963,15 @@ export async function executeCopySheet(
  *
  * A list without the sheet's id (a backend skew; the backend always reports
  * one) is refused rather than deleted unguarded.
+ *
+ * Answers the backend's list WITH the index it removed (`removedIndex`), which
+ * the door hands the follow: every sheet after it moved down one, and Core's
+ * per-sheet view memory must be re-keyed to match (review revG#3).
  */
 export async function executeDeleteSheet(
   lib: Awaited<ReturnType<typeof getLib>>,
   ref: number | string,
-): Promise<SheetsResult> {
+): Promise<SheetsResult & { removedIndex: number }> {
   const before = await lib.getSheets();
   const index = resolveSheetRefIn(before.sheets, ref, "deleteSheet");
   if (before.sheets.length <= 1) {
@@ -10868,7 +10986,7 @@ export async function executeDeleteSheet(
     );
   }
   try {
-    return await lib.deleteSheet(index, { expectedSheetId });
+    return { ...(await lib.deleteSheet(index, { expectedSheetId })), removedIndex: index };
   } catch (err) {
     if (err instanceof BrokerError) throw err;
     throw new BrokerError(
@@ -10886,7 +11004,9 @@ export async function executeDeleteSheet(
  * as add + move under ONE bracket: the anchor is resolved against the PRE-ADD
  * list (an append never renumbers it), the final index computed there, and
  * move_sheet rotates the new sheet into place. A failed move CANCELS the
- * bracket it opened and rethrows — the caller is never told half the truth.
+ * bracket it opened and rethrows — the caller is never told half the truth;
+ * the grid has already followed the add, so it shows the sheet the backend
+ * made active.
  * The bracket is `withScriptUndoBatch`, so inside a script's open batch the
  * add and the move JOIN that batch instead of closing it. Today the bracket
  * groups nothing: the add and the move each END the undo history (Excel
@@ -10913,19 +11033,28 @@ export async function executeAddSheet(
   const target = resolveSheetPosition(before.sheets, position, "addSheet");
   if (target === null) {
     const result = await lib.addSheet(name ?? undefined, kind ?? undefined);
-    await announceSheetsChanged(result);
-    // add_sheet makes the new sheet active — resolve it by INDEX FIELD, not
-    // by array position (the two diverge once a sheet has been deleted).
+    // add_sheet makes the new sheet active, at the index it landed on (the end
+    // of the user sheets: an object sheet in the tail moves up one) -- told as
+    // an insertion there, as the tab strip tells its own add.
+    await announceSheetsChanged(result, { insertedIndex: result.activeIndex });
+    // Resolved by INDEX FIELD, not by array position (the two diverge once a
+    // sheet has been deleted).
     const added = result.sheets.find((s) => s.index === result.activeIndex);
     return { index: added?.index ?? result.activeIndex, name: added?.name ?? "" };
   }
-  // Add + move under ONE bracket (see above).
+  // Add + move under ONE bracket (see above), EACH STEP FOLLOWED STRAIGHT FROM
+  // ITS OWN ANSWER (as in executeCopySheet): the add, then the rotate. A move
+  // that fails therefore leaves the grid on the sheet that was added -- where
+  // the backend is -- and the error reaches the script.
   const result = await withScriptUndoBatch(lib, "Add sheet", async () => {
     const appended = await lib.addSheet(name ?? undefined, kind ?? undefined);
     const appendedAt = appended.activeIndex;
-    return target !== appendedAt ? lib.moveSheet(appendedAt, target) : appended;
+    await announceSheetsChanged(appended, { insertedIndex: appendedAt });
+    if (target === appendedAt) return appended;
+    const moved = await lib.moveSheet(appendedAt, target);
+    await announceSheetsChanged(moved, { moved: { fromIndex: appendedAt, toIndex: target } });
+    return moved;
   });
-  await announceSheetsChanged(result);
   const added = result.sheets.find((s) => s.index === target);
   return { index: added?.index ?? target, name: added?.name ?? "" };
 }
@@ -11476,11 +11605,29 @@ export function borderPresetArgs(
 }
 
 /**
+ * Where a script's format lands: the sheet it names, never the user's sheet
+ * group (see applyRangeFormat). Passed to every group-aware formatting wrapper
+ * this host calls.
+ */
+const SCRIPT_FORMAT_PLACEMENT = { activeSheetOnly: true } as const;
+
+/**
  * Apply a PARTIAL format to a rectangle. Absent properties are left alone, so a
  * script can bold a block without resetting its number format. The active sheet
- * takes apply_formatting (which also replicates to a grouped sheet selection,
- * exactly as a ribbon click would); another sheet takes the sheet-scoped
+ * takes apply_formatting; another sheet takes the sheet-scoped
  * apply_formatting_to_sheets.
+ *
+ * THE ACTIVE SHEET ONLY, NEVER THE USER'S SHEET GROUP (review
+ * NEW-script-format-follows-ui-group). The wrappers add the group the sheet on
+ * screen belongs to, as a ribbon click would -- so a macro or a button that
+ * formatted one cell while the user happened to have sheets grouped formatted
+ * every grouped sheet too, off screen, and a recorded grouped Bold replayed
+ * while sheets were grouped reached the CURRENT group as well. A script's range
+ * is Excel's `ActiveSheet.Range(...)`, which formats that sheet alone [LIVE,
+ * Excel 16: Sheet1+Sheet3 grouped, `ActiveSheet.Range("D4").Font.Bold = True`
+ * bolds Sheet1 only]. Every wrapper call here passes `SCRIPT_FORMAT_PLACEMENT`;
+ * a script that means several sheets names them (a recorded grouped gesture
+ * replays as one call per sheet, MacroRecorder actionCodegen.ts).
  *
  * RANGE-EDGE BORDERS (Wave 3, item 2). borderOutline / borderInsideHorizontal /
  * borderInsideVertical are decomposed here into the per-cell truth via the SAME
@@ -11537,7 +11684,7 @@ export async function applyRangeFormat(
   const work = async (): Promise<void> => {
     if (hasBaseKeys || edgeCount === 0) {
       if (target === active) {
-        const result = await lib.applyFormatting(rows, cols, base);
+        const result = await lib.applyFormatting(rows, cols, base, SCRIPT_FORMAT_PLACEMENT);
         await afterCellDataChange(result.cells);
       } else {
         await lib.applyFormattingToSheets([target], rows, cols, base);
@@ -11549,6 +11696,7 @@ export async function applyRangeFormat(
       const args = borderPresetArgs(side);
       const result = await lib.applyBorderPreset(
         startRow, startCol, endRow, endCol, preset, args.style, args.color, args.width,
+        SCRIPT_FORMAT_PLACEMENT,
       );
       await afterCellDataChange(result.cells);
     }
@@ -12003,7 +12151,10 @@ export async function executeCreateNamedStyle(
     async () => {
       let applied = false;
       try {
-        const result = await lib.applyFormatting([scratch.row], [scratch.col], lowered);
+        // The scratch cell on the ACTIVE sheet alone: through the user's sheet
+        // group the format would land on every grouped sheet's scratch cell,
+        // and the revert below clears only this one (see applyRangeFormat).
+        const result = await lib.applyFormatting([scratch.row], [scratch.col], lowered, SCRIPT_FORMAT_PLACEMENT);
         applied = true;
         const cell = result.cells.find((c) => c.row === scratch.row && c.col === scratch.col);
         if (!cell) {
@@ -17159,7 +17310,11 @@ function wireAppEventForwarder(mw: MountedWorker, hook: string, eventName: strin
 function wireHookForwarder(mw: MountedWorker, hook: string): void {
   if (mw.forwarders.has(hook)) return;
   const { definition } = mw;
-  const instanceId = definition.instanceId || "";
+  // Read when an event ARRIVES, never captured at mount: a re-bind
+  // (`hostRebindMountedScript` -- a renamed name, a control that moved with
+  // its cells) moves `mw.definition.instanceId` under a live forwarder, and a
+  // captured id kept filtering and mirroring the OLD binding (rev6B#3).
+  const boundInstanceId = (): string => mw.definition.instanceId || "";
   const objectType = definition.objectType;
 
   // api.onEvent subscriptions arrive via the audited events.subscribe call.
@@ -17174,7 +17329,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
   }
   if (hook === "canvasRenderer") {
     mw.declaredRenderHooks.add(hook);
-    wireShapeBitmapInvalidation(mw, instanceId);
+    wireShapeBitmapInvalidation(mw, boundInstanceId());
     return;
   }
   if (hook === "itemRenderer") {
@@ -17458,7 +17613,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "slicer.onSelectionChange":
       addForwarder(mw, hook, onAppEvent("slicer:selectionChanged", (detail) => {
         const d = detail as { slicerId: string; selectedItems: string[] };
-        if (String(d.slicerId) !== instanceId) return;
+        if (String(d.slicerId) !== boundInstanceId()) return;
         post(mw, { t: "mirror", path: "slicer.selection", value: d.selectedItems });
         forwardEvent(mw, hook, { selectedItems: d.selectedItems });
       }));
@@ -17468,7 +17623,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "timeline.onChange":
       addForwarder(mw, hook, onAppEvent("timelineSlicer:selectionChanged", (detail) => {
         const d = detail as { timelineId: string; selectionStart: string | null; selectionEnd: string | null };
-        if (d.timelineId !== instanceId) return;
+        if (d.timelineId !== boundInstanceId()) return;
         post(mw, { t: "mirror", path: "timeline.selectionStart", value: d.selectionStart });
         post(mw, { t: "mirror", path: "timeline.selectionEnd", value: d.selectionEnd });
         forwardEvent(mw, hook, { start: d.selectionStart, end: d.selectionEnd });
@@ -17479,7 +17634,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "chart.onDataChange": {
       const getSourceRange = () => {
         const store = getChartStoreService();
-        const chart = store?.getChartById(instanceId);
+        const chart = store?.getChartById(boundInstanceId());
         if (!chart) return null;
         try {
           const spec = JSON.parse(chart.specJson) as { data?: unknown };
@@ -17512,11 +17667,11 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
           );
           if (!hit) return;
         }
-        pushChartSpecMirror(mw, instanceId);
+        pushChartSpecMirror(mw, boundInstanceId());
         forwardEvent(mw, hook, undefined);
       });
       const unsubBulk = onAppEvent(AppEvents.DATA_CHANGED, () => {
-        pushChartSpecMirror(mw, instanceId);
+        pushChartSpecMirror(mw, boundInstanceId());
         forwardEvent(mw, hook, undefined);
       });
       addForwarder(mw, hook, () => {
@@ -17530,8 +17685,8 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "pivot.onRefresh":
       addForwarder(mw, hook, onAppEvent("pivot:refresh", (detail) => {
         const d = detail as { pivotId?: string } | undefined;
-        if (d?.pivotId !== undefined && String(d.pivotId) !== instanceId) return;
-        pushPivotFieldsMirror(mw, instanceId);
+        if (d?.pivotId !== undefined && String(d.pivotId) !== boundInstanceId()) return;
+        pushPivotFieldsMirror(mw, boundInstanceId());
         forwardEvent(mw, hook, undefined);
       }));
       break;
@@ -17539,8 +17694,8 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "pivot.onDrillThrough":
       addForwarder(mw, hook, onAppEvent("pivot:drillThrough", (detail) => {
         const d = detail as { pivotId?: string; cell?: unknown } | undefined;
-        if (d?.pivotId !== undefined && String(d.pivotId) !== instanceId) return;
-        forwardEvent(mw, hook, { pivotId: instanceId, cell: d?.cell ?? [] });
+        if (d?.pivotId !== undefined && String(d.pivotId) !== boundInstanceId()) return;
+        forwardEvent(mw, hook, { pivotId: boundInstanceId(), cell: d?.cell ?? [] });
       }));
       break;
 
@@ -17548,7 +17703,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "button.onClick":
       addForwarder(mw, hook, onAppEvent("button:clicked", (detail) => {
         const d = detail as { instanceId: string; x: number; y: number };
-        if (d.instanceId !== instanceId) return;
+        if (d.instanceId !== boundInstanceId()) return;
         // A USER GESTURE for the pane's reveal window: a click on the button
         // this script is attached to. `button:clicked` is emitted by the
         // Controls extension from the pointer event; no script can emit an
@@ -17592,13 +17747,13 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
         const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number; newValue: string }> };
         const changes = d.changes ?? [];
         if (!inTableRange(changes)) return;
-        pushTableMirror(mw, instanceId);
+        pushTableMirror(mw, boundInstanceId());
         forwardEvent(mw, hook, { changes });
       });
       const unsubExplicit = onAppEvent("table:dataChanged", (detail) => {
         const d = detail as { tableId?: string } | undefined;
-        if (d?.tableId !== undefined && String(d.tableId) !== instanceId) return;
-        pushTableMirror(mw, instanceId);
+        if (d?.tableId !== undefined && String(d.tableId) !== boundInstanceId()) return;
+        pushTableMirror(mw, boundInstanceId());
         forwardEvent(mw, hook, { changes: [] });
       });
       addForwarder(mw, hook, () => {
@@ -17637,13 +17792,13 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
             namedRangeContains(coords, c.row, c.col),
         );
         if (!hit) return;
-        pushNamedRangeMirror(mw, instanceId);
+        pushNamedRangeMirror(mw, boundInstanceId());
         forwardEvent(mw, hook, { changes });
       });
       const unsubExplicit = onAppEvent("namedRange:changed", (detail) => {
         const d = detail as { name?: string } | undefined;
-        if (d?.name !== undefined && String(d.name) !== instanceId) return;
-        pushNamedRangeMirror(mw, instanceId);
+        if (d?.name !== undefined && String(d.name) !== boundInstanceId()) return;
+        pushNamedRangeMirror(mw, boundInstanceId());
         forwardEvent(mw, hook, { changes: [] });
       });
       addForwarder(mw, hook, () => {
@@ -17663,7 +17818,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "range.onClick":
       addForwarder(mw, hook, onAppEvent("cellbehavior:clicked", (detail) => {
         const d = detail as { bindingId: string; row: number; col: number; sheetIndex: number; ctrlKey: boolean; metaKey: boolean };
-        if (d.bindingId !== instanceId) return;
+        if (d.bindingId !== boundInstanceId()) return;
         forwardEvent(mw, hook, {
           row: d.row,
           col: d.col,
@@ -17676,7 +17831,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "range.onDoubleClick":
       addForwarder(mw, hook, onAppEvent("cellbehavior:dblclicked", (detail) => {
         const d = detail as { bindingId: string; row: number; col: number; sheetIndex: number };
-        if (d.bindingId !== instanceId) return;
+        if (d.bindingId !== boundInstanceId()) return;
         forwardEvent(mw, hook, { row: d.row, col: d.col, sheetIndex: d.sheetIndex });
       }));
       break;
@@ -17691,7 +17846,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       let tokens = BUCKET_CAPACITY;
       let lastRefill = performance.now();
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const b = getCellBehaviorById(instanceId);
+        const b = getCellBehaviorById(boundInstanceId());
         if (!b || !b.enabled || b.orphaned) return;
         const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number; newValue: string }> };
         const changes = d.changes ?? [];
@@ -17714,7 +17869,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
         tokens -= 1;
         const truncated = clipped.length > MAX_CHANGE_ENTRIES;
         if (truncated) clipped.length = MAX_CHANGE_ENTRIES;
-        pushRangeMirror(mw, instanceId);
+        pushRangeMirror(mw, boundInstanceId());
         forwardEvent(mw, hook, truncated ? { changes: clipped, truncated: true } : { changes: clipped });
       }));
       break;
@@ -17724,7 +17879,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "shape.onClick":
       addForwarder(mw, hook, onAppEvent("shape:clicked", (detail) => {
         const d = detail as { instanceId: string; x: number; y: number };
-        if (d.instanceId !== instanceId) return;
+        if (d.instanceId !== boundInstanceId()) return;
         // A USER GESTURE for the pane's reveal window, as for a button: a
         // shape with a click handler IS a button the user drew.
         noteScriptGesture(mw.definition.id);
@@ -17734,31 +17889,31 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "shape.onResize":
       addForwarder(mw, hook, onAppEvent("shape:resized", (detail) => {
         const d = detail as { instanceId: string; width: number; height: number };
-        if (d.instanceId !== instanceId) return;
-        invalidateBitmap("shape", instanceId);
+        if (d.instanceId !== boundInstanceId()) return;
+        invalidateBitmap("shape", boundInstanceId());
         forwardEvent(mw, hook, { width: d.width, height: d.height });
       }));
       break;
     case "shape.onPropertyChange":
       addForwarder(mw, hook, onAppEvent("shape:propertyChanged", (detail) => {
         const d = detail as { instanceId: string; key: string; oldValue: string; newValue: string };
-        if (d.instanceId !== instanceId) return;
+        if (d.instanceId !== boundInstanceId()) return;
         mw.shapeProps.set(d.key, d.newValue);
-        invalidateBitmap("shape", instanceId);
+        invalidateBitmap("shape", boundInstanceId());
         forwardEvent(mw, hook, { key: d.key, oldValue: d.oldValue, newValue: d.newValue });
       }));
       break;
     case "shape.onCellChange":
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
         const d = detail as { changes?: unknown[] };
-        invalidateBitmap("shape", instanceId);
+        invalidateBitmap("shape", boundInstanceId());
         forwardEvent(mw, hook, { changes: d.changes ?? [] });
       }));
       break;
     case "shape.onMessage":
       addForwarder(mw, hook, onAppEvent("shape:htmlMessage", (detail) => {
         const d = detail as { instanceId: string; type: string; data: unknown };
-        if (d.instanceId !== instanceId) return;
+        if (d.instanceId !== boundInstanceId()) return;
         forwardEvent(mw, hook, { type: d.type, data: d.data });
       }));
       break;
@@ -17771,7 +17926,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
         hook === "onClick" ? "panel:clicked" : hook === "onActivate" ? "panel:activated" : "panel:deactivated";
       addForwarder(mw, hook, onAppEvent(eventName, (detail) => {
         const d = detail as { panelId: string; placement: string };
-        if (d.panelId !== instanceId) return;
+        if (d.panelId !== boundInstanceId()) return;
         // Only the CLICK is a user gesture for the pane's reveal window: the
         // user pressed this script's panel icon. Activate / deactivate follow
         // the sidebar's own state changes, which a reveal itself causes.
@@ -17783,7 +17938,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "panel.onPlacementChange":
       addForwarder(mw, hook, onAppEvent("panel:placementChanged", (detail) => {
         const d = detail as { panelId: string; oldPlacement: string; newPlacement: string };
-        if (d.panelId !== instanceId) return;
+        if (d.panelId !== boundInstanceId()) return;
         post(mw, { t: "mirror", path: "panel.placement", value: d.newPlacement });
         forwardEvent(mw, hook, { oldPlacement: d.oldPlacement, newPlacement: d.newPlacement });
       }));
@@ -17793,7 +17948,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       const eventName = hook === "onShow" ? "panel:shown" : "panel:hidden";
       addForwarder(mw, hook, onAppEvent(eventName, (detail) => {
         const d = detail as { panelId: string };
-        if (d.panelId !== instanceId) return;
+        if (d.panelId !== boundInstanceId()) return;
         forwardEvent(mw, hook, undefined);
       }));
       break;
@@ -17832,7 +17987,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
   if (objectType === "panel" && !mw.forwarders.has("__panelMeta")) {
     addForwarder(mw, "__panelMeta", onAppEvent("panel:metadata", (detail) => {
       const d = detail as { panelId: string; placement: string; movable: boolean };
-      if (d.panelId !== instanceId) return;
+      if (d.panelId !== boundInstanceId()) return;
       post(mw, { t: "mirror", path: "panel.placement", value: d.placement });
       post(mw, { t: "mirror", path: "panel.movable", value: d.movable });
     }));
@@ -18216,8 +18371,9 @@ function requestCellStyles(mw: MountedWorker, cells: RenderCellRequest[]): Promi
 function wireShapeBitmapInvalidation(mw: MountedWorker, instanceId: string): void {
   // propertyChanged / resize / cell-change invalidation is wired with the
   // corresponding hooks when registered; render.invalidate covers the rest.
-  // Here we only ensure a dispose path exists for the bitmap itself.
-  mw.cleanupFns.push(() => invalidateBitmap("shape", instanceId));
+  // Here we only ensure a dispose path exists for the bitmap itself -- filed
+  // under the binding the shape has when the script GOES (a re-bind moves it).
+  mw.cleanupFns.push(() => invalidateBitmap("shape", mw.definition.instanceId || instanceId));
 }
 
 /**

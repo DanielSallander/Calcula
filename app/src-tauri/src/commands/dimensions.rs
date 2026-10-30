@@ -11,33 +11,52 @@ use tauri::State;
 /// Set a column width.
 #[tauri::command]
 pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, col: u32, width: f64) -> Result<(), String> {
+    set_column_width_inner(&state, &file_state, col, width)
+}
+
+/// State-only body of `set_column_width` (unit-testable without a State).
+///
+/// LOCK ORDER: the width is written, and the mirror RELEASED, before the undo
+/// stack is taken -- the two are never held together here. The cell writers
+/// (`update_cell_impl` and its siblings, which the AI chat, the MCP server and
+/// the notebook run off the main thread) hold `grid`, `grids` and the undo stack
+/// and THEN read `column_widths` for every formula's evaluation context (and
+/// write it for a computed property). This held `column_widths` while it waited
+/// for the stack, with no grid lock to order it against them, so a resize
+/// meeting such a write froze the window with no panic and no log. The batch
+/// resize (`set_line_sizes_inner`) and the hide commands have always released
+/// first.
+pub(crate) fn set_column_width_inner(state: &AppState, file_state: &FileState, col: u32, width: f64) -> Result<(), String> {
     // allowFormatColumns option gate. Returns Result (it used to return unit) so
     // a refusal can reach the user instead of the resize silently not happening.
     {
         let active_sheet = *state.active_sheet.read().unwrap();
-        crate::protection::check_sheet_action(&state, active_sheet, "formatColumns", "resize columns")?;
+        crate::protection::check_sheet_action(state, active_sheet, "formatColumns", "resize columns")?;
     }
     // The protection gate above is the only thing that can still refuse, so the
     // effect is minted here: constructing it dirties the workbook immediately.
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     // The sheet this resize is being recorded ON. `column_widths` is the ACTIVE
     // sheet's mirror, so the change is only meaningful against that sheet — and
     // the user can be looking at a different one by the time they undo.
     let recorded_on = *state.active_sheet.read().unwrap();
-    let mut widths = state.column_widths.write(&effect).unwrap();
-    let mut undo_stack = state.undo_stack.lock().unwrap();
+    // The previous width (for undo), read and replaced under ONE hold.
+    let previous_width = {
+        let mut widths = state.column_widths.write(&effect).unwrap();
+        let previous = widths.get(&col).copied();
+        if width > 0.0 {
+            widths.insert(col, width);
+        } else {
+            widths.remove(&col);
+        }
+        previous
+    };
 
-    // Record previous state for undo
-    let previous_width = widths.get(&col).copied();
-
-    if width > 0.0 {
-        widths.insert(col, width);
-    } else {
-        widths.remove(&col);
+    // Record undo -- the mirror is released (see the LOCK ORDER note above).
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.record_column_width_change(recorded_on, col, previous_width);
     }
-
-    // Record undo
-    undo_stack.record_column_width_change(recorded_on, col, previous_width);
 
     Ok(())
 }
@@ -62,28 +81,39 @@ pub fn get_all_column_widths(state: State<AppState>) -> Vec<DimensionData> {
 /// Set a row height.
 #[tauri::command]
 pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row: u32, height: f64) -> Result<(), String> {
+    set_row_height_inner(&state, &file_state, row, height)
+}
+
+/// State-only body of `set_row_height` (unit-testable without a State). The
+/// mirror is released before the undo stack is taken, exactly as in
+/// `set_column_width_inner` (see its LOCK ORDER note): the cell writers hold the
+/// stack while they read `row_heights`.
+pub(crate) fn set_row_height_inner(state: &AppState, file_state: &FileState, row: u32, height: f64) -> Result<(), String> {
     // allowFormatRows option gate; see set_column_width for the Result change.
     {
         let active_sheet = *state.active_sheet.read().unwrap();
-        crate::protection::check_sheet_action(&state, active_sheet, "formatRows", "resize rows")?;
+        crate::protection::check_sheet_action(state, active_sheet, "formatRows", "resize rows")?;
     }
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     // See `set_column_width`: the sheet this resize belongs to.
     let recorded_on = *state.active_sheet.read().unwrap();
-    let mut heights = state.row_heights.write(&effect).unwrap();
-    let mut undo_stack = state.undo_stack.lock().unwrap();
+    // The previous height (for undo), read and replaced under ONE hold.
+    let previous_height = {
+        let mut heights = state.row_heights.write(&effect).unwrap();
+        let previous = heights.get(&row).copied();
+        if height > 0.0 {
+            heights.insert(row, height);
+        } else {
+            heights.remove(&row);
+        }
+        previous
+    };
 
-    // Record previous state for undo
-    let previous_height = heights.get(&row).copied();
-
-    if height > 0.0 {
-        heights.insert(row, height);
-    } else {
-        heights.remove(&row);
+    // Record undo -- the mirror is released.
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.record_row_height_change(recorded_on, row, previous_height);
     }
-
-    // Record undo
-    undo_stack.record_row_height_change(recorded_on, row, previous_height);
 
     Ok(())
 }

@@ -143,6 +143,62 @@ async function rangeClip(page: Page, from: string, to: string, pad = 2): Promise
   return { x: box.x + rect.x - pad, y: box.y + rect.y - pad, width: rect.width + pad * 2, height: rect.height + pad * 2 };
 }
 
+/** A cell interior holding at least this many off-colour device pixels has something PAINTED in it (text). */
+const INK_PIXELS = 10;
+
+/** Device pixels of an RGBA patch that differ from the patch's own most common colour: its ink. */
+function inkPixels(data: number[], tolerance = 32): number {
+  const counts = new Map<number, number>();
+  let dominant = 0;
+  let best = -1;
+  for (let i = 0; i < data.length; i += 4) {
+    const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+    const n = (counts.get(key) ?? 0) + 1;
+    counts.set(key, n);
+    if (n > best) {
+      best = n;
+      dominant = key;
+    }
+  }
+  const [r, g, b] = [(dominant >> 16) & 0xff, (dominant >> 8) & 0xff, dominant & 0xff];
+  let ink = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (Math.abs(data[i] - r) > tolerance || Math.abs(data[i + 1] - g) > tolerance || Math.abs(data[i + 2] - b) > tolerance) ink++;
+  }
+  return ink;
+}
+
+/**
+ * What the GRID CANVAS paints in each cell, as ink counts keyed "row,col" --
+ * read from the screen, never from the backend. The interior of each cell
+ * (inset past its gridlines) is cropped out of ONE capture; a blank cell is one
+ * flat colour whatever its fill, a cell showing a number is not. Cells not
+ * wholly inside the canvas on screen are left out (the caller's positive
+ * controls count what was sampled).
+ */
+async function paintedInk(page: Page, cells: Array<[number, number]>): Promise<Map<string, number>> {
+  const geo = await readGridGeometry(page);
+  const box = await page.locator("canvas").first().boundingBox();
+  if (!box) throw new Error("grid canvas has no bounding box");
+  const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  const right = Math.min(box.x + box.width, viewport.width);
+  const bottom = Math.min(box.y + box.height, viewport.height);
+  const inset = 3;
+  const keys: string[] = [];
+  const clips: Clip[] = [];
+  for (const [row, col] of cells) {
+    const rect = cellRangeRectFrom(ref(row, col), ref(row, col), geo);
+    const clip = { x: box.x + rect.x + inset, y: box.y + rect.y + inset, width: rect.width - inset * 2, height: rect.height - inset * 2 };
+    const onScreen =
+      clip.width > 0 && clip.height > 0 && clip.x >= box.x && clip.y >= box.y && clip.x + clip.width <= right && clip.y + clip.height <= bottom;
+    if (!onScreen) continue;
+    keys.push(`${row},${col}`);
+    clips.push(clip);
+  }
+  const patches = await samplePixelPatches(page, clips);
+  return new Map(keys.map((key, i) => [key, inkPixels(patches[i])]));
+}
+
 // ---------------------------------------------------------------------------
 // The fixture, as CSV files plus a model that binds them
 // ---------------------------------------------------------------------------
@@ -309,6 +365,31 @@ test.describe("Insight overlays on a BI pivot, live", () => {
       console.log(`[overlay-pivot] filter ${fieldName} to ${selectedItems.length} items: ${applied}`);
       expect(applied, `the filter on ${fieldName} must apply`).toMatch(/rows$/);
     };
+    // The pivot's region as the BACKEND reports it (the frontend's
+    // `getGridRegions()` must follow it -- BUG-0594).
+    const backendPivotRegion = async () => {
+      const regions = await invoke<Array<{ pivotId: unknown; startRow: number; startCol: number; endRow: number; endCol: number }>>(
+        appPage,
+        "get_pivot_regions_for_sheet",
+      );
+      const r = regions.find((x) => String(x.pivotId) === String(pivotId));
+      return r ? { startRow: r.startRow, startCol: r.startCol, endRow: r.endRow, endCol: r.endCol } : null;
+    };
+    // All 24 months, before the filter that cuts the pivot to six.
+    const unfiltered = await backendPivotRegion();
+    expect(unfiltered, "the backend reports the unfiltered pivot's region").not.toBeNull();
+    console.log(`[overlay-pivot] unfiltered region: ${JSON.stringify(unfiltered)}`);
+    // What the canvas paints in every cell of the unfiltered pivot, BEFORE the
+    // filter: the positive control for the vacated-cell check below (the
+    // instrument sees the numbers painted in the very cells it later reads).
+    await waitForGridStable(appPage);
+    await grid.navigateTo("A1");
+    await appPage.waitForTimeout(300);
+    const unfilteredCells: Array<[number, number]> = [];
+    for (let r = unfiltered!.startRow; r <= unfiltered!.endRow; r++) {
+      for (let c = unfiltered!.startCol; c <= unfiltered!.endCol; c++) unfilteredCells.push([r, c]);
+    }
+    const inkBefore = await paintedInk(appPage, unfilteredCells);
     await filterField("Date.Month", SHOWN_MONTHS);
     await appPage.waitForTimeout(1000);
     await waitForGridStable(appPage);
@@ -351,6 +432,53 @@ test.describe("Insight overlays on a BI pivot, live", () => {
       };
     };
     let where = await locate();
+
+    // BUG-0594, pinned live: the month filter SHRANK the pivot (24 months to
+    // six) through `pivot.applyFilter` (@api, no caller dispatch). The backend
+    // vacated the rows below the new extent, but the frontend kept the
+    // pre-filter region and the canvas went on painting the unfiltered rows
+    // into the vacated cells -- numbers that exist nowhere, under a Grand
+    // Total that excludes them. The region must now BE the backend's, and the
+    // vacated cells must be PAINTED empty. (The golden this journey records was
+    // re-recorded on 2026-10-29 BEFORE the fix, with the 26-row region, so it
+    // photographed the ghost rows; it is expected to mismatch until the owner
+    // has looked and it is re-recorded.)
+    const shrunk = await backendPivotRegion();
+    expect(shrunk, "the backend reports the filtered pivot's region").not.toBeNull();
+    console.log(`[overlay-pivot] filtered region: backend ${JSON.stringify(shrunk)}, getGridRegions ${JSON.stringify(where.region)}`);
+    expect(shrunk!.endRow, "POSITIVE CONTROL: the filter shrank the pivot").toBeLessThan(unfiltered!.endRow);
+    expect(where.region, "getGridRegions must report the pivot's SHRUNK extent -- the backend's own -- not the pre-filter one").toEqual(shrunk);
+    const vacated: Array<[number, number]> = [];
+    for (let r = shrunk!.endRow + 1; r <= unfiltered!.endRow; r++) {
+      for (let c = unfiltered!.startCol; c <= unfiltered!.endCol; c++) vacated.push([r, c]);
+    }
+    // The vacated cells AS THE FRONTEND PAINTS THEM (rev3B#7). The backend
+    // emptied them all along -- BUG-0594 was the Core's cell cache plus the
+    // stale region, which only re-read on a "grid:refresh" nobody asked for --
+    // so a `get_cell` read here passed on the pre-fix build. The canvas is the
+    // evidence: a vacated cell painted with a pre-filter number is the ghost.
+    await grid.navigateTo("A1");
+    await appPage.waitForTimeout(300);
+    await waitForGridStable(appPage);
+    const inkAfter = await paintedInk(appPage, vacated);
+    // Only cells sampled on BOTH sides compare (a column auto-fit can move one off screen).
+    const sampled = vacated.filter(([r, c]) => inkAfter.has(`${r},${c}`) && inkBefore.has(`${r},${c}`));
+    const sampledRows = [...new Set(sampled.map(([r]) => r))];
+    console.log(
+      `[overlay-pivot] vacated cells sampled on screen: ${sampled.length} of ${vacated.length}, in ${sampledRows.length} rows`,
+    );
+    expect(sampledRows.length, "POSITIVE CONTROL: vacated rows are on screen to sample").toBeGreaterThanOrEqual(3);
+    const inkedBeforeRows = new Set(sampled.filter(([r, c]) => inkBefore.get(`${r},${c}`)! >= INK_PIXELS).map(([r]) => r));
+    expect(
+      sampledRows.filter((r) => !inkedBeforeRows.has(r)).map((r) => r + 1),
+      "POSITIVE CONTROL: before the filter every sampled row painted ink (its month label at least) -- the instrument sees a number in these very cells",
+    ).toEqual([]);
+    const ghosts = sampled.flatMap(([r, c]) => {
+      const ink = inkAfter.get(`${r},${c}`)!;
+      return ink >= INK_PIXELS ? [`${ref(r, c)} (${ink} px of ink)`] : [];
+    });
+    expect(ghosts, "the cells the shrunk pivot vacated must be PAINTED empty -- these still show pre-filter numbers (BUG-0594's ghost rows)").toEqual([]);
+
     const gadgetsRef = ref(where.gadgets.row, where.gadgets.col);
     console.log(`[overlay-pivot] Gadgets × ${LAST_MONTH} is ${gadgetsRef}; the month's total is ${ref(where.total.row, where.total.col)}`);
 

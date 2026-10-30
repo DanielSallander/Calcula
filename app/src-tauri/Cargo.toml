@@ -72,6 +72,12 @@ sha2 = "0.10"
 # the lockfile (hmac 0.12.1, rand_core 0.6.4 via `calp` / `calcula-crypto`).
 hmac = "0.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
+# F5 / Ctrl+R never reload a window (browser_accelerator_keys.rs): every webview
+# gets an AcceleratorKeyPressed handler, and a release build also turns WebView2's
+# browser accelerator keys off. Only the interface TYPES and the handler type are
+# needed; tauri 2.9.5 exposes neither. Already in the lockfile at 0.38.2 via wry /
+# tauri-runtime-wry.
+webview2-com = "0.38"
 # JobObjects + Threading: the bundled inference runtime is a child process held
 # in a job object with KILL_ON_JOB_CLOSE, so it cannot outlive the app
 # (ai/runtime.rs). Threading is needed because the extended limit struct
@@ -91,6 +97,10 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    # GetKeyState: the modifiers held at a reload key (browser_accelerator_keys.rs).
+    # Already enabled in the graph by wry and tao; declared here because this
+    # crate calls it.
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [features]

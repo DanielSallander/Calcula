@@ -1244,11 +1244,10 @@ pub(crate) fn ready_author_collections(
     let Some(link) = state.working_copy_link.read().map_err(|e| e.to_string())?.clone() else {
         return Ok(None);
     };
-    let (sheet_ids, sheet_names) = {
-        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-        let names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
-        (ids, names)
-    };
+    // ONE hold, `sheet_names` first (BUG-0590 / BUG-0592): two clone-and-release
+    // reads let a delete or a move land between them and name a region's sheet
+    // after its neighbour.
+    let (sheet_ids, sheet_names) = crate::calp_commands::sheet_ids_and_names(state)?;
     let sheet_name_of = |sheet_id: &identity::SheetId| {
         sheet_ids.iter().position(|s| s == sheet_id).and_then(|i| sheet_names.get(i).cloned())
     };
@@ -1290,11 +1289,8 @@ pub(crate) fn ready_author_collections(
 
 pub(crate) fn list_collection_regions(state: &AppState) -> Result<Vec<CollectionRegionInfo>, String> {
     let mut rows: Vec<CollectionRegionInfo> = Vec::new();
-    let (sheet_ids, sheet_names) = {
-        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-        let names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
-        (ids, names)
-    };
+    // ONE hold, `sheet_names` first (BUG-0590 / BUG-0592).
+    let (sheet_ids, sheet_names) = crate::calp_commands::sheet_ids_and_names(state)?;
     let sheet_index_of = |sheet_id: &identity::SheetId| sheet_ids.iter().position(|s| s == sheet_id);
     let subscribed: Vec<calp::WritebackRegionEntry> = writeback_region_entries(state)?;
 

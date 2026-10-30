@@ -17,6 +17,8 @@
 //          prefix end early -- `append_user_sheet`). An index taken before the
 //          add names a different sheet after it, silently.
 
+import { BEYOND_EVERY_SHEET } from "../../core/state/sheetRenumbering";
+
 /** A sheet as `getSheets()` lists it: the TRUE workbook index, plus identity. */
 export interface PlacedSheet {
   index: number;
@@ -85,19 +87,21 @@ export function moveTargetFor(
 //
 // Core remembers each sheet's selection and scroll by TRUE index and re-keys
 // that cache on `sheet:reorder { fromIndex, toIndex }` with rotate semantics
-// (Spreadsheet.tsx, `handleSheetReorder`). An INSERTION or a REMOVAL is a
-// rotate to or from "beyond every sheet", so both are told through the same
-// event with a far index:
+// (core/state/sheetRenumbering.ts, through Spreadsheet's switch listeners).
+// An INSERTION or a REMOVAL is a rotate to or from "beyond every sheet", so
+// both are told through the same event with a far index:
 //   - insertion at `at` == a rotate from the far end to `at`: every key at or
-//     past `at` moves up one;
+//     past `at` moves up one, and `at` itself is left EMPTY (the new sheet
+//     opens at A1);
 //   - removal at `at` == a rotate from `at` to the far end: every key past
-//     `at` moves down one, and the removed sheet's view is parked where no
-//     sheet will ever be.
+//     `at` moves down one, and the removed sheet's view is DROPPED -- it used
+//     to be parked at the far end, where the next insertion's rotate picked it
+//     up and handed it to the new sheet (review rev3C#5).
 // Untold, a copy or a delete left every later sheet restoring its NEIGHBOUR's
 // selection and scroll on its next visit.
 
-/** Beyond every sheet a workbook can hold. */
-const FAR_INDEX = Number.MAX_SAFE_INTEGER;
+/** Beyond every sheet a workbook can hold: Core's own far index. */
+const FAR_INDEX = BEYOND_EVERY_SHEET;
 
 /** The `sheet:reorder` detail announcing a sheet inserted at `at`. */
 export function insertionReorderDetail(at: number): { fromIndex: number; toIndex: number } {

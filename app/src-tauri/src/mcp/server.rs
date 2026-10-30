@@ -961,7 +961,7 @@ impl CalculaMcpServer {
         }
     }
 
-    #[tool(description = "Edit an EXISTING named range: change what it refers to, its comment, its scope, and/or rename it. Pass the current name plus at least one field to change; omitted fields are left alone. Renaming produces two undo steps (the old name is removed and the new one defined). Appears live in the Name Manager.")]
+    #[tool(description = "Edit an EXISTING named range: change what it refers to, its comment, its scope, and/or rename it. Pass the current name plus at least one field to change; omitted fields are left alone. A rename is the Name Manager's rename: every formula that reads the name follows it (=Rate*2 becomes =Tax*2), as one undo step; changing the definition, comment or scope as well adds a second. Appears live in the Name Manager.")]
     async fn update_named_range(
         &self,
         params: Parameters<UpdateNamedRangeParams>,

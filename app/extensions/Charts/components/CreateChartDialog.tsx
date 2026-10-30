@@ -298,6 +298,24 @@ export function CreateChartDialog({
   const [orientation, setOrientation] = useState<SeriesOrientation>("columns");
   const [categoryIndex, setCategoryIndex] = useState(0);
   const [series, setSeries] = useState<ChartSeries[]>([]);
+  // Edit mode: whether the READER has changed the range, the header row or the
+  // orientation since this open. Until then the series and the category are
+  // the stored chart's and series detection holds off (BUG-0481): the range
+  // the open effect seeds is the stored one, and re-detecting it put back the
+  // series the reader had removed -- which Update Chart then wrote.
+  const [sourceTouched, setSourceTouched] = useState(false);
+  const handleSourceRangeChange = useCallback((value: string) => {
+    setSourceTouched(true);
+    setSourceRange(value);
+  }, []);
+  const handleHasHeadersChange = useCallback((value: boolean) => {
+    setSourceTouched(true);
+    setHasHeaders(value);
+  }, []);
+  const handleOrientationChange = useCallback((value: SeriesOrientation) => {
+    setSourceTouched(true);
+    setOrientation(value);
+  }, []);
 
   // Design tab state (managed as a spec, updated via partial merges)
   const [mark, setMark] = useState<ChartMark>("bar");
@@ -409,6 +427,7 @@ export function CreateChartDialog({
       setCategoryIndex,
       setSeries,
       onUnbound: () => setPreviewData(null),
+      holdStoredSeries: isEditMode && !sourceTouched,
     },
   });
   const {
@@ -520,6 +539,9 @@ export function CreateChartDialog({
   useEffect(() => {
     if (isOpen) {
       setHasAutoDetected(false);
+      // A new open: nothing the reader did to the source yet (an edited
+      // chart's stored series are held until they do -- BUG-0481).
+      setSourceTouched(false);
       setError(null);
       setActiveTab(resolveInitialTab(requestedTab, isPivotMode));
       setSpecFullView(false);
@@ -561,8 +583,8 @@ export function CreateChartDialog({
         .catch(() => setConnections([]));
 
       // In edit mode, load the existing chart's spec
+      const existingChart = isEditMode && editChartId != null ? getChartById(editChartId) : null;
       if (isEditMode && editChartId != null) {
-        const existingChart = getChartById(editChartId);
         if (existingChart) {
           const spec = existingChart.spec;
           setEditedDataSource(spec.data);
@@ -611,8 +633,14 @@ export function CreateChartDialog({
         }
       }
 
-      // In pivot mode, auto-detect series from the pivot table
-      if (isPivotMode) {
+      // In pivot mode, auto-detect series from the pivot table -- for a NEW
+      // PivotChart only. An edited one (every PivotChart edit door opens with
+      // its pivotId AND editChartId: the context menu's Select Data / Edit
+      // Chart, Chart Design > Edit Chart, the object pane's data editor) keeps
+      // what it stores, as an edited range chart does (BUG-0481):
+      // detection here replaced the reader's title, series colours and series
+      // with the pivot's defaults, and Update Chart wrote them back.
+      if (isPivotMode && !existingChart) {
         autoDetectPivotSeries(pivotId!).then((detected) => {
           setSeries(detected.series);
           setTitle(detected.title);
@@ -643,9 +671,15 @@ export function CreateChartDialog({
   // cell, auto-detect the surrounding data region; otherwise use the selection as-is.
   // Skipped in pivot mode and design-query mode (data doesn't come from a range),
   // and on a canvas or when the opener asked (`suppressAutoRange`): a canvas
-  // has no cells, so its "selection" is not a data range.
+  // has no cells, so its "selection" is not a data range. NEVER in edit mode:
+  // the edited chart's range is its own. This effect runs in the same commit
+  // as the open effect, so on an open where `hasAutoDetected` was still false
+  // (the session's first open of the dialog) it used to read the grid
+  // selection over the stored range the open effect had just seeded -- and
+  // with the stored series held (BUG-0481), Update Chart would then have
+  // written those series over the wrong cells.
   useEffect(() => {
-    if (!isOpen || hasAutoDetected || !activeSheetName || isPivotMode || sourceMode === "designQuery") return;
+    if (!isOpen || isEditMode || hasAutoDetected || !activeSheetName || isPivotMode || sourceMode === "designQuery") return;
     if (suppressAutoRange || isCanvasSurface) return;
 
     const sel = gridState.selection;
@@ -695,7 +729,7 @@ export function CreateChartDialog({
         );
         setSourceRange(buildSheetRange(activeSheetName, range));
       });
-  }, [isOpen, hasAutoDetected, activeSheetName, gridState.selection, sourceMode, suppressAutoRange, isCanvasSurface]);
+  }, [isOpen, isEditMode, hasAutoDetected, activeSheetName, gridState.selection, sourceMode, suppressAutoRange, isCanvasSurface]);
 
   // Update preview when spec changes. Editing a placed chart, its bound
   // properties (a title that follows a cell or a measure) show their values.
@@ -1030,7 +1064,7 @@ export function CreateChartDialog({
           {activeTab === "data" && (
             <DataTab
               sourceRange={sourceRange}
-              onSourceRangeChange={setSourceRange}
+              onSourceRangeChange={handleSourceRangeChange}
               sourceRangeError={rangeError}
               sourceMode={isPivotMode ? "range" : sourceMode}
               onSourceModeChange={handleSourceModeChange}
@@ -1041,9 +1075,9 @@ export function CreateChartDialog({
               onConnectionIdChange={setConnectionId}
               connections={connections}
               hasHeaders={hasHeaders}
-              onHasHeadersChange={setHasHeaders}
+              onHasHeadersChange={handleHasHeadersChange}
               orientation={orientation}
-              onOrientationChange={setOrientation}
+              onOrientationChange={handleOrientationChange}
               categoryIndex={categoryIndex}
               onCategoryIndexChange={setCategoryIndex}
               series={series}

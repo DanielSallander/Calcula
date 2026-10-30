@@ -31,6 +31,8 @@ import {
 import {
   loadAllObjectScripts,
   saveObjectScript,
+  getObjectScript,
+  onObjectScriptsChanged,
   // The persisted half of "what was asked, what it answered, what I decided".
   // Beside `saveObjectScript` because that is the module that owns them, and
   // because every call below is made at the instant a human presses a button —
@@ -144,6 +146,7 @@ import {
 import type { ScriptDraft } from "../lib/crossWindowEvents";
 import { draftToScriptDefinition } from "../lib/scriptDrafts";
 import { readRequestedDocumentId } from "../lib/editorTarget";
+import { mergeReboundBinding } from "../lib/reboundBinding";
 import { promptAsync } from "@api/dialogs";
 
 // ============================================================================
@@ -1451,6 +1454,31 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       if (cancelled) return;
       setScripts(payload.scripts);
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
+
+    // The BACKEND re-bound a script (a named-range script following its name
+    // through a rename, its undo or its redo -- any route, the command line
+    // and Ctrl+Z included): re-read that script's binding and merge ONLY the
+    // binding, so the buffer and any unsaved edit stay, and a later save or
+    // template stamp addresses the name the store holds (rev4B#2).
+    try {
+      onObjectScriptsChanged((detail) => {
+        if (cancelled || detail.change !== "rebound") return;
+        void getObjectScript(detail.id)
+          .then((stored) => {
+            if (cancelled) return;
+            setScripts((prev) => mergeReboundBinding(prev, detail.id, stored.instanceId ?? null));
+          })
+          .catch(() => {
+            /* gone or unreadable: the next listing settles it */
+          });
+      })
+        .then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); })
+        .catch(() => {
+          /* no event bus here: the next open re-reads the list */
+        });
+    } catch {
+      /* no event bus at all in this environment */
+    }
 
     // Announce a RELOAD/navigation of this webview. NOT the window closing:
     // measured under Tauri + WebView2, `beforeunload` does not run when the

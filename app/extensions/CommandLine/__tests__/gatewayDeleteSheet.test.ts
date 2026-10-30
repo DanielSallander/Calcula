@@ -49,6 +49,13 @@ vi.mock("@api/lib", () => ({
   updateCell: untouched("updateCell"),
 }));
 
+// The delete runs inside the seam's follow (review revG#2,
+// gatewaySheetSwitch.test.ts); here the follow just runs it.
+vi.mock("@api/sheetSwitch", () => ({
+  activateSheet: untouched("activateSheet"),
+  changeSheetsAndFollow: (change: () => Promise<unknown>) => change(),
+}));
+
 vi.mock("@api/backend", () => ({
   getAllPivotTables: untouched("getAllPivotTables"),
   getAllTables: untouched("getAllTables"),

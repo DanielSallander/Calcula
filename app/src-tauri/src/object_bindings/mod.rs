@@ -48,6 +48,8 @@ mod container_literal_tests;
 #[cfg(test)]
 mod command_tests;
 #[cfg(test)]
+mod dev_carriage_tests;
+#[cfg(test)]
 mod eval_tests;
 #[cfg(test)]
 mod formula_tests;
@@ -629,7 +631,7 @@ fn normalize_for(
 ) -> Result<NormalizedFormula, String> {
     let chart_sheet = match object.kind {
         ObjectBindingKind::Chart => chart_definition(cx.state, &object.id)
-            .and_then(|spec| formula::chart_data_sheet(&spec, &world.sheet_names, &world.sheet_ids)),
+            .and_then(|spec| formula::chart_data_sheet(&spec, &world.sheet_names, &world.sheet_ids, &world.named_ranges)),
         _ => None,
     };
     let model_measures: Vec<(String, Vec<String>)> =

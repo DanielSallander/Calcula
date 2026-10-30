@@ -444,19 +444,21 @@ fn an_origin_whose_dependency_broke_reports_the_error_and_releases_its_cells() {
 }
 
 /// A WORKBOOK WRITTEN BY A BUILD WITH A DIFFERENT FUNCTION SET — the brief's
-/// third failure mode, and the one whose answer is NOT the obvious one.
+/// third failure mode.
 ///
-/// An unknown function name is not an error here: `preserved_udf_value`
-/// (evaluator.rs) deliberately keeps the cell's last stored value rather than
-/// clobbering a working custom function to `#NAME?` on an unrelated recalc.
-/// That is right for a scalar UDF and it is what makes this case worth pinning,
-/// because it means the ORIGIN keeps a stale-looking number.
+/// An unknown function name typed over the origin is `#NAME?`, as in Excel.
+/// It used to KEEP the overwritten origin's number: `preserved_udf_value`
+/// (evaluator.rs) handed back whatever the cell held, though that value was
+/// the old SEQUENCE's and never this call's. Since rev3A#3 a custom-function
+/// cell keeps a value only when the served-call memo proves it is that call's
+/// answer for these arguments, and nothing ever answered this one -- the
+/// deliberate change the old assertion here asked to be followed, not deleted.
 ///
-/// What the restored map buys is the other half: the preserved value is a
-/// SCALAR, so the tear-down runs and the array's other cells are released
-/// rather than left behind as orphan literals under it. Before this, they
-/// stayed — and stayed uneditable and undeletable, naming an origin that no
-/// longer produced them.
+/// What the restored map buys is the other half: the new value is a SCALAR,
+/// so the tear-down runs and the array's other cells are released rather than
+/// left behind as orphan literals under it. Before this, they stayed — and
+/// stayed uneditable and undeletable, naming an origin that no longer
+/// produced them.
 #[test]
 fn an_origin_whose_function_this_build_lacks_still_releases_its_cells() {
     let wb = workbook_with_a_sized_spill(4.0);
@@ -467,8 +469,9 @@ fn an_origin_whose_function_this_build_lacks_still_releases_its_cells() {
 
     assert_eq!(
         wb.value(0, 0, 0),
-        CellValue::Number(1.0),
-        "an unknown function preserves the cell's last value (see          `preserved_udf_value`); if this becomes #NAME? that is a deliberate          change and this test should follow it, not be deleted"
+        CellValue::Error(CellError::Name),
+        "an unknown function typed over a cell is #NAME? -- it must not keep the \
+         overwritten cell's value as if it were its own answer (rev3A#3)"
     );
     for row in 1..=3 {
         assert_eq!(

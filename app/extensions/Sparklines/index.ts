@@ -26,6 +26,7 @@ import {
   resetSparklineStore,
   saveToBackend,
   loadFromBackend,
+  mergePendingWithBackend,
   setOnMutationCallback,
 } from "./store";
 import { CreateSparklineDialog } from "./components/CreateSparklineDialog";
@@ -40,6 +41,7 @@ import { emitAppEvent } from "@api/events";
 import type { FillCompletedPayload } from "@api/events";
 import type { SparklineType } from "./types";
 import { sparklinesBackend } from "./lib/sparklinesBackend";
+import { onStructuralEdit } from "../_shared/lib/structuralEditReload";
 
 // ============================================================================
 // Constants
@@ -54,8 +56,8 @@ export const SPARKLINE_DIALOG_ID = "sparkline:createDialog";
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
-/** Debounced save timer */
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
+/** A save is queued for the end of the current task (`scheduleSave`). */
+let savePending = false;
 
 /** Get current active sheet index */
 function getActiveSheetIndex(): number {
@@ -63,21 +65,58 @@ function getActiveSheetIndex(): number {
   return state?.sheetContext?.activeSheetIndex ?? 0;
 }
 
-/** Schedule a debounced save to backend (300ms) */
+/**
+ * Save to the backend at the END OF THE CURRENT TASK (a microtask): every
+ * mutation one action makes -- a fill creates a group per filled cell -- goes
+ * out as ONE save and one undo step, and that save is SENT before anything
+ * the user (or a script) does next, so a structural edit that follows finds
+ * the change in the backend and moves it with everything else.
+ *
+ * It used to wait 300 ms, and a structural edit inside that window lost one
+ * or the other: the reload after the edit dropped the pending save (Insert >
+ * Sparklines, then Insert Rows at once: the new group vanished -- revF#3), and
+ * a timer that fired while the structural command ran wrote the pre-edit
+ * groups back over the moved ones (revF#4). A change made WHILE a structural
+ * command is running still saves after the command -- and is refused there:
+ * every save names the groups it was made against (`save_sparklines`' `base`,
+ * as `update_chart`'s), so the store merges the change into the moved groups
+ * and saves the merge instead (store.ts `saveToBackend`).
+ */
 export function scheduleSave(): void {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveToBackend(getActiveSheetIndex());
-  }, 300);
+  if (savePending) return;
+  savePending = true;
+  queueMicrotask(() => {
+    if (!savePending) return; // saveNow or a reload took it
+    savePending = false;
+    void saveToBackend(getActiveSheetIndex());
+  });
 }
 
 /** Immediately save to backend (e.g., before sheet switch) */
 export function saveNow(): void {
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
+  savePending = false;
   saveToBackend(getActiveSheetIndex());
+}
+
+/**
+ * A structural edit moved this sheet's sparkline ranges IN THE BACKEND, inside
+ * the edit's own undo step (BUG-0357, app/src-tauri/src/chart_range_shift.rs).
+ * The in-memory groups still hold the ranges from before the edit, and the
+ * store saves them back whole, so they are re-read. A change still waiting to
+ * be saved (made in the same task as the announcement) is neither written
+ * over the moved groups nor thrown away: it is merged into them by group id
+ * and the merge is saved (`mergePendingWithBackend`).
+ */
+export async function reloadAfterStructuralEdit(): Promise<void> {
+  const pending = savePending;
+  savePending = false;
+  invalidateDataCache();
+  if (pending) {
+    await mergePendingWithBackend(getActiveSheetIndex());
+  } else {
+    await loadFromBackend(getActiveSheetIndex());
+  }
+  emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 // ============================================================================
@@ -263,6 +302,14 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => {
     window.removeEventListener("sparklines:refresh", handleSparklinesRefresh);
   });
+
+  // 5d. A structural edit (insert/delete rows, columns or cells, or one
+  // undone) moved this sheet's sparkline ranges in the backend: re-read them.
+  cleanupFns.push(
+    onStructuralEdit((eventName, callback) => context.events.on(eventName, callback), () => {
+      void reloadAfterStructuralEdit();
+    }),
+  );
 
   // 6. Subscribe to selection changes for the contextual Sparkline ribbon tab
   const unsubSelection = ExtensionRegistry.onSelectionChange(handleSelectionChange);

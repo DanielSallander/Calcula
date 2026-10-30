@@ -14,6 +14,7 @@ pub mod authoring_log;
 pub mod template_commands;
 pub mod capability_store;
 pub mod scheduler;
+pub(crate) mod script_rebind;
 pub mod udf;
 pub mod writeback_gateway;
 pub mod collaboration_gateway;

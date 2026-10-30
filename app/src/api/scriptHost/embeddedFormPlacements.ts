@@ -46,6 +46,7 @@
 // placement stands (an orphan, or a script that is not mounted).
 
 import { emitAppEvent } from "../events";
+import type { StructuralEditElsewhereEdit } from "../events";
 
 // ============================================================================
 // Limits
@@ -355,20 +356,23 @@ export function shiftEmbeddedFormPlacements(
   return changed;
 }
 
-/** The four structural edits an anchor has to survive. */
-export type StructuralEditKind = "rowInsert" | "rowDelete" | "colInsert" | "colDelete";
+/**
+ * The four structural edits an anchor has to survive -- the same four an
+ * off-sheet announcement names (`StructuralEditElsewhereEdit.kind`, ../events),
+ * so an edit from that payload maps without translation.
+ */
+export type StructuralEditKind = StructuralEditElsewhereEdit["kind"];
 
 /**
  * The anchor mapping for one structural edit — what `shiftEmbeddedFormPlacements`
  * is given. `null` means "that cell no longer exists", which is what turns into
  * an orphan.
  *
- * DUPLICATION DECLARED: `extensions/Controls/index.ts` holds the same fifteen
- * lines inline as `shiftForEvent`, for re-anchoring floating controls. That copy
- * is older and is not this slice's to move; it should be replaced by a call to
- * this function, and until it is, the two must be changed together. The rule
- * itself belongs in one place because it is grid semantics, owned by neither
- * feature.
+ * ONE COPY. `extensions/Controls` re-anchors its floating controls, and re-keys
+ * the side state filed under an off-sheet control's anchor-derived id, with
+ * this function too (it held the same fifteen lines inline as `shiftForEvent`
+ * until round 7 of the bug-ledger programme). The rule belongs in one place
+ * because it is grid semantics, owned by neither feature.
  */
 export function structuralAnchorShift(
   kind: StructuralEditKind,

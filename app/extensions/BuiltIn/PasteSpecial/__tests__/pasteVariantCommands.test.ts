@@ -64,6 +64,8 @@ const h = vi.hoisted(() => ({
   clipboard: null as unknown,
   writes: [] as string[],
   updates: [] as Array<[number, number, string]>,
+  /** Whether each write was flagged as a PASTE (CellUpdateInput.pasted), in order. */
+  pasted: [] as Array<boolean | undefined>,
   styled: [] as Array<[number, number, number]>,
   formatted: [] as Array<{ rows: number[]; cols: number[]; fmt: Record<string, unknown> }>,
   widths: new Map<number, number>(),
@@ -99,7 +101,17 @@ vi.mock("@api/lib", async (importOriginal) => {
     updateCell: vi.fn(async (r: number, c: number, v: string) => {
       h.writes.push("updateCell");
       h.updates.push([r, c, v]);
+      h.pasted.push(undefined);
       return { cells: [] };
+    }),
+    // A pasted formula or stored value is written through the batch, flagged pasted.
+    updateCellsBatch: vi.fn(async (updates: Array<{ row: number; col: number; value: string; pasted?: boolean }>) => {
+      for (const u of updates) {
+        h.writes.push("updateCellsBatch");
+        h.updates.push([u.row, u.col, u.value]);
+        h.pasted.push(u.pasted);
+      }
+      return [];
     }),
     setCellStyle: vi.fn(async (r: number, c: number, i: number) => {
       h.writes.push("setCellStyle");
@@ -209,6 +221,7 @@ beforeEach(() => {
   slot.reset();
   h.writes = [];
   h.updates = [];
+  h.pasted = [];
   h.styled = [];
   h.formatted = [];
   h.widths = new Map();
@@ -283,6 +296,7 @@ describe("Formulas & Number Formatting / Values & Number Formatting", () => {
   it("Formulas & Number Formatting: the FORMULA and only the number format", async () => {
     await run(CoreCommands.PASTE_FORMULAS_AND_NUMBER_FORMATS);
     expect(h.updates).toEqual([[4, 4, "=1+2"]]);
+    expect(h.pasted, "the formula is written as a PASTE (it stays one in an @ cell)").toEqual([true]);
     expect(h.styled).toEqual([]);
     expect(h.formatted).toEqual([{ rows: [4], cols: [4], fmt: { numberFormat: "0.00" } }]);
   });

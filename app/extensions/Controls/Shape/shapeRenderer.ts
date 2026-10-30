@@ -270,6 +270,11 @@ export function removeCustomCanvasRenderer(instanceId: string): void {
   customCanvasRenderers.delete(instanceId);
 }
 
+/** Does this shape paint through a script's custom canvas renderer? */
+export function hasCustomCanvasRenderer(instanceId: string): boolean {
+  return customCanvasRenderers.has(instanceId);
+}
+
 /** Set HTML content for a shape (will skip canvas rendering). */
 export function setShapeHtmlContent(instanceId: string, html: string): void {
   customHtmlContent.set(instanceId, html);
@@ -546,6 +551,34 @@ export function migrateShapeInstanceId(oldId: string, newId: string): void {
   // drift in both directions at once on every structural edit.
   migrateScriptFrameSlot(oldId, newId);
   migrateShapeHitRegions(oldId, newId);
+  // The script badge too: the backend moves the script's binding with the
+  // control (structure.rs `shift_controls`), so the badge belongs on the new id
+  // -- left behind, the moved shape lost it and the old cell kept a badge for a
+  // script that is not there.
+  if (shapesWithScripts.delete(oldId)) shapesWithScripts.add(newId);
+}
+
+/**
+ * Every control id this module holds state for -- a renderer, html, a frame
+ * (parked or not), a content hash, a standing refusal or a script badge.
+ *
+ * What a re-key walks when it cannot ask the floating store: an edit on a
+ * sheet the store does not hold (lib/controlSideState.ts). The store holds one
+ * sheet, but everything here survives a sheet switch (a parked frame keeps its
+ * document, see `releaseUnpaintedShapeOverlays`), so it is the only list of the
+ * other sheets' shapes this module has.
+ */
+export function shapeStateIds(): string[] {
+  return [
+    ...new Set<string>([
+      ...customCanvasRenderers.keys(),
+      ...customHtmlContent.keys(),
+      ...htmlOverlayElements.keys(),
+      ...overlayContentHash.keys(),
+      ...frameRefusals.keys(),
+      ...shapesWithScripts,
+    ]),
+  ];
 }
 
 /**

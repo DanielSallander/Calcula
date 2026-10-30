@@ -60,6 +60,16 @@ import {
 // facade does not carry; the Shell may read Core (insertFunctionHost.tsx reads
 // cellEditFlag the same way).
 import { isEditorOpening } from "../../core/lib/editOpenBuffer";
+// The sheet group's change announcement: the strip PAINTS the group Core owns
+// (core/state/sheetGrouping.ts) instead of keeping its own copy, so a group
+// Core ends -- an ordinary switch to a sheet outside it -- stops showing at
+// once (review revG#4). Read the same way as the typed-open latch above; the
+// subscription and its snapshot come from the one module as a pair (a
+// snapshot that is a new array on every read never settles).
+import {
+  subscribeToSheetGrouping,
+  getSelectedSheetIndices as getCoreSheetGroup,
+} from "../../core/state/sheetGrouping";
 // The SUBPATH (NameBox.tsx precedent): a dependency-free store plus Core's one
 // point-mode switch, kept out of any test's `@api/editing` double.
 import {
@@ -239,7 +249,8 @@ const surfacesOf = (sheets: SheetInfo[]): Record<number, SheetSurface> => {
 
 /**
  * Tell Core's per-sheet view cache (selection + scroll, keyed by TRUE index;
- * Spreadsheet.tsx `handleSheetReorder`) that sheets were renumbered. A move is
+ * core/components/Spreadsheet/sheetSwitchListeners.ts) and its sheet group
+ * that sheets were renumbered. A move is
  * a rotate; an insertion or a removal is told the same way through
  * sheetPlacement.ts's `insertionReorderDetail` / `removalReorderDetail`.
  */
@@ -385,8 +396,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Sheet grouping: tracks which sheets are selected (Ctrl+Click)
-  const [groupedSheets, setGroupedSheets] = useState<Set<number>>(new Set());
+  // Sheet grouping: which sheets are selected (Ctrl+Click), as CORE holds them.
+  // The strip kept its own copy in React state, so a group Core ended or
+  // renumbered went on showing here (review revG#4). It renders the one owner
+  // now; its snapshot keeps its identity until the group changes.
+  const groupedIndices = useSyncExternalStore(subscribeToSheetGrouping, getCoreSheetGroup);
+  const groupedSheets = React.useMemo(() => new Set(groupedIndices), [groupedIndices]);
 
   // Bumped when an extension registers a tab mark or says its answer changed.
   // The strip renders once; extensions activate AFTER it mounts, and a .calp
@@ -1281,10 +1296,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       });
 
       // Ctrl+Click: Toggle sheet grouping (multi-select) when NOT in formula mode
+      // (Core's group, which the strip paints through its subscription.)
       if (action === "group") {
         const newSelection = toggleSheetInGroup(index, activeIndex);
-        const newSet = new Set(newSelection);
-        setGroupedSheets(newSet);
         setSelectedSheetIndices(newSelection);
         console.log("[SheetTabs] Ctrl+Click: groupedSheets =", newSelection);
         return;
@@ -1292,8 +1306,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
       // Normal click (no Ctrl): clear sheet grouping. A Ctrl+click outside
       // formula mode that was refused (a canvas at either end) leaves it alone.
-      if (groupedSheets.size > 1 && !isCurrentlyFormulaMode && !event?.ctrlKey) {
-        setGroupedSheets(new Set());
+      // Asked of Core's group at EVENT time, never the render's copy.
+      if (isSheetGroupingActive() && !isCurrentlyFormulaMode && !event?.ctrlKey) {
         clearSheetGrouping();
         console.log("[SheetTabs] Normal click: cleared sheet grouping");
       }
@@ -1425,7 +1439,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         void alertAsync("Failed to switch sheet: " + String(err));
       }
     },
-    [activeIndex, sheets, onSheetChange, editing, dispatch, dragState, groupedSheets, forgetDropEnded]
+    [activeIndex, sheets, onSheetChange, editing, dispatch, dragState, forgetDropEnded]
   );
 
   const handleAddSheet = useCallback(async (kind?: SheetKindName) => {

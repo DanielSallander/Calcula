@@ -1,7 +1,9 @@
 //! FILENAME: app/src-tauri/src/object_bindings/carriage.rs
 // PURPOSE: Object property BINDINGS arriving through a `.calp` pull (D §3.14):
 //          a subscribe, a checkout or a refresh lands the application's
-//          `bindings.json` rows on the objects it just materialized.
+//          `bindings.json` rows on the objects it just materialized -- and so
+//          does a DEV pull from a local `.cala` (`PulledBindings::from_dev_pull`,
+//          BUG-0471), whose sheet ids are the source's own.
 // CONTEXT: Publish writes the bindings of the objects it carries
 //          (`calp::publish::published_object_bindings`) with APPLICATION ids;
 //          `calp::pull` reads them back unchanged and `rename_pull` follows a
@@ -82,51 +84,79 @@ impl PulledBindings {
         result: &calp::pull::PullResult,
         local_sheet: impl Fn(SheetId) -> Option<SheetId>,
     ) -> Self {
-        let local_of: Vec<(SheetId, SheetId)> = result
-            .sheets
+        let mut objects: Vec<(ObjectBindingKind, String)> = Vec::new();
+        objects.extend(result.charts.iter().map(|c| (ObjectBindingKind::Chart, c.id.to_string())));
+        objects.extend(control_uids(&result.controls).map(|uid| (ObjectBindingKind::Control, uid)));
+        objects.extend(result.slicers.iter().map(|s| (ObjectBindingKind::Slicer, s.id.to_string())));
+        objects.extend(
+            result.timeline_slicers.iter().map(|t| (ObjectBindingKind::TimelineSlicer, t.id.to_string())),
+        );
+        objects.extend(result.pivot_definitions.iter().map(|p| (ObjectBindingKind::Pivot, p.id.to_string())));
+        objects.extend(
+            result.floating_ranges.iter().map(|fr| (ObjectBindingKind::FloatingRange, fr.id.to_string())),
+        );
+        Self::capture(
+            result.sheets.iter().map(|p| (p.package_sheet_id, p.sheet.kind.is_canvas())),
+            objects,
+            &result.object_bindings,
+            local_sheet,
+        )
+    }
+
+    /// Capture a DEV pull's bindings (BUG-0471) by the same rules as
+    /// [`Self::from_pull`]. A dev pull carries controls, floating ranges and
+    /// (as sheets) canvas pages -- no charts, slicers, timelines or pivots --
+    /// and its "application" sheet ids are the SOURCE's. `local_sheet` maps a
+    /// source sheet id to the local sheet it materialized as (`None`: not
+    /// here -- a source sheet skipped because its id is a sheet the dev
+    /// subscription does not own).
+    pub(crate) fn from_dev_pull(
+        result: &calp::dev_mode::DevPullResult,
+        local_sheet: impl Fn(SheetId) -> Option<SheetId>,
+    ) -> Self {
+        let mut objects: Vec<(ObjectBindingKind, String)> = Vec::new();
+        objects.extend(control_uids(&result.controls).map(|uid| (ObjectBindingKind::Control, uid)));
+        objects.extend(
+            result.floating_ranges.iter().map(|fr| (ObjectBindingKind::FloatingRange, fr.id.to_string())),
+        );
+        Self::capture(
+            result.sheets.iter().map(|p| (p.source_sheet_id, p.sheet.kind.is_canvas())),
+            objects,
+            &result.object_bindings,
+            local_sheet,
+        )
+    }
+
+    /// The one capture both pulls share. `sheets`: every pulled sheet as
+    /// (application sheet id, is it a canvas page). `objects`: every other
+    /// object the pull carries, by its kept id. `rows`: the pull's
+    /// `bindings.json` rows, application ids.
+    fn capture(
+        sheets: impl IntoIterator<Item = (SheetId, bool)>,
+        objects: impl IntoIterator<Item = (ObjectBindingKind, String)>,
+        rows: &[::persistence::SavedObjectBinding],
+        local_sheet: impl Fn(SheetId) -> Option<SheetId>,
+    ) -> Self {
+        let sheets: Vec<(SheetId, bool)> = sheets.into_iter().collect();
+        let local_of: Vec<(SheetId, SheetId)> = sheets
             .iter()
-            .filter_map(|p| local_sheet(p.package_sheet_id).map(|local| (p.package_sheet_id, local)))
+            .filter_map(|(pkg, _)| local_sheet(*pkg).map(|local| (*pkg, local)))
             .collect();
         let page_ids: HashMap<String, String> =
             local_of.iter().map(|(pkg, local)| (pkg.to_string(), local.to_string())).collect();
         let landed_sheets: HashSet<SheetId> = local_of.iter().map(|(_, local)| *local).collect();
 
-        let mut carried: HashSet<ObjectBindingRef> = HashSet::new();
-        let mut carry = |kind: ObjectBindingKind, id: String| {
-            carried.insert(ObjectBindingRef { kind, id });
-        };
-        for chart in &result.charts {
-            carry(ObjectBindingKind::Chart, chart.id.to_string());
-        }
-        for entry in &result.controls {
-            for control in entry.controls.as_array().into_iter().flatten() {
-                if let Some(uid) = control.get("uid").and_then(|u| u.as_str()).filter(|u| !u.is_empty()) {
-                    carry(ObjectBindingKind::Control, uid.to_string());
-                }
-            }
-        }
-        for slicer in &result.slicers {
-            carry(ObjectBindingKind::Slicer, slicer.id.to_string());
-        }
-        for timeline in &result.timeline_slicers {
-            carry(ObjectBindingKind::TimelineSlicer, timeline.id.to_string());
-        }
-        for pivot in &result.pivot_definitions {
-            carry(ObjectBindingKind::Pivot, pivot.id.to_string());
-        }
-        for fr in &result.floating_ranges {
-            carry(ObjectBindingKind::FloatingRange, fr.id.to_string());
-        }
-        for pulled in result.sheets.iter().filter(|p| p.sheet.kind.is_canvas()) {
-            if let Some(local) = page_ids.get(&pulled.package_sheet_id.to_string()) {
-                carry(ObjectBindingKind::CanvasPage, local.clone());
+        let mut carried: HashSet<ObjectBindingRef> =
+            objects.into_iter().map(|(kind, id)| ObjectBindingRef { kind, id }).collect();
+        for (pkg, _) in sheets.iter().filter(|(_, is_canvas)| *is_canvas) {
+            if let Some(local) = page_ids.get(&pkg.to_string()) {
+                carried.insert(ObjectBindingRef { kind: ObjectBindingKind::CanvasPage, id: local.clone() });
             }
         }
 
         let page_kind = ObjectBindingKind::CanvasPage.wire_name();
         let control_kind = ObjectBindingKind::Control.wire_name();
-        let rows: Vec<::persistence::SavedObjectBinding> = result
-            .object_bindings
+        let rows: Vec<::persistence::SavedObjectBinding> = rows
             .iter()
             .filter_map(|row| {
                 if row.object.kind == control_kind {
@@ -146,6 +176,20 @@ impl PulledBindings {
 
         PulledBindings { rows, carried, landed_sheets }
     }
+}
+
+/// The `uid` of every control in `entries` (a control with none carries no
+/// binding).
+fn control_uids(entries: &[::persistence::SavedSheetControls]) -> impl Iterator<Item = String> + '_ {
+    entries.iter().flat_map(|entry| {
+        entry
+            .controls
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|control| control.get("uid").and_then(|u| u.as_str()).filter(|u| !u.is_empty()))
+            .map(str::to_string)
+    })
 }
 
 /// A Page Navigator's per-button binding names its page IN THE PATH

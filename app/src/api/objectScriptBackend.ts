@@ -27,13 +27,37 @@ import type { AuthoringRun } from "./scriptHost/authoringRun";
  * backend write resolves, so a listener that re-reads the backend sees the new
  * state; registering the script in the manager (onScriptChange) happens before
  * a fire-and-forget save and cannot promise that.
+ *
+ * The BACKEND emits the same event when it moves or removes a script itself
+ * (`scripting/object_script_commands.rs` `announce_object_script_change`): a
+ * re-bind (`scripting/script_rebind.rs` -- a name rename, a control moving
+ * with its cells, to another cell or with its sheet, and the undo / redo of
+ * each), a name delete and that delete's undo / redo reach no frontend save
+ * that could announce them.
  */
 export const OBJECT_SCRIPTS_CHANGED_EVENT = "workbook:object-scripts-changed";
 
 export interface ObjectScriptsChangedDetail {
   /** The script, or the component instance whose scripts were all deleted. */
   id: string;
-  change: "saved" | "deleted" | "deletedForInstance";
+  /**
+   * "rebound": the BACKEND moved the script to another object instance --
+   * `instanceId` says which. A named-range script follows its name through a
+   * rename; a control script follows its control when it moves with its cells
+   * (Insert / Delete Rows, Columns or Cells, on any sheet), to another cell or
+   * with its sheet (a sheet move, delete or copy); and the undo / redo of each
+   * moves it again (`scripting/script_rebind.rs`). Its id, source and
+   * provenance are unchanged. The backend also emits "deleted" for a script a
+   * name delete pruned and "saved" for one an undo put back.
+   */
+  change: "saved" | "deleted" | "deletedForInstance" | "rebound";
+  /**
+   * On a "rebound" from the backend: the binding the script has NOW -- `null`
+   * when it has none (its control went with a deleted row, column or sheet).
+   * Absent on every other change. Use it as is; a re-read
+   * (`getObjectScript(id)`) answers the same, one round trip later.
+   */
+  instanceId?: string | null;
 }
 
 function announceObjectScriptsChanged(detail: ObjectScriptsChangedDetail): void {

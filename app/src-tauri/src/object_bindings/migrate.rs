@@ -8,7 +8,11 @@
 //          charts and bindings are restored, under
 //          `CleanReason::LoadingFromDisk` -- opening a file is not an edit. The
 //          `.calp` materializer runs it over pulled controls (S6), with that
-//          door's own effect. IDEMPOTENT: a second run finds nothing.
+//          door's own effect. IDEMPOTENT: a second run finds nothing. Every
+//          pull -- a subscribe, a checkout and a refresh, real or dev -- first
+//          renames the old formula text it carries to the sheet names it
+//          landed under (`rename_legacy_control_formulas`), because this
+//          migration resolves it against the HOST's sheets.
 //
 // CHARTS ONLY FROM A PRE-BINDINGS WRITER. A chart field starting with `=` is a
 // LITERAL in a bindings-era document (`ChartTextFields`): the chart half runs
@@ -223,6 +227,62 @@ pub fn migrate_legacy_formulas(
     report
 }
 
+/// Will the migration turn this control property into a BINDING (rather than
+/// static text)? A non-code, catalog-bindable property whose old value type is
+/// `formula` and whose value starts with `=`. The ONE predicate both
+/// [`migrate_controls`] and [`rename_legacy_control_formulas`] ask, so the
+/// properties a pull renames ahead of the migration are exactly the ones the
+/// migration binds.
+fn becomes_binding(key: &str, value_type: &str, value: &str) -> bool {
+    if crate::controls::is_code_slot(key) || value_type != "formula" || !value.trim_start().starts_with('=') {
+        return false;
+    }
+    let path = format!("/properties/{}", catalog::escape_segment(key));
+    catalog::match_path(ObjectBindingKind::Control, &path).is_ok()
+}
+
+/// Rename the sheet references of the OLD formula-typed control properties a
+/// pre-bindings source carries -- exactly those [`migrate_legacy_formulas`]
+/// will turn into bindings ([`becomes_binding`]) -- with `rename` (a pull's
+/// `SheetRenames::rename_formula`). Returns how many changed.
+///
+/// WHY A PULL MUST RUN THIS BEFORE IT MIGRATES (revC#1). The migration
+/// normalises an old `=Data!A1` caption against THIS workbook's sheets. A pull
+/// that collision-renamed the source's "Data" to "Data (2)" renames the cell
+/// formulas and the `bindings.json` rows it carries -- but a formula-typed
+/// control property is neither (`SheetRenames::rename_control_entries` treats
+/// it as a literal, deliberately: a bindings-era payload never holds one), so
+/// the caption migrated into a binding of the SUBSCRIBER's own "Data" and
+/// painted that sheet's value -- live, plausible and wrong, beside cells that
+/// read the pulled one. Renamed first, it migrates to `='Data (2)'!A1`.
+///
+/// `controls` is a pull's per-sheet opaque payloads (`SavedControlEntry`
+/// arrays); every other property, and every code slot, is left byte-identical.
+pub(crate) fn rename_legacy_control_formulas(
+    controls: &mut [persistence::SavedSheetControls],
+    rename: &dyn Fn(&str) -> Option<String>,
+) -> usize {
+    let mut changed = 0;
+    for sheet in controls.iter_mut() {
+        let Some(entries) = sheet.controls.as_array_mut() else { continue };
+        for entry in entries.iter_mut() {
+            let Some(properties) = entry.get_mut("properties").and_then(Value::as_object_mut) else { continue };
+            for (key, property) in properties.iter_mut() {
+                let value_type = property.get("valueType").and_then(Value::as_str).unwrap_or("");
+                let Some(value) = property.get("value").and_then(Value::as_str) else { continue };
+                if !becomes_binding(key, value_type, value) {
+                    continue;
+                }
+                if let Some(renamed) = rename(value) {
+                    property["value"] = Value::String(renamed);
+                    changed += 1;
+                }
+            }
+        }
+    }
+    changed
+}
+
 /// Does this control need the migration (no uid, or a non-code property that
 /// is not static)?
 fn control_needs_migration(meta: &crate::controls::ControlMetadata) -> bool {
@@ -283,9 +343,7 @@ fn migrate_controls(
                 meta.control_type, sheet, row, col, name
             );
             let path = format!("/properties/{}", catalog::escape_segment(&name));
-            let bindable = catalog::match_path(ObjectBindingKind::Control, &path).is_ok();
-            let is_formula = prop.value_type == "formula" && prop.value.trim_start().starts_with('=');
-            if bindable && is_formula {
+            if becomes_binding(&name, &prop.value_type, &prop.value) {
                 // The old evaluator read an unqualified reference on the
                 // control's OWN sheet.
                 let cx = context_for(world, sheet, sheet);
@@ -316,7 +374,7 @@ fn migrate_controls(
 /// sheet (the `specReferenceSheet` rule), else the chart's own worksheet, else
 /// -- a canvas chart whose data names no sheet -- the first visible worksheet.
 fn chart_reference_sheet(world: &FormulaWorld, host: usize, spec_json: &str) -> usize {
-    if let Some(data) = formula::chart_data_sheet(spec_json, &world.sheet_names, &world.sheet_ids) {
+    if let Some(data) = formula::chart_data_sheet(spec_json, &world.sheet_names, &world.sheet_ids, &world.named_ranges) {
         if !world.sheet_kinds.get(data).is_some_and(|k| k.is_canvas()) {
             return data;
         }

@@ -60,9 +60,12 @@ import type { PivotViewResponse } from "../pivot-api";
 
 type Reads = "DISPLAYED" | "REAL" | "SEAM";
 
+/** Every reader of a pivot view the census counts. */
+const VIEW_READERS = ["getCachedPivotView", "getDisplayedPivotView", "getReusableCachedPivotView"] as const;
+
 interface Row {
   file: string;
-  fn: "getCachedPivotView" | "getDisplayedPivotView";
+  fn: (typeof VIEW_READERS)[number];
   count: number;
   reads: Reads;
   /** What happens while a filtered view shows. */
@@ -77,12 +80,14 @@ const CENSUS: Row[] = [
   { file: "Pivot/lib/pivotCrossFilterView.ts", fn: "getDisplayedPivotView", count: 1, reads: "SEAM", whileFiltered: "the definition" },
   { file: "Pivot/lib/pivotCrossFilterView.ts", fn: "getCachedPivotView", count: 2, reads: "SEAM", whileFiltered: "the displayed fallback; the real version a filtered read pairs with" },
   { file: "Pivot/lib/pivotViewStore.ts", fn: "getCachedPivotView", count: 1, reads: "SEAM", whileFiltered: "the definition" },
+  { file: "Pivot/lib/pivotViewStore.ts", fn: "getReusableCachedPivotView", count: 1, reads: "SEAM", whileFiltered: "the definition (the real view unless marked stale, revD#1)" },
   { file: "Pivot/lib/pivotChromeActions.ts", fn: "getCachedPivotView", count: 2, reads: "REAL", whileFiltered: "REFUSED from a box (handlePivotVisualPress, the box double-click) with the note" },
   { file: "Pivot/handlers/filterMenuHandler.ts", fn: "getCachedPivotView", count: 1, reads: "REAL", whileFiltered: "REFUSED when opened from a box cell, before any backend call; allowed from the field list, a PivotChart, the ribbon" },
   { file: "Pivot/handlers/pivotContextMenuHelpers.ts", fn: "getCachedPivotView", count: 1, reads: "REAL", whileFiltered: "the box menu offers only Copy and Clear visual selection" },
   { file: "Pivot/lib/writebackEditing.ts", fn: "getCachedPivotView", count: 1, reads: "REAL", whileFiltered: "REFUSED: resolveWritebackCell answers not-editable first" },
   { file: "Pivot/lib/valueFieldEdits.ts", fn: "getCachedPivotView", count: 1, reads: "REAL", whileFiltered: "unchanged (value field names only, no groupPath)" },
-  { file: "Pivot/index.ts", fn: "getCachedPivotView", count: 6, reads: "REAL", whileFiltered: "unchanged: refresh-cache bookkeeping, autofit of the hidden grid, worksheet-region double-click and paint" },
+  { file: "Pivot/index.ts", fn: "getCachedPivotView", count: 5, reads: "REAL", whileFiltered: "unchanged: refresh-cache bookkeeping, autofit of the hidden grid, worksheet-region double-click and paint" },
+  { file: "Pivot/index.ts", fn: "getReusableCachedPivotView", count: 1, reads: "REAL", whileFiltered: "unchanged: the region refresh's cached hit on a return to a sheet (refresh-cache bookkeeping)" },
 ];
 
 const EXTENSIONS = resolve(__dirname, "../../..");
@@ -106,8 +111,11 @@ function callSites(): Map<string, number> {
   const found = new Map<string, number>();
   for (const file of sourceFiles(EXTENSIONS)) {
     const src = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-    for (const fn of ["getCachedPivotView", "getDisplayedPivotView"] as const) {
-      const n = src.split(`${fn}(`).length - 1;
+    for (const fn of VIEW_READERS) {
+      // Whole names only: `getReusableCachedPivotView(` must not count as a
+      // `getCachedPivotView(` (it does not contain it, but a future reader
+      // named `xGetCachedPivotView` would).
+      const n = src.split(new RegExp(`\\b${fn}\\(`)).length - 1;
       if (n > 0) found.set(`${relative(EXTENSIONS, file).replace(/\\/g, "/")}|${fn}`, n);
     }
   }

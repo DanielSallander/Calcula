@@ -277,6 +277,84 @@ pub(crate) fn origins_blocked_by(
     origins
 }
 
+/// [`origins_blocked_by`] for a SET of written cells -- the shape a batch write
+/// (a paste, a script's setValues, an MCP block write) has.
+///
+/// Pasting a blank over the cell that blocks a dynamic array is the remedy
+/// `#SPILL!` names, exactly as typing Delete there is, and Excel re-spills the
+/// instant the obstruction goes [LIVE, Excel 16]. The array does not DEPEND on
+/// the cell that was in its way, so no dependency edge reaches it: without
+/// this, `update_cell` re-spilled it and the batch left it `#SPILL!` until the
+/// next F9. One `spill_blocks` lock and an `is_empty()` on a workbook with no
+/// blocked array; the written cells are hashed only once something is blocked.
+pub(crate) fn origins_blocked_by_any(
+    state: &AppState,
+    sheet: usize,
+    cells: &[(u32, u32)],
+) -> Vec<(u32, u32)> {
+    let Ok(blocks) = state.spill_blocks.lock() else {
+        return Vec::new();
+    };
+    if blocks.is_empty() || cells.is_empty() {
+        return Vec::new();
+    }
+    let written: crate::CoordSet = cells.iter().copied().collect();
+    let mut origins: Vec<(u32, u32)> = blocks
+        .iter()
+        .filter(|(&(s, _, _), at)| s == sheet && written.contains(*at))
+        .map(|(&(_, r, c), _)| (r, c))
+        .collect();
+    // Deterministic, for the reason `origins_blocked_by` sorts.
+    origins.sort_unstable();
+    origins.dedup();
+    origins
+}
+
+/// A batch is about to write `(row, col)`, a cell a dynamic array SPILLED INTO
+/// EARLIER IN THE SAME BATCH: release that array's spill through the ONE
+/// tear-down and erase its other spilled values -- but NOT this cell, which is
+/// the write's. "Drop the claim, leave the cell", for the one cell that is
+/// somebody's data.
+///
+/// The batch's own spill guard runs before anything is written, so the only
+/// claim a written cell can carry is one an earlier write of the same batch
+/// made: a pasted `=SEQUENCE(3)` in D1 spills over D2:D3 the moment it is
+/// written, and then the batch writes the literal that was copied for D3.
+/// Left under D1's claim, the literal was ERASED by the cascade's re-decision
+/// of D1 (the tear-down erases every cell an origin owned) and D1 spilled over
+/// it -- the user's "x" gone, with no error anywhere. With the claim gone, the
+/// re-decision finds D3 occupied and D1 reports `#SPILL!`, as Excel does for
+/// the same paste [LIVE, Excel 16]. The other spilled values are DERIVED, so
+/// erasing them loses nothing: the re-decision puts them back when the array
+/// can land, and leaving them would block it as foreign data.
+///
+/// Costs one `spill_hosts` lock and one `is_empty()` per written cell on a
+/// workbook with no dynamic array. Takes the leaf spill locks after the grid
+/// guards the caller holds, never nested inside each other.
+fn release_fresh_spill_under_write(
+    state: &AppState,
+    grid: &mut Grid,
+    grids: &mut [Grid],
+    sheet: usize,
+    row: u32,
+    col: u32,
+    updated_cells: &mut Vec<CellData>,
+) {
+    let origin = {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        if spill_hosts.is_empty() {
+            return;
+        }
+        spill_hosts.get(&(sheet, row, col)).copied()
+    };
+    let Some((origin_row, origin_col)) = origin else {
+        return;
+    };
+    let released = take_spills_owned_within(state, sheet, origin_row, origin_col, origin_row, origin_col);
+    let others: Vec<(u32, u32)> = released.into_iter().filter(|&cell| cell != (row, col)).collect();
+    erase_released_spill_cells(grid, grids, sheet, sheet, &others, updated_cells);
+}
+
 /// The ACTIVE SHEET's VOLATILE cells: every cell whose stored formula calls
 /// NOW, TODAY, RAND, RANDBETWEEN, RANDARRAY, OFFSET, INDIRECT or CELL.
 /// `engine::volatility` names them and records WHY each one qualifies (the
@@ -404,6 +482,127 @@ fn splice_volatile_cascade_roots(
             }
         }
     }
+}
+
+/// The cells an active-sheet write's same-sheet cascade starts from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CascadeSeeds<'a> {
+    /// `update_cell`: the one edited cell. It is evaluated BEFORE the cascade
+    /// and is not a member of the order (unless a cycle leads back to it).
+    Edited((u32, u32)),
+    /// `update_cells_batch`: every written cell, each a MEMBER of the order,
+    /// so a formula the batch wrote is re-evaluated after the cells it reads.
+    Written(&'a [(u32, u32)]),
+}
+
+/// THE CELLS AN ACTIVE-SHEET WRITE'S DEPENDENT CASCADE EVALUATES, in the order
+/// it evaluates them -- the ONE answer, for `update_cell_impl`,
+/// `update_cells_batch_core` and the CUBE pre-fetch (`bi::cube::
+/// build_cube_prefetch`) alike.
+///
+/// In order: the seeds' transitive dependents (one multi-root traversal for
+/// the whole write, never one per written cell), their whole-column/row
+/// readers, the volatile custom-function cells the frontend's UDF pass found,
+/// the volatile built-ins and everything downstream of them
+/// (`splice_volatile_cascade_roots`), and the dynamic-array origins this write
+/// unblocked with their dependents (`unblocked_origins`: `origins_blocked_by`
+/// for an edit, `origins_blocked_by_any` over the written cells for a batch).
+///
+/// WHY THE PRE-FETCH CALLS THIS TOO (BUG-0476 follow-up). The cascade
+/// evaluates every one of these cells WITH the write's cube data in hand, and
+/// a cube cell the pre-fetch held no results for answered `#N/A`. The pre-fetch
+/// used to compute its own, smaller set -- each edit's dependents, one full
+/// traversal per edit -- so a `CUBEVALUE` fed by a `TODAY()` cell (the volatile
+/// splice), or wrapped in `=IF(COUNTA(A:A)>0, CUBEVALUE(...))` (a column
+/// reader), went `#N/A` on an ordinary edit. Two copies of "which cells does
+/// this write recalculate" cannot stay in agreement; one function can.
+///
+/// The pre-fetch calls it BEFORE the write, over the pre-write dependency maps
+/// and grid, which yields the same set once the written cells themselves are
+/// added: a write only changes edges that point AT a written cell (a cell's
+/// dependents do not change when its own formula does), and the written cells
+/// are seeds -- so nothing reachable from them moves. Order may differ; the
+/// set does not.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn active_sheet_write_cascade(
+    grid: &Grid,
+    seeds: CascadeSeeds<'_>,
+    dependents_map: &crate::DependencyMap,
+    column_dependents_map: &crate::StripeDependentsMap,
+    row_dependents_map: &crate::StripeDependentsMap,
+    udf_volatile_cells: Option<&[crate::scripting::udf::UdfCellRef]>,
+    unblocked_origins: &[(u32, u32)],
+) -> Vec<(u32, u32)> {
+    let edited_buf: [(u32, u32); 1];
+    let (seed_cells, members, already_evaluated): (&[(u32, u32)], bool, Option<(u32, u32)>) =
+        match seeds {
+            CascadeSeeds::Edited(cell) => {
+                edited_buf = [cell];
+                (&edited_buf[..], false, Some(cell))
+            }
+            CascadeSeeds::Written(cells) => (cells, true, None),
+        };
+
+    let mut order = crate::recalc_order_from_seeds(seed_cells, dependents_map, members);
+    let mut set: crate::CoordSet = order.iter().copied().collect();
+
+    // Whole-column/row readers (formulas with column or row references) live
+    // in the stripe maps, not `dependents`: appended after the topological
+    // order. `get_column_row_dependents` never returns its own seed.
+    for &seed in seed_cells {
+        for dep in get_column_row_dependents(seed, column_dependents_map, row_dependents_map) {
+            if Some(dep) != already_evaluated && set.insert(dep) {
+                order.push(dep);
+            }
+        }
+    }
+
+    // VOLATILE UDF cells (Excel's Application.Volatile): cells calling a
+    // function the author marked volatile recalculate on every edit even
+    // though no dependency edge reaches them. The frontend's UDF pass found
+    // them and already resolved their calls. `None` for every workbook without
+    // a volatile UDF, and for Rust-side writers.
+    if let Some(volatile) = udf_volatile_cells {
+        for v in volatile {
+            if Some((v.row, v.col)) != already_evaluated && set.insert((v.row, v.col)) {
+                order.push((v.row, v.col));
+            }
+        }
+    }
+
+    // VOLATILE BUILT-INS (NOW/TODAY/RAND/RANDBETWEEN/RANDARRAY/OFFSET/
+    // INDIRECT/CELL): the same rule for the functions Excel makes volatile
+    // itself, read back off the stored ASTs. See
+    // `splice_volatile_cascade_roots` for the cost.
+    splice_volatile_cascade_roots(
+        grid,
+        dependents_map,
+        column_dependents_map,
+        row_dependents_map,
+        already_evaluated,
+        &mut order,
+        &mut set,
+    );
+
+    // ARRAYS THIS WRITE UNBLOCKED. A dynamic array blocked by an occupied
+    // cell is `#SPILL!`, and clearing the obstruction is the remedy the error
+    // names -- but the origin does not DEPEND on the cell that was in its way,
+    // so no dependency edge reaches it. (Excel re-spills the instant the
+    // blocker is cleared.) Convergent when several cells block one array: the
+    // re-evaluation records the next blocker and stays `#SPILL!`.
+    for &origin in unblocked_origins {
+        if Some(origin) != already_evaluated && set.insert(origin) {
+            order.push(origin);
+            // ...and whatever reads the array, which was reading an error.
+            for dep in get_recalculation_order(origin, dependents_map) {
+                if set.insert(dep) {
+                    order.push(dep);
+                }
+            }
+        }
+    }
+
+    order
 }
 
 /// [`take_spills_where`] for a RECTANGLE of origins — the shape every clear and
@@ -1186,6 +1385,19 @@ pub fn get_range_cells_typed(
     end_row: u32,
     end_col: u32,
 ) -> Result<Vec<crate::api_types::TypedCellData>, String> {
+    range_cells_typed(&state, sheet_index, start_row, start_col, end_row, end_col)
+}
+
+/// The body of [`get_range_cells_typed`] over a plain reference, so the tests
+/// drive the real read with no Tauri runtime.
+pub(crate) fn range_cells_typed(
+    state: &AppState,
+    sheet_index: Option<usize>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<Vec<crate::api_types::TypedCellData>, String> {
     if end_row < start_row || end_col < start_col {
         return Err("invalid range: end before start".to_string());
     }
@@ -1232,14 +1444,20 @@ pub fn get_range_cells_typed(
                 row,
                 col,
             );
+            let stored_formula = formula_display(cell, &locale);
+            // WITHHELD: the cell holds a formula this read does not return. A
+            // hidden-format cell holding a constant or nothing withholds
+            // nothing -- an operation paste may compute over it (Excel does).
+            let formula_withheld = hide && stored_formula.is_some();
             let formula = if hide {
                 None
             } else {
-                formula_display(cell, &locale)
+                stored_formula
             };
             // A style-only cell (no value, no formula) adds nothing the caller's
-            // empty fill does not already say — keep the payload sparse.
-            if kind == "empty" && formula.is_none() && display.is_empty() {
+            // empty fill does not already say — keep the payload sparse. A
+            // withheld formula is never "nothing", whatever it evaluates to.
+            if kind == "empty" && formula.is_none() && !formula_withheld && display.is_empty() {
                 continue;
             }
             out.push(crate::api_types::TypedCellData {
@@ -1248,6 +1466,7 @@ pub fn get_range_cells_typed(
                 value,
                 display,
                 formula,
+                formula_withheld,
                 r#type: kind.to_string(),
             });
         }
@@ -1584,9 +1803,10 @@ fn named_control_anchor_name(state: &AppState, row: u32, col: u32) -> Option<Str
 
 /// Body of `update_cell` — every lock is acquired AND dropped inside, so the
 /// command wrapper can run the named-anchor control recalc afterwards without
-/// lock re-entry.
+/// lock re-entry. `pub(crate)` so the style tests (format_home_tests.rs) can
+/// type into a formatted line through the REAL entry path (BUG-0354).
 #[allow(clippy::too_many_arguments)]
-fn update_cell_impl(
+pub(crate) fn update_cell_impl(
     state: &AppState,
     file_state: &FileState,
     user_files_state: &UserFilesState,
@@ -2172,73 +2392,28 @@ fn update_cell_impl(
         let cascade_table_names = state.table_names.read().unwrap();
         let cascade_named_ranges = state.named_ranges.read().unwrap();
 
-        // Get direct cell dependents
-        let mut recalc_order = get_recalculation_order((row, col), &dependents_map);
-
-        log_debug!("DEPS", "cascade for ({},{}) recalc_order={:?} dependents_entry={:?}",
-            row, col, recalc_order, dependents_map.get(&(row, col)));
-
-        // Also get column/row dependents (formulas with column or row references)
-        // Use a set for O(1) lookup instead of O(n) Vec::contains
-        let mut recalc_set: crate::CoordSet = recalc_order.iter().copied().collect();
-        let col_row_deps =
-            get_column_row_dependents((row, col), &column_dependents_map, &row_dependents_map);
-        for dep in col_row_deps {
-            if recalc_set.insert(dep) {
-                recalc_order.push(dep);
-            }
-        }
-        // VOLATILE UDF cells (Excel's Application.Volatile): cells calling a
-        // function the author marked volatile recalculate on every edit even
-        // though no dependency edge reaches them. `collect_udf_calls` found
-        // them and already resolved their calls into `udf_results`, so the
-        // resolver below can serve them. Empty (usually None) for every
-        // workbook without a volatile UDF, so the hot path is untouched.
-        if let Some(volatile) = &udf_volatile_cells {
-            for v in volatile {
-                if (v.row, v.col) != (row, col) && recalc_set.insert((v.row, v.col)) {
-                    recalc_order.push((v.row, v.col));
-                }
-            }
-        }
-        // VOLATILE BUILT-INS (NOW/TODAY/RAND/RANDBETWEEN/RANDARRAY/OFFSET/
-        // INDIRECT/CELL). The same rule as the volatile UDF above, for the
-        // functions Excel makes volatile itself; the difference is only that
-        // nobody sends the backend a list, so the cells are read back off the
-        // stored ASTs. See `splice_volatile_cascade_roots` for the cost.
-        splice_volatile_cascade_roots(
+        // THE CASCADE, from the one function the CUBE pre-fetch computes its
+        // result set with (`active_sheet_write_cascade`): the edit's
+        // dependents, its whole-column/row readers, the volatile UDF cells
+        // `collect_udf_calls` found (already resolved into `udf_results`), the
+        // volatile built-ins and everything downstream of them, and the arrays
+        // this edit unblocked. `spill_blocks` makes the last one cheap: it
+        // already records WHICH cell blocked each origin, so unblocking is a
+        // reverse lookup on a map that is empty in every workbook with no
+        // blocked array.
+        let unblocked_origins = origins_blocked_by(&state, active_sheet, row, col);
+        let recalc_order = active_sheet_write_cascade(
             &grid,
+            CascadeSeeds::Edited((row, col)),
             &dependents_map,
             &column_dependents_map,
             &row_dependents_map,
-            Some((row, col)),
-            &mut recalc_order,
-            &mut recalc_set,
+            udf_volatile_cells.as_deref(),
+            &unblocked_origins,
         );
-        // ARRAYS THIS EDIT UNBLOCKED. A dynamic array blocked by an occupied
-        // cell is `#SPILL!`, and clearing the obstruction is the remedy the
-        // error names -- but the origin does not DEPEND on the cell that was in
-        // its way, so no dependency edge reaches it and the cascade walked
-        // straight past. The array stayed `#SPILL!` until the user re-entered
-        // the formula, which is the one thing the error message does not tell
-        // them to do. (Excel re-spills the instant the blocker is cleared.)
-        //
-        // `spill_blocks` is what makes this cheap: it already records WHICH
-        // cell blocked each origin, for the error message, so unblocking is a
-        // reverse lookup on a map that is empty in every workbook with no
-        // blocked array. Convergent when several cells block one array -- the
-        // re-evaluation simply records the next blocker and stays `#SPILL!`.
-        for origin in origins_blocked_by(&state, active_sheet, row, col) {
-            if origin != (row, col) && recalc_set.insert(origin) {
-                recalc_order.push(origin);
-                // ...and whatever reads the array, which was reading an error.
-                for dep in get_recalculation_order(origin, &dependents_map) {
-                    if recalc_set.insert(dep) {
-                        recalc_order.push(dep);
-                    }
-                }
-            }
-        }
+
+        log_debug!("DEPS", "cascade for ({},{}) recalc_order={:?} dependents_entry={:?}",
+            row, col, recalc_order, dependents_map.get(&(row, col)));
         let perf_t4_recalc_order = Instant::now();
         let perf_same_sheet_count = recalc_order.len();
         let mut perf_cache_hits: u32 = 0;
@@ -2434,11 +2609,13 @@ fn update_cell_impl(
 /// this mechanical.
 ///
 /// Each cell is evaluated with an `EvalContext` carrying ITS OWN position
-/// (`current_row`/`current_col`) — required for the preserve-on-no-prefetch
-/// semantics: `preserved_cube_value` / `preserved_udf_value` (evaluator.rs)
-/// read the cell's stored value through the position when no cube prefetch /
-/// UDF resolver is supplied, so cube-bearing dependents keep their last value
-/// instead of collapsing to #N/A (and UDF-bearing ones to #NAME?).
+/// (`current_row`/`current_col`) — required by ROW()/COLUMN(), implicit
+/// intersection and a scoped cube prefetch's `covers`. With no cube prefetch /
+/// UDF resolver, `preserved_cube_value` / `preserved_udf_value` (evaluator.rs)
+/// answer each call -- the whole formula or any part of it -- from the
+/// sheet's results cache (`engine::cube::CallMemo`): the answer recorded for
+/// exactly the arguments it has now, and #N/A (#NAME? for a custom function)
+/// when none is. The cell's stored value is never read back (rev3A#3).
 ///
 /// Steps: evaluate the cached AST (or, on a cache miss, parse + resolve
 /// names/tables/spill refs and cache the converted AST), clear the cell's
@@ -2744,7 +2921,11 @@ impl SheetDependencyIndex {
 /// different values depending on whether F9 or an edit last ran — the exact
 /// path-dependence `EvalSurface`'s doc forbids.
 ///
-/// Still no per-cell position/preserve context, which is unchanged.
+/// AT ITS OWN CELL, too, for the same reason: it evaluated through a
+/// positionless entry point, so an off-sheet `=ROW()*Sheet1!A1` went #VALUE!,
+/// `=@Sheet1!A1:A10` intersected row 1, and a cube or custom-function cell was
+/// clobbered to #N/A / #NAME? instead of keeping its value -- on every edit,
+/// paste, fill, undo and bulk rewrite, since they all end in this walk.
 #[allow(clippy::too_many_arguments)]
 fn recalc_walked_cell(
     state: &AppState,
@@ -2774,6 +2955,27 @@ fn recalc_walked_cell(
         return false;
     };
 
+    // The dependent's OWN cell, exactly as `reevaluate_formula_cell` gives it:
+    // argument-less ROW()/COLUMN(), implicit intersection (`@`) and the cube and
+    // custom-function preserve all ask where the formula sits. No caller hands
+    // this walk cube data or a UDF resolver, so without the position a cube cell
+    // on another sheet was clobbered to #N/A and a custom-function one to #NAME?
+    // by every edit of a cell they read, and `=ROW()*Sheet1!A1` went #VALUE!.
+    // Evaluated on the dependent's own sheet, so the preserve reads THAT sheet's
+    // stored value and THAT sheet's served-call memo: the value is kept only
+    // when the call is the whole formula and the edit left its arguments as
+    // they were; otherwise #N/A / #NAME? (rev3A#3), never the old member's
+    // number beside the new member's name.
+    let eval_ctx = engine::EvalContext {
+        cube_prefetch: None,
+        current_row: Some(dep_row),
+        current_col: Some(dep_col),
+        row_heights: None,
+        column_widths: None,
+        hidden_rows: None,
+        control_values: Some(control_values.clone()),
+    };
+
     // Use the cached AST if available; otherwise re-parse the rendered string.
     let raw_result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
         // Defined names are expanded on the way into the evaluator (D2), against
@@ -2783,15 +2985,17 @@ fn recalc_walked_cell(
             cached_ast,
             &name_tables.at(dep_sheet_idx, dep_row, dep_col),
         );
-        crate::evaluate_formula_raw_with_ast_files_and_cube(
+        evaluate_formula_raw_with_files_and_pivot(
             &*grids,
             sheet_names,
             dep_sheet_idx,
             &eval_target,
+            eval_ctx,
+            Some(styles),
             user_files,
-            None,
-            None,
-            Some(control_values.clone()),
+            None, // pivot lookup: not wired on this path (unchanged)
+            None, // gather lookup: not wired on this path (unchanged)
+            None, // UDF resolver: none reaches the walk; the position keeps the value
         )
     } else {
         // (GET.CONTROLVALUE unavailable here (v1): string path)
@@ -2893,8 +3097,9 @@ fn recalc_walked_cell(
 /// the active sheet's.
 ///
 /// Dependents re-evaluated by this walk spill through the shared
-/// [`apply_spill_decision`], on their own sheet — see `recalc_walked_cell`.
-/// What they still do not get is per-cell position/preserve context.
+/// [`apply_spill_decision`], on their own sheet, and are evaluated at their own
+/// cell (position and the cube/custom-function preserve) — see
+/// `recalc_walked_cell`.
 ///
 /// # BUG-0019
 ///
@@ -3042,6 +3247,15 @@ pub(crate) fn cascade_cross_sheet_dependents(
 /// if any edited cell is the ANCHOR of a NAMED on-grid control, the shared
 /// targeted control recalc refreshes GET.CONTROLVALUE dependents of those
 /// names (see `update_cell` for the rationale and the recursion argument).
+///
+/// `cube_results` (BUG-0476): the cube data the async `cube_prefetch` resolved
+/// for THIS batch's writes (its `edits` shape), exactly as `update_cell` takes
+/// the single edit's: every cube cell the batch evaluates, its cascade
+/// included (`active_sheet_write_cascade`). The frontend sends it for a batch
+/// that writes a CUBE formula and, once the session has seen one, for every
+/// batch (a paste into a cube argument cell re-evaluates the cube cell), so a
+/// workbook with no cube stays one call; without it a script's or an
+/// extension's `=CUBEVALUE(...)` showed #N/A.
 #[tauri::command]
 pub fn update_cells_batch(
     state: State<AppState>,
@@ -3053,6 +3267,7 @@ pub fn update_cells_batch(
     updates: Vec<crate::api_types::CellUpdateInput>,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
     udf_volatile_cells: Option<Vec<crate::scripting::udf::UdfCellRef>>,
+    cube_results: Option<engine::CubePrefetch>,
     target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<CellData>, String> {
     // P3: an OBJECT's cells (a paste, AutoSum or Fill Series into a floating
@@ -3119,8 +3334,8 @@ pub fn update_cells_batch(
         }
     };
 
-    // Plain refs that outlive the State wrappers moved into the core below
-    // (tauri's State::inner returns &'r T) — needed for the post-batch recalc.
+    // Plain refs (tauri's State::inner returns &'r T) for the core and the
+    // post-batch recalc.
     let state_ref = state.inner();
     let user_files_ref = user_files_state.inner();
     let pivot_ref = pivot_state.inner();
@@ -3128,14 +3343,15 @@ pub fn update_cells_batch(
     let ribbon_ref = ribbon_filter_state.inner();
 
     let mut cells = update_cells_batch_core(
-        state,
-        file_state,
-        user_files_state,
-        pivot_state,
+        state_ref,
+        file_state.inner(),
+        user_files_ref,
+        pivot_ref,
         updates,
         udf_results,
         udf_volatile_cells,
         Some(control_values),
+        cube_results,
     )?;
 
     // Named-anchor edits: refresh GET.CONTROLVALUE dependents of the edited
@@ -3163,7 +3379,9 @@ pub fn update_cells_batch(
 /// `control_values: None` => GET.CONTROLVALUE evaluates to #N/A in this pass (v1).
 ///
 /// Rust-side callers have no UDF pre-fetch (they cannot run JS off-thread), so
-/// they get no volatile-UDF splice either — exactly as before.
+/// they get no volatile-UDF splice either — exactly as before. Nor a cube
+/// pre-fetch (the BI model is async; these callers are synchronous): a CUBE
+/// formula one of them writes keeps the preserve-or-#N/A behaviour.
 pub(crate) fn update_cells_batch_with_controls(
     state: State<AppState>,
     file_state: State<FileState>,
@@ -3174,31 +3392,40 @@ pub(crate) fn update_cells_batch_with_controls(
     control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> Result<Vec<CellData>, String> {
     update_cells_batch_core(
-        state,
-        file_state,
-        user_files_state,
-        pivot_state,
+        state.inner(),
+        file_state.inner(),
+        user_files_state.inner(),
+        pivot_state.inner(),
         updates,
         udf_results,
         None,
         control_values,
+        None,
     )
 }
 
 /// The batch body. Split from `update_cells_batch_with_controls` so the Tauri
 /// command can pass the volatile-UDF cell list the frontend's pre-fetch found
-/// without changing the signature Rust-side callers (script apply / MCP tools)
-/// already use.
+/// (and the cube data, BUG-0476) without changing the signature Rust-side
+/// callers (script apply / MCP tools) already use. Over plain references, so
+/// the tests drive the real body with no Tauri runtime.
+///
+/// `cube_results`: the batch's cube pre-fetch (`cube_prefetch` with `edits`),
+/// served to the written cells' own evaluation -- under manual calculation
+/// too, as `update_cell` serves the edited cell -- and to the dependent
+/// cascade, which re-evaluates the written cells after every write has
+/// landed. `None` is exactly the behaviour before it existed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_cells_batch_core(
-    state: State<AppState>,
-    file_state: State<FileState>,
-    user_files_state: State<UserFilesState>,
-    pivot_state: State<'_, crate::pivot::PivotState>,
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
     updates: Vec<crate::api_types::CellUpdateInput>,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
     udf_volatile_cells: Option<Vec<crate::scripting::udf::UdfCellRef>>,
     control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
+    cube_results: Option<engine::CubePrefetch>,
 ) -> Result<Vec<CellData>, String> {
     // Batch cell writes are still an interactive edit — a paste, a script's
     // setValues, a fill — and every result is persisted, so the same ceiling as
@@ -3220,6 +3447,9 @@ pub(crate) fn update_cells_batch_core(
     // Build the apply-time UDF resolver from the pre-fetched results table (if
     // any). Omitting udfResults -> None -> behavior identical to before.
     let udf_resolver = udf_results.as_ref().map(|t| crate::scripting::udf::make_udf_resolver(t));
+    // The batch's pre-fetched CUBE data (BUG-0476), shared by the written
+    // cells' evaluation and the dependent cascade, as in `update_cell_impl`.
+    let cube_arc = cube_results.map(std::sync::Arc::new);
     // NOTE: user files are locked BELOW, after the grid locks -- canonical lock
     // order. Locked here, they were held across `state.grid`, which is the
     // order the recalculation pass takes on a background thread inverted.
@@ -3411,11 +3641,51 @@ pub(crate) fn update_cells_batch_core(
             );
         }
 
+        // ...and a cell an EARLIER write of this batch spilled into stops
+        // being that array's: its spill is released, the cell is this write's
+        // (`release_fresh_spill_under_write`). Pasting B1:B3 = (=SEQUENCE(3)
+        // showing #SPILL!, blank, "x") at D1 spilled D1 over D2:D3 and then
+        // wrote "x" into D3 under D1's claim, and the cascade's re-decision
+        // released the claim by ERASING D3 -- the user's "x" was gone and D1
+        // showed 1,2,3. With the claim gone, the re-decision finds D3 occupied
+        // and D1 is #SPILL!, as in Excel.
+        release_fresh_spill_under_write(
+            &state,
+            &mut grid,
+            &mut grids,
+            active_sheet,
+            row,
+            col,
+            &mut updated_cells,
+        );
+
         // Handle empty value - clear the cell
         if value.trim().is_empty() {
-            grid.clear_cell(row, col);
-            if active_sheet < grids.len() {
-                grids[active_sheet].clear_cell(row, col);
+            // A writer that names a style for a BLANK -- a pasted, filled or
+            // moved empty position, which sends the source's displayed index --
+            // names its LOOK (BUG-0354 follow-up): the position keeps it as an
+            // empty cell of that style wherever the row/column format there
+            // would show something else [LIVE, Excel 16: an empty plain
+            // position cut or copied into a bold row stays plain]. No style
+            // named, or the same look as the line: cleared, as before.
+            let blank_style = match update.style_index {
+                Some(requested) => crate::commands::styles::carried_line_format(
+                    &mut styles,
+                    requested,
+                    crate::commands::styles::line_format_index_at(&grid, row, col),
+                ),
+                None => 0,
+            };
+            if blank_style != 0 {
+                grid.set_cell(row, col, blank_cell_with_style(blank_style));
+                if active_sheet < grids.len() {
+                    grids[active_sheet].set_cell(row, col, blank_cell_with_style(blank_style));
+                }
+            } else {
+                grid.clear_cell(row, col);
+                if active_sheet < grids.len() {
+                    grids[active_sheet].clear_cell(row, col);
+                }
             }
             // Clear dependencies
             update_cross_sheet_dependencies(
@@ -3460,7 +3730,8 @@ pub(crate) fn update_cells_batch_core(
                 overflow: crate::api_types::OverflowClass::Text,
                 display_color: None,
                 formula: None,
-                style_index: 0,
+                // What the position SHOWS: its blank's style, else its line's.
+                style_index: grid.effective_style_index(row, col),
                 row_span,
                 col_span,
                 sheet_index: None,
@@ -3487,22 +3758,52 @@ pub(crate) fn update_cells_batch_core(
         // explicit `styleIndex` on the update wins, because that IS the cell's
         // format once this write completes; otherwise it is the format that
         // effectively applies at the position, row and column tiers included.
+        //
+        // A PASTE is not an entry (`CellUpdateInput::pasted`): the ladder is
+        // told no destination format, so its Text rung -- the only rung the
+        // format moves -- stays out of it, and a pasted formula or number
+        // stays one in an `@` cell, as in Excel. This replaced three frontend
+        // detours that rewrote the cell under General and put the `@` back;
+        // Paste Special's sent `styleIndex: 0`, which also replaced the
+        // cell's PROTECTION flags, so an unlocked input cell on a protected
+        // sheet came back locked.
         let target_format = match update.style_index {
             Some(idx) => styles.get(idx).number_format.clone(),
             None => entry_format_at(&grid, &styles, row, col),
         };
+        // (Never on one line as `{ None } else { .. }`: the lock-order census
+        // applies a line's closes before its opens, and two closes here would
+        // drop it below the grid guard's block and lose track of the guard.)
+        let ladder_format = if update.is_paste() {
+            None
+        } else {
+            Some(&target_format)
+        };
         let (mut cell, implied_format) = if update.invariant.unwrap_or(false) {
             (
-                parse_cell_input_invariant_in_format(value, &locale, Some(&target_format)),
+                parse_cell_input_invariant_in_format(value, &locale, ladder_format),
                 None,
             )
         } else {
-            parse_cell_input_in_format(value, &locale, Some(&target_format))
+            parse_cell_input_in_format(value, &locale, ladder_format)
         };
 
-        // Apply explicit style from input if provided, otherwise preserve existing
+        // Apply explicit style from input if provided, otherwise preserve
+        // existing. An explicit index names the LOOK the cell must show -- a
+        // paste, a fill, a script's paste "all" send the source cell's
+        // DISPLAYED index -- so index 0 (Normal) under a row/column format is
+        // the explicit Normal, never "inherit" (BUG-0354 follow-up; Excel
+        // [LIVE]: a plain cell copied, cut or filled into a bold row stays
+        // plain). With no index the cell keeps its own, so a typed value
+        // under a line format still inherits it.
         if let Some(explicit_style) = update.style_index {
-            cell.style_index = explicit_style;
+            cell.style_index = crate::commands::styles::own_index_for_requested_look(
+                &mut styles,
+                &grid,
+                row,
+                col,
+                explicit_style,
+            );
         } else if let Some(existing) = grid.get_cell(row, col) {
             cell.style_index = existing.style_index;
         }
@@ -3586,9 +3887,11 @@ pub(crate) fn update_cells_batch_core(
                     let engine_ast = crate::convert_expr(resolved);
                     cell.set_cached_ast(crate::convert_expr(&entered.stored));
 
-                    // Use raw evaluation to get EvalResult for spill handling
+                    // Use raw evaluation to get EvalResult for spill handling.
+                    // The batch's cube data serves a CUBE formula it writes --
+                    // in either calculation mode, like the single edit's.
                     let eval_ctx = engine::EvalContext {
-                        cube_prefetch: None,
+                        cube_prefetch: cube_arc.clone(),
                         current_row: Some(row),
                         current_col: Some(col),
                         row_heights: None,
@@ -3707,50 +4010,28 @@ pub(crate) fn update_cells_batch_core(
 
     // Recalculate dependents if automatic mode - do this ONCE after all updates
     if *calc_mode == "automatic" {
-        // One multi-root traversal for the whole batch: a single BFS + Kahn
-        // over the union of affected cells instead of one full pass per edited
-        // cell. Batch cells are members of the ordering, so a formula written
-        // by this batch is re-evaluated AFTER the batch cells it reads (fixes
-        // in-batch stale values); value-only batch cells are skipped by the
-        // formula check in the evaluation loop below.
-        let mut all_recalc_order: Vec<(u32, u32)> =
-            crate::recalc_order_from_seeds(&cells_needing_recalc, &dependents_map, true);
-        let mut recalc_set: crate::CoordSet = all_recalc_order.iter().copied().collect();
-
-        // Also get column/row dependents (appended after the topological
-        // order, mirroring update_cell).
-        for (row, col) in &cells_needing_recalc {
-            let col_row_deps =
-                get_column_row_dependents((*row, *col), &column_dependents_map, &row_dependents_map);
-            for dep in col_row_deps {
-                if recalc_set.insert(dep) {
-                    all_recalc_order.push(dep);
-                }
-            }
-        }
-
-        // VOLATILE UDF cells: recalculate on every batch even without a
-        // dependency edge (see the same splice in update_cell_impl). None for
-        // every workbook with no volatile UDF, and for Rust-side callers.
-        if let Some(volatile) = &udf_volatile_cells {
-            for v in volatile {
-                if recalc_set.insert((v.row, v.col)) {
-                    all_recalc_order.push((v.row, v.col));
-                }
-            }
-        }
-
-        // VOLATILE BUILT-INS: the same splice as `update_cell_impl`, once for
-        // the whole batch. A paste is a worksheet change like any other, so the
-        // volatile cells refresh with it.
-        splice_volatile_cascade_roots(
+        // THE CASCADE, from the one function `update_cell_impl` and the CUBE
+        // pre-fetch use (`active_sheet_write_cascade`): ONE multi-root
+        // traversal for the whole batch (never one full pass per written cell),
+        // with the written cells as MEMBERS of the ordering, so a formula this
+        // batch wrote is re-evaluated AFTER the batch cells it reads (value-only
+        // batch cells are skipped by the formula check below); then the
+        // whole-column/row readers, the volatile UDF cells (None for every
+        // workbook with no volatile UDF, and for Rust-side callers) and the
+        // volatile built-ins -- a paste is a worksheet change like any other --
+        // and the dynamic arrays a written cell was BLOCKING: pasting a blank
+        // over the obstruction re-spills them, as a typed Delete does
+        // (`origins_blocked_by_any`; Excel [LIVE] re-spills at once).
+        let unblocked_origins =
+            origins_blocked_by_any(&state, active_sheet, &cells_needing_recalc);
+        let all_recalc_order: Vec<(u32, u32)> = active_sheet_write_cascade(
             &grid,
+            CascadeSeeds::Written(&cells_needing_recalc),
             &dependents_map,
             &column_dependents_map,
             &row_dependents_map,
-            None,
-            &mut all_recalc_order,
-            &mut recalc_set,
+            udf_volatile_cells.as_deref(),
+            &unblocked_origins,
         );
 
         // Lock table state for cascade recalculation
@@ -3761,160 +4042,61 @@ pub(crate) fn update_cells_batch_core(
         // PERF-20: skip per-dependent formula render + IPC payload for wide cascades.
         let include_cascade_formulas = all_recalc_order.len() <= CASCADE_FORMULA_LIMIT;
 
-        // The same-sheet cascade evaluates UDF-bearing dependents WITH the
-        // pre-fetched resolver. Without it every such cell took the
-        // no-resolver branch, and because this evaluator carries no
-        // current_row/current_col, `preserved_udf_value` had nothing to
-        // preserve and returned #NAME? — the paste/fill corruption. The
-        // collect pass covers exactly this recalc order (same seeds, same
-        // helpers), so every cell reached here has an entry to serve.
+        // Every dependent is re-evaluated through `reevaluate_formula_cell`, the
+        // ONE per-cell evaluator `update_cell` and the bulk-rewrite recalculation
+        // already use. It gives the dependent its OWN position -- argument-less
+        // ROW()/COLUMN(), implicit intersection (`@`) and the cube and
+        // custom-function preserve all ask where the formula sits -- serves the
+        // pre-fetched UDF resolver and cube data when this batch carries them
+        // (BUG-0476; `build_cube_prefetch` computes its result set with the same
+        // `active_sheet_write_cascade`, so it covers exactly this recalc order),
+        // and ends in THE ONE SPILL DECISION.
+        //
+        // This loop used to be a hand copy that evaluated through a POSITIONLESS
+        // entry point and wrote `to_cell_value()`. A paste into A1 turned
+        // `=ROW()*A1` into #VALUE!, reduced `=@A1:A10` against row 1, clobbered a
+        // cube cell to #N/A and a Rust-side batch's custom-function cells to
+        // #NAME? (`preserved_cube_value` / `preserved_udf_value` read the stored
+        // value AT the position, so with none they had nothing to keep), and
+        // collapsed a dynamic-array dependent to its first element. The written
+        // cells are members of this order, so even a pasted `=ROW()` was
+        // overwritten with #VALUE! by its own cascade.
         let batch_udf: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>> =
             udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>);
-
-        // Recalculate all dependents
-        for (dep_row, dep_col) in &all_recalc_order {
-            if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
-                if let Some(formula) = dep_cell.formula_string() {
-                    let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                        // Names expand on the way into the evaluator (D2).
-                        let eval_target = crate::name_resolution::eval_ast(
-                            cached_ast,
-                            &crate::name_resolution::NameTables {
-                                named_ranges: &batch_named_ranges,
-                                tables: &batch_tables,
-                                table_names: &batch_table_names,
-                                sheet_names: &sheet_names,
-                                spill_ranges: &state.spill_ranges,
-                            }
-                            .at(active_sheet, *dep_row, *dep_col),
-                        );
-                        crate::evaluate_formula_raw_with_ast_files_and_cube(
-                            &grids,
-                            &sheet_names,
-                            active_sheet,
-                            &eval_target,
-                            &user_files,
-                            batch_udf,
-                            None,
-                            Some(control_values.clone()),
-                        ).to_cell_value()
-                    } else {
-                        // UNREACHABLE: `formula_string()` and `get_cached_ast()`
-                        // read the SAME `Cell::ast` field, so a cell that produced
-                        // a formula string above always has an AST here. Kept as
-                        // the fallback it has always been. It is the one place that
-                        // still writes an expanded AST back into a cell, which would
-                        // be the pre-resolution defect (D2) if it could run.
-                        // Slow path: parse, resolve refs, and cache AST
-                        if let Ok(engine_ast) = {
-                            parser::parse(&formula).map(|parsed| {
-                                let resolved = if crate::ast_has_named_refs(&parsed) {
-                                    let mut visited = HashSet::new();
-                                    crate::resolve_names_in_ast(&parsed, &batch_named_ranges, active_sheet, &mut visited)
-                                } else {
-                                    parsed
-                                };
-                                let resolved = if crate::ast_has_table_refs(&resolved) {
-                                    let ctx = crate::TableRefContext {
-                                        tables: &batch_tables,
-                                        table_names: &batch_table_names,
-                                        sheet_names: &sheet_names,
-                                        current_sheet_index: active_sheet,
-                                        current_row: *dep_row,
-                                        current_col: *dep_col,
-                                    };
-                                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
-                                } else {
-                                    resolved
-                                };
-                                crate::convert_expr(&resolved)
-                            }).map_err(|e| format!("{}", e))
-                        } {
-                            let result = crate::evaluate_formula_raw_with_ast_files_and_cube(
-                                &grids,
-                                &sheet_names,
-                                active_sheet,
-                                &engine_ast,
-                                &user_files,
-                                batch_udf,
-                                None,
-                                Some(control_values.clone()),
-                            ).to_cell_value();
-                            let mut updated_with_ast = dep_cell.clone();
-                            updated_with_ast.set_cached_ast(engine_ast);
-                            updated_with_ast.value = result.clone();
-                            grid.set_cell(*dep_row, *dep_col, updated_with_ast.clone());
-                            if active_sheet < grids.len() {
-                                grids[active_sheet].set_cell(*dep_row, *dep_col, updated_with_ast.clone());
-                            }
-
-                            let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
-                            let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_with_ast.value, dep_style, &locale);
-
-                            let (dep_row_span, dep_col_span) =
-                                if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
-                                    (
-                                        region.end_row - region.start_row + 1,
-                                        region.end_col - region.start_col + 1,
-                                    )
-                                } else {
-                                    (1, 1)
-                                };
-
-                            updated_cells.push(CellData {
-                                row: *dep_row,
-                                col: *dep_col,
-                                display: dep_display, overflow: dep_overflow,
-                                display_color: None,
-                                formula: if include_cascade_formulas { formula_display(&updated_with_ast, &locale) } else { None },
-                                style_index: grid.effective_style_index(*dep_row, *dep_col),
-                                row_span: dep_row_span,
-                                col_span: dep_col_span,
-                                sheet_index: None,
-                                rich_text: None,
-                                accounting_layout: None,
-                            });
-                            continue;
-                        }
-                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, &formula, &user_files)
-                    };
-
-                    let mut updated_dep = dep_cell.clone();
-                    updated_dep.value = result;
-                    grid.set_cell(*dep_row, *dep_col, updated_dep.clone());
-
-                    if active_sheet < grids.len() {
-                        grids[active_sheet].set_cell(*dep_row, *dep_col, updated_dep.clone());
-                    }
-
-                    let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
-                    let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_dep.value, dep_style, &locale);
-
-                    let (dep_row_span, dep_col_span) =
-                        if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
-                            (
-                                region.end_row - region.start_row + 1,
-                                region.end_col - region.start_col + 1,
-                            )
-                        } else {
-                            (1, 1)
-                        };
-
-                    updated_cells.push(CellData {
-                        row: *dep_row,
-                        col: *dep_col,
-                        display: dep_display, overflow: dep_overflow,
-                        display_color: None,
-                        formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
-                        style_index: grid.effective_style_index(*dep_row, *dep_col),
-                        row_span: dep_row_span,
-                        col_span: dep_col_span,
-                        sheet_index: None,
-                        rich_text: None,
-                        accounting_layout: None,
-                    });
-                }
-            }
+        let mut cache_hits: u32 = 0;
+        let mut cache_misses: u32 = 0;
+        for &(dep_row, dep_col) in &all_recalc_order {
+            let Some(dep_cell) = grid.get_cell(dep_row, dep_col).cloned() else {
+                continue;
+            };
+            let Some(formula) = dep_cell.formula_string() else {
+                continue;
+            };
+            reevaluate_formula_cell(
+                state,
+                &mut grid,
+                &mut grids,
+                &sheet_names,
+                active_sheet,
+                dep_row,
+                dep_col,
+                &dep_cell,
+                &formula,
+                &user_files,
+                batch_udf,
+                cube_arc.as_ref(),
+                Some(&control_values),
+                &styles,
+                &locale,
+                &merge_lookup,
+                &batch_tables,
+                &batch_table_names,
+                &batch_named_ranges,
+                &mut updated_cells,
+                &mut cache_hits,
+                &mut cache_misses,
+                include_cascade_formulas,
+            );
         }
 
         // Cross-sheet dependents — the SHARED walk (see BUG-0019 on
@@ -4316,6 +4498,613 @@ pub fn clear_range(
     Ok(count)
 }
 
+// ============================================================================
+// CLEAR FORMATS OVER ROW AND COLUMN FORMATS (BUG-0354 follow-up, review A#1)
+// ============================================================================
+//
+// Since BUG-0354 a whole-line format (Bold on a clicked column header, Ctrl+A
+// then Fill) is ONE row or column TIER (`Grid::row_styles` /
+// `Grid::column_styles`), not a million cells. Clear Formats and Clear All
+// only ever reset the style of the cells that were STORED, so the tier
+// survived them: Ctrl+B on column C, then Clear Formats on C, and the column
+// stayed bold -- and so did a value typed there afterwards.
+//
+// Excel's rule [LIVE, Excel 16, 2026-10-29: fresh unsaved workbooks,
+// Range.ClearFormats / Range.Clear read back through Font.Bold / Font.Italic
+// and UsedRange]: after the clear EVERY position of the rectangle shows the
+// Normal style, whatever row or column format it sits under --
+//   - column C bold, Clear Formats on C: no column format left (C100 plain);
+//   - row 5 bold, Clear Formats on column C: C5 plain, D5 still bold;
+//   - column C bold, Clear Formats on C1:C10: C1:C10 plain, C11 bold, and the
+//     used range becomes C1:C10 (each position is written as a cell);
+//   - column C bold, Clear Formats on row 5: C5 plain, C6 bold;
+//   - row 5 bold over column C italic, Rows(5).Clear: C5 plain and empty;
+//   - Select All bold, Select All Clear Formats: nothing left (used range A1).
+//
+// Here, in that order of rank (a cell outranks its row, a row its column):
+//   - a WHOLE COLUMN's tier is removed -- the lowest rank, so removing it can
+//     never expose anything;
+//   - a WHOLE ROW's tier is removed too, unless a column format remains that
+//     would then show through it: the row then gets an EXPLICIT Normal tier,
+//     which outranks every column (Excel's own record for that case is
+//     `<row customFormat="1">` with no style);
+//   - every position a remaining tier would still paint gets an explicit-
+//     Normal cell of its own, exactly the cells Excel writes.
+// O(tiers + stored cells + those positions), never O(rows x columns) -- the
+// Formats branch used to walk every position of the rectangle with a
+// `Vec::contains` per position.
+//
+// AN ALMOST-WHOLE RECTANGLE IS CLEARED AS WHOLE LINES PLUS EXCEPTIONS (round-3
+// review rev3A#2), the route the formatting planner takes
+// (`styles::line_extent_of`). Click C2, Ctrl+Shift+Down, Clear Formats under a
+// bold column C: C2:C1048576 is one row short of the column, and it was planned
+// as a PARTIAL clear -- one explicit-Normal cell per position, a million cells,
+// a million undo records and a million-row reply, the used range run to row
+// 1,048,576 -- and A2:B1048576 under bold A:B was refused outright. Excel 16
+// [LIVE, 2026-10-29, rev3A probe-clear-almost.ps1 and lane clearfmt probe.ps1,
+// each saved and its sheet XML read back]: the column format is removed and the
+// excluded position keeps its look as a cell (`<c r=C1 s=bold>`; A1:D1 for
+// A2:D1048576 under bold A:D; Clear All the same, C1's value kept). Here the
+// whole lines' tiers are cleared as above, and each EXCLUDED position whose
+// look that would change keeps it as its own style (`ClearFormatsPlan::kept`)
+// -- or, for an excluded row where every column shows one format, as a ROW
+// format (`kept_row_tiers`, rev3A#7: every column bold, then B2:XFD1048576
+// Clear Formats, is `<row r=1 s=bold customFormat=1/>` in Excel, no cell).
+// Rows 5:10 bold, then B5:XFD10 Clear Formats, is the row axis: the row
+// formats go and A5:A10 keep bold as cells, as in Excel.
+
+/// Above this many positions to write, a clear's formats half is refused
+/// rather than materialised (the shape of `BORDER_TIER_CROSSING_LIMIT` in
+/// styles.rs; a Calcula-only bound -- Excel has none).
+const CLEAR_FORMATS_CELL_LIMIT: u64 = 2_000_000;
+
+/// What becomes of the row tiers of a WHOLE-ROW clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ClearedRows {
+    /// Not a whole-row clear: every row keeps its tier.
+    #[default]
+    Untouched,
+    /// The rows' tiers are removed: no column format remains to show through.
+    Removed,
+    /// Every row of the rectangle shows an explicit Normal tier: a column
+    /// format remains, and a removed row tier would expose it.
+    ExplicitNormal,
+}
+
+/// Everything the FORMATS half of a clear will write on one sheet, decided
+/// before anything is touched, so its one refusal
+/// ([`CLEAR_FORMATS_CELL_LIMIT`]) costs nothing.
+#[derive(Debug, Default)]
+pub(crate) struct ClearFormatsPlan {
+    /// The cleared rectangle, normalised: (min_row, min_col, max_row, max_col).
+    rect: (u32, u32, u32, u32),
+    /// The rectangle spans every row: its columns' tiers go.
+    whole_columns: bool,
+    rows: ClearedRows,
+    /// Column tiers this clear removes (whole columns only).
+    removed_columns: Vec<u32>,
+    /// Row tiers this clear rewrites: (row, explicit Normal?) -- `false`
+    /// removes the tier.
+    row_tiers: Vec<(u32, bool)>,
+    /// Positions holding NO cell that a remaining tier would still paint:
+    /// each gets an empty cell with the explicit Normal style.
+    blanks: Vec<(u32, u32)>,
+    /// THE EXCEPTIONS of an almost-whole clear (round-3 review rev3A#2): the
+    /// positions of the whole lines OUTSIDE the cleared rectangle whose look
+    /// the removed line formats would change, with the style each shows now
+    /// -- written as that position's own style (an empty cell where none is
+    /// stored), so it keeps its look.
+    kept: Vec<((u32, u32), usize)>,
+    /// Excluded ROWS that keep their look as a row format instead (rev3A#7,
+    /// `styles::excluded_row_format`): (row, the style it shows now).
+    kept_row_tiers: Vec<(u32, usize)>,
+}
+
+impl ClearFormatsPlan {
+    fn changes_tiers(&self) -> bool {
+        !self.removed_columns.is_empty() || !self.row_tiers.is_empty() || !self.kept_row_tiers.is_empty()
+    }
+
+    /// Whether the plan writes any CELL: a blank under a remaining tier, or an
+    /// excluded position that keeps its look.
+    fn writes_cells(&self) -> bool {
+        !self.blanks.is_empty() || !self.kept.is_empty()
+    }
+
+    /// Whether `(row, col)` -- with no style of its own -- still shows a
+    /// format other than Normal once this plan's tiers have landed. Asked of
+    /// every stored cell the clear restyles: such a cell needs the explicit
+    /// Normal style, because index 0 means "inherit" (`Grid::effective_style_index`).
+    fn painted_after(&self, grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) -> bool {
+        let (r0, c0, r1, c1) = self.rect;
+        let in_rows = row >= r0 && row <= r1;
+        match self.rows {
+            ClearedRows::ExplicitNormal if in_rows => return false,
+            // The row's tier is gone: the column decides.
+            ClearedRows::Removed if in_rows => {}
+            _ => {
+                let own = grid.row_styles.get(&row).copied().unwrap_or(0);
+                if own != 0 {
+                    return !is_normal_style(styles, own);
+                }
+            }
+        }
+        if self.whole_columns && col >= c0 && col <= c1 {
+            return false;
+        }
+        let tier = grid.column_styles.get(&col).copied().unwrap_or(0);
+        tier != 0 && !is_normal_style(styles, tier)
+    }
+}
+
+/// Whether style `index` LOOKS like Normal (index 0, or an explicit copy of it).
+fn is_normal_style(styles: &StyleRegistry, index: usize) -> bool {
+    index == 0 || styles.get(index) == styles.default_style()
+}
+
+/// Plan the FORMATS half of Clear Formats / Clear All over `rect`
+/// (normalised) on `grid`: see the section comment above for the rules.
+pub(crate) fn plan_clear_formats(
+    grid: &Grid,
+    styles: &StyleRegistry,
+    rect: (u32, u32, u32, u32),
+) -> Result<ClearFormatsPlan, String> {
+    let (r0, c0, r1, c1) = rect;
+    // The WHOLE lines this clear goes through: `rect` itself for whole rows,
+    // whole columns or Select All; the whole columns (or rows) an ALMOST-whole
+    // `rect` nearly fills (rev3A#2) -- their tiers are cleared, and the
+    // positions outside `rect` are planned as exceptions at the end. `rect`
+    // still bounds every position this clear makes Normal.
+    let line = crate::commands::styles::line_extent_of(rect);
+    let (lr0, lc0, lr1, lc1) = line.unwrap_or(rect);
+    let whole_columns = lr0 == 0 && lr1 >= engine::EXCEL_MAX_ROW_INDEX;
+    let whole_rows = lc0 == 0 && lc1 >= engine::EXCEL_MAX_COL_INDEX;
+    let mut plan = ClearFormatsPlan { rect, whole_columns, ..Default::default() };
+
+    if whole_columns {
+        plan.removed_columns = grid
+            .column_styles
+            .iter()
+            .filter(|(c, idx)| **idx != 0 && **c >= c0 && **c <= c1)
+            .map(|(c, _)| *c)
+            .collect();
+        plan.removed_columns.sort_unstable();
+    }
+
+    if whole_rows {
+        // A column format OUTSIDE what this clear removes would show through a
+        // removed row tier.
+        let column_shows = grid.column_styles.iter().any(|(c, idx)| {
+            !(whole_columns && *c >= c0 && *c <= c1) && !is_normal_style(styles, *idx)
+        });
+        if column_shows {
+            plan.rows = ClearedRows::ExplicitNormal;
+            for row in r0..=r1 {
+                let own = grid.row_styles.get(&row).copied().unwrap_or(0);
+                if own == 0 || !is_normal_style(styles, own) {
+                    plan.row_tiers.push((row, true));
+                }
+            }
+        } else {
+            plan.rows = ClearedRows::Removed;
+            plan.row_tiers = grid
+                .row_styles
+                .iter()
+                .filter(|(r, idx)| **idx != 0 && **r >= r0 && **r <= r1)
+                .map(|(r, _)| (*r, false))
+                .collect();
+            plan.row_tiers.sort_unstable();
+        }
+        // Every row of the rectangle now shows Normal through its own tier (or
+        // through nothing): no position needs a cell of its own -- only an
+        // almost-whole clear's excluded columns keep their look.
+        plan_clear_exceptions(grid, styles, &mut plan, line);
+        return Ok(plan);
+    }
+
+    // Positions with no cell that a REMAINING tier still paints: the rows
+    // with a non-Normal format across the rectangle's columns, and the columns
+    // with one down the rectangle's rows that have no row format (a row format
+    // of any kind hides the column's).
+    let mut painted_rows: Vec<u32> = grid
+        .row_styles
+        .iter()
+        .filter(|(r, idx)| **r >= r0 && **r <= r1 && !is_normal_style(styles, **idx))
+        .map(|(r, _)| *r)
+        .collect();
+    painted_rows.sort_unstable();
+    let mut painted_cols: Vec<u32> = if whole_columns {
+        Vec::new()
+    } else {
+        grid.column_styles
+            .iter()
+            .filter(|(c, idx)| **c >= c0 && **c <= c1 && !is_normal_style(styles, **idx))
+            .map(|(c, _)| *c)
+            .collect()
+    };
+    painted_cols.sort_unstable();
+    let width = u64::from(c1 - c0) + 1;
+    let height = u64::from(r1 - r0) + 1;
+    let rows_with_a_tier = grid
+        .row_styles
+        .iter()
+        .filter(|(r, idx)| **idx != 0 && **r >= r0 && **r <= r1)
+        .count() as u64;
+    let positions = painted_rows.len() as u64 * width
+        + painted_cols.len() as u64 * height.saturating_sub(rows_with_a_tier);
+    if positions > CLEAR_FORMATS_CELL_LIMIT {
+        return Err(format!(
+            "Clearing the formats here would have to write {} separate cells where \
+             whole-row or whole-column formats cross the selection; select a smaller range.",
+            positions
+        ));
+    }
+    for &row in &painted_rows {
+        for col in c0..=c1 {
+            if !grid.cells.contains_key(&(row, col)) {
+                plan.blanks.push((row, col));
+            }
+        }
+    }
+    if !painted_cols.is_empty() {
+        for row in r0..=r1 {
+            if grid.row_styles.get(&row).copied().unwrap_or(0) != 0 {
+                continue;
+            }
+            for &col in &painted_cols {
+                if !grid.cells.contains_key(&(row, col)) {
+                    plan.blanks.push((row, col));
+                }
+            }
+        }
+    }
+    plan_clear_exceptions(grid, styles, &mut plan, line);
+    Ok(plan)
+}
+
+/// THE EXCEPTIONS of an almost-whole clear (rev3A#2, rev3A#7): every position
+/// of `line` (the whole lines `styles::line_extent_of` gave) outside the
+/// plan's rectangle whose look the cleared line formats would change keeps
+/// that look. Nothing for an ordinary clear (`line` is `None` or the
+/// rectangle itself). Bounded by the formatting planner's
+/// `ALMOST_WHOLE_EXCEPTION_LIMIT`: `line_extent_of` answers only when the
+/// excluded positions are at most that many. Asked of the plan's own tier
+/// decisions, so it runs after them.
+fn plan_clear_exceptions(
+    grid: &Grid,
+    styles: &StyleRegistry,
+    plan: &mut ClearFormatsPlan,
+    line: Option<(u32, u32, u32, u32)>,
+) {
+    let Some(line) = line.filter(|l| *l != plan.rect) else { return };
+    let (r0, c0, r1, c1) = plan.rect;
+    let (lr0, lc0, lr1, lc1) = line;
+    // The style `(row, col)` shows now when the clear would change it: its own
+    // style outranks every tier, and a position the plan's remaining tiers
+    // still paint shows that tier unchanged (an excluded row's own format).
+    let keeps = |plan: &ClearFormatsPlan, row: u32, col: u32| -> Option<usize> {
+        if grid.get_cell(row, col).is_some_and(|c| c.style_index != 0) {
+            return None;
+        }
+        let before = grid.effective_style_index(row, col);
+        if is_normal_style(styles, before) || plan.painted_after(grid, styles, row, col) {
+            return None;
+        }
+        Some(before)
+    };
+    if plan.whole_columns {
+        // An excluded row with a format of its own outranks the column
+        // formats this clear removes: it shows that format, before and after.
+        let untiered: Vec<u32> = (lr0..r0)
+            .chain(r1.saturating_add(1)..=lr1)
+            .filter(|row| grid.row_styles.get(row).copied().unwrap_or(0) == 0)
+            .collect();
+        if untiered.is_empty() {
+            return;
+        }
+        // Every column shows ONE non-Normal format on these rows: each keeps it
+        // as a row format, the crossings it would hide as cells (rev3A#7).
+        let row_format = crate::commands::styles::excluded_row_format(grid, styles, c0, c1)
+            .filter(|format| !is_normal_style(styles, format.look));
+        if let Some(format) = row_format {
+            for &row in &untiered {
+                plan.kept_row_tiers.push((row, format.look));
+                for &(col, tier) in &format.crossings {
+                    if !grid.get_cell(row, col).is_some_and(|c| c.style_index != 0) {
+                        plan.kept.push(((row, col), tier));
+                    }
+                }
+            }
+            return;
+        }
+        for &row in &untiered {
+            for col in c0..=c1 {
+                if let Some(index) = keeps(plan, row, col) {
+                    plan.kept.push(((row, col), index));
+                }
+            }
+        }
+    } else {
+        // Almost-whole ROWS: the excluded columns of the cleared rows.
+        let excluded_cols: Vec<u32> = (lc0..c0).chain(c1.saturating_add(1)..=lc1).collect();
+        for row in r0..=r1 {
+            for &col in &excluded_cols {
+                if let Some(index) = keeps(plan, row, col) {
+                    plan.kept.push(((row, col), index));
+                }
+            }
+        }
+    }
+}
+
+/// The explicit Normal style, interned on first use. Index 0 means INHERIT on
+/// a cell or a tier, so a position that must SHOW Normal over a remaining
+/// tier needs a non-zero index whose style is Normal
+/// (`StyleRegistry::get_or_create_explicit`, memoised in the registry).
+#[derive(Default)]
+struct ExplicitNormal(Option<usize>);
+
+impl ExplicitNormal {
+    fn index(&mut self, styles: &mut StyleRegistry) -> usize {
+        *self.0.get_or_insert_with(|| {
+            let normal = styles.default_style().clone();
+            styles.get_or_create_explicit(normal)
+        })
+    }
+}
+
+/// An empty cell carrying `style_index` (a cleared position under a tier).
+fn blank_cell_with_style(style_index: usize) -> engine::Cell {
+    let mut cell = engine::Cell::new();
+    cell.style_index = style_index;
+    cell
+}
+
+/// Write a plan's TIER half to one sheet -- and to `mirror`, the second copy
+/// of the ACTIVE sheet (`grids[active]` beside `state.grid`) -- returning each
+/// axis's undo snapshot `(is_column, previous)` for the caller to record as an
+/// `obj_style_tiers` restore in its open step (the record `write_range_style_plan`
+/// makes for the formatting commands).
+fn write_cleared_tiers(
+    grid: &mut Grid,
+    mut mirror: Option<&mut Grid>,
+    plan: &ClearFormatsPlan,
+    styles: &mut StyleRegistry,
+    explicit: &mut ExplicitNormal,
+) -> Vec<(bool, Vec<(u32, usize)>)> {
+    let mut snapshots = Vec::new();
+    if !plan.removed_columns.is_empty() {
+        let previous: Vec<(u32, usize)> = plan
+            .removed_columns
+            .iter()
+            .map(|c| (*c, grid.column_styles.get(c).copied().unwrap_or(0)))
+            .collect();
+        for &col in &plan.removed_columns {
+            grid.set_column_style(col, 0);
+            if let Some(m) = mirror.as_deref_mut() {
+                m.set_column_style(col, 0);
+            }
+        }
+        snapshots.push((true, previous));
+    }
+    if !plan.row_tiers.is_empty() || !plan.kept_row_tiers.is_empty() {
+        // ONE row snapshot for both kinds (an almost-whole clear's excluded
+        // rows keeping their look, rev3A#7, beside the cleared rows' tiers).
+        let previous: Vec<(u32, usize)> = plan
+            .row_tiers
+            .iter()
+            .map(|(r, _)| *r)
+            .chain(plan.kept_row_tiers.iter().map(|(r, _)| *r))
+            .map(|r| (r, grid.row_styles.get(&r).copied().unwrap_or(0)))
+            .collect();
+        for &(row, explicit_normal) in &plan.row_tiers {
+            let index = if explicit_normal { explicit.index(styles) } else { 0 };
+            grid.set_row_style(row, index);
+            if let Some(m) = mirror.as_deref_mut() {
+                m.set_row_style(row, index);
+            }
+        }
+        for &(row, index) in &plan.kept_row_tiers {
+            grid.set_row_style(row, index);
+            if let Some(m) = mirror.as_deref_mut() {
+                m.set_row_style(row, index);
+            }
+        }
+        snapshots.push((false, previous));
+    }
+    snapshots
+}
+
+/// The cell an almost-whole clear's KEPT position (rev3A#2) becomes: the
+/// stored cell -- or an empty one -- carrying `index`, the style it showed
+/// before, as its own. `None` when the position holds a style of its own by
+/// now: that already outranks every tier (an earlier, overlapping area of the
+/// same grouped clear may have written it), so it is left alone.
+fn kept_cell(previous: Option<&engine::Cell>, index: usize) -> Option<engine::Cell> {
+    if previous.is_some_and(|c| c.style_index != 0) {
+        return None;
+    }
+    let mut cell = previous.cloned().unwrap_or_else(engine::Cell::new);
+    cell.style_index = index;
+    Some(cell)
+}
+
+/// What a clear changed on ONE sheet that is not the active one, for the
+/// caller's one undo step, its subscriber overrides and its recalculation.
+#[derive(Default)]
+struct BackgroundClear {
+    /// (row, col, previous cell) for the `script_grid_cells` restore -- the
+    /// FIRST previous of each position only, since several areas may overlap.
+    previous: Vec<(u32, u32, Option<engine::Cell>)>,
+    recorded: crate::CoordSet,
+    /// (row, col, pre, post) for `record_subscription_override_edits`.
+    override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)>,
+    /// Tier snapshots `(is_column, previous)`, in write order.
+    tiers: Vec<(bool, Vec<(u32, usize)>)>,
+    /// Cells and tier entries changed (the command's `count`).
+    count: u32,
+    /// Whether CONTENT left the sheet (a released spill included): the
+    /// recalculation question.
+    content_changed: bool,
+}
+
+impl BackgroundClear {
+    fn remember(&mut self, row: u32, col: u32, previous: Option<engine::Cell>) {
+        if self.recorded.insert((row, col)) {
+            self.previous.push((row, col, previous));
+        }
+    }
+
+    fn changed_anything(&self) -> bool {
+        !self.previous.is_empty() || !self.tiers.is_empty()
+    }
+
+    /// Record this sheet's changes in the caller's OPEN step: one exact cell
+    /// restore (`script_grid_cells`, sheet-tagged, so undo never switches the
+    /// user to this sheet: a CustomRestore names no target sheet) and one
+    /// tier restore per axis.
+    fn record_into(&mut self, undo_stack: &mut engine::UndoStack, sheet: usize, label: &str) {
+        if !self.previous.is_empty() {
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(
+                    sheet,
+                    std::mem::take(&mut self.previous),
+                ),
+                label,
+            );
+        }
+        for (is_column, previous) in std::mem::take(&mut self.tiers) {
+            undo_stack.record_custom_restore(
+                "obj_style_tiers".to_string(),
+                crate::undo_commands::style_tiers_snapshot_bytes(sheet, is_column, previous),
+                label,
+            );
+        }
+    }
+}
+
+/// Clear ONE rectangle of `grid`, a sheet that is NOT the active one, already
+/// gated, under the caller's held `grids` and style guards: the shared body of
+/// `clear_range_with_options_off_sheet_at` (a script's or the command line's
+/// addressed clear, a floating grid's backing sheet) and `clear_range_on_sheets_inner`
+/// (the sheet group). `released_spill` is the caller's SPILL TEAR-DOWN for a
+/// content clear (§2y): the cells of every spill whose origin the rectangle
+/// swallows, already released from the maps by `take_spills_owned_within` in
+/// the same critical section (the off-sheet recalc is not spill-aware); they
+/// are erased here and never recorded for undo (see `spilled_cells_owned_within`).
+/// `plan` is the formats half for All / ResetContents / Formats. Nothing is
+/// recorded here: `out` collects it, and BOTH callers recalculate through
+/// `recalc_after_off_sheet_write` once their guards are dropped.
+#[allow(clippy::too_many_arguments)]
+fn clear_rect_on_background_sheet(
+    grid: &mut Grid,
+    styles: &mut StyleRegistry,
+    explicit: &mut ExplicitNormal,
+    rect: (u32, u32, u32, u32),
+    apply_to: ClearApplyTo,
+    released_spill: &[(u32, u32)],
+    plan: Option<&ClearFormatsPlan>,
+    out: &mut BackgroundClear,
+) {
+    let (min_row, min_col, max_row, max_col) = rect;
+    let effective_end_row = max_row.min(grid.max_row);
+    let effective_end_col = max_col.min(grid.max_col);
+
+    let released_set: crate::CoordSet = released_spill.iter().copied().collect();
+    for &(r, c) in released_spill {
+        grid.cells.remove(&(r, c));
+    }
+    if !released_spill.is_empty() {
+        out.content_changed = true;
+    }
+
+    if let Some(plan) = plan {
+        let snapshots = write_cleared_tiers(grid, None, plan, styles, explicit);
+        out.count += snapshots.iter().map(|(_, entries)| entries.len() as u32).sum::<u32>();
+        out.tiers.extend(snapshots);
+    }
+
+    let mut stored: Vec<(u32, u32)> = grid
+        .cells
+        .keys()
+        .filter(|(r, c)| *r >= min_row && *r <= effective_end_row && *c >= min_col && *c <= effective_end_col)
+        .filter(|coord| !released_set.contains(coord))
+        .cloned()
+        .collect();
+    stored.sort_unstable();
+
+    for (row, col) in stored {
+        let Some(cell) = grid.get_cell(row, col).cloned() else { continue };
+        match apply_to {
+            ClearApplyTo::All | ClearApplyTo::ResetContents => {
+                let painted = plan.is_some_and(|p| p.painted_after(grid, styles, row, col));
+                out.override_edits.push((row, col, Some(cell.clone()), None));
+                out.remember(row, col, Some(cell));
+                grid.clear_cell(row, col);
+                if painted {
+                    let index = explicit.index(styles);
+                    grid.set_cell(row, col, blank_cell_with_style(index));
+                }
+                out.count += 1;
+                out.content_changed = true;
+            }
+            ClearApplyTo::Contents => {
+                let new_cell = blank_cell_with_style(cell.style_index);
+                out.override_edits.push((row, col, Some(cell.clone()), Some(new_cell.clone())));
+                out.remember(row, col, Some(cell));
+                grid.set_cell(row, col, new_cell);
+                out.count += 1;
+                out.content_changed = true;
+            }
+            ClearApplyTo::Formats => {
+                let target = if plan.is_some_and(|p| p.painted_after(grid, styles, row, col)) {
+                    explicit.index(styles)
+                } else {
+                    0
+                };
+                if cell.style_index == target {
+                    continue;
+                }
+                let mut new_cell = cell.clone();
+                new_cell.style_index = target;
+                out.remember(row, col, Some(cell));
+                grid.set_cell(row, col, new_cell);
+                out.count += 1;
+            }
+            // Refused by every caller before anything is locked.
+            ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks => {}
+        }
+    }
+
+    if let Some(plan) = plan {
+        for &(row, col) in &plan.blanks {
+            // A position that holds a cell now was restyled above (or by an
+            // earlier, overlapping area of the same clear).
+            if grid.cells.contains_key(&(row, col)) {
+                continue;
+            }
+            out.remember(row, col, None);
+            let index = explicit.index(styles);
+            grid.set_cell(row, col, blank_cell_with_style(index));
+            out.count += 1;
+        }
+        // An almost-whole clear's excluded positions keep their look (rev3A#2).
+        for &((row, col), index) in &plan.kept {
+            let previous = grid.get_cell(row, col).cloned();
+            let Some(cell) = kept_cell(previous.as_ref(), index) else { continue };
+            out.remember(row, col, previous);
+            grid.set_cell(row, col, cell);
+            out.count += 1;
+        }
+    }
+}
+
+/// Whether `apply_to` clears FORMATS (and so plans the tiers).
+fn clear_kind_clears_formats(apply_to: ClearApplyTo) -> bool {
+    matches!(apply_to, ClearApplyTo::All | ClearApplyTo::ResetContents | ClearApplyTo::Formats)
+}
+
 /// Clear-with-options on a NON-ACTIVE sheet (Wave 3 cross-sheet ops): the
 /// same guard chain as the active path — sheet protection, spill hosts,
 /// object-region protection and the writeback claim guard for content clears
@@ -4395,13 +5184,13 @@ fn clear_range_with_options_off_sheet_at(
         )?;
     }
 
-    let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
-    let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::new();
-
-    let count = {
+    let rect = (min_row, min_col, max_row, max_col);
+    let mut out = BackgroundClear::default();
+    let effect = {
         // Bounds check under a read-only view; the effect is built only once it
         // has passed, so a bad sheet index cannot leave the document dirty. One
-        // lock throughout -- see Persisted::lock_pending.
+        // lock throughout -- see Persisted::lock_pending. Canonical order:
+        // grids, then the style registry.
         let grids = state.grids.lock_pending().unwrap();
         if target >= grids.len() {
             return Err(format!("Sheet index {} out of range", target));
@@ -4409,97 +5198,44 @@ fn clear_range_with_options_off_sheet_at(
         if let Some(t) = expect {
             crate::cell_target::ensure_target_still_at(state, t)?;
         }
+        let styles = state.style_registry.lock_pending().unwrap();
+        // The formats half is PLANNED before the effect: its one refusal (too
+        // many positions to write) must leave the document clean.
+        let plan = if clear_kind_clears_formats(apply_to) {
+            Some(plan_clear_formats(&grids[target], &styles, rect)?)
+        } else {
+            None
+        };
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut grids = grids.authorize(&effect);
+        let mut styles = styles.authorize(&effect);
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        let grid = &mut grids[target];
-
-        let effective_end_row = max_row.min(grid.max_row);
-        let effective_end_col = max_col.min(grid.max_col);
+        let mut explicit = ExplicitNormal::default();
 
         // SPILL TEAR-DOWN, off-sheet half (§2y). The active twin gets this from
         // `recalc_after_active_sheet_bulk_rewrite`; this path recalculates
         // through `recalc_after_off_sheet_write`, which is whole-sheet and NOT
         // spill-aware, so the release happens here, in the same critical
-        // section as the clear. The released cells are erased below and never
-        // recorded for undo, exactly as on the active sheet.
+        // section as the clear.
         let released_spill = if matches!(apply_to, ClearApplyTo::Formats) {
             Vec::new()
         } else {
-            take_spills_owned_within(
-                state, target, min_row, min_col, effective_end_row, effective_end_col,
-            )
+            take_spills_owned_within(state, target, min_row, min_col, max_row, max_col)
         };
-        let released_set: crate::CoordSet = released_spill.iter().copied().collect();
-        for &(r, c) in &released_spill {
-            grid.cells.remove(&(r, c));
-        }
+        // The rectangle's contents, formats and the row / column formats it
+        // covers (`clear_rect_on_background_sheet`).
+        clear_rect_on_background_sheet(
+            &mut grids[target],
+            &mut styles,
+            &mut explicit,
+            rect,
+            apply_to,
+            &released_spill,
+            plan.as_ref(),
+            &mut out,
+        );
 
-        let mut cells_in_range: Vec<(u32, u32)> = grid
-            .cells
-            .keys()
-            .filter(|(r, c)| {
-                *r >= min_row && *r <= effective_end_row && *c >= min_col && *c <= effective_end_col
-            })
-            .filter(|coord| !released_set.contains(coord))
-            .cloned()
-            .collect();
-
-        // Formats mode touches every position in the range, not just existing
-        // cells (count parity with the active twin; only existing cells are
-        // actually rewritten below).
-        if matches!(apply_to, ClearApplyTo::Formats) {
-            for r in min_row..=effective_end_row {
-                for c in min_col..=effective_end_col {
-                    if !cells_in_range.contains(&(r, c)) {
-                        cells_in_range.push((r, c));
-                    }
-                }
-            }
-        }
-
-        let count = cells_in_range.len() as u32;
-
-        for (row, col) in cells_in_range {
-            let previous_cell = grid.get_cell(row, col).cloned();
-            match apply_to {
-                ClearApplyTo::All | ClearApplyTo::ResetContents => {
-                    if previous_cell.is_some() {
-                        override_edits.push((row, col, previous_cell.clone(), None));
-                        previous_cells.push((row, col, previous_cell));
-                        grid.clear_cell(row, col);
-                    }
-                }
-                ClearApplyTo::Contents => {
-                    if let Some(ref cell) = previous_cell {
-                        let style_index = cell.style_index;
-                        let mut new_cell = engine::Cell::new();
-                        new_cell.style_index = style_index;
-                        override_edits.push((
-                            row,
-                            col,
-                            previous_cell.clone(),
-                            Some(new_cell.clone()),
-                        ));
-                        previous_cells.push((row, col, previous_cell.clone()));
-                        grid.set_cell(row, col, new_cell);
-                    }
-                }
-                ClearApplyTo::Formats => {
-                    if let Some(ref cell) = previous_cell {
-                        // Index 0 = INHERIT (falls back to row/column tier).
-                        let mut new_cell = cell.clone();
-                        new_cell.style_index = 0;
-                        previous_cells.push((row, col, previous_cell.clone()));
-                        grid.set_cell(row, col, new_cell);
-                    }
-                }
-                // Refused at the top of this function (active sheet only).
-                ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks => {}
-            }
-        }
-
-        if !previous_cells.is_empty() {
+        if out.changed_anything() {
             let desc = match apply_to {
                 ClearApplyTo::All => "Clear all",
                 ClearApplyTo::Contents => "Clear contents",
@@ -4512,22 +5248,18 @@ fn clear_range_with_options_off_sheet_at(
                 "{} on sheet {} ({},{}) to ({},{})",
                 desc, target + 1, min_row, min_col, max_row, max_col
             ));
-            undo_stack.record_custom_restore(
-                "script_grid_cells".to_string(),
-                crate::undo_commands::script_grid_cells_snapshot_bytes(target, previous_cells),
-                desc,
-            );
+            out.record_into(&mut undo_stack, target, desc);
             undo_stack.commit_owned(owned_txn);
         }
 
-        count
+        effect
     };
 
     // Subscriber overrides for the TARGET sheet (no-op when not subscribed).
-    crate::calp_commands::record_subscription_override_edits(state, &crate::document_effect::DocumentEffect::mutates(file_state), target, &override_edits);
+    crate::calp_commands::record_subscription_override_edits(state, &effect, target, &out.override_edits);
 
     // Dependents (anywhere) of the cleared cells recalculate now.
-    if count > 0 && !matches!(apply_to, ClearApplyTo::Formats) {
+    if out.content_changed {
         crate::commands::data::recalc_after_off_sheet_write(
             state,
             user_files_state,
@@ -4538,12 +5270,8 @@ fn clear_range_with_options_off_sheet_at(
         );
     }
 
-    if count > 0 {
-        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-    }
-
     Ok(ClearRangeResult {
-        count,
+        count: out.count,
         updated_cells: Vec::new(),
     })
 }
@@ -4741,6 +5469,9 @@ fn clear_hyperlinks_apply_to(
 /// - RemoveHyperlinks: Remove the links AND the linked cells' formatting, keep
 ///   content (`clear_hyperlinks_apply_to`)
 /// - ResetContents: Reset to default state
+///
+/// The body is `clear_range_with_options_inner` (testability split: it takes
+/// plain references, so the tests drive the real command in-process).
 #[tauri::command]
 pub fn clear_range_with_options(
     state: State<AppState>,
@@ -4751,15 +5482,43 @@ pub fn clear_range_with_options(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ClearRangeParams,
 ) -> Result<ClearRangeResult, String> {
+    clear_range_with_options_inner(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        params,
+    )
+}
+
+/// The body of `clear_range_with_options`.
+///
+/// Clear Formats, Clear All and Reset Contents also clear the ROW and COLUMN
+/// formats the rectangle covers (`plan_clear_formats`; review A#1): every
+/// position of the rectangle shows Normal afterwards, as in Excel. A
+/// rectangle that ALMOST covers whole lines (C2:C1048576) clears those lines'
+/// formats too, and the few positions it leaves out keep their look
+/// (rev3A#2).
+pub fn clear_range_with_options_inner(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    params: ClearRangeParams,
+) -> Result<ClearRangeResult, String> {
     // P3: an OBJECT's cells (a floating grid) -- its backing sheet only.
     if params.target.is_some() {
         return clear_range_on_target(
-            &state,
-            &file_state,
-            &user_files_state,
-            &pivot_state,
-            &pane_control_state,
-            &ribbon_filter_state,
+            state,
+            file_state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
             params,
         );
     }
@@ -4837,25 +5596,6 @@ pub fn clear_range_with_options(
         )?;
     }
 
-    // Every gate above has passed; from here this command commits. Constructed
-    // HERE and not at the top so a refusal cannot leave a spuriously dirty
-    // document -- see DocumentEffect::mutates on ordering.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let style_registry = state.style_registry.read().unwrap();
-    let mut dependents_map = state.dependents.lock().unwrap();
-    let mut dependencies_map = state.dependencies.lock().unwrap();
-    let mut column_dependents_map = state.column_dependents.lock().unwrap();
-    let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
-    let mut row_dependents_map = state.row_dependents.lock().unwrap();
-    let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
-    let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
-    let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
-    let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
-
     let ClearRangeParams {
         start_row,
         start_col,
@@ -4871,6 +5611,38 @@ pub fn clear_range_with_options(
     let max_row = start_row.max(end_row);
     let min_col = start_col.min(end_col);
     let max_col = start_col.max(end_col);
+
+    // The grid, its mirror and the style registry are taken PENDING (canonical
+    // order: grid, grids, then the rest) so the formats half can be PLANNED
+    // before the effect: its one refusal (too many positions to write where
+    // row / column formats cross the rectangle) must leave the document clean.
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
+    let style_registry = state.style_registry.lock_pending().unwrap();
+    let plan = if clear_kind_clears_formats(apply_to) {
+        Some(plan_clear_formats(&grid, &style_registry, (min_row, min_col, max_row, max_col))?)
+    } else {
+        None
+    };
+
+    // Every gate above has passed; from here this command commits. Constructed
+    // HERE and not at the top so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut style_registry = style_registry.authorize(&effect);
+    let mut dependents_map = state.dependents.lock().unwrap();
+    let mut dependencies_map = state.dependencies.lock().unwrap();
+    let mut column_dependents_map = state.column_dependents.lock().unwrap();
+    let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
+    let mut row_dependents_map = state.row_dependents.lock().unwrap();
+    let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
+    let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.read().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Clamp to grid bounds
     let effective_end_row = max_row.min(grid.max_row);
@@ -4888,7 +5660,10 @@ pub fn clear_range_with_options(
         )
     };
 
-    // Collect cells in the range (both existing and potential)
+    // The STORED cells of the rectangle. Formats mode used to add every empty
+    // POSITION too (and test each against this list with `Vec::contains`,
+    // quadratic in the used area) only to rewrite nothing at them; the
+    // positions a row / column format still paints are the plan's `blanks`.
     let mut cells_in_range: Vec<(u32, u32)> = grid
         .cells
         .keys()
@@ -4898,26 +5673,18 @@ pub fn clear_range_with_options(
         .filter(|coord| !owned_spill.contains(coord))
         .cloned()
         .collect();
+    cells_in_range.sort_unstable();
 
-    // For "Formats" mode, we need to process all cells in the range, not just existing ones
-    if matches!(apply_to, ClearApplyTo::Formats) {
-        for r in min_row..=effective_end_row {
-            for c in min_col..=effective_end_col {
-                if !cells_in_range.contains(&(r, c)) {
-                    cells_in_range.push((r, c));
-                }
-            }
-        }
-    }
-
-    let count = cells_in_range.len() as u32;
+    let mut count = cells_in_range.len() as u32;
     let mut updated_cells = Vec::new();
+    let mut explicit = ExplicitNormal::default();
 
     // OWNED: a script's createNamedStyle clears its scratch cell through here
     // INSIDE the script's open batch, and the unconditional commit below
     // closed that batch halfway -- the script's next write became a step of
     // its own (found live 2026-09-29, e2e fixall-calp X6).
-    let owned_txn = if count > 0 {
+    let tiers_or_blanks = plan.as_ref().is_some_and(|p| p.changes_tiers() || p.writes_cells());
+    let owned_txn = if count > 0 || tiers_or_blanks {
         let desc = match apply_to {
             ClearApplyTo::All => "Clear all",
             ClearApplyTo::Contents => "Clear contents",
@@ -4937,6 +5704,22 @@ pub fn clear_range_with_options(
     // Pre/post cell states collected for subscriber override capture.
     let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
 
+    // The ROW / COLUMN formats the rectangle covers go first (both mirrors),
+    // each axis one `obj_style_tiers` restore in this step -- the record the
+    // formatting commands make -- so the cells below resolve against them.
+    if let Some(plan) = plan.as_ref() {
+        let snapshots =
+            write_cleared_tiers(&mut grid, grids.get_mut(active_sheet), plan, &mut style_registry, &mut explicit);
+        for (is_column, previous) in snapshots {
+            count += previous.len() as u32;
+            undo_stack.record_custom_restore(
+                "obj_style_tiers".to_string(),
+                crate::undo_commands::style_tiers_snapshot_bytes(active_sheet, is_column, previous),
+                "Clear formats",
+            );
+        }
+    }
+
     for (row, col) in cells_in_range {
         // Record previous state for undo
         let previous_cell = grid.get_cell(row, col).cloned();
@@ -4952,6 +5735,22 @@ pub fn clear_range_with_options(
                 if active_sheet < grids.len() {
                     grids[active_sheet].clear_cell(row, col);
                 }
+                // Under a row / column format that stays, the cleared position
+                // must still SHOW Normal: an empty cell with the explicit Normal
+                // style (index 0 would inherit the format back).
+                let painted = plan
+                    .as_ref()
+                    .is_some_and(|p| p.painted_after(&grid, &style_registry, row, col));
+                let shown_style = if painted {
+                    let index = explicit.index(&mut style_registry);
+                    grid.set_cell(row, col, blank_cell_with_style(index));
+                    if active_sheet < grids.len() {
+                        grids[active_sheet].set_cell(row, col, blank_cell_with_style(index));
+                    }
+                    index
+                } else {
+                    0
+                };
 
                 // Clear dependencies
                 update_cross_sheet_dependencies(
@@ -5000,7 +5799,7 @@ pub fn clear_range_with_options(
                     overflow: crate::api_types::OverflowClass::Text,
                     display_color: None,
                     formula: None,
-                    style_index: 0,
+                    style_index: shown_style,
                     row_span,
                     col_span,
                     sheet_index: None,
@@ -5083,23 +5882,36 @@ pub fn clear_range_with_options(
             ClearApplyTo::Formats => {
                 // Clear formatting, keep values
                 if let Some(ref cell) = previous_cell {
+                    // The cell SHOWS Normal afterwards (Excel [LIVE]): index 0
+                    // (inherit) where nothing would show through, the explicit
+                    // Normal style under a row / column format this clear
+                    // leaves in place (a partial clear inside a formatted
+                    // column, a column crossing a formatted row). Clear Formats
+                    // therefore also clears any per-cell LOCK override -- the
+                    // cell falls back to the default: locked.
+                    let target_style = if plan
+                        .as_ref()
+                        .is_some_and(|p| p.painted_after(&grid, &style_registry, row, col))
+                    {
+                        explicit.index(&mut style_registry)
+                    } else {
+                        0
+                    };
+                    if cell.style_index == target_style {
+                        // Already showing Normal: nothing to write or record.
+                        count -= 1;
+                        continue;
+                    }
                     undo_stack.record_cell_change(active_sheet, row, col, previous_cell.clone());
 
-                    // Index 0 = INHERIT, so this returns the cell to its
-                    // row/column style tier rather than to the workbook default.
-                    // That is Excel's behaviour, and it means Clear Formats also
-                    // clears any per-cell LOCK override — the cell falls back to
-                    // whatever its row/column (or the default: locked) says.
                     let mut new_cell = cell.clone();
-                    new_cell.style_index = 0;
+                    new_cell.style_index = target_style;
 
                     grid.set_cell(row, col, new_cell.clone());
                     if active_sheet < grids.len() {
                         grids[active_sheet].set_cell(row, col, new_cell);
                     }
 
-                    // The cell's own style is cleared, but a row/column style
-                    // still applies to it.
                     let default_style = style_registry.get(grid.effective_style_index(row, col));
                     let (display, overflow) = crate::format_cell_value_and_class(&cell.value, default_style, &locale);
 
@@ -5123,7 +5935,7 @@ pub fn clear_range_with_options(
                         overflow,
                         display_color: None,
                         formula: formula_display(&cell, &locale),
-                        style_index: 0,
+                        style_index: target_style,
                         row_span,
                         col_span,
                         sheet_index: None,
@@ -5137,11 +5949,85 @@ pub fn clear_range_with_options(
         }
     }
 
+    // The EMPTY positions a row / column format that stays would still paint
+    // (a partial clear inside a formatted column, whole columns crossing a
+    // formatted row): each gets an empty explicit-Normal cell, the cells Excel
+    // writes there [LIVE: the used range grows to them].
+    if let Some(plan) = plan.as_ref() {
+        for &(row, col) in &plan.blanks {
+            if grid.cells.contains_key(&(row, col)) {
+                continue;
+            }
+            let index = explicit.index(&mut style_registry);
+            undo_stack.record_cell_change(active_sheet, row, col, None);
+            grid.set_cell(row, col, blank_cell_with_style(index));
+            if active_sheet < grids.len() {
+                grids[active_sheet].set_cell(row, col, blank_cell_with_style(index));
+            }
+            let (row_span, col_span) = merged_regions
+                .iter()
+                .find(|m| m.start_row == row && m.start_col == col)
+                .map(|m| (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1))
+                .unwrap_or((1, 1));
+            updated_cells.push(CellData {
+                row,
+                col,
+                display: String::new(),
+                overflow: crate::api_types::OverflowClass::Text,
+                display_color: None,
+                formula: None,
+                style_index: index,
+                row_span,
+                col_span,
+                sheet_index: None,
+                rich_text: None,
+                accounting_layout: None,
+            });
+            count += 1;
+        }
+
+        // An almost-whole clear's EXCLUDED positions (outside the rectangle,
+        // inside its whole lines) keep the look they showed (rev3A#2): a
+        // handful of cells, where the clear used to write one per position.
+        for &((row, col), index) in &plan.kept {
+            let previous = grid.get_cell(row, col).cloned();
+            let Some(cell) = kept_cell(previous.as_ref(), index) else { continue };
+            undo_stack.record_cell_change(active_sheet, row, col, previous);
+            grid.set_cell(row, col, cell.clone());
+            if active_sheet < grids.len() {
+                grids[active_sheet].set_cell(row, col, cell.clone());
+            }
+            let (display, overflow) =
+                crate::format_cell_value_and_class(&cell.value, style_registry.get(index), &locale);
+            let (row_span, col_span) = merged_regions
+                .iter()
+                .find(|m| m.start_row == row && m.start_col == col)
+                .map(|m| (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1))
+                .unwrap_or((1, 1));
+            updated_cells.push(CellData {
+                row,
+                col,
+                display,
+                overflow,
+                display_color: None,
+                formula: formula_display(&cell, &locale),
+                style_index: index,
+                row_span,
+                col_span,
+                sheet_index: None,
+                rich_text: None,
+                accounting_layout: None,
+            });
+            count += 1;
+        }
+    }
+
     // Record subscriber overrides for all cleared cells (subscribed sheets only)
     crate::calp_commands::record_subscription_override_edits(&state, &crate::document_effect::DocumentEffect::mutates(&file_state), active_sheet, &override_edits);
 
+    // An empty step (nothing changed) is dropped by the commit.
+    undo_stack.commit_owned(owned_txn);
     if count > 0 {
-        undo_stack.commit_owned(owned_txn);
         // Mark workbook as dirty
         let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
@@ -5384,7 +6270,9 @@ fn sort_range_off_sheet_at(
         }
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut grids = grids.authorize(&effect);
-        let styles = state.style_registry.read().unwrap();
+        // WRITE: a moved cell may need the explicit Normal interned (see
+        // `carried_line_format`).
+        let mut styles = state.style_registry.write(&effect).unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
 
         // BEFORE the mutable borrow below: `resolve_icons` needs `&Grid` AND
@@ -5455,12 +6343,15 @@ fn sort_range_off_sheet_at(
                 }
 
                 // Extract rows (with tier materialization for color sorts,
-                // same rule as the active path).
-                let mut rows: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
+                // same rule as the active path), and which cells INHERIT
+                // their line's format, so each carries its look where it lands.
+                let mut rows: Vec<(u32, Vec<Option<engine::Cell>>, Vec<bool>)> = Vec::new();
                 for row in data_start_row..=max_row {
                     let mut row_data: Vec<Option<engine::Cell>> = Vec::new();
+                    let mut inherits: Vec<bool> = Vec::new();
                     for col in min_col..=max_col {
                         let mut cell = grid.get_cell(row, col).cloned();
+                        inherits.push(cell.as_ref().is_some_and(|c| c.style_index == 0));
                         if color_sort {
                             if let Some(c) = cell.as_mut() {
                                 if c.style_index == 0 {
@@ -5470,7 +6361,7 @@ fn sort_range_off_sheet_at(
                         }
                         row_data.push(cell);
                     }
-                    rows.push((row, row_data));
+                    rows.push((row, row_data, inherits));
                 }
 
                 rows.sort_by(|a, b| {
@@ -5487,13 +6378,24 @@ fn sort_range_off_sheet_at(
                 }
 
                 sorted_count = rows.len() as u32;
-                for (new_row_idx, (original_row, row_data)) in rows.iter().enumerate() {
+                for (new_row_idx, (original_row, row_data, inherits)) in rows.iter().enumerate() {
                     let target_row = data_start_row + new_row_idx as u32;
                     let row_delta = target_row as i32 - *original_row as i32;
                     for (col_offset, cell_opt) in row_data.iter().enumerate() {
                         let target_col = min_col + col_offset as u32;
                         if let Some(cell) = cell_opt {
                             let mut cell = cell.clone();
+                            // The record keeps the look it showed (BUG-0354
+                            // follow-up): an inheriting cell carries its old
+                            // row's format off it, or explicit Normal onto a
+                            // formatted row. Tiers never move in a sort.
+                            if inherits[col_offset] {
+                                cell.style_index = crate::commands::styles::carried_line_format(
+                                    &mut styles,
+                                    crate::commands::styles::line_format_index_at(grid, *original_row, target_col),
+                                    crate::commands::styles::line_format_index_at(grid, target_row, target_col),
+                                );
+                            }
                             if row_delta != 0 {
                                 if let Some(formula) =
                                     crate::commands::structure::formula_to_rewrite(&cell)
@@ -5524,11 +6426,13 @@ fn sort_range_off_sheet_at(
                     });
                 }
 
-                let mut cols: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
+                let mut cols: Vec<(u32, Vec<Option<engine::Cell>>, Vec<bool>)> = Vec::new();
                 for col in data_start_col..=max_col {
                     let mut col_data: Vec<Option<engine::Cell>> = Vec::new();
+                    let mut inherits: Vec<bool> = Vec::new();
                     for row in min_row..=max_row {
                         let mut cell = grid.get_cell(row, col).cloned();
+                        inherits.push(cell.as_ref().is_some_and(|c| c.style_index == 0));
                         if color_sort {
                             if let Some(c) = cell.as_mut() {
                                 if c.style_index == 0 {
@@ -5538,7 +6442,7 @@ fn sort_range_off_sheet_at(
                         }
                         col_data.push(cell);
                     }
-                    cols.push((col, col_data));
+                    cols.push((col, col_data, inherits));
                 }
 
                 cols.sort_by(|a, b| {
@@ -5555,13 +6459,21 @@ fn sort_range_off_sheet_at(
                 }
 
                 sorted_count = cols.len() as u32;
-                for (new_col_idx, (original_col, col_data)) in cols.iter().enumerate() {
+                for (new_col_idx, (original_col, col_data, inherits)) in cols.iter().enumerate() {
                     let target_col = data_start_col + new_col_idx as u32;
                     let col_delta = target_col as i32 - *original_col as i32;
                     for (row_offset, cell_opt) in col_data.iter().enumerate() {
                         let target_row = min_row + row_offset as u32;
                         if let Some(cell) = cell_opt {
                             let mut cell = cell.clone();
+                            // The record keeps its look (see the row arm).
+                            if inherits[row_offset] {
+                                cell.style_index = crate::commands::styles::carried_line_format(
+                                    &mut styles,
+                                    crate::commands::styles::line_format_index_at(grid, target_row, *original_col),
+                                    crate::commands::styles::line_format_index_at(grid, target_row, target_col),
+                                );
+                            }
                             if col_delta != 0 {
                                 if let Some(formula) =
                                     crate::commands::structure::formula_to_rewrite(&cell)
@@ -5869,7 +6781,9 @@ pub fn sort_range(
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
+    // WRITE: a moved cell may need the explicit Normal interned (see
+    // `carried_line_format`).
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -5950,17 +6864,20 @@ pub fn sort_range(
             // materialize the effective style onto each extracted cell: the
             // rows are flattened here, so the comparator can no longer resolve
             // row/column tiers — without this, a fill inherited from a tier is
-            // invisible to Sort by Cell Color / Font Color. Materializing also
-            // keeps the visible format travelling with the cell, which is what
+            // invisible to Sort by Cell Color / Font Color. `inherits` marks
+            // the cells with no style of their own, for EVERY sort: each one
+            // keeps the look it showed where it lands (below), which is what
             // Excel does when sort moves cells.
             let color_sort = fields
                 .iter()
                 .any(|f| matches!(f.sort_on, SortOn::CellColor | SortOn::FontColor));
-            let mut rows: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
+            let mut rows: Vec<(u32, Vec<Option<engine::Cell>>, Vec<bool>)> = Vec::new();
             for row in data_start_row..=max_row {
                 let mut row_data: Vec<Option<engine::Cell>> = Vec::new();
+                let mut inherits: Vec<bool> = Vec::new();
                 for col in min_col..=max_col {
                     let mut cell = grid.get_cell(row, col).cloned();
+                    inherits.push(cell.as_ref().is_some_and(|c| c.style_index == 0));
                     if color_sort {
                         if let Some(c) = cell.as_mut() {
                             if c.style_index == 0 {
@@ -5970,7 +6887,7 @@ pub fn sort_range(
                     }
                     row_data.push(cell);
                 }
-                rows.push((row, row_data));
+                rows.push((row, row_data, inherits));
             }
 
             // Resolve the icon key ONCE, before the permutation, over exactly the
@@ -5983,7 +6900,7 @@ pub fn sort_range(
                 &sheet_names_for_rebuild,
                 active_sheet,
                 &cf_rules_for_sort,
-                &rows.iter().map(|(r, _)| *r).collect::<Vec<u32>>(),
+                &rows.iter().map(|(r, _, _)| *r).collect::<Vec<u32>>(),
                 true,
                 min_col,
             );
@@ -6005,7 +6922,7 @@ pub fn sort_range(
             let mut updated_cells = Vec::new();
             let sorted_count = rows.len() as u32;
 
-            for (new_row_idx, (original_row, row_data)) in rows.iter().enumerate() {
+            for (new_row_idx, (original_row, row_data, inherits)) in rows.iter().enumerate() {
                 let target_row = data_start_row + new_row_idx as u32;
                 let row_delta = target_row as i32 - *original_row as i32;
 
@@ -6023,6 +6940,17 @@ pub fn sort_range(
                         // value looks right but the next recalculation
                         // computes from the wrong rows (BUG-0010).
                         let mut cell = cell.clone();
+                        // The record keeps the look it showed (BUG-0354
+                        // follow-up): an inheriting cell carries its old row's
+                        // format off it, or explicit Normal onto a formatted
+                        // row. Tiers never move in a sort.
+                        if inherits[col_offset] {
+                            cell.style_index = crate::commands::styles::carried_line_format(
+                                &mut styles,
+                                crate::commands::styles::line_format_index_at(&grid, *original_row, target_col),
+                                crate::commands::styles::line_format_index_at(&grid, target_row, target_col),
+                            );
+                        }
                         if row_delta != 0 {
                             if let Some(formula) =
                                 crate::commands::structure::formula_to_rewrite(&cell)
@@ -6128,15 +7056,18 @@ pub fn sort_range(
             }
 
             // Collect all columns as vectors of cell data (same tier
-            // materialization rule as the row sort above).
+            // materialization rule, and the same `inherits` marks, as the row
+            // sort above).
             let color_sort = fields
                 .iter()
                 .any(|f| matches!(f.sort_on, SortOn::CellColor | SortOn::FontColor));
-            let mut cols: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
+            let mut cols: Vec<(u32, Vec<Option<engine::Cell>>, Vec<bool>)> = Vec::new();
             for col in data_start_col..=max_col {
                 let mut col_data: Vec<Option<engine::Cell>> = Vec::new();
+                let mut inherits: Vec<bool> = Vec::new();
                 for row in min_row..=max_row {
                     let mut cell = grid.get_cell(row, col).cloned();
+                    inherits.push(cell.as_ref().is_some_and(|c| c.style_index == 0));
                     if color_sort {
                         if let Some(c) = cell.as_mut() {
                             if c.style_index == 0 {
@@ -6146,7 +7077,7 @@ pub fn sort_range(
                     }
                     col_data.push(cell);
                 }
-                cols.push((col, col_data));
+                cols.push((col, col_data, inherits));
             }
 
             // Sort the columns using the sort fields (treating rows as keys)
@@ -6157,7 +7088,7 @@ pub fn sort_range(
                 &sheet_names_for_rebuild,
                 active_sheet,
                 &cf_rules_for_sort,
-                &cols.iter().map(|(c, _)| *c).collect::<Vec<u32>>(),
+                &cols.iter().map(|(c, _, _)| *c).collect::<Vec<u32>>(),
                 // by_row = false: for a column sort `field.key` selects a ROW
                 // offset, and the line index supplies the column.
                 false,
@@ -6180,7 +7111,7 @@ pub fn sort_range(
             let mut updated_cells = Vec::new();
             let sorted_count = cols.len() as u32;
 
-            for (new_col_idx, (original_col, col_data)) in cols.iter().enumerate() {
+            for (new_col_idx, (original_col, col_data, inherits)) in cols.iter().enumerate() {
                 let target_col = data_start_col + new_col_idx as u32;
                 let col_delta = target_col as i32 - *original_col as i32;
 
@@ -6196,6 +7127,14 @@ pub fn sort_range(
                         // (Excel sort semantics; see the row-sort arm /
                         // BUG-0010).
                         let mut cell = cell.clone();
+                        // The record keeps its look (see the row-sort arm).
+                        if inherits[row_offset] {
+                            cell.style_index = crate::commands::styles::carried_line_format(
+                                &mut styles,
+                                crate::commands::styles::line_format_index_at(&grid, target_row, *original_col),
+                                crate::commands::styles::line_format_index_at(&grid, target_row, target_col),
+                            );
+                        }
                         if col_delta != 0 {
                             if let Some(formula) =
                                 crate::commands::structure::formula_to_rewrite(&cell)
@@ -6901,33 +7840,16 @@ pub fn remove_duplicates(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: RemoveDuplicatesParams,
 ) -> RemoveDuplicatesResult {
-    // Sheet protection first, before any grid lock: removing duplicates rewrites
-    // the whole range. Reported through the result's `error` field, since this
-    // command does not return Result.
-    {
-        let active_sheet = *state.active_sheet.read().unwrap();
-        if let Err(e) = crate::protection::check_sheet_protection_range(
-            &state,
-            active_sheet,
-            params.start_row.min(params.end_row),
-            params.start_col.min(params.end_col),
-            params.start_row.max(params.end_row),
-            params.start_col.max(params.end_col),
-        ) {
-            return RemoveDuplicatesResult {
-                success: false,
-                duplicates_removed: 0,
-                unique_remaining: 0,
-                updated_cells: Vec::new(),
-                error: Some(e),
-            };
-        }
-    }
-
-    // Past the protection gate: this deletes grid rows.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
+    // LOCKED BUT UNDECIDED. Four exits below change nothing -- no key column,
+    // a range cutting a merged block, a header-only range, no duplicates --
+    // and `DocumentEffect::mutates` dirties at construction, so minting it
+    // here marked the workbook modified for a refusal or a "no duplicates
+    // found" (Excel leaves `Workbook.Saved` alone for both). The grid locks are
+    // taken PENDING: the gates and the duplicate scan read through them, and
+    // the effect is decided once rows are really removed, in the same critical
+    // section.
+    let pending_grid = state.grid.lock_pending().unwrap();
+    let pending_grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
     // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
     // in that order on a BACKGROUND thread, so taking them the other way round
@@ -6936,6 +7858,40 @@ pub fn remove_duplicates(
     let sheet_names_for_rebuild = state.sheet_names.read().unwrap().clone();
     let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    // SHEET PROTECTION, over the guards this command HOLDS (rev3B#8): removing
+    // duplicates rewrites the whole range. The gate used to run first, through
+    // `check_sheet_protection_range`, which takes and RELEASES its own grid,
+    // style and protection locks -- so a `protect_sheet` (it takes
+    // `sheet_protection` alone) or a cell-lock change landing between that gate
+    // and the pending grid locks above let the rows be compacted on a sheet
+    // that had just become protected. It now reads the pending grid this
+    // command will write, and `sheet_protection` stays held until the rows are
+    // written. The kinds (the canvas refusal) are copied first and released;
+    // the order is `search.rs`'s held-guard gate's. Reported through the
+    // result's `error` field, since this command does not return Result.
+    let sheet_kinds = state.sheet_kinds.read().unwrap().clone();
+    let protection_storage = state.sheet_protection.read().unwrap();
+    if let Err(e) = crate::protection::check_sheet_protection_range_in(
+        &sheet_kinds,
+        &protection_storage,
+        &pending_grid,
+        &styles,
+        active_sheet,
+        params.start_row.min(params.end_row),
+        params.start_col.min(params.end_col),
+        params.start_row.max(params.end_row),
+        params.start_col.max(params.end_col),
+    ) {
+        return RemoveDuplicatesResult {
+            success: false,
+            duplicates_removed: 0,
+            unique_remaining: 0,
+            updated_cells: Vec::new(),
+            error: Some(e),
+        };
+    }
+
     let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
@@ -7009,7 +7965,7 @@ pub fn remove_duplicates(
     for row in data_start_row..=max_row {
         let mut row_data: Vec<Option<engine::Cell>> = Vec::new();
         for col in min_col..=max_col {
-            row_data.push(grid.get_cell(row, col).cloned());
+            row_data.push(pending_grid.get_cell(row, col).cloned());
         }
         rows.push((row, row_data));
     }
@@ -7058,6 +8014,11 @@ pub fn remove_duplicates(
             error: None,
         };
     }
+
+    // Every gate has passed and rows really go: from here this command commits.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let mut grid = pending_grid.authorize(&effect);
+    let mut grids = pending_grids.authorize(&effect);
 
     // Begin undo transaction
     let owned_txn = undo_stack.begin_owned_transaction(format!(
@@ -7159,6 +8120,8 @@ pub fn remove_duplicates(
     }
 
     undo_stack.commit_owned(owned_txn);
+    // The rows are written: the protection the gate judged has done its job.
+    drop(protection_storage);
 
     // Formula cells were COMPACTED UPWARDS into new positions, so the
     // dependency maps still describe where they used to live — the same
@@ -7186,10 +8149,19 @@ pub fn remove_duplicates(
     // "hanging" for their full 10-minute timeout); the tests were not slow, the
     // backend was wedged. `sort_range`, which owns the same rebuild-then-seed
     // shape, already scopes its guards this way — this one did not.
+    //
+    // COPIES, not guards (BUG-0592): no name store is held while the rebuild
+    // takes the dependency maps. A cell writer (`update_cell_impl`,
+    // `update_cells_batch_core`, `fill_range` -- off the main thread for the
+    // MCP server, the AI chat and the notebook) takes the dependency maps
+    // BEFORE `tables` / `table_names` / `named_ranges`, so holding the name
+    // tables across the rebuild was the writers' order inside out. Only the
+    // grid locks held above kept it from closing a cycle; a copy closes none
+    // whatever else is held. The tables are small next to the grid walk.
     {
-        let rebuild_named_ranges = state.named_ranges.read().unwrap();
-        let rebuild_tables = state.tables.read().unwrap();
-        let rebuild_table_names = state.table_names.read().unwrap();
+        let rebuild_named_ranges = state.named_ranges.read().unwrap().clone();
+        let rebuild_tables = state.tables.read().unwrap().clone();
+        let rebuild_table_names = state.table_names.read().unwrap().clone();
         crate::undo_commands::rebuild_all_dependencies_from_grid(
             &grid,
             active_sheet,
@@ -7275,9 +8247,12 @@ pub fn remove_duplicates(
 /// has already finished writing.
 ///
 /// No UDF resolver and no cube prefetch are supplied. That is safe rather than
-/// lossy because `reevaluate_formula_cell` evaluates with the cell's OWN
-/// position, so `preserved_udf_value` / `preserved_cube_value` keep the stored
-/// value instead of collapsing to #NAME? / #N/A (see its doc comment).
+/// lossy because `preserved_udf_value` / `preserved_cube_value` answer each
+/// call from the sheet's results cache instead of collapsing to #NAME? / #N/A
+/// -- for a call whose arguments the rewrite left as they were (or moved back
+/// to ones already answered); one whose arguments it changed to ones never
+/// answered is refused, never shown with the old arguments' answer (see their
+/// doc comments).
 ///
 /// LOCKING: acquires everything itself, in the canonical order (control stores
 /// and user files first, then `sheet_names` -> `grid` -> `grids` ->
@@ -7722,6 +8697,12 @@ pub fn recalculate_sheets_after_script_write(
 /// vanished with no error anywhere. Caught live by vba-idioms-wave1.spec.ts.
 /// Reporting the skip lets the host re-issue it through the active-sheet path
 /// instead of losing it.
+///
+/// `cube_results` (BUG-0476): one cube pre-fetch PER TARGET SHEET, aligned
+/// with `sheet_indices` (`cube_results[i]` serves `sheet_indices[i]`), each
+/// resolved by `cube_prefetch` with `edits` and that `sheet_index` -- a cube
+/// argument naming a cell reads THAT sheet's cell. The frontend sends it only
+/// when `value` is a CUBE formula; a list of another length serves nothing.
 #[tauri::command]
 pub fn update_cell_on_sheets(
     state: State<AppState>,
@@ -7736,6 +8717,7 @@ pub fn update_cell_on_sheets(
     value: String,
     invariant: Option<bool>,
     recalc: Option<bool>,
+    cube_results: Option<Vec<engine::CubePrefetch>>,
 ) -> Result<Vec<usize>, String> {
     update_cell_on_sheets_inner(
         &state,
@@ -7750,6 +8732,7 @@ pub fn update_cell_on_sheets(
         value,
         invariant,
         recalc,
+        cube_results,
     )
 }
 
@@ -7758,6 +8741,11 @@ pub fn update_cell_on_sheets(
 /// exact path — the same protection/writeback/spill gates, the same GAP-A edge
 /// registration, the same off-sheet recalc — because a backing sheet IS a
 /// non-active sheet and a second write path would drift.
+///
+/// A CUBE formula is evaluated with its sheet's entry of `cube_results` (see
+/// `update_cell_on_sheets`); the off-sheet recalculation that follows has no
+/// cube data, and answers the call with what this write served (the results
+/// cache, `engine::cube::CallMemo`, records every served call).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_cell_on_sheets_inner(
     state: &AppState,
@@ -7772,11 +8760,64 @@ pub(crate) fn update_cell_on_sheets_inner(
     value: String,
     invariant: Option<bool>,
     recalc: Option<bool>,
+    cube_results: Option<Vec<engine::CubePrefetch>>,
+) -> Result<Vec<usize>, String> {
+    update_cell_on_sheets_as(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        sheet_indices,
+        row,
+        col,
+        value,
+        invariant,
+        recalc,
+        cube_results,
+        false,
+    )
+}
+
+/// [`update_cell_on_sheets_inner`], told whether the write is a PASTE
+/// (`CellUpdateInput::pasted`): a paste is not an entry, so a Text-formatted
+/// (`@`) destination does not turn a pasted formula or number into text. The
+/// one caller that pastes is a floating grid's batch
+/// (`cell_target::update_cells_batch_on_target`); every typed or scripted write
+/// goes through the wrapper above with `pasted = false`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_cell_on_sheets_as(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    sheet_indices: Vec<usize>,
+    row: u32,
+    col: u32,
+    value: String,
+    invariant: Option<bool>,
+    recalc: Option<bool>,
+    cube_results: Option<Vec<engine::CubePrefetch>>,
+    pasted: bool,
 ) -> Result<Vec<usize>, String> {
     let _pass = crate::eval_budget::begin_pass(
         crate::eval_budget::EvalSurface::Interactive,
         &state.calc_cancel,
     );
+    // Each target sheet's cube data, by sheet. Aligned positionally with
+    // `sheet_indices`; a misaligned list is not guessed at.
+    let cube_by_sheet: std::collections::HashMap<usize, std::sync::Arc<engine::CubePrefetch>> =
+        match cube_results {
+            Some(list) if list.len() == sheet_indices.len() => sheet_indices
+                .iter()
+                .copied()
+                .zip(list.into_iter().map(std::sync::Arc::new))
+                .collect(),
+            _ => std::collections::HashMap::new(),
+        };
     // Sheet protection on EVERY targeted sheet, before any other lock is taken.
     // Group edit is refused outright if any one sheet protects the cell — the
     // alternative (writing the sheets that allow it) would silently produce a
@@ -7835,6 +8876,59 @@ pub(crate) fn update_cell_on_sheets_inner(
         // property of each destination.
         let styles = state.style_registry.read().unwrap();
         let active_sheet = *state.active_sheet.read().unwrap();
+
+        // THE ENTERED VALUE, PARSED AND RESTAMPED BEFORE THE UNDO STACK IS
+        // TAKEN (rev5C#1, BUG-0592). The restamp below reads `named_ranges`,
+        // `tables` and `table_names`, and it used to run with the undo stack
+        // already held. This function holds `grids` but never `grid`, so
+        // nothing ordered it against a name writer -- `create_named_range_impl`
+        // and its siblings, which the MCP server runs on its own thread, hold
+        // the registry while they record their undo step. An AI defining a
+        // name while the user typed a formula into a floating grid (or a
+        // grouped sheet replicated an entry, or a script wrote another sheet)
+        // left each thread holding what the other waited for: the window froze
+        // and unsaved work was lost. The name stores are now released before
+        // the stack is taken, so this function never holds the undo stack
+        // while it takes one
+        // (`no_function_holds_the_undo_stack_and_a_name_store_in_an_order_that_can_cycle`).
+        // `None` for an empty value, which CLEARS the cell below.
+        let entered: Option<engine::Cell> = if value.trim().is_empty() {
+            None
+        } else {
+            // Parse the input (same logic as update_cell). When invariant=true the
+            // value is a script's TYPED write in canonical US form ("42.5", "TRUE");
+            // delocalizing it against the workbook locale would corrupt it (sv-SE
+            // reads "42.5" as 425), so it takes the invariant parse — the same split
+            // update_cells_batch makes.
+            let mut cell_template = if invariant.unwrap_or(false) {
+                parse_cell_input_invariant(&value, &locale)
+            } else {
+                parse_cell_input(&value, &locale)
+            };
+
+            // THE WORKBOOK'S OWN CAPITALISATION, on this door too (§2ai / §2t).
+            // The lexer shouts bare identifiers, so `=Sheet1!E2` parses as
+            // `SHEET1!E2`; the active-sheet door restamps names, tables and sheet
+            // qualifiers in `split_entered_formula`, and this one never did -- so
+            // every off-sheet write (a floating grid's cells, a script writing
+            // another sheet, a grouped-sheet edit) stored and showed
+            // `=SHEET1!E2`. Cosmetic for evaluation (every lookup uppercases);
+            // it is what the formula bar shows.
+            if let Some(ast) = cell_template.ast.as_deref_mut() {
+                {
+                    let named_ranges_map = state.named_ranges.read().unwrap();
+                    crate::name_resolution::restamp_name_casing(ast, &named_ranges_map);
+                }
+                if crate::ast_has_table_refs(ast) {
+                    let tables_map = state.tables.read().unwrap();
+                    let table_names_map = state.table_names.read().unwrap();
+                    crate::table_deps::restamp_table_casing(ast, &tables_map, &table_names_map);
+                }
+                crate::sheet_names::restamp_sheet_casing(ast, &sheet_names);
+            }
+            Some(cell_template)
+        };
+
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let mut wrote: Vec<usize> = Vec::new();
 
@@ -7876,72 +8970,10 @@ pub(crate) fn update_cell_on_sheets_inner(
             }
         }
 
-        // Handle empty value - clear the cell on each target sheet. A clear
-        // changes dependents exactly like a write, so it falls through to the
-        // same recalc below instead of returning early.
-        if value.trim().is_empty() {
-            for &sheet_idx in &sheet_indices {
-                if sheet_idx == active_sheet || sheet_idx >= grids.len() {
-                    continue;
-                }
-                let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
-                if previous_cell.is_some() {
-                    undo_stack.record_cell_change(sheet_idx, row, col, previous_cell);
-                    grids[sheet_idx].clear_cell(row, col);
-                    // GAP A (cross-sheet edges, clear half): a cleared formula's
-                    // registered cross-sheet edges must go with it, or the
-                    // cascade keeps re-evaluating a cell that no longer exists.
-                    register_off_sheet_cell_edges(
-                        &state,
-                        sheet_idx,
-                        row,
-                        col,
-                        rustc_hash::FxHashSet::default(),
-                    );
-                }
-                // A clear of an already-empty cell is still "handled": the
-                // caller asked for empty and empty is what the sheet holds, so
-                // it must NOT be reported as skipped (that would make the host
-                // re-issue it against the active sheet).
-                wrote.push(sheet_idx);
-            }
-            if opened_transaction {
-                undo_stack.commit_transaction();
-            }
-            wrote
-        } else {
-            // Parse the input (same logic as update_cell). When invariant=true the
-            // value is a script's TYPED write in canonical US form ("42.5", "TRUE");
-            // delocalizing it against the workbook locale would corrupt it (sv-SE
-            // reads "42.5" as 425), so it takes the invariant parse — the same split
-            // update_cells_batch makes.
-            let mut cell_template = if invariant.unwrap_or(false) {
-                parse_cell_input_invariant(&value, &locale)
-            } else {
-                parse_cell_input(&value, &locale)
-            };
+        // A VALUE: write it on each target sheet (parsed and restamped above,
+        // before the undo stack was taken).
+        if let Some(cell_template) = entered {
             let is_formula = cell_template.has_formula();
-
-            // THE WORKBOOK'S OWN CAPITALISATION, on this door too (§2ai / §2t).
-            // The lexer shouts bare identifiers, so `=Sheet1!E2` parses as
-            // `SHEET1!E2`; the active-sheet door restamps names, tables and sheet
-            // qualifiers in `split_entered_formula`, and this one never did -- so
-            // every off-sheet write (a floating grid's cells, a script writing
-            // another sheet, a grouped-sheet edit) stored and showed
-            // `=SHEET1!E2`. Cosmetic for evaluation (every lookup uppercases);
-            // it is what the formula bar shows.
-            if let Some(ast) = cell_template.ast.as_deref_mut() {
-                {
-                    let named_ranges_map = state.named_ranges.read().unwrap();
-                    crate::name_resolution::restamp_name_casing(ast, &named_ranges_map);
-                }
-                if crate::ast_has_table_refs(ast) {
-                    let tables_map = state.tables.read().unwrap();
-                    let table_names_map = state.table_names.read().unwrap();
-                    crate::table_deps::restamp_table_casing(ast, &tables_map, &table_names_map);
-                }
-                crate::sheet_names::restamp_sheet_casing(ast, &sheet_names);
-            }
 
             // Convert the AST once for reuse across sheets.
             //
@@ -7966,10 +8998,11 @@ pub(crate) fn update_cell_on_sheets_inner(
                 // for this one: `007` on a group where Sheet2's column is
                 // formatted as Text must be the string "007" there and the
                 // number 7 elsewhere. Re-parsed rather than post-processed, so
-                // the one ladder stays the one authority.
+                // the one ladder stays the one authority. A PASTE skips that
+                // rung (`pasted`): the template is the stored value.
                 let target_format =
                     entry_format_at(&grids[sheet_idx], &styles, row, col);
-                let stored_as_text = is_text_format(&target_format);
+                let stored_as_text = !pasted && is_text_format(&target_format);
                 let mut cell = if stored_as_text {
                     if invariant.unwrap_or(false) {
                         parse_cell_input_invariant_in_format(&value, &locale, Some(&target_format))
@@ -7989,15 +9022,23 @@ pub(crate) fn update_cell_on_sheets_inner(
                 // `stored_as_text` excluded: a formula typed into a Text cell is
                 // the literal string on THAT sheet, and evaluating it would put
                 // a value behind text the user asked to be left alone.
+                //
+                // A CUBE formula is served THIS sheet's pre-fetched cube data
+                // (BUG-0476); with none it is exactly the evaluation it always
+                // was (no cube data -> the cube functions' preserve-or-#N/A).
                 if is_formula && !stored_as_text {
                     if let Some(ref ast) = engine_ast {
-                        let result_value = crate::evaluate_formula_multi_sheet_with_ast_and_files(
+                        let result_value = crate::evaluate_formula_raw_with_ast_files_and_cube(
                             &grids,
                             &sheet_names,
                             sheet_idx,
                             ast,
                             &user_files,
-                        );
+                            None,
+                            cube_by_sheet.get(&sheet_idx).cloned(),
+                            None, // GET.CONTROLVALUE unavailable here (v1)
+                        )
+                        .to_cell_value();
                         cell.value = result_value;
                         cell.ast = Some(Box::new(ast.clone()));
                     }
@@ -8036,6 +9077,39 @@ pub(crate) fn update_cell_on_sheets_inner(
                 undo_stack.commit_transaction();
             }
             wrote
+        } else {
+            // Handle empty value - clear the cell on each target sheet. A clear
+            // changes dependents exactly like a write, so it falls through to the
+            // same recalc below instead of returning early.
+            for &sheet_idx in &sheet_indices {
+                if sheet_idx == active_sheet || sheet_idx >= grids.len() {
+                    continue;
+                }
+                let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
+                if previous_cell.is_some() {
+                    undo_stack.record_cell_change(sheet_idx, row, col, previous_cell);
+                    grids[sheet_idx].clear_cell(row, col);
+                    // GAP A (cross-sheet edges, clear half): a cleared formula's
+                    // registered cross-sheet edges must go with it, or the
+                    // cascade keeps re-evaluating a cell that no longer exists.
+                    register_off_sheet_cell_edges(
+                        &state,
+                        sheet_idx,
+                        row,
+                        col,
+                        rustc_hash::FxHashSet::default(),
+                    );
+                }
+                // A clear of an already-empty cell is still "handled": the
+                // caller asked for empty and empty is what the sheet holds, so
+                // it must NOT be reported as skipped (that would make the host
+                // re-issue it against the active sheet).
+                wrote.push(sheet_idx);
+            }
+            if opened_transaction {
+                undo_stack.commit_transaction();
+            }
+            wrote
         }
     };
 
@@ -8057,15 +9131,14 @@ pub(crate) fn update_cell_on_sheets_inner(
     Ok(wrote)
 }
 
-/// Clear a range of cells on multiple non-active sheets.
-/// Used for sheet grouping: when the user presses Delete with grouped sheets.
-///
-/// DEPENDENTS RECALCULATE (§2c). Like every other clear path this one
-/// propagated nothing; unlike them it writes to sheets the user is not looking
-/// at, so `recalc_after_off_sheet_write` is the right shape — it evaluates each
-/// written sheet plus the active one, which is also what puts a formula on the
-/// ACTIVE sheet reading a cleared grouped sheet back in step.
+/// THE SHEET GROUP'S CLEAR: Delete, Clear Contents, Clear Formats and Clear
+/// All with sheet tabs grouped (`core/lib/clearGestures`), over every area of
+/// the selection. The body is `clear_range_on_sheets_inner` (testability
+/// split). Returns the sheets it WROTE: every listed sheet but the active one,
+/// which the gesture clears through its own command right after (the macro
+/// recorder records one clear per returned sheet).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn clear_range_on_sheets(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
@@ -8078,136 +9151,292 @@ pub fn clear_range_on_sheets(
     start_col: u32,
     end_row: u32,
     end_col: u32,
-) -> Result<(), String> {
-    // Object-output protection on every targeted sheet (group clear must not
-    // punch through a pivot/report region on a background sheet).
-    for &sheet_idx in &sheet_indices {
-        // Sheet protection is per-sheet, so a group clear must be refused if ANY
-        // targeted sheet protects those cells — this is the cross-sheet case the
-        // active-sheet-only `can_edit_cell` command could never answer.
-        crate::protection::check_sheet_protection_range(
-            &state, sheet_idx, start_row, start_col, end_row, end_col,
-        )?;
-        check_region_range_protection(&state, sheet_idx, start_row, start_col, end_row, end_col)?;
+    apply_to: Option<ClearApplyTo>,
+    more_areas: Option<Vec<crate::api_types::ClearArea>>,
+) -> Result<Vec<usize>, String> {
+    let mut areas = vec![(start_row, start_col, end_row, end_col)];
+    areas.extend(
+        more_areas
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| (a.start_row, a.start_col, a.end_row, a.end_col)),
+    );
+    clear_range_on_sheets_inner(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &sheet_indices,
+        &areas,
+        apply_to.unwrap_or(ClearApplyTo::Contents),
+    )
+}
+
+/// The body of `clear_range_on_sheets`: clear `areas` on every sheet of
+/// `sheet_indices` that is not the active one, as `apply_to` says
+/// (contents, formats, all).
+///
+/// ALL OR NOTHING (review G#1). Every listed sheet -- the ACTIVE one included,
+/// which the caller then clears through its own command -- is gated for every
+/// area BEFORE anything is written anywhere: sheet protection, a pivot /
+/// report region, a writeback claim and a spill cut in two (the content
+/// gates only for a clear that removes content, as on the active sheet), and
+/// for a clear that removes formats every sheet's formats PLAN -- the active
+/// sheet's too (rev3A#5), whose one refusal (too many positions to write)
+/// otherwise arrived from its own clear after the group had committed.
+/// Excel [LIVE, Excel 16: Sheet2 protected, Sheet1 + Sheet2 grouped, Clear
+/// Contents / Formats / All] clears NOTHING on any sheet; the gesture used to
+/// clear the active sheet first and keep it when a grouped sheet refused.
+/// Called with only the active sheet listed it writes nothing: a pure gate.
+///
+/// ONE STEP, ONE PASS (review G#9). Every sheet's every area is written under
+/// one lock phase, as one undo step (joining the gesture's), each sheet's
+/// cells as one sheet-tagged `script_grid_cells` restore -- which names no
+/// target sheet, so undoing the group never switches the user to another
+/// sheet -- and its row / column formats as `obj_style_tiers` restores; then
+/// ONE `recalc_after_off_sheet_write` over the sheets that lost content. The
+/// gesture used to make one call per area, each running the two-pass
+/// whole-sheet recalculation.
+///
+/// SUBSCRIBED SHEETS (review G#8). Each sheet's cleared cells are recorded as
+/// subscriber overrides (`record_subscription_override_edits`, a no-op on a
+/// sheet no application owns), as the active sheet's clear records them, so an
+/// application refresh does not put the cleared values back.
+///
+/// DEPENDENTS RECALCULATE (§2c): `recalc_after_off_sheet_write` evaluates each
+/// written sheet plus the active one, which is also what puts a formula on the
+/// ACTIVE sheet reading a cleared grouped sheet back in step.
+#[allow(clippy::too_many_arguments)]
+pub fn clear_range_on_sheets_inner(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    sheet_indices: &[usize],
+    areas: &[(u32, u32, u32, u32)],
+    apply_to: ClearApplyTo,
+) -> Result<Vec<usize>, String> {
+    // The hyperlink store has no sheet-addressed clear (see the off-sheet twin).
+    if matches!(apply_to, ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks) {
+        return Err("Clear Hyperlinks and Remove Hyperlinks work on the active sheet only.".to_string());
     }
+    let clears_content = !matches!(apply_to, ClearApplyTo::Formats);
+    let areas: Vec<(u32, u32, u32, u32)> = areas
+        .iter()
+        .map(|&(r0, c0, r1, c1)| (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1)))
+        .collect();
 
-    // WRITEBACK CLAIM GUARD, off-sheet half. The index is keyed by SheetId and
-    // this command never consults the active sheet, so each targeted sheet is
-    // asked individually. Refused for the whole group, like protection above:
-    // a group clear that skipped one sheet is the silent partial mutation the
-    // guard exists to prevent.
-    crate::calp_commands::ensure_range_unclaimed_on_sheets(
-        &state, "clear this range", &sheet_indices, start_row, start_col, end_row, end_col,
-    )?;
-
-    // SPILL PROTECTION, group half (§2y). The paired `clear_range` has always
-    // refused a rectangle that cuts an array in two; this one had no check at
-    // all, so a group Delete over a background sheet's spilled block erased
-    // values whose formula still claimed them. `ReleasedByCaller`, like the
-    // single-sheet clears: a rectangle that swallows the ORIGIN takes the whole
-    // spill with it, released below.
-    {
-        let spill_hosts = state.spill_hosts.lock().unwrap();
-        for &sheet_idx in &sheet_indices {
-            check_spill_protection(
-                &spill_hosts, sheet_idx, start_row, start_col, end_row, end_col,
-                SpillOriginPolicy::ReleasedByCaller,
+    // ---- GATES: every sheet, every area, before any write ----
+    for &(start_row, start_col, end_row, end_col) in &areas {
+        for &sheet_idx in sheet_indices {
+            // Sheet protection is per-sheet, so a group clear must be refused if
+            // ANY targeted sheet protects those cells -- this is the cross-sheet
+            // case the active-sheet-only `can_edit_cell` command could never
+            // answer. It applies to FORMAT clears too (see the active twin).
+            crate::protection::check_sheet_protection_range(
+                state, sheet_idx, start_row, start_col, end_row, end_col,
             )?;
+            // Object-output protection: a content clear must not punch through
+            // a pivot/report region on a background sheet (format-only clears
+            // stay allowed, as on the active sheet).
+            if clears_content {
+                check_region_range_protection(state, sheet_idx, start_row, start_col, end_row, end_col)?;
+            }
+        }
+        if clears_content {
+            // WRITEBACK CLAIM GUARD, off-sheet half. The index is keyed by
+            // SheetId, so each targeted sheet is asked individually. Refused for
+            // the whole group, like protection above: a group clear that
+            // skipped one sheet is the silent partial mutation the guard exists
+            // to prevent.
+            crate::calp_commands::ensure_range_unclaimed_on_sheets(
+                state, "clear this range", sheet_indices, start_row, start_col, end_row, end_col,
+            )?;
+            // SPILL PROTECTION, group half (§2y): refuse a rectangle that cuts
+            // an array in two. `ReleasedByCaller`, like the single-sheet clears:
+            // a rectangle that swallows the ORIGIN takes the whole spill with
+            // it, released below.
+            let spill_hosts = state.spill_hosts.lock().unwrap();
+            for &sheet_idx in sheet_indices {
+                check_spill_protection(
+                    &spill_hosts, sheet_idx, start_row, start_col, end_row, end_col,
+                    SpillOriginPolicy::ReleasedByCaller,
+                )?;
+            }
         }
     }
 
-    // Past every per-sheet protection + writeback-claim refusal above. This writes
-    // USER CONTENT to non-active sheets, which the paired `clear_range` never covered.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grids = state.grids.write(&effect).unwrap();
+    // ---- PLAN, still holding nothing for writing ----
     let active_sheet = *state.active_sheet.read().unwrap();
+    // THE ACTIVE SHEET'S FORMATS HALF IS GATED HERE TOO (round-3 review
+    // rev3A#5). Its plan used to be refused only by its own clear, which the
+    // gesture runs AFTER this call has written and committed the other sheets:
+    // grouped Clear Formats with the active sheet's refusal (too many
+    // positions to write) left the grouped sheets cleared and the active one
+    // not -- the partial write G#1 set out to remove. Planned against the
+    // active sheet's own grid, the one its clear plans against, under the
+    // canonical lock order (grid, grids, then the rest), before anything is
+    // written anywhere; the plans are dropped -- that clear makes its own.
+    let active_grid = if clear_kind_clears_formats(apply_to) && sheet_indices.contains(&active_sheet) {
+        Some(state.grid.lock_pending().unwrap())
+    } else {
+        None
+    };
+    let grids = state.grids.lock_pending().unwrap();
+    let mut written: Vec<usize> = Vec::new();
+    for &sheet_idx in sheet_indices {
+        if sheet_idx != active_sheet && sheet_idx < grids.len() && !written.contains(&sheet_idx) {
+            written.push(sheet_idx);
+        }
+    }
+    let styles = state.style_registry.lock_pending().unwrap();
+    if let Some(active_grid) = active_grid.as_ref() {
+        for &area in &areas {
+            plan_clear_formats(active_grid, &styles, area)?;
+        }
+    }
+    // Released at once: the active sheet's own clear plans and writes it.
+    drop(active_grid);
+    if written.is_empty() {
+        // Only the active sheet was listed (a pure gate): nothing is written,
+        // and the document stays clean.
+        return Ok(written);
+    }
+    // The formats half of every (sheet, area), planned before the effect: its
+    // one refusal (too many positions to write) must write nothing anywhere.
+    let mut plans: Vec<Vec<Option<ClearFormatsPlan>>> = Vec::with_capacity(written.len());
+    for &sheet_idx in &written {
+        let mut per_area = Vec::with_capacity(areas.len());
+        for &area in &areas {
+            per_area.push(if clear_kind_clears_formats(apply_to) {
+                Some(plan_clear_formats(&grids[sheet_idx], &styles, area)?)
+            } else {
+                None
+            });
+        }
+        plans.push(per_area);
+    }
+
+    // Past every per-sheet refusal above. This writes USER CONTENT (or
+    // formats) to non-active sheets.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grids = grids.authorize(&effect);
+    let mut styles = styles.authorize(&effect);
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    // Sheets that actually lost content — the recalc seed set for phase B.
-    let mut cleared_sheets: Vec<usize> = Vec::new();
-
-    for &sheet_idx in &sheet_indices {
-        if sheet_idx == active_sheet || sheet_idx >= grids.len() {
-            continue;
+    let mut explicit = ExplicitNormal::default();
+    let mut per_sheet: Vec<(usize, BackgroundClear)> = Vec::with_capacity(written.len());
+    for (sheet_slot, &sheet_idx) in written.iter().enumerate() {
+        let mut out = BackgroundClear::default();
+        for (area_slot, &(start_row, start_col, end_row, end_col)) in areas.iter().enumerate() {
+            // SPILL TEAR-DOWN (§2y), in the same critical section as the clear.
+            // `recalc_after_off_sheet_write` re-lays arrays whose origin still
+            // holds a formula (§3bm), and a CLEAR is exactly the case it cannot
+            // help with: the origin's formula is gone, so nothing visits it and
+            // nothing would release its claim.
+            let released_spill = if clears_content {
+                take_spills_owned_within(state, sheet_idx, start_row, start_col, end_row, end_col)
+            } else {
+                Vec::new()
+            };
+            clear_rect_on_background_sheet(
+                &mut grids[sheet_idx],
+                &mut styles,
+                &mut explicit,
+                (start_row, start_col, end_row, end_col),
+                apply_to,
+                &released_spill,
+                plans[sheet_slot][area_slot].as_ref(),
+                &mut out,
+            );
         }
-
-        let grid = &grids[sheet_idx];
-        let effective_end_row = end_row.min(grid.max_row);
-        let effective_end_col = end_col.min(grid.max_col);
-
-        // SPILL TEAR-DOWN (§2y), in the same critical section as the clear.
-        // `recalc_after_off_sheet_write` re-lays arrays whose origin still
-        // holds a formula (§3bm), and a CLEAR is exactly the case it cannot
-        // help with: the origin's formula is gone, so nothing visits it and
-        // nothing would release its claim. Released cells are erased and never
-        // recorded for undo (see `spilled_cells_owned_within`).
-        let released_spill = take_spills_owned_within(
-            &state, sheet_idx, start_row, start_col, effective_end_row, effective_end_col,
-        );
-        let released_set: crate::CoordSet = released_spill.iter().copied().collect();
-
-        let cells_to_clear: Vec<(u32, u32)> = grid
-            .cells
-            .keys()
-            .filter(|(r, c)| {
-                *r >= start_row && *r <= effective_end_row && *c >= start_col && *c <= effective_end_col
-            })
-            .filter(|coord| !released_set.contains(coord))
-            .cloned()
-            .collect();
-
-        if cells_to_clear.is_empty() && released_spill.is_empty() {
-            continue;
+        per_sheet.push((sheet_idx, out));
+    }
+    if per_sheet.iter().any(|(_, out)| out.changed_anything()) {
+        let label = match apply_to {
+            ClearApplyTo::Formats => "Clear formats on grouped sheets",
+            ClearApplyTo::Contents => "Clear contents on grouped sheets",
+            _ => "Clear all on grouped sheets",
+        };
+        let owned_txn = undo_stack.begin_owned_transaction(label.to_string());
+        for (sheet_idx, out) in per_sheet.iter_mut() {
+            out.record_into(&mut undo_stack, *sheet_idx, label);
         }
-        cleared_sheets.push(sheet_idx);
-
-        {
-            let grid = &mut grids[sheet_idx];
-            for (r, c) in &released_spill {
-                grid.cells.remove(&(*r, *c));
-            }
-        }
-
-        if cells_to_clear.is_empty() {
-            // Only derived spill cells went; nothing to record. Opening a
-            // transaction here would leave an empty step on the stack, so the
-            // next Ctrl+Z would appear to do nothing.
-            continue;
-        }
-
-        let owned_txn = undo_stack.begin_owned_transaction(format!(
-            "Clear range on sheet {}",
-            sheet_idx
-        ));
-
-        let grid = &mut grids[sheet_idx];
-        for (r, c) in cells_to_clear {
-            let previous_cell = grid.get_cell(r, c).cloned();
-            if previous_cell.is_some() {
-                undo_stack.record_cell_change(sheet_idx, r, c, previous_cell);
-            }
-            grid.clear_cell(r, c);
-        }
-
         undo_stack.commit_owned(owned_txn);
     }
 
-    // PHASE B — dependents. `recalc_after_off_sheet_write` takes its own locks
-    // (it calls `recalculate_sheet_values`), so the caller must hold none.
+    // PHASE B -- overrides, then dependents. `recalc_after_off_sheet_write`
+    // takes its own locks (it calls `recalculate_sheet_values`), so the caller
+    // must hold none.
     drop(undo_stack);
+    drop(styles);
     drop(grids);
 
+    for (sheet_idx, out) in &per_sheet {
+        crate::calp_commands::record_subscription_override_edits(state, &effect, *sheet_idx, &out.override_edits);
+    }
+
+    let cleared_sheets: Vec<usize> = per_sheet
+        .iter()
+        .filter(|(_, out)| out.content_changed)
+        .map(|(sheet_idx, _)| *sheet_idx)
+        .collect();
     if !cleared_sheets.is_empty() {
         recalc_after_off_sheet_write(
-            &state,
-            &user_files_state,
-            &pivot_state,
-            &pane_control_state,
-            &ribbon_filter_state,
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
             &cleared_sheets,
         );
     }
 
-    Ok(())
+    Ok(written)
+}
+
+/// THE SOURCE OF A FILL, keyed by position relative to the source's top-left:
+/// every stored cell of the rectangle EXCEPT a dynamic array's spilled values.
+///
+/// A spilled value is a stored cell (the array's output, `ast: None`), so a
+/// verbatim collection copied it as a LITERAL. Ctrl+D over A1:B3 with
+/// `A1 =SEQUENCE(1,2)` spilling into B1 then wrote `=SEQUENCE(1,2)` into A2 and
+/// A3 and the literal 2 into B2 and B3 -- and since the fill cascade decides
+/// every filled formula's spill, each filled origin was blocked by the copy of
+/// its own spill and showed `#SPILL!`. Excel fills a spilled cell as BLANK,
+/// whether or not its origin is in the source [LIVE, Excel 16: A1:B3 FillDown
+/// spills in A2 and A3; B1:B3 FillDown leaves B2:B3 empty], so the copied
+/// formulas spill again into room the fill itself cleared.
+///
+/// Costs one `spill_hosts` lock and one `is_empty()` on a workbook with no
+/// dynamic array. A leaf lock, taken after the grid guards the caller holds.
+pub(crate) fn fill_source_cells(
+    state: &AppState,
+    grid: &Grid,
+    sheet: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> std::collections::HashMap<(u32, u32), engine::Cell> {
+    let spill_hosts = state.spill_hosts.lock().unwrap();
+    // `source`, never `cells`: this is the fill's own lookup map, and the
+    // spill / recalculation censuses read a `cells.insert(` as a grid write.
+    let mut source = std::collections::HashMap::new();
+    for r in start_row..=end_row {
+        for c in start_col..=end_col {
+            if !spill_hosts.is_empty() && spill_hosts.contains_key(&(sheet, r, c)) {
+                continue; // a spilled value: filled as blank
+            }
+            if let Some(cell) = grid.get_cell(r, c) {
+                source.insert((r - start_row, c - start_col), cell.clone());
+            }
+        }
+    }
+    source
 }
 
 /// Fill on an OBJECT's cells (P3): the same tiling and the same relative shift
@@ -8269,15 +9498,8 @@ pub(crate) fn fill_range_on_target(
         // The plan, against the backing grid as it stands: every destination
         // cell's previous and new state.
         let grid = &grids[backing];
-        let mut source_cells: std::collections::HashMap<(u32, u32), engine::Cell> =
-            std::collections::HashMap::new();
-        for r in sr0..=sr1 {
-            for c in sc0..=sc1 {
-                if let Some(cell) = grid.get_cell(r, c) {
-                    source_cells.insert((r - sr0, c - sc0), cell.clone());
-                }
-            }
-        }
+        // A spilled value fills as blank, as on the sheet (`fill_source_cells`).
+        let source_cells = fill_source_cells(state, grid, backing, sr0, sc0, sr1, sc1);
         let mut plan: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
         for tr in tr0..=tr1 {
             for tc in tc0..=tc1 {
@@ -8533,17 +9755,19 @@ pub fn fill_range(
     let src_rows = source_end_row - source_start_row + 1;
     let src_cols = source_end_col - source_start_col + 1;
 
-    // Collect source cells into a lookup map (relative position -> Cell)
-    let mut source_cells: HashMap<(u32, u32), engine::Cell> = HashMap::new();
-    for r in source_start_row..=source_end_row {
-        for c in source_start_col..=source_end_col {
-            if let Some(cell) = grid.get_cell(r, c) {
-                let rel_r = r - source_start_row;
-                let rel_c = c - source_start_col;
-                source_cells.insert((rel_r, rel_c), cell.clone());
-            }
-        }
-    }
+    // Collect source cells into a lookup map (relative position -> Cell). A
+    // dynamic array's spilled values are filled as BLANK, as Excel does, so a
+    // filled origin spills again instead of being blocked by a literal copy of
+    // its own spill (`fill_source_cells`).
+    let source_cells: HashMap<(u32, u32), engine::Cell> = fill_source_cells(
+        &state,
+        &grid,
+        active_sheet,
+        source_start_row,
+        source_start_col,
+        source_end_row,
+        source_end_col,
+    );
 
     // Begin undo transaction
     let opened_transaction = !undo_stack.has_open_transaction();
@@ -8722,7 +9946,10 @@ pub fn fill_range(
                                 None, // v1: fill/on-sheets path does not resolve UDFs
                             );
 
-                            // For fill, we take the simple scalar result (no spill handling)
+                            // The scalar result here; under automatic calculation the
+                            // cascade below re-evaluates every filled formula (they are
+                            // members of its order) through `reevaluate_formula_cell`,
+                            // so an array result spills through THE ONE SPILL DECISION.
                             new_cell.value = raw_result.to_cell_value();
                         }
                         Err(e) => {
@@ -8872,123 +10099,48 @@ pub fn fill_range(
         // PERF-20: skip per-dependent formula render + IPC payload for wide cascades.
         let include_cascade_formulas = all_recalc_order.len() <= CASCADE_FORMULA_LIMIT;
 
-        for (dep_row, dep_col) in &all_recalc_order {
-            if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
-                if let Some(formula) = dep_cell.formula_string() {
-                    let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                        // Names expand on the way into the evaluator (D2).
-                        let eval_target = crate::name_resolution::eval_ast(
-                            cached_ast,
-                            &crate::name_resolution::NameTables {
-                                named_ranges: &batch_named_ranges,
-                                tables: &batch_tables,
-                                table_names: &batch_table_names,
-                                sheet_names: &sheet_names,
-                                spill_ranges: &state.spill_ranges,
-                            }
-                            .at(active_sheet, *dep_row, *dep_col),
-                        );
-                        crate::evaluate_formula_raw_with_ast_files_and_cube(
-                            &grids,
-                            &sheet_names,
-                            active_sheet,
-                            &eval_target,
-                            &user_files,
-                            None,
-                            None,
-                            Some(control_values.clone()),
-                        ).to_cell_value()
-                    } else {
-                        // UNREACHABLE: `formula_string()` and `get_cached_ast()`
-                        // read the SAME `Cell::ast` field, so a cell that produced
-                        // a formula string above always has an AST here. Kept as
-                        // the fallback it has always been. It is the one place that
-                        // still writes an expanded AST back into a cell, which would
-                        // be the pre-resolution defect (D2) if it could run.
-                        if let Ok(engine_ast) = {
-                            parser::parse(&formula).map(|parsed| {
-                                let resolved = if crate::ast_has_named_refs(&parsed) {
-                                    let mut visited = HashSet::new();
-                                    crate::resolve_names_in_ast(&parsed, &batch_named_ranges, active_sheet, &mut visited)
-                                } else {
-                                    parsed
-                                };
-                                let resolved = if crate::ast_has_table_refs(&resolved) {
-                                    let ctx = crate::TableRefContext {
-                                        tables: &batch_tables,
-                                        table_names: &batch_table_names,
-                                        sheet_names: &sheet_names,
-                                        current_sheet_index: active_sheet,
-                                        current_row: *dep_row,
-                                        current_col: *dep_col,
-                                    };
-                                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
-                                } else {
-                                    resolved
-                                };
-                                crate::convert_expr(&resolved)
-                            }).map_err(|e| format!("{}", e))
-                        } {
-                            let result = crate::evaluate_formula_raw_with_ast_files_and_cube(
-                                &grids,
-                                &sheet_names,
-                                active_sheet,
-                                &engine_ast,
-                                &user_files,
-                                None,
-                                None,
-                                Some(control_values.clone()),
-                            ).to_cell_value();
-                            let mut updated_with_ast = dep_cell.clone();
-                            updated_with_ast.set_cached_ast(engine_ast);
-                            updated_with_ast.value = result.clone();
-                            grid.set_cell(*dep_row, *dep_col, updated_with_ast.clone());
-                            if active_sheet < grids.len() {
-                                grids[active_sheet].set_cell(*dep_row, *dep_col, updated_with_ast.clone());
-                            }
-                            let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
-                            let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_with_ast.value, dep_style, &locale);
-                            let (drspan, dcspan) = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
-                                (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
-                            } else {
-                                (1, 1)
-                            };
-                            updated_cells.push(CellData {
-                                row: *dep_row, col: *dep_col, display: dep_display, overflow: dep_overflow,
-                                display_color: None,
-                                formula: if include_cascade_formulas { formula_display(&updated_with_ast, &locale) } else { None },
-                                style_index: grid.effective_style_index(*dep_row, *dep_col),
-                                row_span: drspan, col_span: dcspan,
-                                sheet_index: None, rich_text: None, accounting_layout: None,
-                            });
-                            continue;
-                        }
-                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, &formula, &user_files)
-                    };
-
-                    let mut updated_dep = dep_cell.clone();
-                    updated_dep.value = result;
-                    grid.set_cell(*dep_row, *dep_col, updated_dep.clone());
-                    if active_sheet < grids.len() {
-                        grids[active_sheet].set_cell(*dep_row, *dep_col, updated_dep.clone());
-                    }
-                    let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
-                    let (dep_display, dep_overflow) = crate::format_cell_value_and_class(&updated_dep.value, dep_style, &locale);
-                    let (drspan, dcspan) = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
-                        (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
-                    } else {
-                        (1, 1)
-                    };
-                    updated_cells.push(CellData {
-                        row: *dep_row, col: *dep_col, display: dep_display, overflow: dep_overflow,
-                        display_color: None,
-                        formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
-                        style_index: grid.effective_style_index(*dep_row, *dep_col),
-                        row_span: drspan, col_span: dcspan,
-                        sheet_index: None, rich_text: None, accounting_layout: None,
-                    });
-                }
-            }
+        // The same per-cell evaluator as the batch above and `update_cell`:
+        // `reevaluate_formula_cell` evaluates each dependent at its OWN cell
+        // (ROW()/COLUMN(), `@`, and -- this path carries no UDF resolver and no
+        // cube data -- the preserve that keeps a cube or custom-function cell's
+        // value instead of clobbering it to #N/A / #NAME?), and spills it through
+        // THE ONE SPILL DECISION. It was a second hand copy of the batch's
+        // positionless loop, and the filled cells are members of this order, so
+        // a `=ROW()` filled down came back #VALUE! from its own cascade.
+        let mut cache_hits: u32 = 0;
+        let mut cache_misses: u32 = 0;
+        for &(dep_row, dep_col) in &all_recalc_order {
+            let Some(dep_cell) = grid.get_cell(dep_row, dep_col).cloned() else {
+                continue;
+            };
+            let Some(formula) = dep_cell.formula_string() else {
+                continue;
+            };
+            reevaluate_formula_cell(
+                &state,
+                &mut grid,
+                &mut grids,
+                &sheet_names,
+                active_sheet,
+                dep_row,
+                dep_col,
+                &dep_cell,
+                &formula,
+                &user_files,
+                None,
+                None,
+                Some(&control_values),
+                &styles,
+                &locale,
+                &merge_lookup,
+                &batch_tables,
+                &batch_table_names,
+                &batch_named_ranges,
+                &mut updated_cells,
+                &mut cache_hits,
+                &mut cache_misses,
+                include_cascade_formulas,
+            );
         }
 
         // Cross-sheet dependents — the SHARED walk (see BUG-0019 on
@@ -9278,8 +10430,13 @@ mod volatile_builtin_cascade_tests {
         // drifted apart before, and a volatile splice missing from ONE of them
         // means "NOW() refreshes when you type but not when you paste" — which
         // nothing in the UI would report.
+        //
+        // Since the BUG-0476 follow-up both paths -- and the CUBE pre-fetch,
+        // which must cover exactly what they evaluate -- build the order through
+        // `active_sheet_write_cascade`, so the splice is asserted there and the
+        // two paths are asserted to call it.
         const DATA_RS: &str = include_str!("data.rs");
-        for func in ["fn update_cell_impl(", "fn update_cells_batch_core("] {
+        let body_of = |func: &str| -> &str {
             let start = DATA_RS
                 .find(func)
                 .unwrap_or_else(|| panic!("no `{}` in source", func));
@@ -9288,12 +10445,23 @@ mod volatile_builtin_cascade_tests {
                 .find("\n#[tauri::command]")
                 .into_iter()
                 .chain(rest.find("\n#[cfg(test)]"))
+                .chain(rest.find("\npub(crate) fn "))
+                .chain(rest.find("\nfn "))
                 .min()
                 .unwrap_or(rest.len());
+            &rest[..end]
+        };
+        assert!(
+            body_of("fn active_sheet_write_cascade(").contains("splice_volatile_cascade_roots("),
+            "the shared write cascade does not splice the volatile built-ins — \
+             NOW()/RAND()/OFFSET() go stale on every edit and paste",
+        );
+        for func in ["fn update_cell_impl(", "fn update_cells_batch_core("] {
             assert!(
-                rest[..end].contains("splice_volatile_cascade_roots("),
-                "`{}` builds a cascade root set without splicing the volatile \
-                 built-ins — NOW()/RAND()/OFFSET() go stale through that path",
+                body_of(func).contains("active_sheet_write_cascade("),
+                "`{}` builds its cascade without the shared `active_sheet_write_cascade` \
+                 — the volatile built-ins go stale through that path, and the CUBE \
+                 pre-fetch no longer covers what it evaluates",
                 func,
             );
         }
@@ -9347,8 +10515,9 @@ mod writeback_range_guard_wiring_tests {
             (DATA_RS, "sort_range", "ensure_range_unclaimed("),
             (DATA_RS, "clear_cell", "ensure_range_unclaimed("),
             (DATA_RS, "clear_range", "ensure_range_unclaimed("),
-            (DATA_RS, "clear_range_with_options", "ensure_range_unclaimed("),
-            (DATA_RS, "clear_range_on_sheets", "ensure_range_unclaimed_on_sheets("),
+            // The two commands delegate to these bodies (testability split).
+            (DATA_RS, "clear_range_with_options_inner", "ensure_range_unclaimed("),
+            (DATA_RS, "clear_range_on_sheets_inner", "ensure_range_unclaimed_on_sheets("),
             (DATA_RS, "fill_range", "ensure_range_unclaimed("),
             (STRUCTURE_RS, "insert_rows", "ensure_row_shift_unclaimed("),
             (STRUCTURE_RS, "delete_rows", "ensure_row_shift_unclaimed("),
@@ -9607,3 +10776,43 @@ mod icon_sort_tests;
 #[cfg(test)]
 #[path = "clear_hyperlinks_tests.rs"]
 mod clear_hyperlinks_tests;
+
+/// Clear Formats / Clear All over row and column FORMATS (review A#1), and the
+/// sheet group's all-or-nothing, one-call clear (review G#1 / G#8 / G#9). A
+/// CHILD module of `data` so it can drive `clear_range_with_options_inner` and
+/// `clear_range_on_sheets_inner` in-process.
+#[cfg(test)]
+#[path = "clear_tiers_tests.rs"]
+mod clear_tiers_tests;
+
+/// A DEPENDENT a cascade re-evaluates is evaluated AT ITS OWN CELL (ROW()/
+/// COLUMN(), `@`, the cube and custom-function preserve) and spills -- the batch
+/// cascade, the fill cascade and the cross-sheet walk. A CHILD module of `data`
+/// for the same reason as above: it reuses the `Workbook` harness.
+#[cfg(test)]
+#[path = "cascade_position_tests.rs"]
+mod cascade_position_tests;
+
+/// A PASTE keeps its kind in a Text-formatted cell (`CellUpdateInput::pasted`,
+/// on the sheet and on a floating grid), and the typed read marks exactly the
+/// cells whose formula it withheld (`TypedCellData::formula_withheld`). A
+/// CHILD module of `data` for the same reason as above.
+#[cfg(test)]
+#[path = "paste_kind_tests.rs"]
+mod paste_kind_tests;
+
+/// A batch write keeps a literal it writes into a spill the same batch made,
+/// and re-spills an array whose blocker it blanked; a fill copies a spilled
+/// value as blank. A CHILD module of `data` for the same reason as above: it
+/// drives `update_cells_batch_core` through the `Workbook` harness.
+#[cfg(test)]
+#[path = "spill_batch_fill_tests.rs"]
+mod spill_batch_fill_tests;
+
+/// A MOVE (drag, Cut + Paste) re-points references INTO the moved block --
+/// in the moved formulas themselves, on every sheet and in defined names --
+/// and leaves every other reference alone (`relocate_cell_references_core`).
+/// A CHILD module of `data` for the same reason as above.
+#[cfg(test)]
+#[path = "move_relocation_tests.rs"]
+mod move_relocation_tests;

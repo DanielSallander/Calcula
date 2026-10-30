@@ -932,6 +932,7 @@ pub(crate) fn update_floating_range_cell_inner(
         value,
         invariant,
         Some(true),
+        None,
     )
 }
 

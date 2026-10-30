@@ -308,7 +308,9 @@ fn the_announcement_comes_after_the_recalculation() {
     let body = body_of("pub(crate) fn apply_refresh_payloads(");
     let recalc = at(
         &body,
-        "crate::calculation::recalculate_sheet_values",
+        // An update recalculates its installed sheets with the keep-aware
+        // pass (NEW-update-refuses-composite-formulas, BUG-0476).
+        "crate::calculation::recalculate_installed_sheet_values(",
         "the recalculation",
     );
     let announce = at(&body, "announce_cascade(", "the sheet announcement");

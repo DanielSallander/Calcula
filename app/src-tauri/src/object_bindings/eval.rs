@@ -355,7 +355,7 @@ fn chart_data_sheets(
     specs
         .into_iter()
         .filter_map(|(id, spec)| {
-            formula::chart_data_sheet(&spec, &world.sheet_names, &world.sheet_ids).map(|i| (id, i))
+            formula::chart_data_sheet(&spec, &world.sheet_names, &world.sheet_ids, &world.named_ranges).map(|i| (id, i))
         })
         .collect()
 }

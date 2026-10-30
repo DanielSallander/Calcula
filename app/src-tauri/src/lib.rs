@@ -87,6 +87,9 @@ pub mod scripting;
 /// bridge gets a policy container of its own rather than a clone of the app's
 /// (BUG-0113).
 pub mod script_frame;
+/// F5 / Ctrl+R never reload a window, in every build (BUG-0393, reviews revG#6
+/// and rev3C#1); a release build also turns WebView2's other browser keys off.
+pub mod browser_accelerator_keys;
 pub mod named_ranges;
 /// Excel-parity named-range resolution: a stored formula keeps its NAME and the
 /// name is expanded at EVALUATION, with a name -> dependents edge of its own.
@@ -4053,8 +4056,41 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
     gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
     udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
 ) -> EvalResult {
+    evaluate_formula_raw_reporting_refusal(
+        grids,
+        sheet_names,
+        current_sheet_index,
+        ast,
+        eval_ctx,
+        style_registry,
+        user_files,
+        pivot_data_fn,
+        gather_fn,
+        udf_fn,
+    )
+    .0
+}
+
+/// [`evaluate_formula_raw_with_files_and_pivot`], also saying whether a cube or
+/// custom-function call in the formula had NO DATA and was refused
+/// (`Evaluator::last_data_refusal`) -- what the full recalculation pass needs to
+/// tell a formula's answer from "one of its calls could not be answered"
+/// (`calculation::run_calculation_pass`). One body, so the two cannot drift.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_formula_raw_reporting_refusal(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    eval_ctx: engine::EvalContext,
+    style_registry: Option<&engine::StyleRegistry>,
+    user_files: &HashMap<String, Vec<u8>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
+    udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
+) -> (EvalResult, Option<CellError>) {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
-        return EvalResult::Error(CellError::Ref);
+        return (EvalResult::Error(CellError::Ref), None);
     }
 
     let current_grid = &grids[current_sheet_index];
@@ -4078,7 +4114,8 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
     if let Some(uf) = udf_fn {
         evaluator.set_udf_fn(uf);
     }
-    evaluator.evaluate(ast)
+    let result = evaluator.evaluate(ast);
+    (result, evaluator.last_data_refusal())
 }
 
 /// Evaluates a formula AST using a pre-built evaluator. This is the fastest path
@@ -4174,12 +4211,12 @@ pub fn evaluate_formula_multi_sheet_with_ast_and_files(
 }
 
 /// Like evaluate_formula_multi_sheet_with_ast_and_files but returns the raw EvalResult,
-/// preserving array/spill information needed for cascade spill recalculation.
+/// preserving array/spill information.
 ///
-/// `udf_fn` (Wave 3 / C1): the dependent-recalc cascade routes through here, so a
-/// dependent cell like B1=MYFN(A1) must serve the pre-fetched UDF table too, or
-/// editing A1 would recompute B1 to #NAME?. Pivot/gather/styles remain
-/// unthreaded here (unchanged limitation); only the UDF resolver is added.
+/// POSITIONLESS -- see `evaluate_formula_raw_with_ast_files_and_cube`. Its one
+/// production caller is the script preview's detached evaluator
+/// (`ai/preview_eval.rs`); no dependent cascade routes through here any more.
+/// Pivot/gather/styles are unthreaded; `udf_fn` serves a pre-fetched UDF table.
 pub fn evaluate_formula_raw_with_ast_and_files(
     grids: &[Grid],
     sheet_names: &[String],
@@ -4195,8 +4232,21 @@ pub fn evaluate_formula_raw_with_ast_and_files(
 }
 
 /// Like `evaluate_formula_raw_with_ast_and_files` but also threads the pre-fetched
-/// CUBE data, so a dependent cube cell (e.g. C1=CUBEVALUE(.., B2)) recomputes
-/// correctly when its precedent (B2=CUBEMEMBER(..)) is edited.
+/// CUBE data and the GET.CONTROLVALUE snapshot.
+///
+/// IT CARRIES NO POSITION (`current_row` / `current_col` are `None`), so it is
+/// NOT a way to re-evaluate a CELL's formula: argument-less ROW()/COLUMN()
+/// answer #VALUE!, implicit intersection (`@`) reduces against row 1, and a
+/// scoped cube prefetch cannot tell which cell it is evaluating (before the
+/// results cache, round 6, a cube or custom-function cell with no data was
+/// also clobbered to #N/A / #NAME?, because the preserve read the stored value
+/// AT the position). Every dependent cascade (the batch, fill,
+/// the cross-sheet walk) once evaluated through here and had exactly those
+/// defects; they now go through `commands::data::reevaluate_formula_cell` or an
+/// `EvalContext` carrying the cell's own position, and
+/// `cascade_position_tests` pins that. Its remaining caller,
+/// `update_cell_on_sheets`, evaluates the cell it WRITES, which the off-sheet
+/// recalculation right after re-evaluates in place (`recalculate_sheet_values`).
 pub fn evaluate_formula_raw_with_ast_files_and_cube(
     grids: &[Grid],
     sheet_names: &[String],
@@ -5323,6 +5373,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // BUG-0393 / reviews revG#6, rev3C#1: no window reloads on F5 / Ctrl+R,
+        // in any build -- the editor windows install no JS guard of their own.
+        // Release builds also turn the browser's other keys off (debug builds
+        // keep F12 DevTools); see browser_accelerator_keys.rs.
+        .plugin(browser_accelerator_keys::plugin())
         // BUG-0113. A real fetch response carries its own `Content-Security-Policy`
         // header, so the script-frame document gets its OWN policy container
         // instead of the clone of ours that `srcdoc` inherits — and the app's

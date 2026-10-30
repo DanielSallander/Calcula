@@ -251,7 +251,9 @@ pub fn get_object_script_by_target(
 /// Save (create or update) an object script.
 /// Provenance is preserved from the stored entry — a frontend save can never
 /// flip a distributed script back to local. Distributed scripts also cannot
-/// be escalated to unlocked through this command.
+/// be escalated to unlocked through this command. An existing script's
+/// BINDING (object type + instance id) is preserved too: see
+/// [`save_object_script_core`].
 #[tauri::command]
 pub fn save_object_script(
     state: State<AppState>,
@@ -260,17 +262,39 @@ pub fn save_object_script(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
-    // Past the window guard and `from_data` validation, both of which can still refuse.
-    let mut saved = from_data(&script)?;
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut scripts = state.object_scripts.write(&effect).map_err(|e| e.to_string())?;
+    save_object_script_core(&state, &file_state, &script)
+}
 
-    // Update if exists, otherwise push new
-    if let Some(existing) = scripts.iter_mut().find(|s| s.id == saved.id) {
-        saved.provenance = existing.provenance.clone();
-        saved.package_name = existing.package_name.clone();
-        saved.package_version = existing.package_version.clone();
-        if saved.provenance == ScriptProvenance::Distributed
+/// [`save_object_script`] past its window guard, over plain references.
+///
+/// THE STORED BINDING WINS for a script that already exists. A named-range
+/// script is bound by the name's TEXT, and the BACKEND moves that binding: a
+/// name rename re-points it, and the rename's undo and redo move it back and
+/// forth (`named_ranges::repoint_named_range_scripts`, the
+/// `obj_object_scripts_by_id` restore). An editor window opened before the
+/// rename still held the old instance id and saved `{...script, source}` --
+/// and this used to replace the whole entry, binding included, so the save
+/// re-bound the script to a name that no longer existed (orphaned again, and
+/// Edit Script on the renamed name scaffolded an empty script). No caller
+/// moves a script to another object through a save (a new binding is always a
+/// new script id), so a save edits the code and the binding is the backend's,
+/// exactly as provenance is.
+///
+/// EVERY REFUSAL BEFORE THE EFFECT. `DocumentEffect::mutates` dirties at
+/// construction, and the distributed-escalation refusal used to come after it:
+/// a refused save left the workbook dirty. The gate now reads through the
+/// held lock (`lock_pending`) and the effect is minted only once it passed,
+/// in the same critical section.
+pub(crate) fn save_object_script_core(
+    state: &AppState,
+    file_state: &FileState,
+    script: &ObjectScriptData,
+) -> Result<(), String> {
+    let mut saved = from_data(script)?;
+    let pending = state.object_scripts.lock_pending().map_err(|e| e.to_string())?;
+
+    if let Some(existing) = pending.iter().find(|s| s.id == saved.id) {
+        if existing.provenance == ScriptProvenance::Distributed
             && saved.access_level == ScriptAccessLevel::Unlocked
             && existing.access_level != ScriptAccessLevel::Unlocked
         {
@@ -280,6 +304,19 @@ pub fn save_object_script(
                     .to_string(),
             );
         }
+    }
+
+    let effect = DocumentEffect::mutates(file_state);
+    let mut scripts = pending.authorize(&effect);
+
+    // Update if exists, otherwise push new
+    if let Some(existing) = scripts.iter_mut().find(|s| s.id == saved.id) {
+        saved.provenance = existing.provenance.clone();
+        saved.package_name = existing.package_name.clone();
+        saved.package_version = existing.package_version.clone();
+        // The binding is the backend's (see above).
+        saved.object_type = existing.object_type.clone();
+        saved.instance_id = existing.instance_id.clone();
         // R19 ceiling. For a LOCAL script the source is authoritative, so
         // re-derive the declared capabilities from the updated source. For a
         // DISTRIBUTED script the ceiling is the package manifest's declaration
@@ -300,6 +337,96 @@ pub fn save_object_script(
         scripts.push(saved);
     }
     Ok(())
+}
+
+// ============================================================================
+// Binding-change announcement
+// ============================================================================
+
+/// The cross-window event the frontend's `OBJECT_SCRIPTS_CHANGED_EVENT`
+/// (`app/src/api/objectScriptBackend.ts`) names. The frontend emits it after
+/// its OWN saves and deletes; the backend emits it when IT moves or removes a
+/// script -- every re-bind (`scripting::script_rebind`: a name rename, a
+/// control moving with its cells or to another cell, a sheet move or delete
+/// renumbering a control, and the undo / redo of any of them), a name delete
+/// pruning the name's scripts, and that prune's undo / redo -- because none of
+/// those has a frontend save to announce it, and the command line, the MCP
+/// tools and Ctrl+Z reach them with no frontend event at all.
+pub(crate) const OBJECT_SCRIPTS_CHANGED_EVENT: &str = "workbook:object-scripts-changed";
+
+/// `change` of a re-bind: the script now belongs to another object instance
+/// (its id, source and provenance are unchanged), named by the payload's
+/// `instance_id`. The frontend re-keys the live mount from it at once
+/// (`ObjectScriptsChangedDetail`).
+pub(crate) const SCRIPT_REBOUND: &str = "rebound";
+/// `change` of a script the backend removed.
+pub(crate) const SCRIPT_DELETED: &str = "deleted";
+/// `change` of a script the backend put back (an undone prune).
+pub(crate) const SCRIPT_SAVED: &str = "saved";
+
+/// Payload of [`OBJECT_SCRIPTS_CHANGED_EVENT`] -- the wire twin of
+/// `ObjectScriptsChangedDetail`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObjectScriptsChangedPayload {
+    pub(crate) id: String,
+    pub(crate) change: String,
+    /// A "rebound" change only: the binding the script has NOW (`Some(None)`:
+    /// none, its control was deleted with its row, column or sheet). Absent
+    /// from the wire on every other change. Carried so the main window
+    /// re-keys the live mount in the event handler itself: a re-read
+    /// (`getObjectScript`) left a window in which a scheduled job the backend
+    /// had already moved came due at an address the mount did not answer yet,
+    /// and a one-shot job was lost to it (rev6B#6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) instance_id: Option<Option<String>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every announcement made on THIS thread (a unit test's capture; each
+    /// test runs on its own thread, so parallel tests cannot see each other's).
+    static ANNOUNCED: std::cell::RefCell<Vec<ObjectScriptsChangedPayload>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tell every window that the backend moved or removed a script. Takes NO
+/// AppState lock (an `emit` on the installed app handle), so it is legal under
+/// any guard; a no-op before the handle is installed (unit tests capture it
+/// instead, see [`take_object_script_announcements`]).
+///
+/// The handle is the one `run()` installs for the writeback modules
+/// (`bi::writeback_source::app_handle`): one process-wide handle, read here
+/// rather than installed a second time.
+pub(crate) fn announce_object_script_change(id: &str, change: &str) {
+    announce(ObjectScriptsChangedPayload { id: id.to_string(), change: change.to_string(), instance_id: None });
+}
+
+/// Announce a RE-BIND: `id` is bound to `instance_id` now. Only the one re-bind
+/// door calls this (`scripting::script_rebind::announce_rebinds`), so every
+/// route's announcement carries the new binding the same way. Same lock
+/// contract as [`announce_object_script_change`].
+pub(crate) fn announce_object_script_rebound(id: &str, instance_id: Option<&str>) {
+    announce(ObjectScriptsChangedPayload {
+        id: id.to_string(),
+        change: SCRIPT_REBOUND.to_string(),
+        instance_id: Some(instance_id.map(str::to_string)),
+    });
+}
+
+fn announce(payload: ObjectScriptsChangedPayload) {
+    #[cfg(test)]
+    ANNOUNCED.with(|announced| announced.borrow_mut().push(payload.clone()));
+    if let Some(app) = crate::bi::writeback_source::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit(OBJECT_SCRIPTS_CHANGED_EVENT, payload);
+    }
+}
+
+/// The announcements this thread made since the last call (tests only).
+#[cfg(test)]
+pub(crate) fn take_object_script_announcements() -> Vec<ObjectScriptsChangedPayload> {
+    ANNOUNCED.with(|announced| std::mem::take(&mut *announced.borrow_mut()))
 }
 
 /// Delete an object script by ID.
@@ -386,4 +513,107 @@ pub fn delete_object_scripts_for_instance(
     let effect = DocumentEffect::mutates(&file_state);
     prune_scripts_for_instance(&state, &effect, &instance_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    use crate::document_effect::test_seed_effect;
+
+    fn stored(id: &str, instance: &str, provenance: ScriptProvenance) -> SavedObjectScript {
+        SavedObjectScript {
+            id: id.to_string(),
+            name: format!("Script for {}", instance),
+            object_type: ScriptableObjectType::NamedRange,
+            instance_id: Some(instance.to_string()),
+            source: "export default function setup() {}\n".to_string(),
+            access_level: ScriptAccessLevel::Restricted,
+            description: None,
+            provenance,
+            package_name: None,
+            package_version: None,
+            declared_capabilities: Vec::new(),
+        }
+    }
+
+    /// What an editor window that was opened BEFORE the rename sends: the
+    /// script as it read it then, with new source.
+    fn stale_editor_save(id: &str, instance: &str, source: &str, access: &str) -> ObjectScriptData {
+        ObjectScriptData {
+            id: id.to_string(),
+            name: "Script for Rate".to_string(),
+            object_type: "namedRange".to_string(),
+            instance_id: Some(instance.to_string()),
+            source: source.to_string(),
+            access_level: access.to_string(),
+            description: None,
+            provenance: Some("local".to_string()),
+            package_name: None,
+            package_version: None,
+            declared_capabilities: Vec::new(),
+        }
+    }
+
+    fn binding_of(state: &AppState, id: &str) -> Option<String> {
+        state.object_scripts.read().unwrap().iter().find(|s| s.id == id).and_then(|s| s.instance_id.clone())
+    }
+
+    /// An editor window opened before a name rename still holds the OLD
+    /// instance id. Its save must edit the code and leave the binding the
+    /// backend moved -- it used to write the old name back, re-orphaning the
+    /// script by another route (rev4B#2).
+    ///
+    /// SABOTAGE: drop `saved.instance_id = existing.instance_id.clone()` from
+    /// `save_object_script_core` -- the binding assertion fails ("Rate").
+    #[test]
+    fn a_save_edits_the_code_and_keeps_the_binding_the_backend_moved() {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        // The rename already re-bound the script to Tax.
+        state.object_scripts.write(&test_seed_effect()).unwrap().push(stored("s1", "Tax", ScriptProvenance::Local));
+
+        save_object_script_core(&state, &file, &stale_editor_save("s1", "Rate", "// edited\n", "restricted"))
+            .expect("a save of an existing script");
+        assert_eq!(binding_of(&state, "s1").as_deref(), Some("Tax"), "the stale editor wrote the old binding back");
+        let scripts = state.object_scripts.read().unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(scripts[0].source, "// edited\n", "the code is what the save changes");
+        drop(scripts);
+
+        // A NEW script takes the binding it is created with.
+        save_object_script_core(&state, &file, &stale_editor_save("s2", "Fresh", "// new\n", "restricted"))
+            .expect("a new script");
+        assert_eq!(binding_of(&state, "s2").as_deref(), Some("Fresh"));
+    }
+
+    /// A refused save -- a distributed script escalated to unlocked -- leaves
+    /// the workbook CLEAN and the store untouched: `DocumentEffect::mutates`
+    /// dirties at construction and used to be minted before this refusal.
+    ///
+    /// SABOTAGE: mint the effect before the escalation gate -- the clean
+    /// assertion fails.
+    #[test]
+    fn a_refused_escalation_leaves_the_workbook_clean() {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        state
+            .object_scripts
+            .write(&test_seed_effect())
+            .unwrap()
+            .push(stored("d1", "Rate", ScriptProvenance::Distributed));
+
+        let refused = save_object_script_core(&state, &file, &stale_editor_save("d1", "Rate", "// mine now\n", "unlocked"));
+        assert!(refused.is_err(), "a distributed script cannot be escalated to unlocked");
+        assert!(!file.is_dirty(), "a refused save must leave the workbook clean");
+        assert_eq!(
+            state.object_scripts.read().unwrap()[0].source,
+            "export default function setup() {}\n",
+            "nothing was written"
+        );
+
+        // Positive control: an accepted save of the same script dirties it.
+        save_object_script_core(&state, &file, &stale_editor_save("d1", "Rate", "// mine now\n", "restricted"))
+            .expect("a restricted save is accepted");
+        assert!(file.is_dirty(), "an accepted save dirties the workbook");
+    }
 }

@@ -1,7 +1,7 @@
 //! FILENAME: app/src/api/scriptHost/__tests__/objectsWave4.test.ts
 // PURPOSE: Wave 4 OBJECTS cluster — table STRUCTURE aspects (the ListObject
 //          management family), namedRange.update (definition edit + one-undo
-//          rename with script re-key), chart.setGeometry + spec sugar, and the
+//          rename that repoints its readers), chart.setGeometry + spec sugar, and the
 //          notes/comments API rows.
 // COVERS:  (1) the validator gates behind BOTH setState doors (vSetState and
 //              vObjectAspect land on the same checkers);
@@ -9,7 +9,8 @@
 //              api.objectSetState / api.* methods the worker shims send):
 //              each table aspect dispatches the RIGHT backend command, the
 //              active-sheet rule refuses with the fix spelled out, a rename
-//              is ONE undo transaction and re-keys attached local scripts
+//              is the Name Manager's rename (+ its edit) as ONE undo
+//              transaction, its scripts left to the backend's re-point
 //              (distributed = refused), chart geometry goes to the chart
 //              store's PLACEMENT path (never through the spec), and notes
 //              round-trip add -> update -> remove;
@@ -139,7 +140,11 @@ vi.mock("../../lib", () => ({
   deleteRows: vi.fn(async () => []),
   // Named ranges
   getNamedRange: vi.fn(async () => hoisted.namedRange),
+  resolveNamedRangeCoords: vi.fn(async (name: string) => {
+    throw new Error(`Named range ${name} does not exist`);
+  }),
   updateNamedRange: vi.fn(async () => ({ success: true })),
+  renameNamedRange: vi.fn(async () => ({ success: true })),
   deleteNamedRange: vi.fn(async () => ({ success: true })),
   createNamedRange: vi.fn(async () => ({ success: true })),
   // Notes
@@ -574,37 +579,148 @@ describe("Wave 4 host executors", () => {
     );
   });
 
-  it("a RENAME is delete+create inside ONE undo transaction and returns the new name", async () => {
+  // NEW-scripthost-namedrange-rename. A rename was DELETE + CREATE: the delete
+  // rewrites no formula and the create repoints none, so after a script
+  // renamed Rate to Tax every `=Rate*2` showed #NAME?. It is now the Name
+  // Manager's own rename (which repoints the readers and the name's scripts in
+  // Rust -- named_ranges.rs rename_tests), then its edit for what else changed.
+  //
+  // SABOTAGE: put the delete + create back in executeNamedRangeUpdate -- the
+  // renameNamedRange assertion fails.
+  it("a RENAME is the Name Manager's rename, then its edit for what else changed, in ONE undo transaction", async () => {
     const result = await setAspect("namedRange", "MyName", "namedRange.update", [
       { newName: "Better", refersTo: "=Sheet1!$D$1" },
     ]);
     expect(result.ok).toBe(true);
     expect(result.value).toEqual({ name: "Better" });
     expect(lib.beginUndoTransaction).toHaveBeenCalledTimes(1);
-    expect(lib.deleteNamedRange).toHaveBeenCalledWith("MyName");
-    expect(lib.createNamedRange).toHaveBeenCalledWith(
+    expect(lib.renameNamedRange).toHaveBeenCalledWith("MyName", "Better");
+    // Addressed to the NEW spelling: the entry is keyed by it after the rename.
+    expect(lib.updateNamedRange).toHaveBeenCalledWith(
       "Better", null, "=Sheet1!$D$1", "the comment", undefined,
     );
+    expect(lib.renameNamedRange.mock.invocationCallOrder[0])
+      .toBeLessThan(lib.updateNamedRange.mock.invocationCallOrder[0]);
     expect(lib.commitUndoTransaction).toHaveBeenCalledTimes(1);
     expect(lib.cancelUndoTransaction).not.toHaveBeenCalled();
+    expect(lib.deleteNamedRange, "a delete rewrites no formula: every reader would show #NAME?").not.toHaveBeenCalled();
+    expect(lib.createNamedRange).not.toHaveBeenCalled();
+  });
+
+  it("a rename alone sends no edit", async () => {
+    const result = await setAspect("namedRange", "MyName", "namedRange.update", [{ newName: "Better" }]);
+    expect(result.ok).toBe(true);
+    expect(lib.renameNamedRange).toHaveBeenCalledWith("MyName", "Better");
+    expect(lib.updateNamedRange).not.toHaveBeenCalled();
+    expect(lib.commitUndoTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  // SABOTAGE: compare the names case-insensitively again -- the case-only
+  // rename takes the edit-only path, which keeps the old spelling: the script
+  // is answered "MyName".
+  it("a CASE-ONLY rename is a rename: it re-spells the name (and, in the backend, its readers)", async () => {
+    const result = await setAspect("namedRange", "MyName", "namedRange.update", [{ newName: "myname" }]);
+    expect(result.ok).toBe(true);
+    expect(result.value).toEqual({ name: "myname" });
+    expect(lib.renameNamedRange).toHaveBeenCalledWith("MyName", "myname");
     expect(lib.updateNamedRange).not.toHaveBeenCalled();
   });
 
-  it("a rename RE-KEYS attached local scripts at the new name", async () => {
+  it("a rename leaves the scripts to the backend's re-point: nothing is re-saved", async () => {
     hoisted.objectScripts = [{
       id: "s-local", name: "attached", objectType: "namedRange",
       instanceId: "MyName", accessLevel: "restricted", provenance: "local",
     }];
     const result = await setAspect("namedRange", "MyName", "namedRange.update", [{ newName: "Better" }]);
     expect(result.ok).toBe(true);
-    expect(scriptBackend.saveObjectScript).toHaveBeenCalledTimes(1);
-    expect(scriptBackend.saveObjectScript.mock.calls[0][0]).toMatchObject({
-      id: "s-local",
-      instanceId: "Better",
-    });
+    expect(lib.renameNamedRange).toHaveBeenCalledWith("MyName", "Better");
+    expect(
+      scriptBackend.saveObjectScript,
+      "a second re-point from here would re-save the script through the save command",
+    ).not.toHaveBeenCalled();
   });
 
-  it("a rename is REFUSED while a distributed script is attached (no provenance laundering)", async () => {
+  // rev4B#2. The live mount of a script on the renamed name is re-keyed --
+  // and that includes every method it EXPOSED: the exposure map is keyed by
+  // the instance id, so re-keying only the mount's definition and handle left
+  // refresh() reachable under the old name alone, and a scheduled job that had
+  // followed the rename (or a shortcut, or the debugger) found nothing.
+  //
+  // SABOTAGE: drop the `rekeyExposed` call from `hostRebindMountedScript` --
+  // the exposure stays under "MyName".
+  it("a rename re-keys the attached script's live mount AND its exposed methods", async () => {
+    const workbookWorker = FakeWorker.last!;
+    await host.hostMountScript({
+      id: "attached-script",
+      name: "attached",
+      objectType: "namedRange",
+      instanceId: "MyName",
+      source: "function setup(context) {}",
+      accessLevel: "restricted",
+      apiVersion: "1.0.0",
+    });
+    const attachedWorker = FakeWorker.last!;
+    expect((await attachedWorker.call(nextCallId++, "base.expose", ["refresh", false])).ok).toBe(true);
+    const broker = await import("../broker");
+    const exposedAt = () =>
+      broker
+        .listExposed()
+        .filter((m) => m.ownerScriptId === "attached-script" && m.methodName === "refresh")
+        .map((m) => m.instanceId);
+    expect(exposedAt()).toEqual(["MyName"]);
+
+    FakeWorker.last = workbookWorker;
+    const result = await setAspect("namedRange", "MyName", "namedRange.update", [{ newName: "Better" }]);
+    expect(result.ok).toBe(true);
+    expect(exposedAt(), "the exposed method follows the rename").toEqual(["Better"]);
+    // A second announcement of the same move (the backend's "rebound") is a no-op.
+    expect(host.hostRebindMountedScript("attached-script", "Better")).toBe(false);
+    // The undo's announcement moves it back.
+    expect(host.hostRebindMountedScript("attached-script", "MyName")).toBe(true);
+    expect(exposedAt()).toEqual(["MyName"]);
+  });
+
+  // rev6B#3. A hook forwarder captured the binding when it was WIRED (at
+  // mount), so after a re-bind namedRange.onChange kept filtering by the old
+  // name -- an explicit change of the renamed name never reached the script --
+  // and kept mirroring the old name's values, which the backend no longer
+  // resolves ("Named range MyName does not exist"): the handler read stale
+  // values until a remount. Forwarders now read the binding when an event
+  // arrives.
+  // SABOTAGE: read the binding once at wire time in `wireHookForwarder` (the
+  // pre-round-8 capture) -- the event naming "Better" is filtered out.
+  it("a re-bound mount's hook forwarders hear and mirror the NEW binding", async () => {
+    await host.hostMountScript({
+      id: "onchange-script",
+      name: "onchange",
+      objectType: "namedRange",
+      instanceId: "MyName",
+      source: "function setup(context) {}",
+      accessLevel: "restricted",
+      apiVersion: "1.0.0",
+    });
+    const worker = FakeWorker.last!;
+    worker.emit({ t: "hookRegistered", hook: "onChange" } as W2H);
+    const { emitAppEvent } = await import("../../events");
+    const onChangeEvents = () =>
+      worker.received.filter((m) => m.t === "event" && (m as { hook?: string }).hook === "onChange").length;
+
+    expect(host.hostRebindMountedScript("onchange-script", "Better")).toBe(true);
+    lib.resolveNamedRangeCoords.mockClear();
+
+    emitAppEvent("namedRange:changed", { name: "Better" });
+    expect(onChangeEvents(), "a change of the renamed name reaches the script").toBe(1);
+    // The mirror push reads the backend asynchronously.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lib.resolveNamedRangeCoords, "the mirror reads the name the script is bound to now").toHaveBeenLastCalledWith(
+      "Better",
+    );
+
+    emitAppEvent("namedRange:changed", { name: "MyName" });
+    expect(onChangeEvents(), "the old name is someone else's now").toBe(1);
+  });
+
+  it("a rename is REFUSED while a distributed script is attached", async () => {
     hoisted.objectScripts = [{
       id: "s-dist", name: "attached", objectType: "namedRange",
       instanceId: "MyName", accessLevel: "restricted", provenance: "distributed",
@@ -612,21 +728,35 @@ describe("Wave 4 host executors", () => {
     const result = await setAspect("namedRange", "MyName", "namedRange.update", [{ newName: "Better" }]);
     expect(result.ok).toBe(false);
     expect(result.error?.message).toContain("distributed script");
+    expect(lib.renameNamedRange).not.toHaveBeenCalled();
     expect(lib.deleteNamedRange).not.toHaveBeenCalled();
     expect(scriptBackend.saveObjectScript).not.toHaveBeenCalled();
   });
 
-  it("a failed create puts the original name back (no silent delete)", async () => {
-    lib.createNamedRange.mockResolvedValueOnce({ success: false, error: "collides with a table" });
-    const result = await setAspect("namedRange", "MyName", "namedRange.update", [{ newName: "Sales" }]);
+  it("a REFUSED rename changes nothing: no edit, and the bracket is cancelled", async () => {
+    lib.renameNamedRange.mockResolvedValueOnce({ success: false, error: "A table named 'Sales' already exists" });
+    const result = await setAspect("namedRange", "MyName", "namedRange.update", [
+      { newName: "Sales", refersTo: "=Sheet1!$D$1" },
+    ]);
     expect(result.ok).toBe(false);
-    expect(result.error?.message).toContain("collides");
-    // The compensating re-create of the ORIGINAL definition.
-    expect(lib.createNamedRange).toHaveBeenLastCalledWith(
-      "MyName", null, "=Sheet1!$A$1:$B$2", "the comment", undefined,
-    );
+    expect(result.error?.message).toContain("already exists");
+    expect(lib.updateNamedRange).not.toHaveBeenCalled();
+    expect(lib.createNamedRange).not.toHaveBeenCalled();
     expect(lib.cancelUndoTransaction).toHaveBeenCalledTimes(1);
     expect(lib.commitUndoTransaction).not.toHaveBeenCalled();
+  });
+
+  it("an edit refused AFTER the rename keeps the rename as its undo step and says so", async () => {
+    lib.updateNamedRange.mockResolvedValueOnce({ success: false, error: "Named range 'Better' does not exist." });
+    const result = await setAspect("namedRange", "MyName", "namedRange.update", [
+      { newName: "Better", comment: "new" },
+    ]);
+    expect(result.ok).toBe(false);
+    // Cancelling would drop the record and KEEP the rename: one nobody can undo.
+    // SABOTAGE: let the edit's refusal throw out of the bracket -- it cancels.
+    expect(lib.cancelUndoTransaction, "the rename lost its undo step").not.toHaveBeenCalled();
+    expect(lib.commitUndoTransaction).toHaveBeenCalledTimes(1);
+    expect(result.error?.message).toContain('Renamed "MyName" to "Better", but could not change its definition');
   });
 
   // ---- chart.setGeometry ----

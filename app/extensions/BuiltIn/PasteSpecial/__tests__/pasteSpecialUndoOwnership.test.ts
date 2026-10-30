@@ -57,6 +57,7 @@ const h = vi.hoisted(() => ({
   commitUndoTransaction: vi.fn(async (t?: number | null) => slot.close(slot.committed, t)),
   cancelUndoTransaction: vi.fn(async (t?: number | null) => slot.close(slot.dropped, t)),
   updateCell: vi.fn(async () => ({ cells: [] as unknown[] })),
+  updateCellsBatch: vi.fn(async () => [] as unknown[]),
   setColumnWidth: vi.fn(async () => {}),
 }));
 
@@ -65,6 +66,8 @@ vi.mock("@api/lib", async (importOriginal) => ({
   getCell: vi.fn(async () => ({ display: "1", formula: null, styleIndex: 0 })),
   getStyle: vi.fn(async () => ({})),
   updateCell: () => h.updateCell(),
+  // A link is written as a PASTE through the batch (CellUpdateInput.pasted).
+  updateCellsBatch: () => h.updateCellsBatch(),
   setCellStyle: vi.fn(async () => {}),
   applyFormatting: vi.fn(async () => ({ cells: [] })),
   getColumnWidth: vi.fn(async () => 64),
@@ -101,7 +104,7 @@ const PASTES = [
   {
     name: "Paste Link",
     label: "Paste Link 1 cells",
-    writes: h.updateCell,
+    writes: h.updateCellsBatch,
     run: () => executePasteLink(CLIPBOARD, TARGET, 100, 50),
   },
   {
@@ -121,6 +124,8 @@ beforeEach(() => {
   h.cancelUndoTransaction.mockClear();
   h.updateCell.mockReset();
   h.updateCell.mockImplementation(async () => ({ cells: [] }));
+  h.updateCellsBatch.mockReset();
+  h.updateCellsBatch.mockImplementation(async () => []);
   h.setColumnWidth.mockReset();
   h.setColumnWidth.mockImplementation(async () => {});
 });

@@ -550,16 +550,21 @@ export class CellRange {
 
   /**
    * Apply formatting options to all cells in this range.
+   *
+   * `applyFormatting` formats `rows` x `cols` -- every listed row crossed with
+   * every listed column -- so it is sent the range's DISTINCT rows and columns,
+   * once each, in order (BUG-0354 follow-up). This used to push one row and one
+   * column per CELL, so both lists held R*C entries with duplicates: the
+   * backend walked (R*C)^2 positions, recorded the same cell many times in
+   * undo, and from 2,000 cells up refused the call outright. One ascending run
+   * per axis is also what lets the wrapper send a whole column as a run and
+   * the backend take a whole line as a row/column format.
    */
   async applyFormatting(formatting: FormattingOptions): Promise<FormattingResult> {
     const rows: number[] = [];
     const cols: number[] = [];
-    for (let r = this.startRow; r <= this.endRow; r++) {
-      for (let c = this.startCol; c <= this.endCol; c++) {
-        rows.push(r);
-        cols.push(c);
-      }
-    }
+    for (let r = this.startRow; r <= this.endRow; r++) rows.push(r);
+    for (let c = this.startCol; c <= this.endCol; c++) cols.push(c);
     return applyFormatting(rows, cols, formatting);
   }
 

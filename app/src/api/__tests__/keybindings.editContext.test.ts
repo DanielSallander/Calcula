@@ -184,6 +184,25 @@ const UNDO_KEYS: [string, KeyboardEventInit, string][] = [
 
 const CORE_EDIT_KEYS = [...SELECTION_KEYS, ...GRID_SCOPED_KEYS, ...UNDO_KEYS];
 
+/**
+ * The rows whose key is also one of WebView2's RELOAD accelerators (BUG-0393).
+ * Refused during an edit like every other row, and never taken -- but their
+ * DEFAULT is prevented, because an unprevented Ctrl+R reloads the page and
+ * throws the open workbook away (keybindings.f5NeverReloads.test.ts). The key
+ * still propagates, so the editor hears it; Excel types on (live, 2026-10-29).
+ */
+const RELOAD_KEY_LABELS: ReadonlySet<string> = new Set(["Ctrl+R"]);
+
+/** What a refused key's default must be: prevented only for a reload key. */
+function expectRefusedDefault(label: string, event: KeyboardEvent): void {
+  if (RELOAD_KEY_LABELS.has(label)) {
+    expect(event.defaultPrevented, `${label} during an edit reached WebView2's reload`).toBe(true);
+    expect(event.cancelBubble, `${label}: the reload guard stopped the key reaching the editor`).toBe(false);
+  } else {
+    expect(event.defaultPrevented).toBe(false);
+  }
+}
+
 function spyOn(rows: [string, KeyboardEventInit, string][]): void {
   for (const [, , commandId] of rows) {
     if (spies.has(commandId)) continue;
@@ -232,9 +251,10 @@ describe("Core's own edit PARKED on another sheet (keyboard on the grid containe
         `${commandId} ran over the viewed sheet's selection during Core's parked edit`,
       ).not.toHaveBeenCalled();
       // Unprevented, so Core's own doors (the container's fallback branch and
-      // useGridKeyboard's edit gate) see it and leave the grid alone.
+      // useGridKeyboard's edit gate) see it and leave the grid alone. (A reload
+      // key's default is prevented, and it still propagates to those doors.)
       expect(handled).toBe(false);
-      expect(event.defaultPrevented).toBe(false);
+      expectRefusedDefault(label, event);
     });
   }
 
@@ -255,9 +275,10 @@ describe("Core's in-cell editor (a textarea INSIDE the grid container)", () => {
       openInCellEditor();
       const { handled, event } = press(init);
       expect(spies.get(commandId)!, `${commandId} ran during the in-cell edit`).not.toHaveBeenCalled();
-      // Unprevented: Ctrl+C/X/V are the text field's own clipboard.
+      // Unprevented: Ctrl+C/X/V are the text field's own clipboard. (A reload
+      // key's default is prevented; the editor still hears it.)
       expect(handled).toBe(false);
-      expect(event.defaultPrevented).toBe(false);
+      expectRefusedDefault(label, event);
     });
   }
 });

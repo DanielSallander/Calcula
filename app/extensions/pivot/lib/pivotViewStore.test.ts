@@ -25,6 +25,11 @@ import {
   preserveCurrentView,
   restorePreviousView,
   clearPreviousView,
+  markCachedPivotViewStale,
+  markAllCachedPivotViewsStale,
+  isCachedPivotViewStale,
+  getReusableCachedPivotView,
+  settleFreshPivotViewsNotIn,
 } from './pivotViewStore';
 import type { PivotViewResponse } from './pivot-api';
 
@@ -324,5 +329,59 @@ describe('Every progress-emitting command is sequenced', () => {
 guard — a superseded operation would wipe a newer one's indicator, and \
 applyBackendProgress would then drop that newer operation's real progress`,
     ).toBeGreaterThanOrEqual(clears);
+  });
+});
+
+// revD#1 (follow-up of BUG-0594): a cached view is reused on a return to its
+// sheet only while nothing has made it stale.
+describe('stale views', () => {
+  beforeEach(() => {
+    deleteCachedPivotView(997);
+    deleteCachedPivotView(996);
+  });
+
+  it('a view marked stale is never reusable; caching it again (door or fetch) clears the mark', () => {
+    cachePivotView(997, mockView(997, 1));
+    consumeFreshFlag(997);
+    expect(getReusableCachedPivotView(997)?.version).toBe(1);
+    markCachedPivotViewStale(997);
+    expect(isCachedPivotViewStale(997)).toBe(true);
+    expect(getReusableCachedPivotView(997), 'a stale view stood in for a fetch').toBeUndefined();
+    expect(getCachedPivotView(997)?.version, 'the view itself stays for the readers that act on it').toBe(1);
+    setCachedPivotView(997, mockView(997, 2));
+    expect(getReusableCachedPivotView(997)?.version).toBe(2);
+    markCachedPivotViewStale('997');
+    cachePivotView(997, mockView(997, 3));
+    expect(getReusableCachedPivotView(997)?.version).toBe(3);
+  });
+
+  it('marking all keeps a view a door JUST cached (fresh), unless includeFresh', () => {
+    cachePivotView(997, mockView(997));
+    cachePivotView(996, mockView(996));
+    consumeFreshFlag(996);
+    markAllCachedPivotViewsStale();
+    expect(isCachedPivotViewStale(997), 'the fresh view of a door was marked').toBe(false);
+    expect(isCachedPivotViewStale(996)).toBe(true);
+    markAllCachedPivotViewsStale({ includeFresh: true });
+    expect(isCachedPivotViewStale(997)).toBe(true);
+    expect(isCacheFresh(997), 'includeFresh leaves no fresh flag to skip the fetch').toBe(false);
+  });
+
+  it('settle: a fresh flag of a pivot the region refresh did not visit becomes an ordinary cached view', () => {
+    cachePivotView(997, mockView(997));
+    cachePivotView(996, mockView(996));
+    settleFreshPivotViewsNotIn([996]);
+    expect(isCacheFresh(997), 'the flag of a pivot on another sheet outlived the refresh').toBe(false);
+    expect(isCacheFresh(996), 'the visited pivot keeps its flag for the refresh to consume').toBe(true);
+    expect(getReusableCachedPivotView(997)).toBeDefined();
+  });
+
+  it('deleting a view drops its fresh flag and stale mark (a flag outliving its view skipped the fetch of a view that no longer existed)', () => {
+    cachePivotView(997, mockView(997));
+    markCachedPivotViewStale(996);
+    deleteCachedPivotView(997);
+    deleteCachedPivotView(996);
+    expect(isCacheFresh(997)).toBe(false);
+    expect(isCachedPivotViewStale(996)).toBe(false);
   });
 });

@@ -69,8 +69,9 @@ struct SheetTable {
 
 impl SheetTable {
     fn read(state: &AppState) -> SheetTable {
-        let names = state.sheet_names.read().map(|g| g.clone()).unwrap_or_default();
-        let ids = state.sheet_ids.read().map(|g| g.clone()).unwrap_or_default();
+        // Names and ids under ONE hold, `sheet_names` first (BUG-0590 /
+        // BUG-0592): `location` pairs them by index.
+        let (ids, names) = crate::calp_commands::sheet_ids_and_names(state).unwrap_or_default();
         let kinds = state.sheet_kinds.read().map(|g| g.clone()).unwrap_or_default();
         SheetTable { names, ids, kinds }
     }

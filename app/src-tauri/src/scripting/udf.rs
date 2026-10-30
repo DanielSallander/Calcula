@@ -224,6 +224,33 @@ pub fn collect_udf_calls(
     volatile_udf_names: Vec<String>,
     known: HashMap<String, UdfValue>,
 ) -> Result<UdfCollectResult, String> {
+    collect_udf_calls_impl(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        edits,
+        udf_names,
+        volatile_udf_names,
+        known,
+    )
+}
+
+/// The body of [`collect_udf_calls`], on plain references so it runs without a
+/// Tauri runtime (the tests drive it directly).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn collect_udf_calls_impl(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    edits: Vec<crate::api_types::CellUpdateInput>,
+    udf_names: Vec<String>,
+    volatile_udf_names: Vec<String>,
+    known: HashMap<String, UdfValue>,
+) -> Result<UdfCollectResult, String> {
     // The UDF DISCOVERY pass: a throwaway evaluation of the edited cells whose
     // only purpose is to find out which UDF calls need pre-fetching. It must
     // evaluate them EXACTLY as `update_cell`'s apply pass will, or the two
@@ -238,7 +265,7 @@ pub fn collect_udf_calls(
     // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below, so the
     // discovery pass evaluates cells the same way update_cell's apply will.
     let control_values = crate::control_values::build_control_values(
-        &state, &pane_control_state, &ribbon_filter_state,
+        state, pane_control_state, ribbon_filter_state,
     );
     // --- Lock the same READ state update_cell uses to evaluate. We take only
     // immutable locks and never write back. Undo / dependents maps are NOT
@@ -261,30 +288,39 @@ pub fn collect_udf_calls(
         ));
     }
 
-    // --- Dependency closure of the pending edits, computed with the SAME
-    // helpers the apply cascades use so the two sets agree cell-for-cell. The
-    // maps are read pre-edit; that is sound because an edit only ever adds
-    // edges POINTING AT the edited cells (dependents[precedent] gains the
-    // edited cell), and the edited cells are seeds here anyway.
+    // --- Dependency closure of the pending edits: THE cascade the apply path
+    // evaluates with the resolver wired, from the ONE function `update_cell`,
+    // `update_cells_batch` and the cube pre-fetch build it with
+    // (`active_sheet_write_cascade`). It used to be a hand-copied subset -- the
+    // dependents and the whole-column/row readers only -- so a custom-function
+    // cell downstream of a TODAY()/NOW()/RAND() cell (the volatile splice), or
+    // an array origin the edit unblocked, was re-evaluated by the cascade with
+    // a resolver that held no result for it: #NAME? on an unrelated edit. The
+    // maps and the grid are read pre-edit; that is sound because an edit only
+    // ever adds edges POINTING AT the edited cells, and those are seeds anyway.
     //
-    // Lock order: styles -> dependents -> ... -> locale, matching
-    // update_cell_impl. The guards are confined to this block so nothing is
-    // held across the evaluation below.
+    // Lock order: grids (held above), then the leaf `spill_blocks`, then the
+    // three dependency maps in their canonical order, as update_cell_impl. The
+    // guards are confined to this block so nothing is held across the
+    // evaluation below.
     let seeds: Vec<(u32, u32)> = edits.iter().map(|e| (e.row, e.col)).collect();
     let affected: crate::CoordSet = {
+        let unblocked = crate::commands::data::origins_blocked_by_any(state, sheet_index, &seeds);
         let dependents = state.dependents.lock().unwrap();
         let column_dependents = state.column_dependents.lock().unwrap();
         let row_dependents = state.row_dependents.lock().unwrap();
-        let mut set: crate::CoordSet =
-            crate::recalc_order_from_seeds(&seeds, &dependents, true)
-                .into_iter()
-                .collect();
-        for &seed in &seeds {
-            set.insert(seed);
-            for dep in crate::get_column_row_dependents(seed, &column_dependents, &row_dependents) {
-                set.insert(dep);
-            }
-        }
+        let mut set: crate::CoordSet = crate::commands::data::active_sheet_write_cascade(
+            &grids[sheet_index],
+            crate::commands::data::CascadeSeeds::Written(&seeds),
+            &dependents,
+            &column_dependents,
+            &row_dependents,
+            None,
+            &unblocked,
+        )
+        .into_iter()
+        .collect();
+        set.extend(seeds.iter().copied());
         set
     };
 
@@ -810,6 +846,116 @@ mod tests {
         assert_eq!(
             json,
             r#"{"kind":"array","value":[{"kind":"number","value":1.0},{"kind":"empty"}]}"#
+        );
+    }
+
+    // ---- The discovery pass collects for EVERY cell the apply cascade
+    //      evaluates (BUG-0476 follow-up, the UDF twin of revFU#1) ----
+
+    struct Book {
+        state: AppState,
+        file: FileState,
+        files: UserFilesState,
+        slicer: SlicerState,
+        pivots: crate::pivot::PivotState,
+        pane: crate::pane_control::PaneControlState,
+        filters: crate::ribbon_filter::RibbonFilterState,
+    }
+
+    impl Book {
+        fn new() -> Self {
+            let state = crate::create_app_state();
+            *state.locale.lock().unwrap() = engine::LocaleSettings::from_locale_id("en-US");
+            Book {
+                state,
+                file: FileState::default(),
+                files: UserFilesState::default(),
+                slicer: SlicerState::new(),
+                pivots: crate::pivot::PivotState::new(),
+                pane: crate::pane_control::PaneControlState::new(),
+                filters: crate::ribbon_filter::RibbonFilterState::new(),
+            }
+        }
+
+        /// One edit through the real grid-editor door, with a UDF table.
+        fn type_value(&self, row: u32, col: u32, value: &str, udf: Option<HashMap<String, UdfValue>>) {
+            crate::commands::data::update_cell_impl(
+                &self.state,
+                &self.file,
+                &self.files,
+                &self.slicer,
+                &self.pivots,
+                &self.pane,
+                &self.filters,
+                row,
+                col,
+                value.to_string(),
+                udf,
+                None,
+                None,
+            )
+            .expect("the edit writes");
+        }
+
+        /// The discovery pass for one edit, as the frontend runs it.
+        fn collect(&self, row: u32, col: u32, value: &str) -> UdfCollectResult {
+            collect_udf_calls_impl(
+                &self.state,
+                &self.files,
+                &self.pivots,
+                &self.pane,
+                &self.filters,
+                vec![crate::api_types::CellUpdateInput {
+                    row,
+                    col,
+                    value: value.to_string(),
+                    style_index: None,
+                    invariant: Some(true),
+                    pasted: None,
+                }],
+                vec!["MYFN".to_string()],
+                Vec::new(),
+                HashMap::new(),
+            )
+            .expect("the discovery pass runs")
+        }
+
+        fn value(&self, row: u32, col: u32) -> engine::CellValue {
+            self.state.grids.read().unwrap()[0]
+                .get_cell(row, col)
+                .map(|c| c.value.clone())
+                .unwrap_or(engine::CellValue::Empty)
+        }
+    }
+
+    #[test]
+    fn a_custom_function_downstream_of_a_volatile_cell_is_collected_for_an_edit_elsewhere() {
+        // A1 = an integer that comes from TODAY() -- VOLATILE, so every edit's
+        // cascade re-evaluates it and B1 = MYFN(A1) after it (the splice). The
+        // discovery pass must therefore resolve MYFN for an edit of C5 too, or
+        // the cascade evaluates B1 with a resolver that has no answer: #NAME?.
+        let book = Book::new();
+        book.type_value(0, 0, "=IF(YEAR(TODAY())>2000,7,8)", None);
+        book.type_value(0, 1, "=MYFN(A1)", None);
+
+        let found = book.collect(4, 2, "5");
+        let myfn: Vec<&UdfCall> = found.calls.iter().filter(|c| c.name == "MYFN").collect();
+        assert_eq!(
+            myfn.len(),
+            1,
+            "the discovery pass left out a custom-function cell the volatile splice re-evaluates: {:?}",
+            found.calls
+        );
+        assert_eq!(myfn[0].args, vec![UdfValue::Number { value: 7.0 }]);
+
+        // End to end: the edit, served the collected answer, computes B1.
+        let mut table = HashMap::new();
+        table.insert(myfn[0].key.clone(), UdfValue::Number { value: 70.0 });
+        book.type_value(4, 2, "5", Some(table));
+        assert_eq!(
+            book.value(0, 1),
+            engine::CellValue::Number(70.0),
+            "the cascade re-evaluated B1 with a resolver that had no answer for it"
         );
     }
 }

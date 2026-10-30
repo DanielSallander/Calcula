@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 594 | Open: 70 | Triaged: 0 | Fixed: 524 | Other: 0
+Total: 616 | Open: 60 | Triaged: 0 | Fixed: 556 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -3751,7 +3751,7 @@ THE PASTE VARIANTS STILL WRITE ONE CELL PER BACKEND CALL (updateCell plus setCel
 
 **Repro:** Copy A1:A1000, Paste Values on B1 with the devtools network/IPC log open.
 
-## BUG-0346 `[open]`
+## BUG-0346 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** paste-special-operation-drops-formula
@@ -3759,6 +3759,7 @@ THE PASTE VARIANTS STILL WRITE ONE CELL PER BACKEND CALL (updateCell plus setCel
 PASTE SPECIAL WITH AN OPERATION REPLACES A DESTINATION FORMULA WITH A CONSTANT. Add / Subtract / Multiply / Divide write a plain value; Excel keeps the formula as =(old)+src.
 
 **Repro:** B1 = =A1, copy a cell holding 1, Paste Special > Add onto B1: B1 becomes a constant.
+**Fix:** fixed
 
 ## BUG-0347 `[open]`
 
@@ -3769,7 +3770,7 @@ NO BORDERS PUTS THE DESTINATION'S BORDERS BACK WITH LESS DETAIL: applyFormatting
 
 **Repro:** Give C1 a theme-coloured medium dashed bottom border, copy A1, Paste Special > All except borders on C1, change the theme: C1's border keeps the old colour.
 
-## BUG-0348 `[open]`
+## BUG-0348 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** paste-link-renamed-sheet
@@ -3777,6 +3778,7 @@ NO BORDERS PUTS THE DESTINATION'S BORDERS BACK WITH LESS DETAIL: applyFormatting
 PASTE LINK AFTER RENAMING THE SOURCE SHEET LINKS TO THE OLD NAME (-> #REF!): the name is recorded at copy time; Excel cancels copy mode when a sheet is renamed.
 
 **Repro:** Copy Sheet1!A1, rename Sheet1 to Data, Paste Link on Sheet2: =Sheet1!$A$1, which is #REF!.
+**Fix:** fixed
 
 ## BUG-0349 `[open]`
 
@@ -3787,7 +3789,7 @@ PASTE SPECIAL'S VARIANTS LEAVE THE SELECTION WHERE IT WAS, while plain Paste sel
 
 **Repro:** Copy A1:B3, select D1, Paste Values: the selection stays on D1 alone.
 
-## BUG-0350 `[open]`
+## BUG-0350 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** grouped-delete-active-only
@@ -3795,6 +3797,7 @@ PASTE SPECIAL'S VARIANTS LEAVE THE SELECTION WHERE IT WAS, while plain Paste sel
 DELETE WITH GROUPED SHEETS PROBABLY CLEARS ONLY THE ACTIVE SHEET (found by reading the code, not run). The registry binding Delete runs core.edit.clearContents in the capture phase and stops the key, so useSpreadsheetSelection.handleDeleteContents -- which holds the grouped-sheet replication (clearRangeOnSheets) and the checkEditGuards pivot check -- runs only when the dispatcher stands down; the clear gesture replicates to nothing.
 
 **Repro:** Group Sheet1 + Sheet2, type in A1 on both, select A1, press Delete: Sheet2!A1 should be cleared too.
+**Fix:** fixed
 
 ## BUG-0351 `[open]`
 
@@ -3823,7 +3826,7 @@ SELECT ALL, THEN ROW HEIGHT IS REFUSED (a toast). The batch command is cheap now
 
 **Repro:** Ctrl+A, Home > Format > Row Height... 30: refused with a toast.
 
-## BUG-0354 `[open]`
+## BUG-0354 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** apply-formatting-dense-walk
@@ -3831,6 +3834,7 @@ SELECT ALL, THEN ROW HEIGHT IS REFUSED (a toast). The batch command is cheap now
 apply_formatting WALKS ROWS x COLUMNS: Select All + Bold sends 1,048,576 rows and 16,384 columns, 17.2 billion iterations -- the class of BUG-0282 in the command every Home button uses. The Borders split's Left/Right edge presets (and Top/Bottom on whole rows) go through it too, so Left Border on a whole column sends a million rows.
 
 **Repro:** Ctrl+A, then Ctrl+B: the app stops responding.
+**Fix:** fixed
 
 ## BUG-0355 `[open]`
 
@@ -3850,7 +3854,7 @@ THE OFF-SHEET STRUCTURAL PATH RECORDS NO SPILL CLAIMS (off_sheet_structural_edit
 
 **Repro:** From a script, insert rows on a non-active sheet above a SEQUENCE spill, undo, switch to that sheet: the origin may show #SPILL!.
 
-## BUG-0357 `[open]`
+## BUG-0357 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** structural-edit-chart-ranges
@@ -3858,6 +3862,7 @@ THE OFF-SHEET STRUCTURAL PATH RECORDS NO SPILL CLAIMS (off_sheet_structural_edit
 CHART AND SPARKLINE DATA RANGES ARE NOT ADJUSTED BY ANY STRUCTURAL EDIT (insert/delete rows, columns or cells). Pre-existing; Insert/Delete Cells inherits the gap.
 
 **Repro:** Chart over A1:B5, insert a row at 3: the chart still reads A1:B5, now missing the last data row.
+**Fix:** fixed
 
 ## BUG-0358 `[open]`
 
@@ -4194,7 +4199,7 @@ IN THE BAND PATH A ONE-ROW RANGE ON THE LAST ROW COLLAPSED back to one row where
 **Repro:** A CF on A1048576:D1048576, Delete Cells above it, shift up.
 **Fix:** fixed
 
-## BUG-0393 `[open]`
+## BUG-0393 `[fixed]`
 
 **Found:** 2026-10-05 (manual)
 **Oracle:** ctrl-r-reload-while-editing
@@ -4202,6 +4207,7 @@ IN THE BAND PATH A ONE-ROW RANGE ON THE LAST ROW COLLAPSED back to one row where
 CTRL+R DURING A CELL EDIT MAY STILL REACH WEBVIEW2'S RELOAD: it is the Fill Right binding, and keybindings.editContext.test.ts pins that it is not prevented while editing.
 
 **Repro:** Type in a cell, press Ctrl+R (not verified live).
+**Fix:** fixed
 
 ## BUG-0394 `[open]`
 
@@ -4886,7 +4892,7 @@ A NAVIGATION BUTTON LOST ITS CURRENT-PAGE WASH AFTER ITS PAGE WAS RENAMED: isCur
 **Fix:** fixed
   Files: app/extensions/Controls/Button/actionGlyph.ts, app/extensions/Controls/Button/floatingRenderer.ts, app/extensions/Controls/__tests__/buttonActionPaint.test.ts
 
-## BUG-0464 `[open]`
+## BUG-0464 `[fixed]`
 
 **Found:** 2026-10-15 (manual)
 **Oracle:** cli-hide-active-sheet-frontend-not-switched
@@ -4894,6 +4900,7 @@ A NAVIGATION BUTTON LOST ITS CURRENT-PAGE WASH AFTER ITS PAGE WAS RENAMED: isCur
 THE COMMAND LINE CAN HIDE THE ACTIVE SHEET WITHOUT THE FRONTEND SWITCHING: `set sheet <active> visibility=hidden|veryhidden` (app/extensions/CommandLine/cli/appWriters.ts, case "setSheet") calls hideSheet and ignores its result. The backend's hide_sheet moves its active sheet to a neighbour (BUG-0046), but nothing applies that switch to the grid or announces it (Core's wrapper deliberately stays silent when the active sheet moved; the caller must apply the switch), so the grid keeps painting the now-hidden sheet while the backend's active sheet is another one -- the BUG-0046 shape (edits and per-sheet caches keyed on the backend's active sheet disagree with what is on screen). The script host does NOT have this gap: api.setSheetVisibility applies the switch through announceSheetsChanged (app/src/api/scriptHost/host.ts). The command line's own qualified references (ensureSheetActive -> setActiveSheet) move the backend's active sheet the same silent way, which may be the same design gap.
 
 **Repro:** From code, not reproduced live: two visible sheets, Sheet1 active; in the Command Line run `set sheet Sheet1 visibility=hidden`. Expected: the grid switches to Sheet2 (as the tab menu's Hide does). Predicted: the tab disappears from the strip only at the next sheet-list read, and the grid stays on Sheet1's cells while the backend's active sheet is Sheet2.
+**Fix:** fixed
 
 ## BUG-0465 `[fixed]`
 
@@ -4951,7 +4958,7 @@ A sheet RENAME or DELETE repair of a RULE formula re-spells every OTHER sheet re
 
 **Repro:** Unit tier (app crate): create_app_state, sheets Data/Inputs/Report (add_sheet_inner), store a binding or a CF expression rule `=Data!A1&Inputs!B1`, delete_sheet_impl(Inputs). Without respell_sheet_case the binding read `=DATA!A1&#REF!` (cascade_tests.rs deleting_a_sheet_turns_binding_refs_into_ref_errors failed with exactly that before the respell was added). The CF rule takes the same closure and keeps `=DATA!A1&#REF!`.
 
-## BUG-0471 `[open]`
+## BUG-0471 `[fixed]`
 
 **Found:** 2026-10-15 (manual)
 **Oracle:** calp-dev-pull-drops-object-bindings
@@ -4959,6 +4966,7 @@ A sheet RENAME or DELETE repair of a RULE formula re-spells every OTHER sheet re
 A DEV subscription (calp_dev_subscribe / calp_dev_refresh) carries a source .cala's cell-anchored controls but not its object property BINDINGS. core/calp/src/dev_mode.rs pull_dev copies workbook.controls into DevPullResult and has no object_bindings field, and app/src-tauri/src/calp_commands.rs materialize_dev_controls lands only the controls. Since WP-D a control property that follows a formula is a bindings.json row beside the control's own literal (which the migration of an older file empties, and which a binding set later leaves at whatever it was), so a dev-pulled button whose caption follows =Data!A1 arrives showing that frozen or blank literal -- a value that LOOKS live and never moves -- and nothing says the binding was dropped. A source saved before v10 carries valueType:"formula" properties instead, and the dev path runs no migrate_legacy_formulas either, so those controls land with a formula-typed literal resolve_control_properties no longer evaluates. The real pull doors (subscribe, checkout, refresh) carry and land bindings as of S6 (object_bindings::carriage).
 
 **Repro:** Code reading, 2026-10-15: in a v10 workbook bind a button text property (Properties > fx, =Data!A1), save as src.cala. In another workbook dev-subscribe to src.cala. The button lands (materialize_dev_controls) with only its stored literal, and the binding store holds no row for its uid (DevPullResult has no bindings to land), so the caption paints the literal and never follows Data!A1.
+**Fix:** fixed
 
 ## BUG-0472 `[open]`
 
@@ -4996,7 +5004,7 @@ THE RESTRICTED-TIER BINDING CLAMP DID NOT SEE THE ALL-SHEETS WILDCARD. object_bi
 
 **Repro:** Unit: command_tests::restricted_script_source_is_clamped_in_rust with "=SUM('*'!A1)" from a Script{unlocked:false} source on a chart of the active sheet -- before the fix the Set was accepted (Ok(Binding{formula: "=SUM('*'!A1)"})); formula_tests::the_analysis_flags_say_what_the_formula_reads asserted sheets == [] for ='*'!A1.
 
-## BUG-0476 `[open]`
+## BUG-0476 `[fixed]`
 
 **Found:** 2026-10-15 (manual)
 **Oracle:** api-batch-write-skips-cube-prefetch
@@ -5004,6 +5012,7 @@ THE RESTRICTED-TIER BINDING CLAMP DID NOT SEE THE ALL-SHEETS WILDCARD. object_bi
 A CUBE FORMULA WRITTEN THROUGH @api SHOWS #N/A UNTIL A FORCED CUBE RECALC: CellRange.setValue / setValues (app/src/api/range.ts) write through updateCellsBatch (and updateCellOnSheets for a background sheet), and neither runs the cube_prefetch that core/lib/tauri-api.ts updateCell runs for the grid editor, nor sets the sessionHasCube latch. So a script, an extension or the E2E harness that writes =CUBEVALUE(...) gets #N/A, and a later plain Calculate Now does not refresh it either (workbookHasCubeFormulas() is still false). Only recalcWithCube() (Model Editor save, Calculated Measures dialog) brings the value.
 
 **Repro:** Live, 2026-10-15, AdventureWorks model connected as 'AWprobe2': tauri-api updateCell(5,3,'=CUBEVALUE("AWprobe2";"[Revenue]")') -> D6 shows 114033992,77...; CellRange.fromCell(6,3,0).setValue(same) -> D7 shows #N/A; after recalcWithCube() both show 114033992,77. Probe: scratchpad pd-probe-cube2.cjs.
+**Fix:** fixed
 
 ## BUG-0477 `[open]`
 
@@ -5032,7 +5041,7 @@ View > Show "Chart JSON" DID NOTHING. The View menu's dynamic "Show <pane>" item
 
 **Repro:** Select a chart, open the Chart JSON pane from the Chart Design band, close it with the pane header's X, then View > Show Chart JSON: the pane stays closed. Unit: dispatch new CustomEvent("taskpane:requestReopen", { detail: { viewId: "chart-json" } }) with the Charts extension active -> no openTaskPane call.
 
-## BUG-0480 `[open]`
+## BUG-0480 `[fixed]`
 
 **Found:** 2026-10-16 (manual)
 **Oracle:** dsl-serializer-aliased-bi-measure-renamed
@@ -5041,8 +5050,9 @@ THE PIVOT-LAYOUT DSL SERIALIZER WRITES AN ALIASED BI MEASURE UNDER ITS ALIAS. `V
 
 **Repro:** processDsl('ROWS: Geo.Region
 VALUES: [Revenue] AS "Sales"', {sourceFields: [], biModel}) with a model measure Revenue, then serialize(rows, columns, values, filters, layout, {biModel}) -> 'VALUES:  [Sales] AS "Sales"' (measured 2026-10-16 through Charts/lib/designQueryWells.serializeZones). Expected: '[Revenue] AS "Sales"'.
+**Fix:** fixed
 
-## BUG-0481 `[open]`
+## BUG-0481 `[fixed]`
 
 **Found:** 2026-10-16 (manual)
 **Oracle:** chart-edit-dialog-redetects-series
@@ -5050,6 +5060,7 @@ VALUES: [Revenue] AS "Sales"', {sourceFields: [], biModel}) with a model measure
 Edit Chart (the chart dialog opened with editChartId, e.g. the context menu's "Select Data...") THROWS AWAY the chart's stored series selection. The open effect seeds `series` from the stored spec, then seeds the range field; the range binding's key goes from "" to the stored range, and the series-detection effect (now useRangeSource's `detection` effect, identical to the old CreateChartDialog effect) runs autoDetectSeries and REPLACES the series and the category index with the detected ones. A chart whose reader had unchecked a series (or reordered the category) reopens with every detected series checked, and "Update Chart" writes them back -- the chart silently starts plotting series the reader removed.
 
 **Repro:** A range chart over Sheet1!A1:C5 plotting only column B (uncheck C in the Data tab, Update). Right-click > Select Data...: the series list shows B AND C checked; Update Chart plots both. Unit (proved 2026-10-16 with a scratch copy of components/__tests__/createChartDialogPreset.test.tsx): getChartById('c9') with spec.series = [Sales(1)] and autoDetectSeries answering [Sales(1), Cost(2)]; show({ editChartId: 'c9' }) -> the DataTab receives series [Sales, Cost] and autoDetectSeries was called once.
+**Fix:** fixed
 
 ## BUG-0482 `[fixed]`
 
@@ -6117,7 +6128,7 @@ Cell writers hold `grid` / `grids` / `sheet_names` and THEN take `subscriptions`
 **Repro:** Census self-tests in app/src-tauri/src/state_digest_lock_order_tests.rs fire on each pre-fix shape (`the_cell_writer_censuses_fire_on_every_shape_round_six_found_and_stay_quiet_on_the_fixes`). A runtime probe of the preview is impossible (it takes a Tauri State and Window).
 **Fix:** fixed
 
-## BUG-0592 `[open]`
+## BUG-0592 `[fixed]`
 
 **Found:** 2026-10-23 (manual)
 **Oracle:** name-stores-before-grid-locks
@@ -6125,8 +6136,9 @@ Cell writers hold `grid` / `grids` / `sheet_names` and THEN take `subscriptions`
 Two pre-existing lock cycles with the off-main-thread cell writers, found through calls by the round-6 call-graph census and NOT fixed there (outside its files): (1) `remove_duplicates` (app/src-tauri/src/commands/data.rs) holds `tables` / `table_names` / `named_ranges` without a grid lock and calls `rebuild_all_dependencies_from_grid`, which takes the dependency maps the writers hold first; (2) `rename_named_range_impl` (app/src-tauri/src/named_ranges.rs) holds `named_ranges` and calls `rename_name_in_grids` (grid, grids) and `record_rename_undo` (undo_stack). Either can deadlock against an MCP or script cell write landing at the same moment. Also nine sheet_ids / sheet_names reads remain TORN (two clone-and-release reads) outside calp_commands.rs, allowed by name in the torn-read census: calp_collection.rs (ready_author_collections, list_collection_regions), commands/sheet_blank.rs (sheet_contents), object_bindings/formula.rs (FormulaWorld::read), object_bindings/object_json.rs (SheetTable::read), object_bindings/page_overrides.rs (ReportPages::read), scripting/application_code_gate.rs (workbook_sheet_facts), scripting/notebook_commands.rs (run_cell_internal), sheets.rs (with_pane_controls_following_rename).
 
 **Repro:** Read the two call chains named above against the canonical order (grid, grids, then everything else); the census self-test shape for a held name store plus a grid-taking callee reproduces them in app/src-tauri/src/state_digest_lock_order_tests.rs.
+**Fix:** fixed
 
-## BUG-0593 `[open]`
+## BUG-0593 `[fixed]`
 
 **Found:** 2026-10-23 (manual)
 **Oracle:** slicer-items-after-grids
@@ -6134,8 +6146,9 @@ Two pre-existing lock cycles with the off-main-thread cell writers, found throug
 ABBA deadlock between a TABLE slicer's item fetch and a cell edit or a sheet op. The async `get_slicer_items_core` (app/src-tauri/src/slicer/commands.rs) holds `slicer_state.slicers` while `get_table_column_values` / `get_table_available_values` read `state.grids`; meanwhile `update_cell_impl` holds grid and grids and calls `re_evaluate_slicer_computed_properties`, which writes `slicer_state.slicers`; delete, move and copy reach the slicers through `cascade_sheet_removed` under the grid locks; `add_slicer_computed_property` / `update_slicer_computed_property` take grids then slicers. A slicer item fetch for a table slicer racing a cell edit (or a sheet op) can leave each thread holding what the other waits for: the window freezes, nothing is logged.
 
 **Repro:** Read the two acquisition orders named above (slicers -> grids in the async item fetch; grid/grids -> slicers in the cell writer and the sheet cascades). Fix in slicer/commands.rs: copy what the item fetch needs from the slicer store, release it, then read the grids (or take the grids first), and add the slicer store to the pair censuses.
+**Fix:** fixed
 
-## BUG-0594 `[open]`
+## BUG-0594 `[fixed]`
 
 **Found:** 2026-10-29 (manual)
 **Oracle:** pivot-shrink-leaves-ghost-cells
@@ -6143,3 +6156,198 @@ ABBA deadlock between a TABLE slicer's item fetch and a cell edit or a sheet op.
 A PIVOT THAT SHRINKS UNDER A FILTER KEEPS PAINTING ITS OLD CELLS. After `pivot.applyFilter` (app/src/api/pivot.ts) cut a BI pivot from 26 view rows to 8, the backend was right -- `get_cell` returns the 8-row output in rows 2-9 and EMPTY cells in rows 10-26 -- but the frontend was not: `getGridRegions()` (app/src/api/gridOverlays.ts) still reported the pivot region as rows 1-26 (0-based startRow 1, endRow 26, the pre-filter extent), and the canvas kept painting the UNFILTERED pivot's lower rows (2024-08 .. 2025-12) into the vacated cells. The user sees numbers that exist nowhere in the document, directly under a Grand Total that does not include them.
 
 **Repro:** app/e2e/journeys/insight-overlays-pivot.spec.ts up to `let where = await locate();` (after filterField("Date.Month", SHOWN_MONTHS)): read get_cell for rows 0..28 x cols 0..8 and getGridRegions(). Measured 2026-10-29: region {startRow:1,startCol:1,endRow:26,endCol:7}, viewRows=8, rows 10-26 empty in the backend, the same rows painted with the old values in e2e/journeys/__screenshots__/insight-overlays-pivot.spec.ts/region-insight-overlay-pivot-model.png.
+**Fix:** fixed
+
+## BUG-0595 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** paste-writes-display-text
+
+COPY + PASTE OF A CONSTANT WROTE ITS DISPLAY TEXT: Paste, Cut + Paste, Paste Values/Formulas/All, the floating-grid route, drag move and Ctrl+drag copy re-entered the formatted display through the typed-entry ladder, so 1.23456 under 0.00 pasted as 1.23, 1234567890123456 under General lost digits, =1/3 Paste Values gave 0.33, text '00123'/'TRUE'/'=A1' changed kind, and a number pasted into an @ cell became text. Ctrl+drag copy also wrote formulas unshifted, and a script's pasteRange wrote copied text as an entry.
+
+**Fix:** fixed
+
+## BUG-0596 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** move-relocation-wrong
+
+A MOVE RE-POINTED REFERENCES WRONGLY: a drag move shifted every relative reference of the moved formulas (=A1 moved from B1 to B2 became =A2; Excel keeps =A1), and relocate_cell_references skipped the destination, ignored other sheets and defined names, renumbered same-address references on other sheets, moved range corners independently (=SUM(A1:A4) became =SUM(C1:A4)), and never produced #REF! for overwritten cells.
+
+**Fix:** fixed
+
+## BUG-0597 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** cut-paste-across-sheets
+
+CUT ON ONE SHEET, PASTE ON ANOTHER ERASED THE WRONG CELLS: the cut branch's clearCell loop acted on the ACTIVE sheet, so it emptied the destination sheet's cells at the source addresses, left the source intact and re-pointed nothing. A cut also survived Esc and edits of its source (pasting a stale snapshot and losing the new value), pasted again as a copy after its own paste, committed half a move when the source clear was refused, and wrote #REF! after a sheet rename.
+
+**Fix:** fixed
+
+## BUG-0598 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** move-changes-line-format-look
+
+A MOVED VALUE CHANGED ITS LOOK UNDER ROW/COLUMN FORMATS: Sort, Insert/Delete Cells, Cut/Copy+Paste, Fill and drag-move took a value off a bold row plain and turned a value landing in it bold, and pasting/filling an empty formatted cell dropped its format. Excel keeps the look with the cell.
+
+**Fix:** fixed
+
+## BUG-0599 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** mcp-apply-formatting-walk
+
+THE AI/MCP apply_formatting TOOL HAD ITS OWN CELL WALK: Select All froze the app (17.2 billion iterations), it dropped column formats, and it formatted protected sheets the user cannot.
+
+**Fix:** fixed
+
+## BUG-0600 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** decimals-select-all-wire
+
+Increase/Decrease Decimal on Select All sent 1,048,576 row and 16,384 column indices over IPC.
+
+**Fix:** fixed
+
+## BUG-0601 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** recorder-replay-wrong-sheet-or-hang
+
+MACRO RECORDER REPLAY: a recorded Delete on a column header replayed 1,048,576 writes (Select All about 17 billion) and hung; grouped or off-sheet clears, formats and merges replayed on the active sheet only; a notebook off-sheet clear threw.
+
+**Fix:** fixed
+
+## BUG-0602 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** named-range-rename-routes
+
+RENAMING A NAME BROKE THINGS ON SEVERAL ROUTES: the MCP/AI update_named_range and the script host's namedRange.update renamed by delete + create, so every =Rate*2 showed #NAME?; the Name Manager / command-line rename orphaned the name's object scripts and their scheduled jobs; undoing a name delete, a rename, a table delete or Convert to Range reverted later script edits or lost the script.
+
+**Fix:** fixed
+
+## BUG-0603 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** refusal-dirties-document
+
+REFUSALS AND NO-OPS MARKED THE WORKBOOK DIRTY: editing or deleting a missing name, defining a duplicate name, Remove Duplicates finding none, and a refused distributed-script escalation all minted DocumentEffect before their gate.
+
+**Fix:** fixed
+
+## BUG-0604 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** pivot-view-across-documents
+
+A pivot in a newly opened workbook was painted from the PREVIOUS workbook's cached view when the ids matched, showing another workbook's numbers.
+
+**Fix:** fixed
+
+## BUG-0605 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** cli-tabcolor-not-shown
+
+The command line's set sheet X tabcolor=... announced nothing, so the tab colour appeared only after a later reload.
+
+**Fix:** fixed
+
+## BUG-0606 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** batch-cascade-positionless
+
+PASTE/FILL/SCRIPT-BATCH CASCADES EVALUATED DEPENDENTS WITHOUT THEIR POSITION: =ROW()*A1, implicit intersection and CUBE/custom-function cells read the wrong row after a paste, fill, undo or cross-sheet edit, and dynamic-array dependents collapsed to their first element.
+
+**Fix:** fixed
+
+## BUG-0607 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** cube-udf-dataless-recalc
+
+CUBE AND CUSTOM-FUNCTION CELLS WITHOUT DATA SHOWED WRONG VALUES: a recalculation with no data fed the cell's whole stored value back into its own formula (=MYFN(A1)*2 doubled at every F9 or save), kept an old argument's answer as current, read a sheet-qualified argument from the formula's own sheet, turned other sheets' cube cells #N/A on F9, and showed the value a mistyped function overwrote.
+
+**Fix:** fixed
+
+## BUG-0608 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** script-format-follows-ui-group
+
+A script's setRangeFormat / border edges / named-style scratch format used the user's current sheet group, so a macro formatted off-screen grouped sheets (Excel's object model formats ActiveSheet only).
+
+**Fix:** fixed
+
+## BUG-0609 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** bound-title-defined-name-sheet
+
+A canvas chart whose data is a defined name read its bound title / property references on the first visible worksheet instead of the name's sheet.
+
+**Fix:** fixed
+
+## BUG-0610 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** undo-stack-lock-cycles
+
+DEADLOCKS AROUND THE UNDO STACK: row/column resize held its dimension store while taking the undo stack, pivot create/delete held pivot_tables across their undo record, the structural edits re-read sheet_names under the undo stack, and the move relocation took the name store under it -- each against a cell writer or name writer on another thread (AI chat, MCP, notebook). The lock census missed them because one-line blocks hid guards.
+
+**Fix:** fixed
+
+## BUG-0611 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** offsheet-frontend-state
+
+An insert/delete on ANOTHER sheet (script, command line) left frontend-owned state at the old cells: embedded form placements, Controls side state (renderers, properties, badges) under a dead id, live script mounts keyed to the old control id, and the cell-behavior index.
+
+**Fix:** fixed
+
+## BUG-0612 `[fixed]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** structural-shift-3d-span
+
+A row/column insert or delete on an end sheet of a 3-D span re-pointed =SUM(Sheet2:Sheet3!A5) (and whole-line spans) on every sheet; Excel leaves 3-D references alone.
+
+**Fix:** fixed
+
+## BUG-0613 `[open]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** whatif-routes-skip-dependents
+
+WHAT-IF ROUTES LEAVE DEPENDENTS STALE: Scenario Show, Goal Seek, Solver, data tables and animation evaluate dependents positionlessly (re-parsing display strings) or not at all on other sheets, and an application update's refreshed values do not recalculate other sheets' readers; since the save/F9 pass now KEEPS a stored value nothing it reads changed, such a stale cube/custom-function value can be saved.
+
+
+## BUG-0614 `[open]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** frontend-coordinates-no-structural-follow
+
+Watch Window entries, Cell Bookmarks, Insights range overlays and Animation specs hold cell coordinates that follow NO structural edit on any sheet (Excel's Watch Window follows inserted rows).
+
+
+## BUG-0615 `[open]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** cube-keep-rule-followups
+
+Results-cache / keep-rule follow-ups from the final review: =IFERROR(UNKNOWNFN(RAND()),0) becomes #NAME? on F9 (Excel: 0); a manual-calculation workbook saved without recalculation reopens with stale composite values vouched for; switching calculation mode during Calculate Now blocks the UI thread; reads_a_changed_cell is O(changed x ranges); a script badge is lost after a structural undo.
+
+
+## BUG-0616 `[open]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** owner-decisions-from-fix-programme
+
+Owner decisions raised by the programme: (1) the script API's 100,000-cell cap blocks whole-column format/clear (VBA Columns("C").ClearFormats) and a recorded whole-column format; (2) api.clearRange is not in the approved-macro grant, so grouped clears cannot replay there; (3) an extension worker can schedule jobs but has no expose door; (4) Excel keeps a sparkline group one group across inserts; (5) Excel ends COPY mode on Esc; (6) a plain click on a member tab clears the group (Excel keeps it); (7) pasting an empty formatted cell now carries its format (Excel parity).
+

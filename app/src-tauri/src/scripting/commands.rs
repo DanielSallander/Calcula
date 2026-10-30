@@ -93,6 +93,7 @@ pub(crate) fn diff_grids_to_updates(before: &Grid, after: &Grid) -> Vec<CellUpda
                 value: after_str,
                 style_index: None,
                 invariant: Some(true),
+                pasted: None,
             });
         }
     }

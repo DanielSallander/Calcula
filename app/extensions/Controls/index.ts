@@ -93,7 +93,6 @@ import {
   markShapeHasScript,
   unmarkShapeHasScript,
   getShapeOverlayFrame,
-  migrateShapeInstanceId,
 } from "./Shape/shapeRenderer";
 import { setShapeHitRegions, resetShapeHitRegions } from "./Shape/shapeHitRegions";
 import {
@@ -103,7 +102,6 @@ import {
 import {
   setDeclaredProperties,
   clearDeclaredProperties,
-  migrateDeclaredProperties,
 } from "./Shape/shapeProperties";
 import { getShapeTemplate } from "./Shape/shapeTemplateCatalog";
 import {
@@ -202,11 +200,12 @@ import { createControlObjectFormatProvider } from "./lib/controlObjectFormat";
 import { createControlObjectPaneProvider } from "./lib/controlObjectPane";
 import {
   forgetControlContainer,
-  migrateControlContainer,
   resetControlContainers,
   setControlContainerResync,
 } from "./lib/controlContainer";
 import { shapeRecipePaint } from "./Shape/shapeRecipe";
+import { CONTROL_SIDE_STATE_HOOKS, followStructuralEditsElsewhere } from "./lib/controlSideState";
+import { structuralAnchorShift } from "@api/scriptHost/embeddedFormPlacements";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
 import { isEmbeddedControl, forgetInCellButtons, noteControlAt } from "./lib/heldEmbeddedButtons";
 import { installControlObjectMenu } from "./lib/controlObjectMenu";
@@ -835,27 +834,9 @@ function activate(context: ExtensionContext): void {
   //
   //     Placement decides what moves, mirroring the backend rule: a control
   //     marked `free` holds its pixel position and its anchor; anything else
-  //     follows the grid.
-  const shiftForEvent = (
-    kind: "rowInsert" | "rowDelete" | "colInsert" | "colDelete",
-    at: number,
-    count: number,
-  ) => (row: number, col: number): { row: number; col: number } | null => {
-    switch (kind) {
-      case "rowInsert":
-        return { row: row >= at ? row + count : row, col };
-      case "colInsert":
-        return { row, col: col >= at ? col + count : col };
-      case "rowDelete":
-        if (row >= at + count) return { row: row - count, col };
-        if (row >= at) return null; // The anchor row itself was deleted.
-        return { row, col };
-      case "colDelete":
-        if (col >= at + count) return { row, col: col - count };
-        if (col >= at) return null;
-        return { row, col };
-    }
-  };
+  //     follows the grid. The anchor mapping is the grid's one rule
+  //     (`structuralAnchorShift`, @api/scriptHost/embeddedFormPlacements), which
+  //     this extension used to hold a second copy of as `shiftForEvent`.
 
   // Mirrors controls::moves_with_cells. A floating control only follows the
   // grid when the user has pinned it; in-cell controls are not in this store.
@@ -879,22 +860,15 @@ function activate(context: ExtensionContext): void {
 
     structuralQueue = structuralQueue.then(async () => {
       const sheetIndex = await getActiveSheet();
-      reanchorFloatingControls(sheetIndex, shiftForEvent(kind, at, count), movesWithCells, {
-        // Migrate id-keyed side state with the re-key: a scripted pinned
-        // shape otherwise loses its renderer/HTML content and leaks its
-        // iframe under the old id.
-        onRename: (oldId, newId) => {
-          migrateShapeInstanceId(oldId, newId);
-          migrateDeclaredProperties(oldId, newId);
-          migrateControlContainer(oldId, newId);
-        },
-        onRemove: (id) => {
-          removeShapeHtmlOverlay(id);
-          removeCustomCanvasRenderer(id);
-          clearDeclaredProperties(id);
-          forgetControlContainer(id);
-        },
-      });
+      // Migrate id-keyed side state with the re-key (lib/controlSideState.ts):
+      // a scripted pinned shape otherwise loses its renderer/HTML content and
+      // leaks its iframe under the old id.
+      reanchorFloatingControls(
+        sheetIndex,
+        structuralAnchorShift(kind, at, count),
+        movesWithCells,
+        CONTROL_SIDE_STATE_HOOKS,
+      );
       // Pinned controls must FOLLOW the edit visually, not merely re-anchor:
       // the anchor row moved, so anchorOrigin + offset lands on new pixels.
       // Without this the move only became visible on the next row resize.
@@ -918,6 +892,31 @@ function activate(context: ExtensionContext): void {
   ] as const) {
     cleanupFns.push(context.events.on(evt, onStructuralEdit(kind)));
   }
+
+  // An insert/delete on ANOTHER sheet (a script's or the command line's
+  // `sheetIndex`) announces STRUCTURAL_EDIT_ELSEWHERE, not the four events
+  // above. The backend re-keyed the controls there and their scripts' bindings;
+  // the floating store holds the sheet on screen only, but the side state of a
+  // shape on that sheet (its renderer, html frame, declared properties,
+  // container, script badge) survives the sheet switch under its
+  // anchor-derived id, so it is re-keyed here from the announced edits, on the
+  // same queue as the on-screen re-anchors (lib/controlSideState.ts).
+  cleanupFns.push(
+    followStructuralEditsElsewhere({
+      enqueue: (task) => {
+        structuralQueue = structuralQueue.then(task).catch((err) => {
+          console.error("[Controls] Off-sheet side-state re-key failed:", err);
+        });
+      },
+      afterChange: () => {
+        invalidateAllFloatingButtonCaches();
+        invalidateAllShapeCaches();
+        invalidateAllImageCaches();
+        syncFloatingControlRegions();
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      },
+    }),
+  );
 
   // Undo of a structural edit carries no coordinates, so the only correct
   // response is to re-read the anchors from the backend — which is what this

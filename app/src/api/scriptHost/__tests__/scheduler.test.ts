@@ -15,18 +15,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const invokeBackend = vi.fn();
-const callExposedMethod = vi.fn();
+const hostCallOwnExposed = vi.fn();
 const refreshScriptConnector = vi.fn();
 const listMountedHandles = vi.fn();
 
 vi.mock("../../backend", () => ({ invokeBackend: (...a: unknown[]) => invokeBackend(...a) }));
-vi.mock("../../scriptableObjects", () => ({
-  callExposedMethod: (...a: unknown[]) => callExposedMethod(...a),
-}));
 vi.mock("../../scriptConnectors", () => ({
   refreshScriptConnector: (...a: unknown[]) => refreshScriptConnector(...a),
 }));
-vi.mock("../broker", () => ({ listMountedHandles: () => listMountedHandles() }));
+vi.mock("../broker", () => ({
+  listMountedHandles: () => listMountedHandles(),
+  hostCallOwnExposed: (...a: unknown[]) => hostCallOwnExposed(...a),
+}));
 // host.ts is the debugger's owner. Mocked here so the tick's pause check is
 // controllable without spawning a worker realm (and so importing this module
 // does not drag the 5,800-line host into the scheduler's test graph).
@@ -142,7 +142,7 @@ describe("the renderer tick", () => {
     vi.resetModules();
     vi.useFakeTimers();
     invokeBackend.mockReset();
-    callExposedMethod.mockReset().mockResolvedValue(undefined);
+    hostCallOwnExposed.mockReset().mockResolvedValue(undefined);
     refreshScriptConnector.mockReset().mockResolvedValue(undefined);
     listMountedHandles.mockReset().mockReturnValue([{ scriptId: "s1" }]);
     pausedScriptIds.clear();
@@ -189,7 +189,7 @@ describe("the renderer tick", () => {
     await scheduler.syncPump();
     await vi.advanceTimersByTimeAsync(11_000);
 
-    expect(callExposedMethod).toHaveBeenCalledWith("shape", "i1", "refresh");
+    expect(hostCallOwnExposed).toHaveBeenCalledWith("s1", "shape", "i1", "refresh", []);
     const complete = requestFor("complete");
     expect(complete).toMatchObject({ jobId: "sched-1", ok: true });
   });
@@ -199,7 +199,7 @@ describe("the renderer tick", () => {
     // failing job skipped it, the job would stay flagged running and never fire
     // again until the 10-minute watchdog — i.e. one bad run would silently
     // retire the schedule.
-    callExposedMethod.mockRejectedValue(new Error("boom"));
+    hostCallOwnExposed.mockRejectedValue(new Error("boom"));
     backendWithDue([
       { id: "sched-1", scriptId: "s1", surface: "object-script", objectType: "shape", instanceId: null, handler: "refresh" },
     ]);
@@ -221,13 +221,13 @@ describe("the renderer tick", () => {
     await vi.advanceTimersByTimeAsync(11_000);
 
     expect(refreshScriptConnector).toHaveBeenCalledWith("script:crm");
-    expect(callExposedMethod).not.toHaveBeenCalled();
+    expect(hostCallOwnExposed).not.toHaveBeenCalled();
     expect(requestFor("complete")).toMatchObject({ jobId: "sched-2", ok: true });
   });
 
   it("does not stack overlapping ticks when a run outlives the interval", async () => {
     let release: (() => void) | undefined;
-    callExposedMethod.mockImplementation(
+    hostCallOwnExposed.mockImplementation(
       () => new Promise<void>((r) => { release = r; }),
     );
     backendWithDue([
@@ -259,7 +259,7 @@ describe("the renderer tick", () => {
     await scheduler.syncPump();
     await vi.advanceTimersByTimeAsync(11_000);
 
-    expect(callExposedMethod, "a paused script must not be invoked").not.toHaveBeenCalled();
+    expect(hostCallOwnExposed, "a paused script must not be invoked").not.toHaveBeenCalled();
     const complete = requestFor("complete");
     expect(complete, "the overlap slot must still be released").toMatchObject({
       jobId: "sched-1",
@@ -280,8 +280,8 @@ describe("the renderer tick", () => {
     await scheduler.syncPump();
     await vi.advanceTimersByTimeAsync(11_000);
 
-    expect(callExposedMethod).toHaveBeenCalledTimes(1);
-    expect(callExposedMethod).toHaveBeenCalledWith("shape", "i2", "fine");
+    expect(hostCallOwnExposed).toHaveBeenCalledTimes(1);
+    expect(hostCallOwnExposed).toHaveBeenCalledWith("s2", "shape", "i2", "fine", []);
   });
 
   it("does not run a timer for a workbook with no scheduled jobs", async () => {

@@ -401,8 +401,10 @@ export function setGridCellEditorOpener(open: ((text: string) => boolean) | null
  * user had typed it and pressed Enter: the editor opens with the text and
  * commits, so every commit guard runs. Null unregisters.
  *
- * The Delete key uses it for a cell whose range guard admits a one-cell EDIT
- * but refuses a bulk write (a writeback cell collects one answer at a time):
+ * Clear Contents -- Delete and every other Clear Contents door -- uses it
+ * (core/lib/clearGestures, `enteredAsOneCellEdit`) for a cell whose range
+ * guard admits a one-cell EDIT but refuses a bulk write (a writeback cell
+ * collects one answer at a time):
  * clearing it as an edit lets the owner's commit guard record the cleared
  * value, where a bulk clear would be refused by the backend.
  */

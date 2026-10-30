@@ -54,8 +54,8 @@ const entry = (v: string) => CHANGELOG?.find((e) => e.version === v);
 const names = (v: string): Set<string> => new Set(entry(v)?.added.map((e) => e.name) ?? []);
 
 describe("API_VERSION", () => {
-  it("is 1.6.0 (the model-visual drill-through added to @api)", () => {
-    expect(version.API_VERSION).toBe("1.6.0");
+  it("is 1.7.0 (the bug-ledger fix programme added to @api after 1.6.0 was committed)", () => {
+    expect(version.API_VERSION).toBe("1.7.0");
   });
 
   it("carries a changelog whose newest entry IS the current version", () => {
@@ -430,6 +430,155 @@ describe("the 1.6.0 changelog names what a push CARRIES (round 11, RV11-TS-1)", 
     expect(line, "1.6.0's changelog does not say holdBackCells changed").toBeDefined();
     expect(line).toContain("cellsSkipped");
     expect(line).toMatch(/sheetIds/);
+  });
+});
+
+describe("the 1.7.0 changelog names what the bug-ledger fix programme added (2026-10-29)", () => {
+  // A committed entry is closed (version.ts header): 1.6.0 was committed, so
+  // this programme's additions open 1.7.0 rather than being appended to 1.6.0
+  // (revE#6). SABOTAGE: move one back to 1.6.0, or drop it.
+  const REQUIRED = [
+    "ClipboardData.sourceSheetId",
+    "announceSheetsChanged",
+    "changeSheetsAndFollow",
+    "FollowableSheetsResult",
+    "SheetsRenumbering",
+    "RecordedGridEvent.clearRange.sheetIndex",
+    // Round 4: a copy's stored values and the one rule that pastes them.
+    "ClipboardData.values",
+    "pastedConstantInput",
+    "ClipboardCellValue",
+    "PastedConstant",
+    // Rounds 3-4: the multi-area clear's block shape, and the off-canvas
+    // structural event with its payload (rev3A#8, the recorder lane's API lines).
+    "ClearArea",
+    "AppEvents.STRUCTURAL_EDIT_ELSEWHERE",
+    "StructuralEditElsewherePayload",
+    // Round 7 (NEW-offsheet-structural-frontend-only-state): the event carries
+    // its edits, in order, for the stores whose coordinates the backend never holds.
+    "StructuralEditElsewherePayload.edits",
+    "StructuralEditElsewhereEdit",
+    // Round 5 (lanes pastekind and sheetnav; round 6 rev4A#3): the paste
+    // flag, the withheld-formula flag, the switch's focus option and the
+    // formatting wrappers' active-sheet placement.
+    "CellUpdateInput.pasted",
+    "TypedCellData.formulaWithheld",
+    "SheetFocusOptions",
+    "FormatPlacementOptions",
+  ];
+
+  it("lists each of them, in 1.7.0 and in no earlier entry", () => {
+    const listed = names("1.7.0");
+    for (const n of REQUIRED) expect(listed.has(n), `1.7.0's changelog does not list ${n}`).toBe(true);
+    for (const older of CHANGELOG!.filter((e) => e.version !== "1.7.0")) {
+      for (const n of REQUIRED) {
+        expect(older.added.some((a) => a.name === n), `${n} is listed in the committed ${older.version} entry too`).toBe(false);
+      }
+    }
+  });
+
+  it("says the key and write doors CHANGED", () => {
+    const changed = entry("1.7.0")!.changed.join("\n");
+    for (const n of [
+      "handleGlobalKeyDown",
+      "updateCellsBatch",
+      "insertRows",
+      "clearRangeWithOptions",
+      // rev3A#8, rev3B#11 and the round-4 lanes' API lines.
+      "clearRangeOnSheets",
+      "pivot.refreshCache",
+      "applyBorderPreset",
+      "setCellStyle",
+      // Round 5's lines (round 6, apidocs): the switch's focus, the active-sheet
+      // placement, the group's lifetime, the paste flag and the gate it feeds,
+      // the whole-line formats of applyFormatting and of a formats clear.
+      "activateSheet",
+      "keepFocus",
+      "activeSheetOnly",
+      "getGroupedSheetIndices",
+      "CellUpdateInput.pasted",
+      "TypedCellData.formulaWithheld",
+      "applyFormattingToSheets",
+      "adjustNumberFormatDecimals",
+    ]) {
+      expect(changed, `1.7.0's changelog does not say ${n} changed`).toContain(n);
+    }
+    // The off-canvas structural line used to say STRUCTURAL_UNDO + the objects
+    // domain; round 4 replaced that announcement (review FU#5).
+    const structural = entry("1.7.0")!.changed.find((line) => line.startsWith("insertRows"));
+    expect(structural, "1.7.0 has no line for the off-canvas insertRows / deleteRows").toBeDefined();
+    expect(structural).toContain("STRUCTURAL_EDIT_ELSEWHERE");
+    expect(structural, "the line still claims the old STRUCTURAL_UNDO announcement").toMatch(/never STRUCTURAL_UNDO/);
+  });
+
+  it("says a LATCHED session prefetches cube data for every batch (round 6, rev4A#3)", () => {
+    // Round 4 (cube lane, revFU#2) made updateCellsBatch prefetch for ANY batch
+    // once the session has written a CUBE formula (tauri-api.ts
+    // shouldPrefetchCubeForBatch); the line kept saying "a write with no CUBE
+    // formula is still one IPC call", which is now true only of
+    // updateCellOnSheets and of a session that never latched.
+    const cube = entry("1.7.0")!.changed.find((line) => line.startsWith("updateCellsBatch / updateCellOnSheets"));
+    expect(cube, "1.7.0 has no line for the batch doors' cube prefetch").toBeDefined();
+    expect(cube, "the line still says a batch without a CUBE formula is always one IPC call").not.toMatch(
+      /a write with no CUBE formula is still one IPC call/,
+    );
+    expect(cube, "the line does not say a latched session prefetches EVERY batch").toMatch(/latched[^;]*EVERY updateCellsBatch/);
+    expect(cube, "the line does not say updateCellOnSheets prefetches only for a CUBE formula").toMatch(
+      /updateCellOnSheets prefetches[^;]*only for a written CUBE formula/,
+    );
+  });
+});
+
+/**
+ * The names an @api module exports, read from the source of every non-test
+ * file under src/api: `export interface X`, `export function X`, ... and every
+ * name of an `export { ... }` / `export type { ... }` list (an `A as B` exports
+ * B). version.ts is left out: its changelog QUOTES declarations in strings.
+ */
+function apiExportedNames(): Set<string> {
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== "__tests__") walk(p);
+      } else if (/\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name) && e.name !== "version.ts") {
+        files.push(p);
+      }
+    }
+  };
+  walk(path.join(APP, "src/api"));
+  const names = new Set<string>();
+  for (const f of files) {
+    const src = fs.readFileSync(f, "utf8").replace(/\r\n/g, "\n");
+    const declared =
+      /export\s+(?:declare\s+)?(?:abstract\s+)?(?:interface|type|class|enum|const|let|var|function|async\s+function)\s+([A-Za-z_$][\w$]*)/g;
+    for (const m of src.matchAll(declared)) names.add(m[1]);
+    for (const m of src.matchAll(/export\s+(?:type\s+)?\{([^}]*)\}/g)) {
+      const body = m[1].replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+      for (const raw of body.split(",")) {
+        const item = raw.trim().replace(/^type\s+/, "");
+        if (!item) continue;
+        const parts = item.split(/\s+as\s+/);
+        names.add((parts[1] ?? parts[0]).trim());
+      }
+    }
+  }
+  return names;
+}
+
+describe("every type-only 1.7.0 addition can be IMPORTED from @api (round 6, apidocs)", () => {
+  // A changelog line that names a type an extension cannot import tells it to
+  // use something it cannot reach: the Facade Rule forbids the deep import
+  // into src/core. ClearArea and FormatPlacementOptions were listed while only
+  // Core exported them. The open 1.7.0 entry only: a committed entry is closed.
+  it("the type, or the type a listed member belongs to, is exported by some @api module", () => {
+    const exported = apiExportedNames();
+    expect(exported.has("CellTargetOptions"), "the export scan found nothing: the test proves nothing").toBe(true);
+    const typeOnly = entry("1.7.0")!.added.filter((a) => !a.module);
+    expect(typeOnly.length, "1.7.0 lists no type-only addition: the test proves nothing").toBeGreaterThan(0);
+    const unreachable = typeOnly.map((a) => a.name).filter((name) => !exported.has(name.split(".")[0]));
+    expect(unreachable, "these 1.7.0 additions cannot be imported from any @api module").toEqual([]);
   });
 });
 

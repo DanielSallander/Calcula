@@ -381,6 +381,10 @@ describe("formatting", () => {
 // ============================================================================
 
 describe("clear range", () => {
+  // A rectangle of at most SCRIPT_RANGE_MAX_CELLS (one script call). A bigger
+  // one -- a clicked column header, Select All -- used to replay as this SAME
+  // loop over every position of the rectangle, a freeze; that is pinned in
+  // clearRangeBoundedReplay.test.ts.
   it("clears contents with a bounded loop and one batch call", () => {
     const { source } = gen([
       act({
@@ -409,6 +413,13 @@ describe("clear range", () => {
       }),
     ]);
     expect(source).toContain("await api.updateCellsBatch(updates);");
+    expect(source).toContain("await api.clearRangeFormat(0, 0, 1, 1); // A1:B2");
+  });
+
+  it("a formats-only clear on the action's sheet keeps clearRangeFormat", () => {
+    const { source } = gen([
+      act({ kind: "clearRange", startRow: 0, startCol: 0, endRow: 1, endCol: 1, applyTo: "formats" }),
+    ]);
     expect(source).toContain("await api.clearRangeFormat(0, 0, 1, 1); // A1:B2");
   });
 

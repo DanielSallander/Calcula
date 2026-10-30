@@ -339,6 +339,40 @@ pub(crate) fn create_named_range_impl(
 
     let key = name.to_uppercase();
 
+    // THE LOCKS, IN THE RENAME'S EXACT ORDER (rev3B#6, rev5C#1): `grid`, then
+    // `grids`, then the registry, then the undo stack. All three are held
+    // from the gates through the undo record, so the rename -- which holds the
+    // grid locks and the registry through its own record -- cannot run between
+    // this definition and its "Define name" step and land "Rename name" in
+    // between.
+    //
+    // BOTH GRID LOCKS FIRST is what makes holding the registry across the undo
+    // stack safe. A function that holds the undo stack while it takes a name
+    // store (the cell writers, `update_cell_impl` and the rest) holds `grid`
+    // AND `grids` first, so it is serialized with this one instead of closing
+    // a cycle. `grid` alone was not enough (rev5C#1): `update_cell_on_sheets_as`
+    // -- a floating grid's cell, a grouped-sheet entry, a script writing
+    // another sheet -- held `grids` but never `grid` while it read
+    // `named_ranges` under the undo stack, so an MCP name write (its own
+    // thread) holding `grid` and the registry and waiting for the stack
+    // deadlocked against it. That writer now restamps BEFORE it takes the
+    // stack, and `no_function_holds_the_undo_stack_and_a_name_store_in_an_order_that_can_cycle`
+    // pins both sides. The grids are only held, never written.
+    let Ok(grid_hold) = state.grid.lock_pending() else {
+        return NamedRangeResult {
+            success: false,
+            named_range: None,
+            error: Some("The workbook is unavailable.".to_string()),
+        };
+    };
+    let Ok(grids_hold) = state.grids.lock_pending() else {
+        return NamedRangeResult {
+            success: false,
+            named_range: None,
+            error: Some("The workbook is unavailable.".to_string()),
+        };
+    };
+
     // Names and TABLE names share one formula namespace but live in two
     // unrelated registries, so nothing stopped a name from shadowing a table.
     // Which one won then depended on resolution order (names are resolved
@@ -357,14 +391,22 @@ pub(crate) fn create_named_range_impl(
         }
     }
 
-    // `workbook.named_ranges` is persisted and written only by the save path.
-    // Constructed AFTER the validity / table-namespace gates above, so a refusal
-    // leaves the document clean.
-    let effect = DocumentEffect::mutates(file_state);
-    let mut named_ranges = state.named_ranges.write(&effect).unwrap();
+    // LOCKED BUT UNDECIDED: the duplicate refusal reads the registry it
+    // guards, and `DocumentEffect::mutates` dirties at construction -- minted
+    // ahead of that check, defining a name that already existed marked the
+    // workbook modified for a command that changed nothing. The check reads
+    // through the held lock; the effect is minted once it has passed, in the
+    // same critical section.
+    let Ok(pending) = state.named_ranges.lock_pending() else {
+        return NamedRangeResult {
+            success: false,
+            named_range: None,
+            error: Some("Named ranges are unavailable.".to_string()),
+        };
+    };
 
     // Check for duplicate name (case-insensitive)
-    if named_ranges.contains_key(&key) {
+    if pending.contains_key(&key) {
         return NamedRangeResult {
             success: false,
             named_range: None,
@@ -380,11 +422,18 @@ pub(crate) fn create_named_range_impl(
         folder,
     };
 
+    // `workbook.named_ranges` is persisted and written only by the save path.
+    // Every gate above has passed, so a refusal leaves the document clean.
+    let effect = DocumentEffect::mutates(file_state);
+    let mut named_ranges = pending.authorize(&effect);
     named_ranges.insert(key.clone(), named_range.clone());
-    drop(named_ranges);
 
     // BUG-0007 (user decision: undo-everything): name creation is undoable.
+    // Recorded UNDER the registry and grid holds (see the lock note above).
     crate::undo_commands::record_named_range_undo(state, &key, None, "Define name");
+    drop(named_ranges);
+    drop(grids_hold);
+    drop(grid_hold);
 
     NamedRangeResult {
         success: true,
@@ -408,18 +457,39 @@ pub fn update_named_range(
     comment: Option<String>,
     folder: Option<String>,
 ) -> NamedRangeResult {
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut named_ranges = state.named_ranges.write(&effect).unwrap();
+    update_named_range_core(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        name,
+        sheet_index,
+        refers_to,
+        comment,
+        folder,
+    )
+}
 
+/// `update_named_range` over plain references, so its refusal, its undo step
+/// and its recalculation are unit-testable without a Tauri `State` -- and so
+/// the MCP tool (`mcp::objects::update_named_range_core`) runs exactly this.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_named_range_core(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    name: String,
+    sheet_index: Option<usize>,
+    refers_to: String,
+    comment: Option<String>,
+    folder: Option<String>,
+) -> NamedRangeResult {
     let key = name.to_uppercase();
-    if !named_ranges.contains_key(&key) {
-        return NamedRangeResult {
-            success: false,
-            named_range: None,
-            error: Some(format!("Named range '{}' does not exist.", name)),
-        };
-    }
-
     let named_range = NamedRange {
         name: name.clone(),
         sheet_index,
@@ -428,20 +498,60 @@ pub fn update_named_range(
         folder,
     };
 
-    let previous = named_ranges.insert(key.clone(), named_range.clone());
-    drop(named_ranges);
-
-    crate::undo_commands::record_named_range_undo(&state, &key, previous, "Edit name");
+    // LOCKED BUT UNDECIDED: `DocumentEffect::mutates` dirties at construction,
+    // and the "does not exist" refusal is still ahead -- it used to come after
+    // the effect, so editing a name that was not there marked the workbook
+    // modified. The gate reads through the held lock; the effect is minted
+    // only once it has passed, in the same critical section.
+    //
+    // `grid` and `grids` FIRST, then the registry, all held THROUGH the undo
+    // record (rev3B#6, rev5C#1): released before it, a rename could run in
+    // between and land "Rename name" below this "Edit name" step for a key it
+    // had already moved -- Ctrl+Z then re-created the old name beside the new
+    // one, and the edit itself was never undone. The order and its safety are
+    // `create_named_range_impl`'s. The block ENDS every guard before the
+    // recalculation (which takes the grids and the dependency maps).
+    {
+        let Ok(grid_hold) = state.grid.lock_pending() else {
+            return NamedRangeResult {
+                success: false,
+                named_range: None,
+                error: Some("The workbook is unavailable.".to_string()),
+            };
+        };
+        let Ok(grids_hold) = state.grids.lock_pending() else {
+            return NamedRangeResult {
+                success: false,
+                named_range: None,
+                error: Some("The workbook is unavailable.".to_string()),
+            };
+        };
+        let pending = state.named_ranges.lock_pending().unwrap();
+        if !pending.contains_key(&key) {
+            return NamedRangeResult {
+                success: false,
+                named_range: None,
+                error: Some(format!("Named range '{}' does not exist.", name)),
+            };
+        }
+        let effect = DocumentEffect::mutates(file_state);
+        let mut named_ranges = pending.authorize(&effect);
+        let previous = named_ranges.insert(key.clone(), named_range.clone());
+        crate::undo_commands::record_named_range_undo(state, &key, previous, "Edit name");
+        drop(named_ranges);
+        drop(grids_hold);
+        drop(grid_hold);
+    }
 
     // REPOINTING A NAME MOVES EVERY FORMULA THAT READS IT. This is the whole
     // point of D2 — before it, the formulas held the old definition's
     // coordinates and nothing here could reach them.
     recalc_after_name_change(
-        &state,
-        &user_files_state,
-        &pivot_state,
-        &pane_control_state,
-        &ribbon_filter_state,
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
         &[name],
     );
 
@@ -470,39 +580,140 @@ pub fn delete_named_range(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     name: String,
 ) -> NamedRangeResult {
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut named_ranges = state.named_ranges.write(&effect).unwrap();
+    delete_named_range_core(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        name,
+    )
+}
 
+/// `delete_named_range` over plain references, for the same reason as
+/// [`update_named_range_core`].
+pub(crate) fn delete_named_range_core(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    name: String,
+) -> NamedRangeResult {
+    // Decided under the held lock, AFTER the "does not exist" refusal: a
+    // delete of a name that is not there changes nothing and must leave the
+    // document clean (it used to dirty it).
+    //
+    // `grid` and `grids` FIRST, then the registry, all held through the script
+    // prune and the undo record (rev3B#6, rev5C#1; the order and its safety
+    // are `create_named_range_impl`'s): released before the record, a rename
+    // could land its "Rename name" step between this delete and its own. The
+    // block ENDS every guard before the recalculation.
     let key = name.to_uppercase();
-    match named_ranges.remove(&key) {
-        Some(removed) => {
-            drop(named_ranges);
+    // The ids of the scripts the prune took, announced once every guard is
+    // released (see `rename_named_range_impl`'s announcement).
+    let mut pruned_ids: Vec<String> = Vec::new();
+    let removed = {
+        let Ok(grid_hold) = state.grid.lock_pending() else {
+            return NamedRangeResult {
+                success: false,
+                named_range: None,
+                error: Some("The workbook is unavailable.".to_string()),
+            };
+        };
+        let Ok(grids_hold) = state.grids.lock_pending() else {
+            return NamedRangeResult {
+                success: false,
+                named_range: None,
+                error: Some("The workbook is unavailable.".to_string()),
+            };
+        };
+        let pending = state.named_ranges.lock_pending().unwrap();
+        if !pending.contains_key(&key) {
+            return NamedRangeResult {
+                success: false,
+                named_range: None,
+                error: Some(format!("Named range '{}' does not exist.", name)),
+            };
+        }
+        let effect = DocumentEffect::mutates(file_state);
+        let mut named_ranges = pending.authorize(&effect);
+        let removed = named_ranges.remove(&key);
+
+        if let Some(removed) = &removed {
+            // C10 cleanup: prune any object scripts attached to this name so a
+            // deleted name leaves no dangling scripts behind. instanceId == the
+            // name string (matched case-insensitively to be safe). What the
+            // prune took -- and only that -- is kept for the undo. Released
+            // before the undo stack is taken (a structural shift holds the
+            // stack while it takes `object_scripts`).
+            let pruned = match state.object_scripts.write(&effect) {
+                Ok(mut scripts) => crate::undo_commands::take_object_scripts(&mut scripts, |s| {
+                    s.object_type == persistence::ScriptableObjectType::NamedRange
+                        && s.instance_id
+                            .as_deref()
+                            .map(|id| id.eq_ignore_ascii_case(&name))
+                            .unwrap_or(false)
+                }),
+                Err(_) => Vec::new(),
+            };
+            pruned_ids = pruned.iter().map(|p| p.script.id.clone()).collect();
+
+            // ONE undo step puts back the name AND the scripts it took with
+            // it: recorded as the registry restore alone, Ctrl+Z brought the
+            // name back with its macro gone for good. The scripts are recorded
+            // BY ID (`OBJECT_SCRIPTS_BY_ID_RESTORE_KIND`): a whole-list
+            // snapshot put back every OTHER script as this delete found it,
+            // so undoing the delete after the user had edited or created
+            // another script (a script save records no undo) reverted or
+            // deleted it. Joined into a transaction only when there are any.
+            let opened = if pruned.is_empty() {
+                false
+            } else {
+                let mut undo_stack = state.undo_stack.lock().unwrap();
+                let opened = !undo_stack.has_open_transaction();
+                if opened {
+                    undo_stack.begin_transaction("Delete name".to_string());
+                }
+                undo_stack.record_custom_restore(
+                    crate::undo_commands::OBJECT_SCRIPTS_BY_ID_RESTORE_KIND.to_string(),
+                    crate::undo_commands::object_scripts_pruned_bytes(pruned),
+                    "Restore name scripts",
+                );
+                opened
+            };
             crate::undo_commands::record_named_range_undo(
-                &state,
+                state,
                 &key,
                 Some(removed.clone()),
                 "Delete name",
             );
-
-            // C10 cleanup: prune any object scripts attached to this name so a
-            // deleted name leaves no dangling scripts behind. instanceId == the
-            // name string (matched case-insensitively to be safe).
-            if let Ok(mut scripts) = state.object_scripts.write(&effect) {
-                scripts.retain(|s| {
-                    !(s.object_type == persistence::ScriptableObjectType::NamedRange
-                        && s.instance_id
-                            .as_deref()
-                            .map(|id| id.eq_ignore_ascii_case(&name))
-                            .unwrap_or(false))
-                });
+            if opened {
+                state.undo_stack.lock().unwrap().commit_transaction();
             }
+        }
+        drop(named_ranges);
+        drop(grids_hold);
+        drop(grid_hold);
+        removed
+    };
+    for id in &pruned_ids {
+        crate::scripting::object_script_commands::announce_object_script_change(
+            id,
+            crate::scripting::object_script_commands::SCRIPT_DELETED,
+        );
+    }
 
+    match removed {
+        Some(removed) => {
             recalc_after_name_change(
-                &state,
-                &user_files_state,
-                &pivot_state,
-                &pane_control_state,
-                &ribbon_filter_state,
+                state,
+                user_files_state,
+                pivot_state,
+                pane_control_state,
+                ribbon_filter_state,
                 &[name],
             );
 
@@ -512,6 +723,8 @@ pub fn delete_named_range(
                 error: None,
             }
         }
+        // Unreachable while the gate above holds the same lock; kept so the
+        // match stays total.
         None => NamedRangeResult {
             success: false,
             named_range: None,
@@ -780,9 +993,12 @@ struct NestedRename {
 /// 2. the registry move, under the guard the gates read through
 ///    (`lock_pending` / `authorize`), so gate and mutation are one critical
 ///    section and the document is dirtied only once every refusal is behind us;
-/// 3. the repoint, over the stored ASTs of every sheet in the name's SCOPE;
-/// 4. ONE undo transaction covering both, because a rename that undoes halfway
-///    is worse than one that cannot be undone at all.
+/// 3. the repoint, over the stored ASTs of every sheet in the name's SCOPE,
+///    and of the object scripts bound to the name (they are bound by its text)
+///    with their scheduled jobs -- announced to every window once the locks
+///    are released (`workbook:object-scripts-changed`, "rebound");
+/// 4. ONE undo transaction covering all of it, because a rename that undoes
+///    halfway is worse than one that cannot be undone at all.
 ///
 /// The recalculation and the dependency rebuild are the caller's second lock
 /// phase, below.
@@ -797,7 +1013,42 @@ pub fn rename_named_range(
     old_name: String,
     new_name: String,
 ) -> NamedRangeResult {
-    let result = rename_named_range_impl(&state, &file_state, &old_name, &new_name);
+    rename_named_range_core(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &old_name,
+        &new_name,
+    )
+}
+
+/// The WHOLE rename -- the gated move, the repoint of the formulas AND of the
+/// name's object scripts, then the second lock phase -- over plain references.
+/// The ONE rename every route runs: the Name Manager and the command line
+/// through `rename_named_range`, the object-script broker's `namedRange.update`
+/// through the same command (`scriptHost/host.ts` `executeNamedRangeUpdate`),
+/// and the MCP / AI-chat tool `update_named_range`
+/// (`mcp::objects::update_named_range_core`). The last two used to rename by
+/// DELETE + CREATE -- the delete deliberately rewrites no formula and the
+/// create repoints none, so every reader of the old name came back `#NAME?` --
+/// and each carried the name's scripts itself, which the Name Manager never
+/// did (it orphaned them). The scripts now move inside the rename, in its one
+/// "Rename name" undo step ([`repoint_named_range_scripts`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rename_named_range_core(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    old_name: &str,
+    new_name: &str,
+) -> NamedRangeResult {
+    let result = rename_named_range_impl(state, file_state, old_name, new_name);
     if result.success {
         // PHASE B, holding nothing: both helpers take their own locks.
         //
@@ -809,19 +1060,19 @@ pub fn rename_named_range(
         // makes the seeding below find them. (Same argument
         // `apply_names_to_formulas` makes for the cells it rewrites, and
         // `recalc_after_table_change` for a renamed table.)
-        crate::undo_commands::rebuild_all_dependencies(&state);
+        crate::undo_commands::rebuild_all_dependencies(state);
         // No VALUE moves for a reader that was repointed — the same definition
         // under a new name — but two populations do move: a cell that already
         // said `=NEWNAME` before the name existed was `#NAME?` and is now a
         // number, and a reader OUTSIDE a sheet-scoped name's scope keeps saying
         // the old name. Both spellings are reported so both are reached.
         recalc_after_name_change(
-            &state,
-            &user_files_state,
-            &pivot_state,
-            &pane_control_state,
-            &ribbon_filter_state,
-            &[old_name, new_name],
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &[old_name.to_string(), new_name.to_string()],
         );
     }
     result
@@ -851,6 +1102,49 @@ pub(crate) fn rename_named_range_impl(
 
     let old_key = old_name.to_uppercase();
     let new_key = new_name.to_uppercase();
+
+    // ---- THE LOCKS, IN THE CRATE'S ORDER, BEFORE ANY OTHER (BUG-0592). -----
+    // `grid` and `grids` FIRST, then everything else -- the order of every
+    // cell writer (`update_cell_impl`, `update_cells_batch_core`, `fill_range`,
+    // which the MCP server, the AI chat and the notebook drive off the main
+    // thread) and of the recalculation pass. Both are held, PENDING, through
+    // the gates, the registry move, the repoint and the undo record, so the
+    // rename is ONE critical section for every reader that takes a grid lock
+    // first: none can see the registry already saying the new name while the
+    // formulas still say the old one (their `#NAME?`), and no cell write can
+    // land between the move and the repoint.
+    //
+    // THE REGISTRY IS HELD TO THE END TOO, across the repoint and the undo
+    // record. The name writers -- `create_named_range_impl`,
+    // `update_named_range_core`, `delete_named_range_core`, which the MCP tools
+    // and the script host reach off the main thread -- took `named_ranges` and
+    // NO grid lock, so the grid hold alone did not order them: released at
+    // the move, the registry let one define the freed old name and record its
+    // "Define name" BELOW this "Rename name" step (or inside it, between its
+    // separate undo-stack locks), and undoing the rename then overwrote that
+    // definition and the next Ctrl+Z deleted the user's original name. They
+    // now take `grid` and `grids` first too, in this order, and hold them and
+    // the registry through their own undo record (rev3B#6, rev5C#1), the
+    // mirror of this rule.
+    // `undo_stack` under `named_ranges` closes no cycle: every function that
+    // holds `undo_stack` while it takes a name store (the cell writers) holds
+    // `grid` AND `grids` first, which this rename holds, and Undo itself holds
+    // the stack alone. `no_function_holds_the_undo_stack_and_a_name_store_in_an_order_that_can_cycle`
+    // (state_digest_lock_order_tests.rs) pins both halves crate-wide.
+    // `lock_pending` postpones the dirty decision past the last refusal.
+    let pending_grid = match state.grid.lock_pending() {
+        Ok(guard) => guard,
+        Err(_) => return refuse("The workbook is unavailable.".to_string()),
+    };
+    let pending_grids = match state.grids.lock_pending() {
+        Ok(guard) => guard,
+        Err(_) => return refuse("The workbook is unavailable.".to_string()),
+    };
+    // Under the grid hold, so a sheet switch cannot land between this read
+    // and the repoint below.
+    let Ok(active_sheet) = state.active_sheet.read().map(|active| *active) else {
+        return refuse("The workbook is unavailable.".to_string());
+    };
 
     // ---- GATE 2: names and TABLES share ONE formula namespace. -------------
     // `create_named_range` refuses a name a table already holds because which
@@ -925,6 +1219,8 @@ pub(crate) fn rename_named_range_impl(
 
     // Every gate has passed; from here this command commits.
     let effect = DocumentEffect::mutates(file_state);
+    let mut grid = pending_grid.authorize(&effect);
+    let mut grids = pending_grids.authorize(&effect);
     let mut named_ranges = pending.authorize(&effect);
 
     named_ranges.remove(&old_key);
@@ -932,12 +1228,34 @@ pub(crate) fn rename_named_range_impl(
     for entry in &nested {
         named_ranges.insert(entry.key.clone(), entry.after.clone());
     }
+
+    // ---- THE REPOINT, under the same grid hold. ---------------------------
+    let touched = rename_name_in_grids(&mut grid, &mut grids, active_sheet, existing.sheet_index, &old_key, new_name);
+
+    // ---- THE NAME'S OBJECT SCRIPTS FOLLOW IT, in the same critical section.
+    // Bound by the name's TEXT, so without this every route's rename orphaned
+    // them (see `repoint_named_range_scripts`).
+    let rebound = repoint_named_range_scripts(state, &effect, &existing.name, new_name);
+    let rebound_scripts: Vec<crate::undo_commands::ScriptRebind> = rebound
+        .iter()
+        .map(|r| crate::undo_commands::ScriptRebind { id: r.id.clone(), instance_id: r.from.clone() })
+        .collect();
+
+    // The undo stack after the grid locks (every cell writer's order), and
+    // still under the registry, so no name writer's step can land below or
+    // inside this one (see the lock note above).
+    record_rename_undo(state, touched, &old_key, &new_key, &existing, &nested, rebound_scripts);
     drop(named_ranges);
+    drop(grids);
+    drop(grid);
 
-    // ---- THE REPOINT. -----------------------------------------------------
-    let touched = rename_name_in_grids(state, &effect, existing.sheet_index, &old_key, new_name);
-
-    record_rename_undo(state, touched, &old_key, &new_key, &existing, &nested);
+    // Every window is told which scripts moved, and where (rev4B#2, rev6B#6):
+    // an open Object Script Editor re-reads the binding, and the main window
+    // re-keys the live mount from the payload, so neither keeps addressing the
+    // old name. Announced HERE, in the one rename every route runs, because the
+    // command line and the MCP tools have no frontend event of their own to
+    // carry it.
+    crate::scripting::script_rebind::announce_rebinds(&rebound);
 
     NamedRangeResult {
         success: true,
@@ -1043,17 +1361,18 @@ fn plan_nested_renames(
 /// SCOPE, as in [`plan_nested_renames`]: a sheet-scoped name resolves only on
 /// its own sheet, so `=RATE` written on another sheet is a `#NAME?` that never
 /// denoted this name and must not be rewritten into one that looks like it did.
+///
+/// Over the grids the CALLER holds (`rename_named_range_impl` takes both grid
+/// locks before the registry and keeps them across the move, this walk and the
+/// undo record -- BUG-0592), so it takes no lock of its own.
 fn rename_name_in_grids(
-    state: &AppState,
-    effect: &DocumentEffect,
+    grid: &mut engine::Grid,
+    grids: &mut [engine::Grid],
+    active_sheet: usize,
     scope: Option<usize>,
     old_key: &str,
     new_name: &str,
 ) -> Vec<(usize, u32, u32, Option<engine::Cell>)> {
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let mut grid = state.grid.write(effect).unwrap();
-    let mut grids = state.grids.write(effect).unwrap();
-
     // `state.grid` is the AUTHORITATIVE copy of the active sheet and
     // `grids[active]` can lag behind it (BUG-0016) — sync before the walk, the
     // way `rename_sheet` does, or the formula the user typed since the last
@@ -1106,19 +1425,89 @@ fn rename_name_in_grids(
     touched
 }
 
-/// Record the whole rename — registry entries AND rewritten formulas — as ONE
-/// undo transaction.
+/// Re-point every object script bound to the name being renamed at its new
+/// spelling, and the SCHEDULED JOBS each of them registered on the old
+/// spelling with it (`scheduler::rebind_script_jobs`, rev4B#1).
+///
+/// A named-range script is bound by the name's TEXT (`instance_id`; the Name
+/// Manager's Edit Script keys it by the selected name). The rename used to move
+/// the registry key and repoint the formulas but leave the script store alone,
+/// so a Name Manager or command-line rename ORPHANED the name's macro: still
+/// bound to a name the workbook no longer had, while Edit Script on the renamed
+/// name scaffolded a new, empty one. The MCP tool and the script host each
+/// carried the scripts themselves; every route now renames through here, so
+/// none of them does.
+///
+/// Matched case-insensitively, as `delete_named_range_core`'s prune matches.
+/// Only the binding moves: id, source, provenance and the declared-capability
+/// ceiling are carried over untouched, so a distributed script stays
+/// distributed.
+///
+/// LOCKS. Taken while the caller holds `grid`, `grids` and `named_ranges` --
+/// `named_ranges` before `object_scripts` is the order
+/// `calp_commands::calp_get_application_objects` takes too -- and RELEASED
+/// before the caller takes the undo stack: a structural shift holds
+/// `undo_stack` while it takes `object_scripts` (`commands/structure.rs`
+/// `shift_controls`).
+///
+/// Returns each re-pointed script with the binding it had -- what the undo
+/// puts back -- and the one it has now, which the caller announces once the
+/// locks are released (empty when no script was bound).
+fn repoint_named_range_scripts(
+    state: &AppState,
+    effect: &DocumentEffect,
+    old_name: &str,
+    new_name: &str,
+) -> Vec<crate::scripting::script_rebind::ScriptRebound> {
+    let bound = |script: &persistence::SavedObjectScript| -> bool {
+        script.object_type == persistence::ScriptableObjectType::NamedRange
+            && script
+                .instance_id
+                .as_deref()
+                .map(|id| id.eq_ignore_ascii_case(old_name))
+                .unwrap_or(false)
+    };
+    let Ok(mut scripts) = state.object_scripts.write(effect) else {
+        return Vec::new();
+    };
+    let mut rebound = Vec::new();
+    for script in scripts.iter_mut() {
+        if bound(script) {
+            // Through the one re-bind door (scripting/script_rebind.rs): its
+            // SCHEDULED JOBS follow it (rev4B#1) -- a job addresses the exposed
+            // method by the binding, so a job left on the old name called
+            // nothing after the next reopen while reporting a healthy run. The
+            // undo and redo move them back and forth in the
+            // `obj_object_scripts_by_id` restore. The scheduler lock is a leaf.
+            rebound.extend(crate::scripting::script_rebind::rebind_script(
+                effect,
+                script,
+                Some(new_name.to_string()),
+            ));
+        }
+    }
+    rebound
+}
+
+/// Record the whole rename — registry entries, rewritten formulas AND the
+/// re-pointed object scripts — as ONE undo transaction.
 ///
 /// A rename that undoes halfway is worse than one that cannot be undone at all:
 /// putting the old name back while the formulas keep saying the new one produces
-/// `#NAME?` everywhere, which is the exact defect the repoint exists to remove.
-/// (`rename_table` learned this the same way; `rename_sheet` sidesteps it by
-/// ENDING the undo history, which Excel also does for a sheet rename and does
-/// not do for a name.)
+/// `#NAME?` everywhere, which is the exact defect the repoint exists to remove,
+/// and putting it back while its script stays bound to the new spelling orphans
+/// the script all over again. (`rename_table` learned this the same way;
+/// `rename_sheet` sidesteps it by ENDING the undo history, which Excel also
+/// does for a sheet rename and does not do for a name.)
 ///
 /// CELLS ARE RECORDED FIRST so they restore LAST — a transaction is replayed in
 /// reverse — i.e. after the registry is back, which is the order that makes the
-/// restored formulas resolve.
+/// restored formulas resolve. The scripts are recorded only when the rename
+/// moved one, and BY ID: the bindings it moved and nothing else
+/// (`OBJECT_SCRIPTS_BY_ID_RESTORE_KIND`). A whole-list snapshot put back every
+/// script as the rename found it, so undoing the rename after the user had
+/// edited or created a script (a script save records no undo) silently
+/// reverted the edit or deleted the new script.
 fn record_rename_undo(
     state: &AppState,
     touched: Vec<(usize, u32, u32, Option<engine::Cell>)>,
@@ -1126,6 +1515,7 @@ fn record_rename_undo(
     new_key: &str,
     before: &NamedRange,
     nested: &[NestedRename],
+    rebound_scripts: Vec<crate::undo_commands::ScriptRebind>,
 ) {
     let opened = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -1146,6 +1536,13 @@ fn record_rename_undo(
                 "script_grid_cells".to_string(),
                 crate::undo_commands::script_grid_cells_snapshot_bytes(sheet_index, cells),
                 "Restore formulas",
+            );
+        }
+        if !rebound_scripts.is_empty() {
+            undo_stack.record_custom_restore(
+                crate::undo_commands::OBJECT_SCRIPTS_BY_ID_RESTORE_KIND.to_string(),
+                crate::undo_commands::object_scripts_rebound_bytes(rebound_scripts),
+                "Restore name scripts",
             );
         }
         opened
@@ -1949,5 +2346,593 @@ mod rename_tests {
             "the off-sheet reader comes back too — it is recorded against the \
              sheet it lives on, not the one in front of the user"
         );
+    }
+
+    fn named_range_script(id: &str, instance: &str) -> persistence::SavedObjectScript {
+        persistence::SavedObjectScript {
+            id: id.to_string(),
+            name: format!("Script for {}", instance),
+            object_type: persistence::ScriptableObjectType::NamedRange,
+            instance_id: Some(instance.to_string()),
+            source: "// @capability bi.query\nexport function onChange() {}\n".to_string(),
+            access_level: persistence::ScriptAccessLevel::Restricted,
+            description: None,
+            provenance: persistence::ScriptProvenance::Local,
+            package_name: None,
+            package_version: None,
+            declared_capabilities: vec!["bi.query".to_string()],
+        }
+    }
+
+    fn binding_of(f: &Fixture, id: &str) -> Option<String> {
+        f.state
+            .object_scripts
+            .read()
+            .unwrap()
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.instance_id.clone())
+    }
+
+    /// A named-range script is bound by the name's TEXT. The Name Manager's
+    /// rename (and the command line's: both run `rename_named_range`) moved the
+    /// key and repointed the formulas but never touched the script store, so a
+    /// script attached to `Rate` was orphaned by a rename to `Tax` -- bound to a
+    /// name the workbook no longer had, while Edit Script on `Tax` scaffolded a
+    /// new, empty one. The rename now re-points it, case-insensitively and only
+    /// for NamedRange scripts of THAT name, inside its one "Rename name" step:
+    /// one Ctrl+Z puts the name and the binding back together, and redo moves
+    /// both again.
+    ///
+    /// SABOTAGE: drop the `repoint_named_range_scripts` call from
+    /// `rename_named_range_impl` -- the script stays on "rate" and the first
+    /// assertion fails. Or drop the script record (`obj_object_scripts_by_id`)
+    /// from `record_rename_undo` -- the undo leaves the script on "Tax".
+    #[test]
+    fn a_rename_carries_the_names_scripts_and_one_undo_puts_both_back() {
+        let f = Fixture::new(1);
+        f.define("Rate", "=$D$5", None);
+        f.put_formula(0, 0, 0, "=Rate*2");
+        {
+            let mut scripts = f.state.object_scripts.write(&test_seed_effect()).unwrap();
+            // Bound in another case: the Name Manager keys by the name as typed.
+            scripts.push(named_range_script("s-rate", "rate"));
+            scripts.push(named_range_script("s-other", "OtherName"));
+            let mut chart_script = named_range_script("s-chart", "Rate");
+            chart_script.object_type = persistence::ScriptableObjectType::Chart;
+            scripts.push(chart_script);
+        }
+
+        // The Name Manager's own command body.
+        let result = rename_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "Rate", "Tax",
+        );
+        assert!(result.success, "{:?}", result.error);
+
+        assert_eq!(binding_of(&f, "s-rate").as_deref(), Some("Tax"), "the name's script follows the rename");
+        assert_eq!(binding_of(&f, "s-other").as_deref(), Some("OtherName"), "another name's script is untouched");
+        assert_eq!(
+            binding_of(&f, "s-chart").as_deref(),
+            Some("Rate"),
+            "a script of another object type is untouched, whatever its id says"
+        );
+        {
+            let scripts = f.state.object_scripts.read().unwrap();
+            assert_eq!(scripts.len(), 3, "nothing lost, nothing duplicated");
+            let carried = scripts.iter().find(|s| s.id == "s-rate").unwrap();
+            assert_eq!(carried.declared_capabilities, vec!["bi.query".to_string()], "only the binding moves");
+            assert_eq!(carried.provenance, persistence::ScriptProvenance::Local);
+        }
+        assert_eq!(f.undo_depth(), 1, "the name, its readers and its script are ONE step");
+
+        f.undo();
+        assert_eq!(f.spelling("RATE").as_deref(), Some("Rate"));
+        assert_eq!(
+            binding_of(&f, "s-rate").as_deref(),
+            Some("rate"),
+            "one Ctrl+Z puts the binding back with the name -- undone halfway, the script is orphaned again"
+        );
+
+        let redo = f.state.undo_stack.lock().unwrap().pop_redo().expect("the undo left a redo step");
+        let _ = crate::undo_commands::apply_changes(
+            &f.state, &f.file, &f.files, &f.pivots, &f.slicer, &f.filters, &f.pane, &f.timelines, redo, false,
+        );
+        assert_eq!(f.spelling("TAX").as_deref(), Some("Tax"));
+        assert_eq!(binding_of(&f, "s-rate").as_deref(), Some("Tax"), "redo moves the binding again");
+    }
+
+    /// A persisted job of the name's script, as the `.cala` carries it.
+    fn job_def(id: &str, script: &str, instance: &str, handler: &str) -> calcula_format::features::scheduled_jobs::ScheduledJobDef {
+        calcula_format::features::scheduled_jobs::ScheduledJobDef {
+            id: id.to_string(),
+            script_id: script.to_string(),
+            script_hash: "h".to_string(),
+            surface: "object-script".to_string(),
+            object_type: "namedRange".to_string(),
+            instance_id: Some(instance.to_string()),
+            handler: handler.to_string(),
+            cadence: crate::scripting::scheduler::CADENCE_EVERY.to_string(),
+            interval_secs: 3600,
+            minute_of_day: 0,
+            next_run_ms: 0,
+            enabled: true,
+            label: None,
+            last_run_ms: 0,
+            last_ok: false,
+            last_error: None,
+            run_count: 0,
+        }
+    }
+
+    /// What a SAVE writes for each job: (job id, the binding it calls).
+    fn saved_job_bindings(scripts: &[&str]) -> Vec<(String, Option<String>)> {
+        let hashes: HashMap<String, String> = scripts.iter().map(|s| (s.to_string(), "h".to_string())).collect();
+        let mut jobs: Vec<(String, Option<String>)> = crate::scripting::scheduler::export_jobs_for_workbook(&hashes)
+            .into_iter()
+            .map(|d| (d.id, d.instance_id))
+            .collect();
+        jobs.sort();
+        jobs
+    }
+
+    /// A named-range script's SCHEDULED JOBS follow the rename (rev4B#1).
+    /// A job calls the method the script exposed under its BINDING, and the
+    /// rename re-bound the script but left the persisted job on the old name:
+    /// after save and reopen the script exposed `refresh` under Tax while the
+    /// job still called it under Rate, and every tick did nothing. The jobs
+    /// now move in the same step, back on Ctrl+Z, forward again on redo.
+    ///
+    /// SABOTAGE: make `scheduler::rebind_jobs` match nothing -- the saved job
+    /// still calls Rate after the rename. Drop the `rebind_script_jobs` call
+    /// from the `obj_object_scripts_by_id` restore arm -- the undo leaves the
+    /// jobs on Tax.
+    #[test]
+    fn a_rename_moves_the_scripts_scheduled_jobs_and_one_undo_moves_them_back() {
+        let _jobs = crate::persistence::scheduler_test_guard();
+        let f = Fixture::new(1);
+        f.define("Rate", "=$D$5", None);
+        {
+            let mut scripts = f.state.object_scripts.write(&test_seed_effect()).unwrap();
+            scripts.push(named_range_script("s-sched-rate", "Rate"));
+            scripts.push(named_range_script("s-sched-other", "OtherName"));
+        }
+        let restored = crate::scripting::scheduler::import_jobs_for_workbook(
+            vec![
+                job_def("sched-1", "s-sched-rate", "Rate", "refresh"),
+                job_def("sched-2", "s-sched-rate", "Rate", "snapshot"),
+                job_def("sched-3", "s-sched-other", "OtherName", "refresh"),
+            ],
+            &["s-sched-rate", "s-sched-other"].iter().map(|s| (s.to_string(), "h".to_string())).collect(),
+        );
+        assert_eq!(restored.restored, 3, "the jobs are in the registry");
+
+        let result = rename_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "Rate", "Tax",
+        );
+        assert!(result.success, "{:?}", result.error);
+        let tax = Some("Tax".to_string());
+        let other = Some("OtherName".to_string());
+        let rate = Some("Rate".to_string());
+        assert_eq!(
+            saved_job_bindings(&["s-sched-rate", "s-sched-other"]),
+            vec![
+                ("sched-1".to_string(), tax.clone()),
+                ("sched-2".to_string(), tax.clone()),
+                ("sched-3".to_string(), other.clone()),
+            ],
+            "the saved jobs call the method under the name the script is bound to now"
+        );
+
+        f.undo();
+        assert_eq!(binding_of(&f, "s-sched-rate"), rate);
+        assert_eq!(
+            saved_job_bindings(&["s-sched-rate", "s-sched-other"]),
+            vec![
+                ("sched-1".to_string(), rate.clone()),
+                ("sched-2".to_string(), rate.clone()),
+                ("sched-3".to_string(), other.clone()),
+            ],
+            "one Ctrl+Z puts the jobs back on the name with the script"
+        );
+
+        redo(&f);
+        assert_eq!(
+            saved_job_bindings(&["s-sched-rate", "s-sched-other"]),
+            vec![
+                ("sched-1".to_string(), tax.clone()),
+                ("sched-2".to_string(), tax),
+                ("sched-3".to_string(), other),
+            ],
+            "redo moves the jobs again"
+        );
+        crate::scripting::scheduler::reset_jobs();
+    }
+
+    /// Every window is told that the rename, its undo and its redo moved the
+    /// name's script (rev4B#2): an open editor saving afterwards used to write
+    /// the old binding back, and the main window's live mount kept answering
+    /// under the old name. Announced from the one rename every route runs, so
+    /// the command line, the MCP tools and Ctrl+Z are covered too.
+    ///
+    /// SABOTAGE: drop the announcement from `rename_named_range_impl` -- the
+    /// first announcement assertion fails. Since round 8 every "rebound" also
+    /// carries the binding the script has NOW (rev6B#6: the main window
+    /// re-keys the mount from it, with no read in between), so these
+    /// assertions name it -- deliberately changed from `{ id, change }`.
+    #[test]
+    fn a_rename_and_its_undo_announce_the_rebind_to_every_window() {
+        let f = Fixture::new(1);
+        f.define("Rate", "=$D$5", None);
+        {
+            let mut scripts = f.state.object_scripts.write(&test_seed_effect()).unwrap();
+            scripts.push(named_range_script("s-ann-rename", "Rate"));
+            scripts.push(named_range_script("s-ann-bystander", "OtherName"));
+        }
+        let _ = crate::scripting::object_script_commands::take_object_script_announcements();
+        let rebound = |id: &str, to: &str| crate::scripting::object_script_commands::ObjectScriptsChangedPayload {
+            id: id.to_string(),
+            change: "rebound".to_string(),
+            instance_id: Some(Some(to.to_string())),
+        };
+
+        let result = rename_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "Rate", "Tax",
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            crate::scripting::object_script_commands::take_object_script_announcements(),
+            vec![rebound("s-ann-rename", "Tax")],
+            "every window is told the script moved, where, and only that script"
+        );
+
+        f.undo();
+        assert_eq!(
+            crate::scripting::object_script_commands::take_object_script_announcements(),
+            vec![rebound("s-ann-rename", "Rate")],
+            "the undo announces the move back"
+        );
+
+        redo(&f);
+        assert_eq!(
+            crate::scripting::object_script_commands::take_object_script_announcements(),
+            vec![rebound("s-ann-rename", "Tax")],
+            "the redo announces the move again"
+        );
+    }
+
+    /// The delete twin of the announcement: the prune and its undo are told
+    /// to every window too, so a status bar or an editor listing the script is
+    /// not left showing a script the store no longer has (or lacking one it
+    /// has again).
+    ///
+    /// SABOTAGE: drop the announcement loop from `delete_named_range_core` --
+    /// the first announcement assertion fails.
+    #[test]
+    fn a_name_delete_and_its_undo_announce_the_scripts_they_moved() {
+        let f = Fixture::new(1);
+        f.define("Rate", "=$D$5", None);
+        {
+            let mut scripts = f.state.object_scripts.write(&test_seed_effect()).unwrap();
+            scripts.push(named_range_script("s-ann-rate", "Rate"));
+            scripts.push(named_range_script("s-ann-other", "OtherName"));
+        }
+        let _ = crate::scripting::object_script_commands::take_object_script_announcements();
+        let change = |id: &str, change: &str| crate::scripting::object_script_commands::ObjectScriptsChangedPayload {
+            id: id.to_string(),
+            change: change.to_string(),
+            instance_id: None,
+        };
+
+        let result = delete_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "Rate".to_string(),
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            crate::scripting::object_script_commands::take_object_script_announcements(),
+            vec![change("s-ann-rate", "deleted")],
+            "the prune is announced"
+        );
+
+        f.undo();
+        assert_eq!(binding_of(&f, "s-ann-rate").as_deref(), Some("Rate"));
+        assert_eq!(
+            crate::scripting::object_script_commands::take_object_script_announcements(),
+            vec![change("s-ann-rate", "saved")],
+            "the undo announces the script it put back"
+        );
+    }
+
+    /// Deleting a name prunes the scripts bound to it (C10), and its undo used
+    /// to record the registry alone: Ctrl+Z brought the name back with its
+    /// macro gone for good. The prune is now in the same "Delete name" step.
+    ///
+    /// SABOTAGE: drop the script record (`obj_object_scripts_by_id`) from
+    /// `delete_named_range_core` -- the undo leaves the script deleted.
+    #[test]
+    fn undoing_a_name_delete_puts_its_scripts_back_too() {
+        let f = Fixture::new(1);
+        f.define("Rate", "=$D$5", None);
+        {
+            let mut scripts = f.state.object_scripts.write(&test_seed_effect()).unwrap();
+            scripts.push(named_range_script("s-rate", "Rate"));
+            scripts.push(named_range_script("s-other", "OtherName"));
+        }
+        let result = delete_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "Rate".to_string(),
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(binding_of(&f, "s-rate"), None, "the deleted name's script is pruned (C10)");
+        assert_eq!(binding_of(&f, "s-other").as_deref(), Some("OtherName"));
+        assert_eq!(f.undo_depth(), 1, "the name and its scripts are ONE step");
+
+        f.undo();
+        assert_eq!(f.spelling("RATE").as_deref(), Some("Rate"), "the name comes back");
+        assert_eq!(
+            binding_of(&f, "s-rate").as_deref(),
+            Some("Rate"),
+            "...and so does its script -- undone halfway, the macro was lost for good"
+        );
+        assert_eq!(f.state.object_scripts.read().unwrap().len(), 2, "nothing duplicated");
+    }
+
+    /// A rename of a name with NO script records no script snapshot and leaves
+    /// the script store exactly as it was (a whole-list snapshot recorded for
+    /// nothing would make the rename's undo rewind script edits it never made).
+    #[test]
+    fn a_rename_of_a_name_with_no_script_leaves_the_scripts_alone() {
+        let f = Fixture::new(1);
+        f.define("Rate", "=$D$5", None);
+        f.state
+            .object_scripts
+            .write(&test_seed_effect())
+            .unwrap()
+            .push(named_range_script("s-other", "OtherName"));
+        assert!(f.rename("Rate", "Tax").success);
+        assert_eq!(binding_of(&f, "s-other").as_deref(), Some("OtherName"));
+        let step = f.state.undo_stack.lock().unwrap().pop_undo().expect("the rename's step");
+        // Either script kind: the by-id record the rename makes now, or the
+        // whole-list snapshot it made before (2026-10-29).
+        assert!(
+            !step.changes.iter().any(|c| matches!(
+                c,
+                engine::CellChange::CustomRestore { kind, .. }
+                    if kind == "obj_object_scripts" || kind == crate::undo_commands::OBJECT_SCRIPTS_BY_ID_RESTORE_KIND
+            )),
+            "no script record for a name no script is bound to"
+        );
+    }
+
+    fn source_of(f: &Fixture, id: &str) -> Option<String> {
+        f.state.object_scripts.read().unwrap().iter().find(|s| s.id == id).map(|s| s.source.clone())
+    }
+
+    /// A script SAVE through `save_object_script`'s own body past its window
+    /// guard (`save_object_script_core`): edit in place (keeping the stored
+    /// binding) or push -- and, like it, RECORD NO UNDO.
+    fn save_script_without_undo(f: &Fixture, script: persistence::SavedObjectScript) {
+        let data = crate::scripting::object_script_commands::ObjectScriptData {
+            id: script.id,
+            name: script.name,
+            object_type: "namedRange".to_string(),
+            instance_id: script.instance_id,
+            source: script.source,
+            access_level: "restricted".to_string(),
+            description: script.description,
+            provenance: None,
+            package_name: None,
+            package_version: None,
+            declared_capabilities: Vec::new(),
+        };
+        crate::scripting::object_script_commands::save_object_script_core(&f.state, &f.file, &data)
+            .expect("the save is accepted");
+    }
+
+    fn edited(id: &str, instance: &str, source: &str) -> persistence::SavedObjectScript {
+        let mut script = named_range_script(id, instance);
+        script.source = source.to_string();
+        script
+    }
+
+    fn redo(f: &Fixture) {
+        let redo = f.state.undo_stack.lock().unwrap().pop_redo().expect("the undo left a redo step");
+        let _ = crate::undo_commands::apply_changes(
+            &f.state, &f.file, &f.files, &f.pivots, &f.slicer, &f.filters, &f.pane, &f.timelines, redo, false,
+        );
+    }
+
+    /// A script SAVE records no undo step, so the "Rename name" step's
+    /// script record used to be a WHOLE-LIST snapshot of the store as the
+    /// rename found it: undoing the rename after the user had edited ANOTHER
+    /// script, edited the renamed name's own script, or created a new one put
+    /// the whole list back -- the edits silently reverted and the new script
+    /// deleted. Lost work, with nothing on screen saying so. The step now
+    /// records only the BINDINGS it moved, by script id.
+    ///
+    /// SABOTAGE: record the whole-list `obj_object_scripts` snapshot in
+    /// `record_rename_undo` again -- the edit assertions fail.
+    #[test]
+    fn undoing_a_rename_keeps_every_script_edit_made_after_it() {
+        let f = Fixture::new(1);
+        f.define("Rate", "=$D$5", None);
+        {
+            let mut scripts = f.state.object_scripts.write(&test_seed_effect()).unwrap();
+            scripts.push(named_range_script("s-other", "OtherName"));
+            scripts.push(named_range_script("s-rate", "Rate"));
+        }
+        let result = rename_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "Rate", "Tax",
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(binding_of(&f, "s-rate").as_deref(), Some("Tax"));
+
+        // AFTER the rename the user edits two scripts and creates a third.
+        save_script_without_undo(&f, edited("s-other", "OtherName", "// another name's script, edited later"));
+        save_script_without_undo(&f, edited("s-rate", "Tax", "// the renamed name's own script, edited later"));
+        save_script_without_undo(&f, named_range_script("s-new", "Fresh"));
+
+        f.undo();
+        assert_eq!(f.spelling("RATE").as_deref(), Some("Rate"), "the name comes back");
+        assert_eq!(binding_of(&f, "s-rate").as_deref(), Some("Rate"), "...and its script's binding with it");
+        assert_eq!(
+            source_of(&f, "s-other").as_deref(),
+            Some("// another name's script, edited later"),
+            "undoing the rename reverted an edit to ANOTHER script it never touched -- lost work"
+        );
+        assert_eq!(
+            source_of(&f, "s-rate").as_deref(),
+            Some("// the renamed name's own script, edited later"),
+            "the undo puts back the BINDING, not the source the script had at the rename"
+        );
+        assert_eq!(
+            binding_of(&f, "s-new").as_deref(),
+            Some("Fresh"),
+            "undoing the rename deleted a script created after it -- lost work"
+        );
+        assert_eq!(f.state.object_scripts.read().unwrap().len(), 3, "nothing lost, nothing duplicated");
+
+        redo(&f);
+        assert_eq!(binding_of(&f, "s-rate").as_deref(), Some("Tax"), "redo moves the binding again");
+        assert_eq!(source_of(&f, "s-other").as_deref(), Some("// another name's script, edited later"));
+        assert_eq!(source_of(&f, "s-rate").as_deref(), Some("// the renamed name's own script, edited later"));
+        assert_eq!(binding_of(&f, "s-new").as_deref(), Some("Fresh"));
+    }
+
+    /// The delete twin: the "Delete name" step's whole-list snapshot put the
+    /// store back as the delete found it, so undoing the delete after the user
+    /// had edited or created another script reverted or deleted it. The step
+    /// now records only the scripts it PRUNED: the undo puts back exactly
+    /// those, where they stood, and the redo prunes exactly those again.
+    ///
+    /// SABOTAGE: record the whole-list `obj_object_scripts` snapshot in
+    /// `delete_named_range_core` again -- the edit assertions fail.
+    #[test]
+    fn undoing_a_name_delete_keeps_every_script_edit_made_after_it() {
+        let f = Fixture::new(1);
+        f.define("Rate", "=$D$5", None);
+        {
+            let mut scripts = f.state.object_scripts.write(&test_seed_effect()).unwrap();
+            scripts.push(named_range_script("s-first", "First"));
+            scripts.push(named_range_script("s-rate", "Rate"));
+            scripts.push(named_range_script("s-other", "OtherName"));
+        }
+        let result = delete_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "Rate".to_string(),
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(binding_of(&f, "s-rate"), None, "the deleted name's script is pruned (C10)");
+
+        save_script_without_undo(&f, edited("s-other", "OtherName", "// edited after the delete"));
+        save_script_without_undo(&f, named_range_script("s-new", "Fresh"));
+
+        f.undo();
+        assert_eq!(f.spelling("RATE").as_deref(), Some("Rate"), "the name comes back");
+        assert_eq!(binding_of(&f, "s-rate").as_deref(), Some("Rate"), "...and so does its script");
+        assert_eq!(
+            source_of(&f, "s-other").as_deref(),
+            Some("// edited after the delete"),
+            "undoing the delete reverted an edit to ANOTHER script -- lost work"
+        );
+        assert_eq!(
+            binding_of(&f, "s-new").as_deref(),
+            Some("Fresh"),
+            "undoing the delete deleted a script created after it -- lost work"
+        );
+        let order: Vec<String> = f.state.object_scripts.read().unwrap().iter().map(|s| s.id.clone()).collect();
+        assert_eq!(order, vec!["s-first", "s-rate", "s-other", "s-new"], "the script is back where it stood");
+
+        redo(&f);
+        assert_eq!(binding_of(&f, "s-rate"), None, "redo prunes the name's script again");
+        assert_eq!(source_of(&f, "s-other").as_deref(), Some("// edited after the delete"));
+        assert_eq!(binding_of(&f, "s-new").as_deref(), Some("Fresh"));
+        assert_eq!(f.state.object_scripts.read().unwrap().len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. A refusal leaves the document clean
+    // -----------------------------------------------------------------------
+
+    /// Editing or deleting a name that does not exist is refused -- and used to
+    /// dirty the workbook anyway, because both commands minted
+    /// `DocumentEffect::mutates` (which dirties at construction) BEFORE their
+    /// "does not exist" gate. The positive control proves the same calls do
+    /// dirty it when they change something.
+    ///
+    /// SABOTAGE: mint the effect ahead of the gate in `update_named_range_core`
+    /// again -- the refusal assertion fails.
+    #[test]
+    fn editing_a_name_that_does_not_exist_leaves_the_document_clean() {
+        let f = Fixture::new(1);
+        f.define("RATE", "=$D$5", None);
+
+        let edited = update_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters,
+            "Nope".to_string(), None, "=$A$1".to_string(), None, None,
+        );
+        assert!(!edited.success, "an unknown name is refused");
+        assert!(!f.file.is_dirty(), "a refused EDIT must leave the workbook clean");
+        assert_eq!(f.undo_depth(), 0, "and records no undo step");
+
+        // POSITIVE CONTROL: the same door dirties the workbook when it acts.
+        let edited = update_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters,
+            "RATE".to_string(), None, "=$A$1".to_string(), None, None,
+        );
+        assert!(edited.success, "{:?}", edited.error);
+        assert!(f.file.is_dirty(), "an edit that changes the name dirties the workbook");
+        assert_eq!(f.refers_to("RATE").as_deref(), Some("=$A$1"));
+        assert_eq!(f.undo_depth(), 1);
+    }
+
+    /// Defining a name that already exists is refused -- and used to dirty the
+    /// workbook anyway: `create_named_range_impl` minted `DocumentEffect::mutates`
+    /// (which dirties at construction) and THEN checked for the duplicate, so
+    /// the close-without-saving prompt and AutoRecover fired for a command that
+    /// changed nothing. The positive control proves the same door dirties it
+    /// when it defines a name.
+    ///
+    /// SABOTAGE: mint the effect ahead of the duplicate check in
+    /// `create_named_range_impl` again -- the refusal assertion fails.
+    #[test]
+    fn defining_a_name_that_already_exists_leaves_the_document_clean() {
+        let f = Fixture::new(1);
+        f.define("RATE", "=$D$5", None);
+
+        let created = create_named_range_impl(&f.state, &f.file, "Rate".to_string(), None, "=$A$1".to_string(), None, None);
+        assert!(!created.success, "a duplicate name is refused");
+        assert!(!f.file.is_dirty(), "a refused DEFINE must leave the workbook clean");
+        assert_eq!(f.undo_depth(), 0, "and records no undo step");
+        assert_eq!(f.refers_to("RATE").as_deref(), Some("=$D$5"), "the existing name is untouched");
+
+        // POSITIVE CONTROL.
+        let created = create_named_range_impl(&f.state, &f.file, "Fee".to_string(), None, "=$A$1".to_string(), None, None);
+        assert!(created.success, "{:?}", created.error);
+        assert!(f.file.is_dirty(), "defining a new name dirties the workbook");
+        assert_eq!(f.undo_depth(), 1);
+    }
+
+    /// The delete twin of `editing_a_name_that_does_not_exist_leaves_the_document_clean`.
+    ///
+    /// SABOTAGE: mint the effect ahead of the gate in `delete_named_range_core`
+    /// again -- the refusal assertion fails.
+    #[test]
+    fn deleting_a_name_that_does_not_exist_leaves_the_document_clean() {
+        let f = Fixture::new(1);
+        f.define("RATE", "=$D$5", None);
+
+        let deleted = delete_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "Nope".to_string(),
+        );
+        assert!(!deleted.success, "an unknown name is refused");
+        assert!(!f.file.is_dirty(), "a refused DELETE must leave the workbook clean");
+        assert_eq!(f.undo_depth(), 0, "and records no undo step");
+
+        // POSITIVE CONTROL.
+        let deleted = delete_named_range_core(
+            &f.state, &f.file, &f.files, &f.pivots, &f.pane, &f.filters, "RATE".to_string(),
+        );
+        assert!(deleted.success, "{:?}", deleted.error);
+        assert!(f.file.is_dirty(), "a delete that removes the name dirties the workbook");
+        assert!(f.name_keys().is_empty());
+        assert_eq!(f.undo_depth(), 1);
     }
 }

@@ -266,16 +266,19 @@ describe("executeCreateNamedStyle", () => {
       bold: true,
       textColor: { theme: "accent1", tint: 0.4 },
     });
+    // The 4th argument, changed deliberately (review
+    // NEW-script-format-follows-ui-group): the scratch format lands on the
+    // active sheet alone, never on the user's sheet group.
     expect(lib.applyFormatting).toHaveBeenCalledWith([11], [6], {
       bold: true, textColorTheme: "accent1", textColorTint: 400,
-    });
+    }, { activeSheetOnly: true });
   });
 
   it("walks past a styled scratch candidate (a virgin cell or nothing)", async () => {
     const { lib } = makeNamedStyleLib({ styledScratch: true });
     await executeCreateNamedStyle(asLib(lib), "Alert", { italic: true });
     // First candidate (11, 6) was styled; the probe moved to (14, 11).
-    expect(lib.applyFormatting).toHaveBeenCalledWith([14], [11], { italic: true });
+    expect(lib.applyFormatting).toHaveBeenCalledWith([14], [11], { italic: true }, { activeSheetOnly: true });
   });
 
   it("refuses a duplicate name (case-insensitive) BEFORE touching the grid", async () => {

@@ -55,6 +55,11 @@ vi.mock("@api/lib", async (importOriginal) => {
     getCell: vi.fn(async () => null),
     getStyle: vi.fn(async () => ({ borderTop: { style: "none", color: "#000000", width: 0 } })),
     updateCell: write("updateCell"),
+    // A pasted formula or stored value goes through the batch (CellUpdateInput.pasted).
+    updateCellsBatch: async () => {
+      h.writes.push("updateCellsBatch");
+      return [];
+    },
     setCellStyle: write("setCellStyle"),
     applyFormatting: write("applyFormatting"),
     setColumnWidth: write("setColumnWidth"),

@@ -13,6 +13,7 @@
 import { describe, it, expect } from "vitest";
 import { insertSheetBefore, moveOrCopySheet, type SheetFlowBackend } from "../sheetTabFlows";
 import type { PlacedSheet } from "../sheetPlacement";
+import { renumberedSheetIndex } from "../../../core/state/sheetRenumbering";
 
 interface SheetsResult {
   sheets: PlacedSheet[];
@@ -23,7 +24,8 @@ interface SheetsResult {
  * The backend, by its own definitions (sheets.rs): `add_sheet` appends and
  * activates; `copy_sheet` inserts "<name> (2)" right after the source and
  * activates it; `move_sheet` is `rotate_element` and the active sheet FOLLOWS
- * its sheet. The view cache is Core's `handleSheetReorder` (Spreadsheet.tsx).
+ * its sheet. The view cache re-keys by Core's own rule
+ * (core/state/sheetRenumbering.ts, which Spreadsheet's switch listeners run).
  */
 class Model implements SheetFlowBackend {
   names: string[];
@@ -74,12 +76,8 @@ class Model implements SheetFlowBackend {
     const { fromIndex, toIndex } = detail;
     const next = new Map<number, string>();
     for (const [key, value] of this.cache) {
-      let k = key;
-      if (key === fromIndex) k = toIndex;
-      else if (fromIndex < toIndex) {
-        if (key > fromIndex && key <= toIndex) k = key - 1;
-      } else if (key >= toIndex && key < fromIndex) k = key + 1;
-      next.set(k, value);
+      const k = renumberedSheetIndex(key, fromIndex, toIndex);
+      if (k !== null) next.set(k, value);
     }
     this.cache = next;
   };
@@ -87,7 +85,6 @@ class Model implements SheetFlowBackend {
   /** Every cached view still sits under the index its own sheet now has. */
   cacheIsAligned(): boolean {
     for (const [key, name] of this.cache) {
-      if (key > 1_000_000) continue; // parked out of reach
       if (this.names[key] !== name) return false;
     }
     return true;

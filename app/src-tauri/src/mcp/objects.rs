@@ -436,66 +436,8 @@ pub fn delete_chart(handle: &AppHandle, chart_id: &str) -> Result<String, String
 // Named ranges
 // ============================================================================
 
-/// Detach and return every object script bound to named range `name`.
-///
-/// `named_ranges::delete_named_range` PRUNES these (correct when the name is
-/// really going away). A rename runs through that same delete, so without this
-/// the user's macro would be silently destroyed by what they asked to be a
-/// rename. Returns the removed scripts so the caller can re-point them.
-pub(crate) fn take_named_range_scripts(
-    state: &AppState,
-    name: &str,
-) -> Vec<persistence::SavedObjectScript> {
-    let Ok(scripts) = state.object_scripts.read() else {
-        return Vec::new();
-    };
-    scripts
-        .iter()
-        .filter(|s| {
-            s.object_type == persistence::ScriptableObjectType::NamedRange
-                && s.instance_id
-                    .as_deref()
-                    .map(|id| id.eq_ignore_ascii_case(name))
-                    .unwrap_or(false)
-        })
-        .cloned()
-        .collect()
-}
-
-/// Re-attach previously detached scripts under `instance_id`. A no-op for an
-/// empty list.
-pub(crate) fn restore_named_range_scripts(
-    state: &AppState,
-    effect: &crate::document_effect::DocumentEffect,
-    mut scripts: Vec<persistence::SavedObjectScript>,
-    instance_id: &str,
-) {
-    if scripts.is_empty() {
-        return;
-    }
-    let Ok(mut stored) = state.object_scripts.write(effect) else {
-        return;
-    };
-    for script in scripts.drain(..) {
-        // Re-binding only; ids, source, provenance and the declared-capability
-        // ceiling are carried over untouched.
-        let mut rebound = script;
-        rebound.instance_id = Some(instance_id.to_string());
-        stored.retain(|s| s.id != rebound.id);
-        stored.push(rebound);
-    }
-}
-
 /// Edit an existing name: its target (`refers_to`), comment, scope, and/or the
-/// name itself. Reuses the SAME undoable commands the Name Manager calls.
-///
-/// A RENAME is done as delete + create rather than through `rename_named_range`
-/// on purpose: `rename_named_range` records no undo entry AND skips the
-/// name-vs-table namespace collision check, so an AI rename could shadow a
-/// table with no way back. delete+create runs both validations and produces two
-/// undo entries (reported in the result). The one thing delete+create gets
-/// wrong on its own — pruning the name's object scripts — is repaired by
-/// `take_named_range_scripts` / `restore_named_range_scripts` around it.
+/// name itself. Runs the SAME bodies the Name Manager's commands run.
 pub fn update_named_range(
     handle: &AppHandle,
     name: &str,
@@ -506,6 +448,94 @@ pub fn update_named_range(
 ) -> Result<String, String> {
     require_tier(handle, "update_named_range")?;
 
+    let edit = update_named_range_core(
+        &handle.state::<AppState>(),
+        &handle.state::<crate::persistence::FileState>(),
+        &handle.state::<crate::persistence::UserFilesState>(),
+        &handle.state::<crate::pivot::PivotState>(),
+        &handle.state::<crate::pane_control::PaneControlState>(),
+        &handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+        name,
+        new_name,
+        refers_to,
+        comment,
+        sheet_index,
+    )?;
+
+    if edit.undo_steps > 0 {
+        // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
+        // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
+        // cascade's stores are named without anyone having to remember them.
+        crate::object_deps::announce_cascade(
+            handle,
+            crate::object_deps::ObjectKind::NamedRange,
+        );
+        mark_dirty(handle);
+    }
+    audit(
+        handle,
+        "update_named_range",
+        &format!("An AI tool edited named range '{}' -> {}", edit.name, edit.refers_to),
+        vec![
+            ("name", serde_json::json!(name)),
+            ("newName", serde_json::json!(new_name)),
+            ("refersTo", serde_json::json!(edit.refers_to)),
+            ("sheetIndex", serde_json::json!(edit.scope)),
+        ],
+    );
+
+    Ok(format!(
+        "Updated named range '{}' -> {} ({} undo step(s))",
+        edit.name, edit.refers_to, edit.undo_steps
+    ))
+}
+
+/// What [`update_named_range_core`] did: the name as it is now spelled and
+/// defined, and how many undo steps that took (0 when nothing changed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NamedRangeEdit {
+    pub name: String,
+    pub refers_to: String,
+    pub scope: Option<usize>,
+    pub undo_steps: usize,
+}
+
+/// The MCP / AI-chat `update_named_range` over plain references (testable
+/// without an `AppHandle`).
+///
+/// A RENAME goes through `named_ranges::rename_named_range_core`, the Name
+/// Manager's own rename: every gate (a legal name, no table holding it, the
+/// new key free, every rewritten definition readable), the move, the repoint
+/// of every formula that reads the name -- across sheets and inside other
+/// names' definitions -- and of the object scripts bound to it, its
+/// dependency rebuild and recalculation, all as ONE undo step. Excel does the same: `Names("Rate").Name = "Tax"` turns `=Rate*2`
+/// into `=Tax*2`. This tool used to rename by DELETE + CREATE instead, on the
+/// stated ground that the rename recorded no undo entry and skipped the table
+/// collision check; both had been fixed since, and the delete deliberately
+/// rewrites no formula while the create repoints none, so every reader of the
+/// old name came back `#NAME?`, in two undo steps.
+///
+/// A case-only change ("total" -> "Total") is a rename too: it re-spells the
+/// references (the update alone would store the new spelling and leave every
+/// formula saying the old one).
+///
+/// A scope, definition or comment change is then the Name Manager's own EDIT,
+/// addressed to the name as it is now spelled -- a second undo step, reported,
+/// exactly the two calls the Name Manager's dialog makes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_named_range_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    name: &str,
+    new_name: Option<&str>,
+    refers_to: Option<&str>,
+    comment: Option<Option<String>>,
+    sheet_index: Option<Option<usize>>,
+) -> Result<NamedRangeEdit, String> {
     if new_name.is_none() && refers_to.is_none() && comment.is_none() && sheet_index.is_none() {
         return Err(
             "update_named_range needs at least one of: new_name, refers_to, comment, sheet_index."
@@ -513,126 +543,84 @@ pub fn update_named_range(
         );
     }
 
-    let key = name.to_uppercase();
     let existing = {
-        let state = handle.state::<AppState>();
         let ranges = state.named_ranges.read().map_err(|e| e.to_string())?;
-        ranges.get(&key).cloned().ok_or_else(|| {
+        ranges.get(&name.to_uppercase()).cloned().ok_or_else(|| {
             format!("Named range '{}' does not exist. Use list_named_ranges to see the names.", name)
         })?
     };
 
     // Resolved target state (unspecified fields keep their current value).
-    let target_refers_to = refers_to.map(|s| s.to_string()).unwrap_or(existing.refers_to.clone());
-    let target_comment = comment.unwrap_or(existing.comment.clone());
+    let target_refers_to = refers_to.map(|s| s.to_string()).unwrap_or_else(|| existing.refers_to.clone());
+    let target_comment = comment.unwrap_or_else(|| existing.comment.clone());
     let target_scope = sheet_index.unwrap_or(existing.sheet_index);
-    let target_name = new_name.unwrap_or(name);
+    let target_name = new_name.unwrap_or(existing.name.as_str()).to_string();
 
-    let renaming = !target_name.eq_ignore_ascii_case(name);
-    let mut undo_steps = 1;
+    let renaming = target_name != existing.name;
+    let redefining = target_refers_to != existing.refers_to
+        || target_comment != existing.comment
+        || target_scope != existing.sheet_index;
+    let mut undo_steps = 0;
 
     if renaming {
-        // Rescue the name's object scripts BEFORE the delete prunes them.
-        let attached = take_named_range_scripts(&handle.state::<AppState>(), name);
+        // The name's object scripts are bound by its TEXT; the rename itself
+        // re-points them, inside its one undo step
+        // (`named_ranges::repoint_named_range_scripts`).
+        let renamed = crate::named_ranges::rename_named_range_core(
+            state,
+            file_state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &existing.name,
+            &target_name,
+        );
+        if !renamed.success {
+            // Refused before anything moved: nothing to put back.
+            return Err(renamed
+                .error
+                .unwrap_or_else(|| format!("Failed to rename named range '{}'", existing.name)));
+        }
+        undo_steps += 1;
+    }
 
-        // Remove the old name first (undoable), then create the new one
-        // (undoable + fully validated). Two entries; reported honestly.
-        let removed = crate::named_ranges::delete_named_range(
-            handle.state::<AppState>(),
-            handle.state::<crate::persistence::FileState>(),
-            handle.state::<crate::persistence::UserFilesState>(),
-            handle.state::<crate::pivot::PivotState>(),
-            handle.state::<crate::pane_control::PaneControlState>(),
-            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
-            name.to_string(),
-        );
-        if !removed.success {
-            restore_named_range_scripts(&handle.state::<AppState>(), &mcp_effect(handle), attached, &existing.name);
-            return Err(removed
-                .error
-                .unwrap_or_else(|| format!("Failed to remove named range '{}'", name)));
-        }
-        let created = crate::named_ranges::create_named_range(
-            handle.state::<AppState>(),
-            handle.state::<crate::persistence::FileState>(),
-            handle.state::<crate::persistence::UserFilesState>(),
-            handle.state::<crate::pivot::PivotState>(),
-            handle.state::<crate::pane_control::PaneControlState>(),
-            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
-            target_name.to_string(),
-            target_scope,
-            target_refers_to.clone(),
-            target_comment.clone(),
-            existing.folder.clone(),
-        );
-        if !created.success {
-            // Put the original back so a rejected rename is not a silent delete.
-            let _ = crate::named_ranges::create_named_range(
-                handle.state::<AppState>(),
-                handle.state::<crate::persistence::FileState>(),
-                handle.state::<crate::persistence::UserFilesState>(),
-                handle.state::<crate::pivot::PivotState>(),
-                handle.state::<crate::pane_control::PaneControlState>(),
-                handle.state::<crate::ribbon_filter::RibbonFilterState>(),
-                existing.name.clone(),
-                existing.sheet_index,
-                existing.refers_to.clone(),
-                existing.comment.clone(),
-                existing.folder.clone(),
-            );
-            restore_named_range_scripts(&handle.state::<AppState>(), &mcp_effect(handle), attached, &existing.name);
-            return Err(created
-                .error
-                .unwrap_or_else(|| format!("Failed to create named range '{}'", target_name)));
-        }
-        // Re-point the rescued scripts at the new name.
-        restore_named_range_scripts(&handle.state::<AppState>(), &mcp_effect(handle), attached, target_name);
-        undo_steps = 2;
-    } else {
-        let result = crate::named_ranges::update_named_range(
-            handle.state::<AppState>(),
-            handle.state::<crate::persistence::FileState>(),
-            handle.state::<crate::persistence::UserFilesState>(),
-            handle.state::<crate::pivot::PivotState>(),
-            handle.state::<crate::pane_control::PaneControlState>(),
-            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
-            existing.name.clone(),
+    if redefining {
+        let result = crate::named_ranges::update_named_range_core(
+            state,
+            file_state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            target_name.clone(),
             target_scope,
             target_refers_to.clone(),
             target_comment.clone(),
             existing.folder.clone(),
         );
         if !result.success {
-            return Err(result
+            let error = result
                 .error
-                .unwrap_or_else(|| format!("Failed to update named range '{}'", name)));
+                .unwrap_or_else(|| format!("Failed to update named range '{}'", target_name));
+            return Err(if renaming {
+                format!(
+                    "Renamed '{}' to '{}' ({} undo step), but could not change its definition: {}",
+                    existing.name, target_name, undo_steps, error
+                )
+            } else {
+                error
+            });
         }
+        undo_steps += 1;
     }
 
-    // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
-    // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
-    // cascade's stores are named without anyone having to remember them.
-    crate::object_deps::announce_cascade(
-        handle,
-        crate::object_deps::ObjectKind::NamedRange,
-    );
-    mark_dirty(handle);
-    audit(
-        handle,
-        "update_named_range",
-        &format!("An AI tool edited named range '{}' -> {}", target_name, target_refers_to),
-        vec![
-            ("name", serde_json::json!(name)),
-            ("newName", serde_json::json!(new_name)),
-            ("refersTo", serde_json::json!(target_refers_to)),
-            ("sheetIndex", serde_json::json!(target_scope)),
-        ],
-    );
-
-    Ok(format!(
-        "Updated named range '{}' -> {} ({} undo step(s))",
-        target_name, target_refers_to, undo_steps
-    ))
+    Ok(NamedRangeEdit {
+        name: target_name,
+        refers_to: target_refers_to,
+        scope: target_scope,
+        undo_steps,
+    })
 }
 
 /// Delete a name. Reuses the undoable Name Manager command (which also prunes
@@ -1774,71 +1762,203 @@ mod tests {
         }
     }
 
+    // The tool's own collect / re-point helpers are gone: the rename every route
+    // runs re-points the scripts itself, in its one undo step -- the which-
+    // scripts rules (case-insensitive, NamedRange only, other names untouched)
+    // and the undo are pinned in `named_ranges::rename_tests`
+    // (`a_rename_carries_the_names_scripts_and_one_undo_puts_both_back`).
+
+    // ---- update_named_range: an AI rename is the Name Manager's rename ----
+
+    /// `Rate` (`=Sheet1!$A$1`, A1 = 2, A2 = 5) read by `=Rate*2` in B1, which
+    /// shows 4, with the name edges built the way a load builds them.
+    struct NameFixture {
+        state: AppState,
+        file: crate::persistence::FileState,
+        files: crate::persistence::UserFilesState,
+        pivots: crate::pivot::PivotState,
+        pane: crate::pane_control::PaneControlState,
+        filters: crate::ribbon_filter::RibbonFilterState,
+    }
+
+    impl NameFixture {
+        fn new() -> Self {
+            let state = crate::create_app_state();
+            let seed = crate::document_effect::test_seed_effect();
+            state.named_ranges.write(&seed).unwrap().insert(
+                "RATE".to_string(),
+                crate::named_ranges::NamedRange {
+                    name: "Rate".to_string(),
+                    sheet_index: None,
+                    refers_to: "=Sheet1!$A$1".to_string(),
+                    comment: None,
+                    folder: None,
+                },
+            );
+            let mut reader = engine::Cell::new_formula_with_ast(parser::parse("=Rate*2").expect("=Rate*2 parses"));
+            reader.value = engine::CellValue::Number(4.0);
+            {
+                let mut grid = state.grid.write(&seed).unwrap();
+                let mut grids = state.grids.write(&seed).unwrap();
+                if grids.is_empty() {
+                    grids.push(engine::Grid::new());
+                }
+                for (row, col, cell) in [
+                    (0, 0, engine::Cell::new_number(2.0)),
+                    (1, 0, engine::Cell::new_number(5.0)),
+                    (0, 1, reader),
+                ] {
+                    grid.set_cell(row, col, cell.clone());
+                    grids[0].set_cell(row, col, cell);
+                }
+            }
+            crate::undo_commands::rebuild_all_dependencies(&state);
+            NameFixture {
+                state,
+                file: crate::persistence::FileState::default(),
+                files: crate::persistence::UserFilesState::default(),
+                pivots: crate::pivot::PivotState::new(),
+                pane: crate::pane_control::PaneControlState::new(),
+                filters: crate::ribbon_filter::RibbonFilterState::new(),
+            }
+        }
+
+        fn edit(
+            &self,
+            name: &str,
+            new_name: Option<&str>,
+            refers_to: Option<&str>,
+        ) -> Result<NamedRangeEdit, String> {
+            update_named_range_core(
+                &self.state,
+                &self.file,
+                &self.files,
+                &self.pivots,
+                &self.pane,
+                &self.filters,
+                name,
+                new_name,
+                refers_to,
+                None,
+                None,
+            )
+        }
+
+        fn b1_formula(&self) -> String {
+            self.state.grid.read().unwrap().get_cell(0, 1).and_then(|c| c.formula_string()).unwrap_or_default()
+        }
+
+        fn b1_value(&self) -> engine::CellValue {
+            self.state.grid.read().unwrap().get_cell(0, 1).map(|c| c.value.clone()).unwrap_or(engine::CellValue::Empty)
+        }
+
+        fn names(&self) -> Vec<(String, String)> {
+            let mut out: Vec<(String, String)> = self
+                .state
+                .named_ranges
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(key, n)| (key.clone(), n.name.clone()))
+                .collect();
+            out.sort();
+            out
+        }
+    }
+
+    /// revB#1. The tool renamed by DELETE + CREATE: the delete rewrites no
+    /// formula (Excel's rule for a delete) and the create repoints none, so
+    /// `=Rate*2` kept saying `Rate`, showed `#NAME?`, and it took two undo
+    /// steps. It now runs the Name Manager's rename: [LIVE] Excel 16,
+    /// `Names("Rate").Name = "Tax"` turns B1 into `=Tax*2`, still 4. The name's
+    /// object script is carried to the new name -- by the rename itself now
+    /// (`named_ranges::repoint_named_range_scripts`), not by this tool.
+    ///
+    /// SABOTAGE: put the delete + create back in `update_named_range_core` --
+    /// B1 keeps reading `Rate` and the first assertion fails.
     #[test]
-    fn renaming_a_name_carries_its_object_scripts_over_instead_of_pruning_them() {
-        let state = crate::create_app_state();
+    fn an_ai_rename_repoints_every_reader_in_one_undo_step() {
+        let f = NameFixture::new();
         {
-            let seed = crate::document_effect::DocumentEffect::deliberately_clean(
-                crate::document_effect::CleanReason::LoadingFromDisk,
-            );
-            let mut scripts = state.object_scripts.write(&seed).unwrap();
-            scripts.push(named_range_script("s-tax", "TaxRate"));
-            // A script on an unrelated name must not be touched.
-            scripts.push(named_range_script("s-other", "OtherName"));
-            // Nor one of a different object type that happens to share the id.
-            let mut chart_script = named_range_script("s-chart", "TaxRate");
-            chart_script.object_type = persistence::ScriptableObjectType::Chart;
-            scripts.push(chart_script);
+            let seed = crate::document_effect::test_seed_effect();
+            f.state.object_scripts.write(&seed).unwrap().push(named_range_script("s-rate", "Rate"));
         }
 
-        // Case-insensitive match, exactly like the prune this repairs.
-        let taken = take_named_range_scripts(&state, "taxrate");
-        assert_eq!(taken.len(), 1, "only the NamedRange script for TaxRate");
-        assert_eq!(taken[0].id, "s-tax");
+        let edit = f.edit("Rate", Some("Tax"), None).expect("the rename succeeds");
 
-        // Simulate what delete_named_range does to them.
-        {
-            let seed = crate::document_effect::DocumentEffect::deliberately_clean(
-                crate::document_effect::CleanReason::LoadingFromDisk,
-            );
-            let mut scripts = state.object_scripts.write(&seed).unwrap();
-            scripts.retain(|s| {
-                !(s.object_type == persistence::ScriptableObjectType::NamedRange
-                    && s.instance_id.as_deref() == Some("TaxRate"))
-            });
-            assert_eq!(scripts.len(), 2);
-        }
-
-        let fs = crate::persistence::FileState::default();
-        let effect = crate::document_effect::DocumentEffect::mutates(&fs);
-        restore_named_range_scripts(&state, &effect, taken, "VatRate");
-
-        let scripts = state.object_scripts.read().unwrap();
-        assert_eq!(scripts.len(), 3, "nothing was lost and nothing duplicated");
-        let carried = scripts.iter().find(|s| s.id == "s-tax").expect("the macro survived");
-        assert_eq!(carried.instance_id.as_deref(), Some("VatRate"), "re-pointed at the new name");
-        // Everything else about it is carried over untouched.
-        assert_eq!(carried.declared_capabilities, vec!["bi.query".to_string()]);
-        assert_eq!(carried.provenance, persistence::ScriptProvenance::Local);
-        // The unrelated ones kept their bindings.
         assert_eq!(
-            scripts.iter().find(|s| s.id == "s-other").unwrap().instance_id.as_deref(),
-            Some("OtherName")
+            f.b1_formula(),
+            "Tax*2",
+            "the reader follows the rename -- a delete + create leaves it reading a name that is gone"
         );
+        assert_eq!(f.b1_value(), engine::CellValue::Number(4.0), "...and still evaluates, not #NAME?");
+        assert_eq!(f.names(), vec![("TAX".to_string(), "Tax".to_string())]);
+        assert_eq!(edit.undo_steps, 1, "{edit:?}");
+        {
+            let undo = f.state.undo_stack.lock().unwrap();
+            assert_eq!(undo.undo_depth(), 1, "one undo step, not delete + create");
+            assert_eq!(undo.undo_description(), Some("Rename name"));
+        }
+        let scripts = f.state.object_scripts.read().unwrap();
+        assert_eq!(scripts.len(), 1, "the name's script is neither lost nor duplicated");
+        assert_eq!(scripts[0].instance_id.as_deref(), Some("Tax"), "and it follows the name");
+    }
+
+    /// A rename that ALSO redefines the name: the Name Manager's rename, then
+    /// its edit addressed to the new spelling -- two steps, reported -- and the
+    /// reader follows both (`=Tax*2` over A2 = 5).
+    #[test]
+    fn an_ai_rename_that_also_redefines_moves_the_reader_to_the_new_definition() {
+        let f = NameFixture::new();
+        let edit = f.edit("Rate", Some("Tax"), Some("=Sheet1!$A$2")).expect("rename + redefine");
+        assert_eq!(f.b1_formula(), "Tax*2");
+        assert_eq!(f.b1_value(), engine::CellValue::Number(10.0), "B1 reads the new definition");
+        assert_eq!(edit.undo_steps, 2, "{edit:?}");
+        assert_eq!(f.state.undo_stack.lock().unwrap().undo_depth(), 2);
         assert_eq!(
-            scripts.iter().find(|s| s.id == "s-chart").unwrap().instance_id.as_deref(),
-            Some("TaxRate")
+            f.state.named_ranges.read().unwrap().get("TAX").map(|n| n.refers_to.clone()).as_deref(),
+            Some("=Sheet1!$A$2")
         );
     }
 
+    /// A case-only change is a rename too: the old tool compared the names
+    /// case-insensitively, took the "no rename" branch and stored the old
+    /// spelling again, so `Rate` -> `rate` changed nothing at all. The rename
+    /// re-spells the entry and the references (which the fixture's parse
+    /// stored as `RATE`: the lexer uppercases a bare identifier).
+    ///
+    /// SABOTAGE: decide `renaming` case-insensitively again -- the spelling
+    /// assertion fails.
     #[test]
-    fn restoring_no_scripts_is_a_no_op() {
-        let state = crate::create_app_state();
-        let fs = crate::persistence::FileState::default();
-        let effect = crate::document_effect::DocumentEffect::mutates(&fs);
-        restore_named_range_scripts(&state, &effect, Vec::new(), "Whatever");
-        assert!(state.object_scripts.read().unwrap().is_empty());
-        assert!(take_named_range_scripts(&state, "Nothing").is_empty());
+    fn an_ai_case_only_rename_respells_the_name_and_its_readers() {
+        let f = NameFixture::new();
+        assert_eq!(f.b1_formula(), "RATE*2", "precondition: the stored spelling differs from the new one");
+        let edit = f.edit("Rate", Some("rate"), None).expect("re-spell");
+        assert_eq!(f.names(), vec![("RATE".to_string(), "rate".to_string())], "the entry is re-spelled");
+        assert_eq!(f.b1_formula(), "rate*2", "and so are its readers");
+        assert_eq!(edit.undo_steps, 1, "{edit:?}");
+    }
+
+    /// An edit that changes nothing records nothing and leaves the document
+    /// clean; a refused rename (a table holds the name) moves nothing.
+    #[test]
+    fn an_ai_name_edit_that_changes_nothing_or_is_refused_leaves_the_workbook_alone() {
+        let f = NameFixture::new();
+        let edit = f.edit("Rate", None, Some("=Sheet1!$A$1")).expect("a no-op edit is not an error");
+        assert_eq!(edit.undo_steps, 0, "{edit:?}");
+        assert!(!f.file.is_dirty(), "a no-op edit must not mark the workbook modified");
+        assert_eq!(f.state.undo_stack.lock().unwrap().undo_depth(), 0);
+
+        f.state.table_names.write(&crate::document_effect::test_seed_effect()).unwrap().insert(
+            "TAX".to_string(),
+            (0, identity::EntityId::from_bytes(identity::generate_uuid_v7())),
+        );
+        let before = f.b1_formula();
+        let refused = f.edit("Rate", Some("Tax"), None);
+        assert!(refused.is_err(), "a name may not take a table's name: {refused:?}");
+        assert_eq!(f.names(), vec![("RATE".to_string(), "Rate".to_string())], "nothing moved");
+        assert_eq!(f.b1_formula(), before, "no reader was repointed");
+        assert!(!f.file.is_dirty(), "a refused rename leaves the workbook clean");
     }
 
     // ---- audit ----

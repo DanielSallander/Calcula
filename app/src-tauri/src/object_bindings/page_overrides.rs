@@ -130,8 +130,9 @@ pub struct ReportPages {
 impl ReportPages {
     /// Copy the sheet table out (ids, names, kinds), each lock released.
     pub fn read(state: &AppState) -> ReportPages {
-        let ids = state.sheet_ids.read().map(|g| g.clone()).unwrap_or_default();
-        let names = state.sheet_names.read().map(|g| g.clone()).unwrap_or_default();
+        // Ids and names under ONE hold, `sheet_names` first (BUG-0590 /
+        // BUG-0592): `from_table` pairs them by index.
+        let (ids, names) = crate::calp_commands::sheet_ids_and_names(state).unwrap_or_default();
         let kinds = state.sheet_kinds.read().map(|g| g.clone()).unwrap_or_default();
         ReportPages::from_table(&ids, &names, &kinds)
     }

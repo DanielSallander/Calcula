@@ -875,21 +875,25 @@ pub(crate) fn create_pivot_core(
         }
     }
 
-    // Store pivot table
-    let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
-    pivot_tables.insert(pivot_id, (definition, cache_mut));
-
-    // Set as active pivot
-    let mut active = pivot_state.active_pivot_id.lock().unwrap();
-    *active = Some(pivot_id);
-
-    // Record undo snapshot for pivot creation (undo = delete the pivot), built
+    // The undo snapshot for pivot creation (undo = delete the pivot), built
     // through the ONE payload the restore arm reads (BUG-0054), with the cells
-    // the create wrote over.
+    // the create wrote over -- from the definition BEFORE it moves into the
+    // store, with the clean pre-calc cache (serializable; redo recomputes).
+    let data = crate::undo_commands::pivot_create_snapshot_bytes(pivot_id, &definition, &undo_cache, overwritten_cells);
+
+    // Store the pivot table and make it the active pivot, then RELEASE both
+    // before the undo stack. The cell writers (`update_cell_impl` and its
+    // siblings, run off the main thread by the AI chat, the MCP server and the
+    // notebook) hold `grid`, `grids` and the undo stack and THEN read
+    // `pivot_tables` for GETPIVOTDATA; holding `pivot_tables` here while waiting
+    // for the stack, with no grid lock in common, could freeze the window.
     {
-        let (def, _post_calc_cache) = pivot_tables.get(&pivot_id).unwrap();
-        // The clean pre-calc cache (serializable; redo recomputes).
-        let data = crate::undo_commands::pivot_create_snapshot_bytes(pivot_id, def, &undo_cache, overwritten_cells);
+        let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
+        pivot_tables.insert(pivot_id, (definition, cache_mut));
+    }
+    *pivot_state.active_pivot_id.lock().unwrap() = Some(pivot_id);
+
+    {
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let owned_txn = undo_stack.begin_owned_transaction("Create pivot table");
         undo_stack.record_custom_restore("pivot_create".to_string(), data, "Create pivot table");
@@ -900,8 +904,6 @@ pub(crate) fn create_pivot_core(
 
     // PHASE B — the block just written seeds the ONE shared cascade, after every
     // guard above is released (std mutexes are not reentrant).
-    drop(active);
-    drop(pivot_tables);
     let seeds = pivot_block_seeds(destination, view.row_count, view.col_count);
     let active_sheet = *state.active_sheet.read().unwrap();
     if dest_sheet_idx == active_sheet {
@@ -1902,11 +1904,19 @@ pub fn delete_pivot_table(
     // sources), and `record_source_cascade_undo` records their restore FIRST so
     // it replays LAST, after the objects exist again.
 
-    // Get pivot info before removing
-    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
-    let (definition, cache) = pivot_tables
-        .get(&pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+    // Copy the pivot out before removing it, and RELEASE `pivot_tables` before
+    // the undo stack. The cell writers (`update_cell_impl` and its siblings, run
+    // off the main thread by the AI chat, the MCP server and the notebook) hold
+    // `grid`, `grids` and the undo stack and THEN read `pivot_tables` for
+    // GETPIVOTDATA; this held it across its undo record, with no grid lock in
+    // common, and a delete meeting such a write could freeze the window.
+    let (definition, cache, dest_ref) = {
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+        let (definition, cache) = pivot_tables
+            .get(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+        (definition.clone(), cache.clone(), PivotDestSheet::of(definition))
+    };
 
     // Record undo snapshot for pivot deletion (undo = recreate the pivot)
     {
@@ -1918,8 +1928,8 @@ pub fn delete_pivot_table(
         }
         let snapshot = PivotFullSnapshot {
             pivot_id,
-            definition: definition.clone(),
-            cache: cache.clone(),
+            definition,
+            cache,
         };
         let data = serde_json::to_vec(&snapshot).unwrap_or_default();
         // A MEMBER of an open transaction (wave B, A4): a canvas-wide Delete
@@ -1946,8 +1956,6 @@ pub fn delete_pivot_table(
         }
     }
 
-    let dest_ref = PivotDestSheet::of(definition);
-    drop(pivot_tables);
     let dest_sheet_idx = dest_ref.resolve(&state);
     
     // The block to clear: what the pivot WROTE. An empty pivot's placeholder
@@ -3047,8 +3055,11 @@ pub(crate) const MODEL_VALUE_LISTS_NAME_THE_BLANK: bool = true;
 /// shortcut classed a range pivot's slicer as the pivot's own list, and its
 /// East + (blank) hid the "" rows the slicer never offered.
 ///
-/// LOCKS: the slicer store's read guard alone -- call it holding no pivot lock
-/// (`get_slicer_items` holds the slicers while it takes `pivot_tables`).
+/// LOCKS: the slicer store's read guard alone, released before it returns.
+/// (`get_slicer_items` used to hold the slicers while it took `pivot_tables`,
+/// which is why this was called holding no pivot lock; since BUG-0593 nothing
+/// holds the slicer store while it takes a store the cell writer holds first --
+/// `no_function_holds_the_slicer_store_while_acquiring_a_store_the_cell_writer_holds_first`.)
 pub(crate) fn selection_list_blank_listing(
     slicer_state: &crate::slicer::SlicerState,
     request: &ApplyPivotFilterRequest,

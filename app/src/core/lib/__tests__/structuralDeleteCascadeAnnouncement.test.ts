@@ -31,17 +31,37 @@ function bodyOf(name: string): string {
 
 describe("structural deletes announce the pivot-death cascade (BUG-0054)", () => {
   for (const route of ["deleteRows", "deleteColumns"]) {
+    // CHANGED DELIBERATELY (review FU#5): the OFF-SHEET branch now hands the
+    // cascade to the coalesced off-canvas announcement -- one per burst, not one
+    // per call of a script loop -- as `announceStructuralEditElsewhere(...,
+    // { deletes: true })`, whose flush calls announceStructuralDeleteCascade
+    // (pinned below, and behaviourally in structuralEditElsewhereAnnouncement.test.ts).
+    // CHANGED DELIBERATELY (round 7, NEW-offsheet-structural-frontend-only-state):
+    // the call now carries the edit itself between the description and the
+    // options -- `announceStructuralEditElsewhere("Delete Rows", { sheetIndex,
+    // kind, at, count }, { deletes: true })` -- so the pattern admits that
+    // middle argument (and the line breaks the formatter puts round it).
     it(`${route} reaches the cascade announcement on BOTH branches`, () => {
       const body = bodyOf(route);
-      const calls = body.match(/announceStructuralDeleteCascade\(\)/g) ?? [];
+      const direct = body.match(/announceStructuralDeleteCascade\(\)/g) ?? [];
+      const viaBurst =
+        body.match(/announceStructuralEditElsewhere\(\s*"[^"]+",\s*\{[^{}]*\},\s*\{ deletes: true \},?\s*\)/g) ?? [];
+      expect(direct.length, `${route}: the active-sheet invoke announces the cascade itself`).toBeGreaterThanOrEqual(1);
       expect(
-        calls.length,
+        direct.length + viaBurst.length,
         `${route} must announce after the active-sheet invoke AND after the ` +
           `off-sheet invoke — a script deleting rows on a non-active sheet ` +
           `kills a pivot there just as dead`
       ).toBeGreaterThanOrEqual(2);
     });
   }
+
+  it("the off-canvas burst's flush announces the cascade when a delete is in it", () => {
+    const start = src.indexOf("function flushStructuralEditElsewhere(");
+    expect(start, "the flush has moved or been renamed").toBeGreaterThan(-1);
+    const body = src.slice(start, start + 600);
+    expect(body).toMatch(/if \(deletes\) announceStructuralDeleteCascade\(\);/);
+  });
 
   it("the announcement names the domains the backend cascade touches", () => {
     const start = src.indexOf("function announceStructuralDeleteCascade");

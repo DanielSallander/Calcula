@@ -166,6 +166,7 @@ fn batch(wb: &Workbook, t: &CellTargetRef, writes: &[(u32, u32, &str)]) -> Resul
                 value: value.to_string(),
                 style_index: None,
                 invariant: Some(true),
+                pasted: None,
             })
             .collect(),
         "Paste",
@@ -575,6 +576,78 @@ fn keep_first_value_moves_the_value_and_re_points_its_readers_on_the_backing_she
         "and the reader's text"
     );
     assert!(backing_merges(&wb, backing).is_empty());
+}
+
+/// rev6A#4. The floating-grid merge re-pointed its backing sheet with the
+/// sheet-blind `relocate_references_in_formula` while the sheet gesture used the
+/// move rule, so one gesture gave two answers: a backing formula reading the
+/// HOST's B1 was renumbered to the host's A1, a reader of the empty top-left
+/// silently read the moved value, and the moved formula `=A8+5` landed on A8
+/// reading itself. Excel [LIVE, Excel 16, 2026-10-30, shifters/probemerge.ps1,
+/// merge A1:B1 with A1 empty]: `=Sheet2!B1` stays, `=A1` is `=#REF!`, `=B1` is
+/// `=A1`, `=SUM(A1:B1)` is `=SUM(A1:A1)`, `=Sheet1!B1` is `=Sheet1!A1`, and a
+/// moved `=A1+5` is `=#REF!+5`.
+#[test]
+fn keep_first_value_re_points_the_backing_sheet_the_way_excel_moves_the_value() {
+    let wb = Workbook::new(1);
+    let (t, backing) = float1(&wb, 8, 3);
+    let backing_name = wb.state.sheet_names.read().unwrap()[backing].clone();
+    wb.set(0, 0, "5"); // the HOST's A1
+    wb.set(0, 1, "7"); // the HOST's B1
+    type_in(&wb, &t, 0, 1, "42"); // the grid's B1 holds the first value; A1 is empty
+    type_in(&wb, &t, 1, 0, "=Sheet1!B1"); // A2 reads the HOST's B1
+    type_in(&wb, &t, 2, 0, "=A1"); // A3 reads the empty top-left
+    type_in(&wb, &t, 3, 0, "=B1"); // A4 reads the value that moves
+    type_in(&wb, &t, 4, 0, "=SUM(A1:B1)"); // A5
+    let qualifier = engine::ast_render::quote_sheet_name(&backing_name);
+    type_in(&wb, &t, 5, 0, &format!("={}!B1", qualifier)); // A6, qualified with its own sheet
+    type_in(&wb, &t, 6, 0, "=Sheet1!A1"); // A7 reads the HOST's A1
+    type_in(&wb, &t, 7, 1, "=A8+5"); // B8 reads the empty A8 it will be moved onto
+    type_in(&wb, &t, 7, 2, "=C1*2"); // C8: a formula outside both merges, reading outside them
+    // UPPERCASED: a qualifier keeps the case it was typed in, and these checks
+    // are about where a reference points.
+    let formula = |row: u32, col: u32| {
+        backing_cell(&wb, backing, row, col).and_then(|c| c.formula_string()).map(|f| f.to_ascii_uppercase())
+    };
+    assert_eq!(backing_value(&wb, backing, 1, 0), CellValue::Number(7.0), "precondition: A2 reads the host");
+
+    merge(&wb, &t, (0, 0, 0, 1), MergeOptions { keep_first_value: true, ..Default::default() })
+        .expect("merge A1:B1 keeping the first value");
+    // The moved formula itself is re-pointed too: it read the cell it landed on.
+    merge(&wb, &t, (7, 0, 7, 1), MergeOptions { keep_first_value: true, ..Default::default() })
+        .expect("merge A8:B8 keeping the first value");
+
+    // Every disagreement with Excel is listed, not just the first.
+    let mut wrong: Vec<String> = Vec::new();
+    let mut check = |what: &str, got: String, excel: String| {
+        if got != excel {
+            wrong.push(format!("{what}: Excel {excel}, Calcula {got}"));
+        }
+    };
+    let shown = |row: u32, col: u32| formula(row, col).unwrap_or_else(|| format!("{:?}", backing_value(&wb, backing, row, col)));
+    check("A1, the merged cell", format!("{:?}", backing_value(&wb, backing, 0, 0)), format!("{:?}", CellValue::Number(42.0)));
+    check("A2 =Sheet1!B1 (the host's B1, not the moved B1)", shown(1, 0), "SHEET1!B1".into());
+    check("A2's value", format!("{:?}", backing_value(&wb, backing, 1, 0)), format!("{:?}", CellValue::Number(7.0)));
+    check("A3 =A1 (the top-left the value overwrote)", shown(2, 0), "#REF!".into());
+    check("A3's value", format!("{:?}", backing_value(&wb, backing, 2, 0)), format!("{:?}", CellValue::Error(engine::CellError::Ref)));
+    check("A4 =B1 (the moved value)", shown(3, 0), "A1".into());
+    check("A4's value", format!("{:?}", backing_value(&wb, backing, 3, 0)), format!("{:?}", CellValue::Number(42.0)));
+    check("A5 =SUM(A1:B1)", shown(4, 0), "SUM(A1:A1)".into());
+    check("A6, qualified with the backing sheet's own name", shown(5, 0), format!("{}!A1", qualifier.to_ascii_uppercase()));
+    check("A7 =Sheet1!A1 (the host's A1, never overwritten)", shown(6, 0), "SHEET1!A1".into());
+    check("A7's value", format!("{:?}", backing_value(&wb, backing, 6, 0)), format!("{:?}", CellValue::Number(5.0)));
+    check("A8, the moved =A8+5 (it read the cell it landed on)", shown(7, 0), "#REF!+5".into());
+    check("C8 =C1*2 (outside both merges)", shown(7, 2), "C1*2".into());
+    assert!(wrong.is_empty(), "the floating-grid merge disagrees with Excel:\n  {}", wrong.join("\n  "));
+
+    // One Ctrl+Z per merge puts every formula back.
+    undo_once(&wb);
+    assert_eq!(formula(7, 1).as_deref(), Some("A8+5"));
+    undo_once(&wb);
+    assert_eq!(formula(1, 0).as_deref(), Some("SHEET1!B1"));
+    assert_eq!(formula(2, 0).as_deref(), Some("A1"));
+    assert_eq!(formula(3, 0).as_deref(), Some("B1"));
+    assert_eq!(backing_value(&wb, backing, 0, 1), CellValue::Number(42.0), "B1 is back");
 }
 
 #[test]

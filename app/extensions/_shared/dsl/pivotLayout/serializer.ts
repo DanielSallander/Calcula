@@ -92,7 +92,9 @@ export function serialize(
   }
 
   if (options.saveAs) {
-    lines.push(`SAVE AS "${options.saveAs}"`);
+    // Escaped like every other string literal (revD#3): a name with a quote
+    // in it no longer ends the literal early.
+    lines.push(`SAVE AS "${escapeString(options.saveAs)}"`);
   }
 
   return lines.join('\n');
@@ -139,21 +141,31 @@ function serializeValueFields(fields: ZoneField[], options: SerializeOptions): s
 function serializeValueField(field: ZoneField, options: SerializeOptions): string {
   let result = '';
 
-  // Check if this is a BI measure. Measure fields have names like "[TotalSales]"
-  // (with brackets) while model measures have names like "TotalSales" (without).
-  // Also check customName which may hold the original measure name.
-  const stripBrackets = (s: string) =>
-    s.startsWith('[') && s.endsWith(']') ? s.slice(1, -1) : s;
-  const fieldNameBare = stripBrackets(field.name);
-  const customNameBare = field.customName ? stripBrackets(field.customName) : '';
-  const isBiMeasure = options.biModel?.measures.some(
-    m => m.name === fieldNameBare || m.name === customNameBare
-      || m.name === field.name || m.name === field.customName
+  // Is this a BI measure? Every route that builds a measure's zone field (the
+  // compiler, the pivot editor's measure toggle, the chart wells, the backend's
+  // field configuration) keeps the MEASURE in `name` as "[TotalSales]", while
+  // the model spells it "TotalSales". `customName` is the field's DISPLAY name
+  // -- "[TotalSales]" when not aliased, the alias ("Sales") when it is -- so it
+  // is never evidence of which measure this is, and never the name written.
+  //
+  // BUG-0480: this used to accept a match on customName too and then write
+  // `[${customNameBare || fieldNameBare}]`, so the ALIAS won:
+  // `[Revenue] AS "Sales"` came back as `[Sales] AS "Sales"`, a query naming a
+  // measure that does not exist ("Unknown measure: [Sales]") -- or, worse,
+  // silently a DIFFERENT measure when the model has one called like the alias.
+  // A bracketed name the model no longer has is still written as itself, so
+  // the compiler reports the missing measure instead of the text renaming it.
+  const isBracketed = (s: string) => s.startsWith('[') && s.endsWith(']');
+  const fieldNameBare = isBracketed(field.name) ? field.name.slice(1, -1) : field.name;
+  const isBiMeasure = options.biModel !== undefined && (
+    isBracketed(field.name)
+    || options.biModel.measures.some(m => m.name === fieldNameBare)
   );
 
   if (isBiMeasure) {
-    // Use the bare name (without brackets) since the DSL syntax adds them
-    result = `[${customNameBare || fieldNameBare}]`;
+    // The measure's OWN name, bare (the DSL syntax adds the brackets); an
+    // alias is written only in the AS clause below.
+    result = `[${fieldNameBare}]`;
   } else {
     const aggLabel = getAggregationLabel(field.aggregation ?? 'sum');
     const fieldName = quoteIfNeeded(field.name);
@@ -166,7 +178,11 @@ function serializeValueField(field: ZoneField, options: SerializeOptions): strin
       ? getValueFieldDisplayName(field.name, field.aggregation)
       : field.name;
     if (field.customName !== defaultName && field.customName !== field.name) {
-      result += ` AS "${field.customName}"`;
+      // Escaped (revD#3): `Sa"les` written raw as `AS "Sa"les"` ended the
+      // literal at the inner quote, and the regenerated text no longer
+      // compiled ("Unterminated string literal") -- the pivot editor's Design
+      // tab and getPivotDsl after a value field was renamed with a quote.
+      result += ` AS "${escapeString(field.customName)}"`;
     }
   }
 

@@ -333,6 +333,7 @@ import { pruneVanishedChartSelections } from "./lib/chartCrossFilterPrune";
 import { installHiddenLinesWatch, resetHiddenLinesWatch } from "./lib/hiddenLinesWatch";
 import type { PivotChartFieldButton } from "./types";
 import { PivotEvents } from "../_shared/lib/pivotEvents";
+import { onStructuralEdit } from "../_shared/lib/structuralEditReload";
 
 // ============================================================================
 // Module State
@@ -2324,7 +2325,21 @@ function activate(context: ExtensionContext): void {
   //   "objects":  the backend's chart state changed under us (undo/redo of a
   //               chart edit, an AI-created chart, the charts a sheet delete
   //               took with it) -- a plain re-pull.
-  type ChartReloadKind = "document" | "sheets" | "objects";
+  //   "cells":    a structural edit (insert/delete rows, columns or cells)
+  //               moved chart DATA RANGES in the backend, inside the edit's
+  //               own undo step (BUG-0357, chart_range_shift.rs). Like
+  //               "sheets": a pending save adopts the backend's rewrite where
+  //               the pending edit did not change the same value, and is
+  //               flushed BEFORE the reload -- written as it was, it would put
+  //               the old range back.
+  //   "elsewhere": the same, for a row/column edit OFF the sheet on screen
+  //               (STRUCTURAL_EDIT_ELSEWHERE: a script's or the command line's
+  //               edit of another sheet, a floating grid's backing sheet).
+  //               Nothing on screen moved, so on its own it leaves the reader's
+  //               state alone (review FU#5): the selected chart stays selected
+  //               (its sub-selection re-checked against the re-read data, as
+  //               after a typed source cell) unless the chart is gone.
+  type ChartReloadKind = "document" | "sheets" | "objects" | "cells" | "elsewhere";
   type ChartReloadRequest = Record<ChartReloadKind, boolean>;
   let reloadsDisposed = false;
   cleanupFunctions.push(() => {
@@ -2333,9 +2348,10 @@ function activate(context: ExtensionContext): void {
   const reloadCharts = async (req: ChartReloadRequest) => {
     if (reloadsDisposed) return;
     try {
-      if (req.sheets && !req.document) {
+      if ((req.sheets || req.cells || req.elsewhere) && !req.document) {
         // Never across documents: a pending save from the OUTGOING workbook
-        // has nothing to be flushed into.
+        // has nothing to be flushed into. The reconcile is the same for both:
+        // the backend rewrote stored charts under the store.
         await reloadChartsAfterSheetListChange();
       } else {
         await loadChartsFromBackend();
@@ -2349,7 +2365,15 @@ function activate(context: ExtensionContext): void {
       pruneVanishedChartSelections();
       const idx = await getActiveSheet();
       setActiveSheetIndex(idx);
-      deselectChart();
+      // An edit OFF the sheet on screen, alone in this burst, keeps the
+      // selected chart (review FU#5); every other reason deselects as before.
+      const offScreenOnly = req.elsewhere && !req.document && !req.sheets && !req.objects && !req.cells;
+      const keptId = offScreenOnly ? getCurrentChartId() : null;
+      if (keptId !== null && getChartById(keptId) !== null) {
+        noteChartDataChanging();
+      } else {
+        deselectChart();
+      }
       emitChartSelectionEvent();
       if (req.document || req.objects) {
         // Drop ephemeral point-selections + widget values on file open/new so they
@@ -2381,7 +2405,7 @@ function activate(context: ExtensionContext): void {
       queuedReload[kind] = true;
       return;
     }
-    const req: ChartReloadRequest = { document: false, sheets: false, objects: false };
+    const req: ChartReloadRequest = { document: false, sheets: false, objects: false, cells: false, elsewhere: false };
     req[kind] = true;
     queuedReload = req;
     // From the REQUEST, not from when the chain gets to it: the window in which
@@ -2405,6 +2429,14 @@ function activate(context: ExtensionContext): void {
   // coalesces with the SHEET_CHANGED request that follows (one reload).
   cleanupFunctions.push(
     context.events.on(AppEvents.SHEET_DELETED, () => requestChartsReload("sheets")),
+  );
+  // A structural edit moved chart data ranges in the backend (BUG-0357): the
+  // store re-reads them, adopting the rewrite into any pending save. One off
+  // the sheet on screen is "elsewhere" (it keeps the selected chart).
+  cleanupFunctions.push(
+    onStructuralEdit((eventName, callback) => context.events.on(eventName, callback), (where) =>
+      requestChartsReload(where === "elsewhere" ? "elsewhere" : "cells"),
+    ),
   );
 
   cleanupFunctions.push(

@@ -47,6 +47,7 @@ export type {
 } from "../core/lib/selectionOwner";
 export type { CellTargetRef, CellTargetCells, TargetCellData, TargetCellValueKind } from "../core/types/types";
 export type { CellTargetOptions } from "../core/lib/tauri-api";
+export type { FormatPlacementOptions } from "../core/lib/tauri-api";
 export {
   resolveCellTarget,
   cellTargetFor,
@@ -111,8 +112,11 @@ export async function getCellTargetCells(ref: CellTargetRef, rect: CellTargetRec
         endRow: er,
         endCol: ec,
       });
-      cells.push(...(part.cells ?? []));
-      conditional.push(...(part.conditional ?? []));
+      // One push per entry, never `push(...part.cells)`: a band is up to
+      // CELL_TARGET_READ_BAND (100,000) cells, and spreading that many call
+      // arguments is at the edge of V8's call stack (BUG-0346, revE#5).
+      for (const cell of part.cells ?? []) cells.push(cell);
+      for (const cf of part.conditional ?? []) conditional.push(cf);
       for (const m of part.merges ?? []) merges.set(mergeKey(m), m);
       for (const st of part.styles ?? []) styles.set(st.index, st);
       for (const rule of part.rules ?? []) rules.set(rule.id, rule);
@@ -164,7 +168,8 @@ export async function getCellTargetCellsTyped(ref: CellTargetRef, rect: CellTarg
         endRow: er,
         endCol: ec,
       });
-      out.push(...(part ?? []));
+      // A loop, never `out.push(...part)` (see getCellTargetCells).
+      for (const cell of part ?? []) out.push(cell);
     }
   }
   return out;

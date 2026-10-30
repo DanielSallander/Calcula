@@ -219,6 +219,7 @@ fn an_off_sheet_write_aimed_at_a_canvas_is_refused_and_writes_nothing() {
         "=1+1".to_string(),
         None,
         None,
+        None,
     );
     assert_refused_as_canvas(result, "update_cell_on_sheets");
     assert_eq!(cell_count(&wb, canvas), 0);
@@ -2333,7 +2334,15 @@ fn every_canvas_write_door_is_wired_and_ordered() {
         (CALP, "calp_commands.rs", "pub(crate) fn restore_pulled_pivots(", "is_canvas_sheet", Some("write_pivot_to_grid(")),
         (CALP, "calp_commands.rs", "pub(crate) fn apply_refreshed_pivots(", "is_canvas_sheet", Some("update_pivot_in_grid(")),
         (TABLES, "tables.rs", "pub fn create_table(", "ensure_not_canvas_in_state", Some(EFFECT)),
-        (MCP_TOOLS, "mcp/tools.rs", "pub fn apply_cell_formatting(", "ensure_not_canvas_in_state", Some(EFFECT)),
+        // The tool's body; the shared formatting core it calls mints the effect.
+        // CHANGED DELIBERATELY (review revFU#9): the tool refuses a canvas
+        // itself only for an empty rectangle (it formats nothing); any other
+        // rectangle is refused by the core under ITS guards -- the formatCells
+        // gate below, which `format_cells_on_sheets` runs through
+        // `gate_style_targets` -- so the sheet the tool audits is the sheet
+        // it formatted, read once.
+        (MCP_TOOLS, "mcp/tools.rs", "pub(crate) fn apply_cell_formatting_core(", "ensure_not_canvas_in_state", Some("apply_formatting_core_on_active(")),
+        (PROTECTION, "protection.rs", "pub(crate) fn check_sheet_action_in(", "ensure_not_canvas(", Some("action_refusal(")),
         (SCRIPTING, "scripting/commands.rs", "pub(crate) fn apply_script_modified_grids_core(", "&sheet_kinds", None),
         (SEARCH, "commands/search.rs", "pub(crate) fn replace_all_off_sheet(", "&sheet_kinds", None),
         (SEARCH, "commands/search.rs", "pub fn replace_all(", "&sheet_kinds", None),

@@ -113,6 +113,24 @@ export const AppEvents = {
   ROWS_DELETED: "app:rows-deleted",
   COLUMNS_DELETED: "app:columns-deleted",
   STRUCTURAL_UNDO: "app:structural-undo",
+  // A row/column insert or delete landed OFF the sheet on screen: on a
+  // non-active sheet (a script's or the command line's `sheetIndex`) or on a
+  // floating grid's backing sheet. The backend moved what it keeps for those
+  // sheets (chart and sparkline data ranges, tables, formulas pointing there),
+  // but NOTHING on the sheet on screen moved -- so this is not STRUCTURAL_UNDO,
+  // whose listeners re-read the visible sheet's stores and close its open UI (a
+  // filter dropdown, a validation prompt, the selected chart). Only a store
+  // that caches what the backend keeps for OTHER SHEETS listens, and only to
+  // re-read it: the chart and sparkline ranges and the author's designated
+  // writeback regions (through extensions/_shared/lib/structuralEditReload.ts)
+  // and @api/cellBehaviors' workbook-wide binding index -- or a store whose
+  // coordinates the backend never holds, which REPLAYS the payload's edits on
+  // the sheet each names: the embedded forms' anchors and Controls' side state
+  // filed under anchor-derived control ids.
+  // Coalesced: one announcement per burst (a script loop of N inserts is not N
+  // announcements), with every edit of the burst listed in order.
+  // Payload: StructuralEditElsewherePayload.
+  STRUCTURAL_EDIT_ELSEWHERE: "app:structural-edit-elsewhere",
 
   // Generic post-mutation refresh. Core emits ONE of these with a list of change
   // DOMAINS (not feature/extension names) after undo/redo/commit; a Shell-side
@@ -311,6 +329,43 @@ export const AppEvents = {
   // behind the publisher-gated cap.writebackListSubmissions.
   WRITEBACK_SUBMISSION_RECEIVED: "app:writeback-submission-received",
 } as const;
+
+/**
+ * One row/column edit of a STRUCTURAL_EDIT_ELSEWHERE burst: WHERE the lines
+ * moved, as the edit's caller named them.
+ *
+ * A store that owns cell coordinates the backend never sees (an embedded
+ * form's anchor, an id derived from a control's anchor cell) cannot re-read
+ * them after an edit on a sheet the user is not looking at -- nobody moved
+ * them -- so it replays this shift itself, the same one the ROWS_ family's
+ * coordinates give it on the sheet on screen, on the sheet named here.
+ */
+export interface StructuralEditElsewhereEdit {
+  /**
+   * The sheet whose lines moved (0-based, as it stood at the edit), or null
+   * for a floating grid's own lines -- its hidden backing sheet, which no
+   * sheet index names here.
+   */
+  sheetIndex: number | null;
+  kind: "rowInsert" | "rowDelete" | "colInsert" | "colDelete";
+  /** The first row (column) inserted or deleted, 0-based. */
+  at: number;
+  /** How many rows (columns). */
+  count: number;
+}
+
+/** Payload of STRUCTURAL_EDIT_ELSEWHERE: the edits the burst made. */
+export interface StructuralEditElsewherePayload {
+  /** "Insert Rows", "Delete Columns", ... each named once, in the order first seen. */
+  descriptions: string[];
+  /**
+   * EVERY edit of the burst, in the order it was made -- never folded, so
+   * replaying them in order lands each coordinate where the backend put it.
+   * An edit is in exactly one announcement, and every edit announced before
+   * an on-screen insert or delete (the ROWS_ family) is delivered before it.
+   */
+  edits: StructuralEditElsewhereEdit[];
+}
 
 /**
  * A generic change-domain reported by a MUTATION_REFRESH event. These are

@@ -167,6 +167,18 @@ describe("copyCellRange fills the clipboards -- and nothing of Core's selection"
     expect(sys.written.at(-1), "the system clipboard was not written").toBe("r3c1\tr3c2\nr4c1\tr4c2");
   });
 
+  it("records the source sheet's STABLE id, so a paste finds it after a rename (BUG-0348)", async () => {
+    grid.snapshot = { sheetContext: { activeSheetIndex: 2, activeSheetName: "Canvas1", activeSheetId: "S-canvas" } };
+    fill(0, 0, 0, 0);
+    await copyCellRange({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
+    expect(getInternalClipboard()!.sourceSheetId, "the copy did not record its sheet's id").toBe("S-canvas");
+
+    // A context that carries no id records none -- never a stale one.
+    grid.snapshot = { sheetContext: { activeSheetIndex: 2, activeSheetName: "Canvas1" } };
+    await copyCellRange({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
+    expect(getInternalClipboard()!.sourceSheetId).toBeUndefined();
+  });
+
   it("never dispatches setClipboard (the marching ants belong to Core's selection)", async () => {
     fill(0, 0, 1, 1);
     await copyCellRange({ startRow: 0, startCol: 0, endRow: 1, endCol: 1 });

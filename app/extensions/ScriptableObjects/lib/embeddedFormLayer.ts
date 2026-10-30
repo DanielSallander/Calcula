@@ -128,6 +128,7 @@ import {
   type GridRegion,
   type OverlayRenderContext,
 } from "@api";
+import type { StructuralEditElsewhereEdit, StructuralEditElsewherePayload } from "@api/events";
 // The subpath, not the barrel: this is Core's own pointer rule and a test that
 // doubles `@api` must still be measuring the REAL one, the same way M3b's shim
 // reaches it.
@@ -551,6 +552,42 @@ export function installEmbeddedFormLayer(hostBridge: {
       });
   };
 
+  /**
+   * An insert/delete on a sheet the user is NOT looking at -- a script's or the
+   * command line's `sheetIndex` -- announces STRUCTURAL_EDIT_ELSEWHERE instead
+   * of the four events above, so without this a form placed on that sheet kept
+   * its OLD anchor: it came up over the wrong cells when the user switched
+   * there, and its cell bindings followed. Nothing else can put it right: the
+   * placements are this session's own state, which the backend never sees, so
+   * a re-read would read nothing. The announcement lists every edit in order
+   * (`StructuralEditElsewherePayload.edits`), and each is the same shift as the
+   * on-screen path, on the sheet it names. A floating grid's own lines (sheet
+   * null) anchor no form. Queued behind the on-screen shifts, so the two are
+   * applied in the order they were heard.
+   */
+  const onStructuralEditElsewhere = (detail: unknown): void => {
+    const edits = (detail as Partial<StructuralEditElsewherePayload> | null)?.edits;
+    if (!Array.isArray(edits)) return;
+    const onSheets = edits.filter(
+      (e): e is StructuralEditElsewhereEdit & { sheetIndex: number } => typeof e?.sheetIndex === "number",
+    );
+    if (onSheets.length === 0) return;
+    serialQueue = serialQueue
+      .then(() => {
+        let changed = false;
+        for (const e of onSheets) {
+          if (shiftEmbeddedFormPlacements(e.sheetIndex, structuralAnchorShift(e.kind, e.at, e.count))) changed = true;
+        }
+        if (changed) {
+          syncRegions();
+          emitAppEvent(AppEvents.GRID_REFRESH);
+        }
+      })
+      .catch((err) => {
+        console.error("[ScriptableObjects] embedded-form off-sheet shift failed:", err);
+      });
+  };
+
   const offs: Array<() => void> = [];
   for (const [event, kind] of [
     [AppEvents.ROWS_INSERTED, "rowInsert"],
@@ -560,6 +597,7 @@ export function installEmbeddedFormLayer(hostBridge: {
   ] as const) {
     offs.push(onAppEvent(event, onStructuralEdit(kind)));
   }
+  offs.push(onAppEvent(AppEvents.STRUCTURAL_EDIT_ELSEWHERE, onStructuralEditElsewhere));
   offs.push(
     onAppEvent(AppEvents.SHEET_CHANGED, (detail) => {
       const d = (detail ?? {}) as { sheetIndex?: number };

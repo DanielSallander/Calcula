@@ -442,7 +442,10 @@ async function requireSheet(s: AppCliSession, name: string, line: number): Promi
 }
 
 /** Cell/range commands target the ACTIVE sheet; a qualified reference
- *  switches to its sheet first (resolved live, by name). */
+ *  switches to its sheet first (resolved live, by name) -- the user-visible
+ *  switch a tab click makes, so the grid shows the sheet the command writes
+ *  (the gateway's `setActiveSheet` is `@api/sheetSwitch` activateSheet; a
+ *  backend-only switch left the grid on the old sheet, BUG-0464). */
 async function ensureSheetActive(s: AppCliSession, sheetName: string | null, line: number): Promise<void> {
   if (sheetName === null) return;
   const sheet = await requireSheet(s, sheetName, line);
@@ -490,7 +493,10 @@ export async function runAppWrite(cmd: GenericCommand, s: AppCliSession, io: Cli
       s.sheets = res.sheets;
       s.activeSheetIndex = res.activeIndex;
       await resumeRunBatchAfterHistoryEnded(s);
-      const created = action.name ?? res.sheets[res.activeIndex]?.name ?? "sheet";
+      // By the index FIELD, never list position (review rev3C#8): object-backed
+      // sheets are absent from the list while indices stay true, so the list
+      // position of the active index can name another sheet, or none.
+      const created = action.name ?? res.sheets.find((sh) => sh.index === res.activeIndex)?.name ?? "sheet";
       io.print(`Added ${action.kind === "canvas" ? "canvas" : "sheet"} '${created}'.`);
       return;
     }
@@ -528,16 +534,25 @@ export async function runAppWrite(cmd: GenericCommand, s: AppCliSession, io: Cli
     }
     case "setSheet": {
       const sheet = await requireSheet(s, action.name, cmd.line);
+      // A hide of the ACTIVE sheet moves the backend's active sheet to a
+      // neighbour (BUG-0046), and Core's wrapper announces nothing then. The
+      // gateway's hide FOLLOWS that answer (as its add and delete do), so the
+      // grid switches to the neighbour before the next line runs (BUG-0464).
       const changes: string[] = [];
+      let visibilityResult: SheetsResult | null = null;
       if (action.visibility === "visible") {
-        await s.gateway.unhideSheet(sheet.index);
+        visibilityResult = await s.gateway.unhideSheet(sheet.index);
         changes.push("visibility=visible");
       } else if (action.visibility === "hidden") {
-        await s.gateway.hideSheet(sheet.index);
+        visibilityResult = await s.gateway.hideSheet(sheet.index);
         changes.push("visibility=hidden");
       } else if (action.visibility === "veryHidden") {
-        await s.gateway.hideSheet(sheet.index, "veryHidden");
+        visibilityResult = await s.gateway.hideSheet(sheet.index, "veryHidden");
         changes.push("visibility=veryHidden");
+      }
+      if (visibilityResult) {
+        s.sheets = visibilityResult.sheets;
+        s.activeSheetIndex = visibilityResult.activeIndex;
       }
       if (action.tabColor !== null) {
         await s.gateway.setTabColor(sheet.index, action.tabColor);

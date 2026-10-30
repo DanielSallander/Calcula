@@ -154,6 +154,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "visual-format",
+ "webview2-com",
  "windows",
  "zeroize",
 ]

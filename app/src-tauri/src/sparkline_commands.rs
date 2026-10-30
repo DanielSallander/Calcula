@@ -28,14 +28,33 @@ pub fn get_sparklines(state: State<AppState>) -> Vec<SparklineEntry> {
     state.sparklines.read().unwrap().clone()
 }
 
+/// The refusal [`save_sparklines`] answers when the save was made against
+/// groups the store no longer holds for that sheet (its `base`). The
+/// Sparklines store (extensions/Sparklines/store.ts) matches this prefix,
+/// re-reads the sheet's groups, merges its change into them by group id and
+/// saves again.
+pub(crate) const SPARKLINE_GROUPS_CHANGED: &str = "SPARKLINE_GROUPS_CHANGED";
+
 /// Save sparkline groups for a specific sheet (upsert by sheet_index).
+///
+/// `base`: the sheet's groups blob exactly as the caller last saw it stored
+/// (`""` for "none stored"). When given and the store now holds anything else,
+/// the save is refused with [`SPARKLINE_GROUPS_CHANGED`] and changes nothing
+/// -- clean, no undo step. The store saves its WHOLE group list, and the
+/// backend rewrites the stored list on its own in between: a structural edit
+/// moves, splits or drops groups (BUG-0357, `chart_range_shift.rs`), an undo
+/// puts an older list back. A save made before such a rewrite and landing
+/// after it -- a sparkline change made while an Insert Rows runs -- used to
+/// put the old ranges back over the moved ones (revF#4 item 2), the gap
+/// `update_chart`'s `base` closed for charts.
 #[tauri::command]
 pub fn save_sparklines(
     state: State<AppState>,
     file_state: State<FileState>,
     entry: SparklineEntry,
+    base: Option<String>,
 ) -> Result<(), String> {
-    save_sparklines_impl(&state, &file_state, entry)
+    save_sparklines_against(&state, &file_state, entry, base.as_deref())
 }
 
 /// Is this stored blob "no sparklines at all"?
@@ -57,11 +76,22 @@ fn sparklines_unchanged(previous: Option<&str>, next: &str) -> bool {
     }
 }
 
-/// Command body over plain references (see `document_effect_wave2_tests`).
+/// Command body over plain references with no `base` (an unconditional save),
+/// see `document_effect_wave2_tests`.
 pub(crate) fn save_sparklines_impl(
     state: &AppState,
     file_state: &FileState,
     entry: SparklineEntry,
+) -> Result<(), String> {
+    save_sparklines_against(state, file_state, entry, None)
+}
+
+/// [`save_sparklines`] over plain references, `base` included.
+pub(crate) fn save_sparklines_against(
+    state: &AppState,
+    file_state: &FileState,
+    entry: SparklineEntry,
+    base: Option<&str>,
 ) -> Result<(), String> {
     let sheet_index = entry.sheet_index;
 
@@ -113,20 +143,35 @@ pub(crate) fn save_sparklines_impl(
     // their last edit. `set_active_sheet` deliberately declares itself clean
     // for exactly this reason; an extension must not be able to overrule that
     // by writing back what it just read.
+    //
+    // THE BASE CHECK, THE NO-CHANGE CHECK AND THE WRITE IN ONE CRITICAL
+    // SECTION (`lock_pending`): a rewrite landing between a check under a read
+    // guard and a later write lock would be overwritten all the same. Both
+    // refusals come before the effect, so they leave the document clean; the
+    // list put on the undo stack is the one actually replaced.
     let previous = {
-        let sparklines = state.sparklines.read().map_err(|e| e.to_string())?;
-        sparklines
+        let pending = state.sparklines.lock_pending().map_err(|e| e.to_string())?;
+        let previous = pending
             .iter()
             .find(|s| s.sheet_index == sheet_index)
-            .map(|s| s.groups_json.clone())
-    };
-    if sparklines_unchanged(previous.as_deref(), &entry.groups_json) {
-        return Ok(());
-    }
-
-    let effect = DocumentEffect::mutates(&file_state);
-    {
-        let mut sparklines = state.sparklines.write(&effect).map_err(|e| e.to_string())?;
+            .map(|s| s.groups_json.clone());
+        if let Some(base) = base {
+            // The same equivalence as the no-change check: an absent entry
+            // and an empty list are one state, so a store that saw "none"
+            // matches either.
+            if !sparklines_unchanged(previous.as_deref(), base) {
+                return Err(format!(
+                    "{SPARKLINE_GROUPS_CHANGED}: the sparklines of sheet {} changed in the workbook \
+                     after this edit was made; the edit was not written over them.",
+                    sheet_index
+                ));
+            }
+        }
+        if sparklines_unchanged(previous.as_deref(), &entry.groups_json) {
+            return Ok(());
+        }
+        let effect = DocumentEffect::mutates(file_state);
+        let mut sparklines = pending.authorize(&effect);
         if let Some(existing) = sparklines
             .iter_mut()
             .find(|s| s.sheet_index == sheet_index)
@@ -135,8 +180,9 @@ pub(crate) fn save_sparklines_impl(
         } else {
             sparklines.push(entry);
         }
-    }
-    crate::undo_commands::record_sparklines_undo(&state, sheet_index, previous, "Edit sparklines");
+        previous
+    };
+    crate::undo_commands::record_sparklines_undo(state, sheet_index, previous, "Edit sparklines");
     Ok(())
 }
 
@@ -208,4 +254,134 @@ pub fn clear_all_sparklines(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod base_check_tests {
+    //! revF#4 item 2: the Sparklines store saves a sheet's WHOLE group list, and
+    //! a save made before the backend rewrote that list (a structural edit's
+    //! range shift, an undo) could land after it and put the old ranges back.
+    //! `save_sparklines`' `base` names the list the save was made against, and
+    //! a save whose base the store no longer holds is refused.
+    use super::{save_sparklines_against, SPARKLINE_GROUPS_CHANGED};
+    use crate::api_types::SparklineEntry;
+    use crate::document_effect::test_seed_effect;
+
+    /// One line group, E{row0 + 1}:E{row1 + 1} over A:C, in the given colour.
+    fn groups(row0: u32, row1: u32, color: &str) -> String {
+        format!(
+            r##"[{{"id":1,"location":{{"startRow":{row0},"startCol":4,"endRow":{row1},"endCol":4}},"dataRange":{{"startRow":{row0},"startCol":0,"endRow":{row1},"endCol":2}},"type":"line","color":"{color}"}}]"##
+        )
+    }
+
+    fn stored(state: &crate::AppState) -> Option<String> {
+        state.sparklines.read().unwrap().iter().find(|e| e.sheet_index == 0).map(|e| e.groups_json.clone())
+    }
+
+    /// SABOTAGE: skip the base comparison (`if false && ...`) -- the stale
+    /// recolour is written over the moved ranges and `unwrap_err` panics.
+    #[test]
+    fn a_save_against_groups_the_store_no_longer_holds_is_refused_and_changes_nothing() {
+        let state = crate::create_app_state();
+        let fs = crate::persistence::FileState::default();
+        let seen = groups(1, 4, "#4472C4");
+        state
+            .sparklines
+            .write(&test_seed_effect())
+            .unwrap()
+            .push(SparklineEntry { sheet_index: 0, groups_json: seen.clone() });
+        // The backend moves the ranges (an Insert Rows) after the store read them.
+        let moved = groups(1, 5, "#4472C4");
+        state.sparklines.write(&test_seed_effect()).unwrap()[0].groups_json = moved.clone();
+
+        // The store's recolour, made against the list it SAW.
+        let edit = SparklineEntry { sheet_index: 0, groups_json: groups(1, 4, "#000000") };
+        let refused = save_sparklines_against(&state, &fs, edit, Some(&seen)).unwrap_err();
+        assert!(refused.starts_with(SPARKLINE_GROUPS_CHANGED), "{refused}");
+        assert_eq!(stored(&state), Some(moved.clone()), "the moved ranges are kept");
+        assert!(!fs.is_dirty(), "a refused save leaves the document clean");
+        assert!(!state.undo_stack.lock().unwrap().can_undo(), "and records no undo step");
+
+        // Made against what IS stored: written, dirty, one undo step.
+        let rebased = groups(1, 5, "#000000");
+        save_sparklines_against(
+            &state,
+            &fs,
+            SparklineEntry { sheet_index: 0, groups_json: rebased.clone() },
+            Some(&moved),
+        )
+        .expect("the base matches");
+        assert_eq!(stored(&state), Some(rebased));
+        assert!(fs.is_dirty());
+        assert!(state.undo_stack.lock().unwrap().can_undo());
+
+        // No base: the save is unconditional, as every other caller's is.
+        let unconditional = groups(9, 9, "#FF0000");
+        save_sparklines_against(
+            &state,
+            &fs,
+            SparklineEntry { sheet_index: 0, groups_json: unconditional.clone() },
+            None,
+        )
+        .expect("no base, no check");
+        assert_eq!(stored(&state), Some(unconditional));
+    }
+
+    /// "None stored" is one state however it is spelled: a store that saw no
+    /// entry sends `""`, and the sheet may hold no entry or an empty list. A
+    /// first group on such a sheet is written; once a group IS stored, a save
+    /// made against "none" is refused.
+    #[test]
+    fn a_save_against_nothing_stored_matches_an_absent_or_empty_entry() {
+        let state = crate::create_app_state();
+        let fs = crate::persistence::FileState::default();
+        let first = groups(1, 4, "#4472C4");
+        save_sparklines_against(
+            &state,
+            &fs,
+            SparklineEntry { sheet_index: 0, groups_json: first.clone() },
+            Some(""),
+        )
+        .expect("no entry stored matches the empty base");
+        assert_eq!(stored(&state), Some(first.clone()));
+
+        let stale = save_sparklines_against(
+            &state,
+            &fs,
+            SparklineEntry { sheet_index: 0, groups_json: groups(2, 3, "#000000") },
+            Some(""),
+        )
+        .unwrap_err();
+        assert!(stale.starts_with(SPARKLINE_GROUPS_CHANGED), "{stale}");
+        assert_eq!(stored(&state), Some(first));
+
+        state.sparklines.write(&test_seed_effect()).unwrap()[0].groups_json = "[]".to_string();
+        save_sparklines_against(
+            &state,
+            &fs,
+            SparklineEntry { sheet_index: 0, groups_json: groups(2, 3, "#000000") },
+            Some(""),
+        )
+        .expect("an empty stored list is the same as none");
+    }
+
+    #[test]
+    fn the_base_travels_as_an_optional_string() {
+        // `invoke("save_sparklines", { entry, base })`: `base` is the stored
+        // blob, `""` for none, and absent for an unconditional save.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Args {
+            entry: SparklineEntry,
+            base: Option<String>,
+        }
+        let with: Args = serde_json::from_value(serde_json::json!({
+            "entry": { "sheetIndex": 0, "groupsJson": "[]" }, "base": ""
+        }))
+        .unwrap();
+        assert_eq!(with.base.as_deref(), Some(""));
+        let without: Args =
+            serde_json::from_value(serde_json::json!({ "entry": { "sheetIndex": 0, "groupsJson": "[]" } })).unwrap();
+        assert!(without.base.is_none());
+    }
 }

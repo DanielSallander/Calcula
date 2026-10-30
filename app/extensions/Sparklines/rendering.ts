@@ -250,12 +250,23 @@ function getScaleMinMax(
   group: SparklineGroup,
   dataPoints: DataPoint[],
 ): { min: number; max: number } {
-  // Get data min/max (ignoring NaN)
-  const values = dataPoints.map((d) => d.value).filter((v) => !isNaN(v));
-  if (values.length === 0) return { min: 0, max: 1 };
-
-  let dataMin = Math.min(...values);
-  let dataMax = Math.max(...values);
+  // Get data min/max (ignoring NaN), by a LOOP: `Math.min(...values)` passed one
+  // call argument per point, and V8 throws RangeError somewhere above ~125,000
+  // arguments -- a sparkline over a data range of that size (fetchGroupData
+  // reads one in bands, TYPED_READ_CAP) threw in the paint path and drew
+  // nothing (BUG-0346's pattern; the cell paste twin is useClipboard's
+  // `pasteWidth`).
+  let dataMin = Infinity;
+  let dataMax = -Infinity;
+  let counted = 0;
+  for (const point of dataPoints) {
+    const v = point.value;
+    if (isNaN(v)) continue;
+    if (v < dataMin) dataMin = v;
+    if (v > dataMax) dataMax = v;
+    counted++;
+  }
+  if (counted === 0) return { min: 0, max: 1 };
 
   if (group.axisScaleType === "custom") {
     if (group.axisMinValue !== null) dataMin = group.axisMinValue;

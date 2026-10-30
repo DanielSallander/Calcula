@@ -1022,15 +1022,16 @@ pub fn delete_table(
     // C10 cleanup: prune any object scripts attached to this table so a deleted
     // table leaves no dangling scripts behind. instanceId == the table id.
     let table_id_str = table_id.to_string();
-    let scripts_before = if let Ok(mut scripts) = state.object_scripts.write(&effect) {
-        let before = scripts.clone();
-        scripts.retain(|s| {
-            !(s.object_type == persistence::ScriptableObjectType::Table
-                && s.instance_id.as_deref() == Some(table_id_str.as_str()))
-        });
-        if scripts.len() != before.len() { Some(before) } else { None }
-    } else {
-        None
+    // What the prune took -- and only that -- is kept for the undo, BY ID: a
+    // whole-list snapshot put back every OTHER script as this step found it, so
+    // undoing it after the user had edited or created a script (a script save
+    // records no undo) reverted the edit or deleted the new script.
+    let pruned_scripts = match state.object_scripts.write(&effect) {
+        Ok(mut scripts) => crate::undo_commands::take_object_scripts(&mut scripts, |s| {
+            s.object_type == persistence::ScriptableObjectType::Table
+                && s.instance_id.as_deref() == Some(table_id_str.as_str())
+        }),
+        Err(_) => Vec::new(),
     };
 
     // §3bn: the table is out of its store, so anything BOUND to it is now
@@ -1088,10 +1089,10 @@ pub fn delete_table(
                 "Restore table filter",
             );
         }
-        if let Some(previous) = scripts_before {
+        if !pruned_scripts.is_empty() {
             undo_stack.record_custom_restore(
-                "obj_object_scripts".to_string(),
-                crate::undo_commands::object_scripts_snapshot_bytes(previous),
+                crate::undo_commands::OBJECT_SCRIPTS_BY_ID_RESTORE_KIND.to_string(),
+                crate::undo_commands::object_scripts_pruned_bytes(pruned_scripts),
                 "Restore table scripts",
             );
         }
@@ -2580,15 +2581,16 @@ pub fn convert_to_range(
     // bound to its id has no host and must not be inherited by the next object
     // minted at that id.
     let table_id_str = table_id.to_string();
-    let scripts_before = if let Ok(mut scripts) = state.object_scripts.write(&effect) {
-        let before = scripts.clone();
-        scripts.retain(|s| {
-            !(s.object_type == persistence::ScriptableObjectType::Table
-                && s.instance_id.as_deref() == Some(table_id_str.as_str()))
-        });
-        if scripts.len() != before.len() { Some(before) } else { None }
-    } else {
-        None
+    // What the prune took -- and only that -- is kept for the undo, BY ID: a
+    // whole-list snapshot put back every OTHER script as this step found it, so
+    // undoing it after the user had edited or created a script (a script save
+    // records no undo) reverted the edit or deleted the new script.
+    let pruned_scripts = match state.object_scripts.write(&effect) {
+        Ok(mut scripts) => crate::undo_commands::take_object_scripts(&mut scripts, |s| {
+            s.object_type == persistence::ScriptableObjectType::Table
+                && s.instance_id.as_deref() == Some(table_id_str.as_str())
+        }),
+        Err(_) => Vec::new(),
     };
 
     // §3bn: slicers bound to a table that has stopped being a table.
@@ -2636,10 +2638,10 @@ pub fn convert_to_range(
                 "Restore table filter",
             );
         }
-        if let Some(previous) = scripts_before {
+        if !pruned_scripts.is_empty() {
             undo_stack.record_custom_restore(
-                "obj_object_scripts".to_string(),
-                crate::undo_commands::object_scripts_snapshot_bytes(previous),
+                crate::undo_commands::OBJECT_SCRIPTS_BY_ID_RESTORE_KIND.to_string(),
+                crate::undo_commands::object_scripts_pruned_bytes(pruned_scripts),
                 "Restore table scripts",
             );
         }

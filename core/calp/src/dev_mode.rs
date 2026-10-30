@@ -102,6 +102,13 @@ pub fn pull_dev(
             || floating_ranges.iter().any(|fr| fr.backing_sheet_id == p.source_sheet_id)
     });
 
+    // THE OBJECT PROPERTY BINDINGS of what this pull carries (BUG-0471). A
+    // control property that follows a formula is a `bindings.json` row beside
+    // the control's own literal (empty after the migration, or whatever it was
+    // when the binding was set), so a dev pull that carried the controls and
+    // not the rows previewed a caption that LOOKED live and never moved.
+    let object_bindings = dev_pulled_object_bindings(&workbook, &pulled_sheets, &floating_ranges);
+
     Ok(DevPullResult {
         sheets: pulled_sheets,
         tables: workbook.tables,
@@ -109,10 +116,53 @@ pub fn pull_dev(
         controls: workbook.controls,
         media: workbook.media,
         floating_ranges,
+        object_bindings,
     })
 }
 
+/// The source's `bindings.json` rows a dev pull carries: what a PUBLISH of the
+/// pulled sheets would carry (`publish::published_object_bindings`, the one
+/// rule -- a control by `uid` in a pulled sheet's `controls.json` entry, a
+/// pulled sheet that is a canvas page), narrowed to the object families a dev
+/// pull actually brings:
+///
+/// - `control` and `canvasPage`: as the publish rule says;
+/// - `floatingRange`: a row of `floating_ranges` (the rows this pull carries:
+///   host and backing both here, structurally sound).
+///
+/// A dev pull brings no charts, slicers, timelines or pivots, so their rows stay
+/// home -- landed, they would name an object this pull did not bring. Ids are
+/// the SOURCE's, which a dev pull keeps as the local ids; the host still lands
+/// a row only on an object it actually placed on a pulled sheet.
+fn dev_pulled_object_bindings(
+    workbook: &persistence::Workbook,
+    sheets: &[DevPulledSheet],
+    floating_ranges: &[persistence::SavedFloatingRange],
+) -> Vec<persistence::SavedObjectBinding> {
+    if workbook.object_bindings.is_empty() {
+        return Vec::new();
+    }
+    let sheet_indices: Vec<usize> = workbook
+        .sheets
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| sheets.iter().any(|p| p.source_sheet_id == s.id))
+        .map(|(idx, _)| idx)
+        .collect();
+    let carried_ranges: std::collections::HashSet<String> =
+        floating_ranges.iter().map(|fr| fr.id.to_string()).collect();
+    crate::publish::published_object_bindings(workbook, &sheet_indices)
+        .into_iter()
+        .filter(|row| match row.object.kind.as_str() {
+            "control" | "canvasPage" => true,
+            "floatingRange" => carried_ranges.contains(&row.object.id),
+            _ => false,
+        })
+        .collect()
+}
+
 /// Result of a dev pull.
+#[derive(Default)]
 pub struct DevPullResult {
     pub sheets: Vec<DevPulledSheet>,
     pub tables: Vec<persistence::SavedTable>,
@@ -135,6 +185,13 @@ pub struct DevPullResult {
     /// `sheets`, keyed by SOURCE sheet ids (which a dev pull keeps as the local
     /// ids). Structurally checked the way a real pull checks them.
     pub floating_ranges: Vec<persistence::SavedFloatingRange>,
+    /// The source's object property BINDINGS (`bindings.json` rows) of the
+    /// objects this pull carries -- the controls of the pulled sheets, the
+    /// carried floating ranges and the pulled canvas pages
+    /// (`dev_pulled_object_bindings`), with SOURCE ids, which a dev pull keeps
+    /// as the local ids. The host lands them through the same
+    /// `object_bindings::carriage` a real pull uses (BUG-0471).
+    pub object_bindings: Vec<persistence::SavedObjectBinding>,
 }
 
 /// A sheet pulled from a dev source.
@@ -299,6 +356,13 @@ mod tests {
             hidden_rows: Vec::new(),
             hidden_cols: Vec::new(),
         }];
+        // ...and a property binding of that range, which travels with its row.
+        wb.object_bindings = vec![persistence::SavedObjectBinding {
+            object: persistence::SavedObjectRef { kind: "floatingRange".to_string(), id: fr_id.to_string() },
+            path: "/showTitle".to_string(),
+            formula: "=Source2!A1".to_string(),
+            model: None,
+        }];
         calcula_format::save_calcula(&wb, &source_path).unwrap();
 
         let by_name = pull_dev(&source_path, &["Source1".to_string()]).unwrap();
@@ -306,6 +370,7 @@ mod tests {
         assert_eq!(names, vec!["Source1", "Float1"], "the host's backing sheet joins the pull");
         assert_eq!(by_name.floating_ranges.len(), 1, "and the row that binds them travels");
         assert_eq!(by_name.floating_ranges[0].id, fr_id);
+        assert_eq!(by_name.object_bindings.len(), 1, "so does the range's property binding");
 
         let all = pull_dev(&source_path, &[]).unwrap();
         let names: Vec<&str> = all.sheets.iter().map(|p| p.name.as_str()).collect();
@@ -319,6 +384,82 @@ mod tests {
         let without_host = pull_dev(&source_path, &["Source2".to_string()]).unwrap();
         assert!(without_host.floating_ranges.is_empty(), "no host, no row");
         assert_eq!(without_host.sheets.len(), 1, "and no backing sheet either");
+        assert!(without_host.object_bindings.is_empty(), "and no binding of a range that stayed home");
+    }
+
+    fn binding(kind: &str, id: &str, path: &str, formula: &str) -> persistence::SavedObjectBinding {
+        persistence::SavedObjectBinding {
+            object: persistence::SavedObjectRef { kind: kind.to_string(), id: id.to_string() },
+            path: path.to_string(),
+            formula: formula.to_string(),
+            model: None,
+        }
+    }
+
+    fn button(uid: &str) -> serde_json::Value {
+        serde_json::json!({
+            "row": 2, "col": 2, "controlType": "button", "uid": uid,
+            "properties": { "text": { "valueType": "static", "value": "" } }
+        })
+    }
+
+    /// BUG-0471. A dev pull carried the source's controls and not their
+    /// BINDINGS, so a button whose caption follows `=Data!A1` arrived showing
+    /// its frozen literal. The pull now carries the rows of exactly the objects
+    /// it brings: the controls of the PULLED sheets, the pulled canvas pages and
+    /// the carried floating ranges -- never a control of a sheet left behind,
+    /// and never a chart (a dev pull brings none).
+    ///
+    /// SABOTAGE: return `Vec::new()` from `dev_pulled_object_bindings` -- no
+    /// row travels and the first assertion fails.
+    #[test]
+    fn dev_pull_carries_the_bindings_of_the_objects_it_brings() {
+        let dir = TempDir::new().unwrap();
+        let source_path = dir.path().join("source.cala");
+
+        let mut wb = make_test_workbook(); // Source1(0), Source2(1)
+        let mut page = Sheet::new("Page".to_string());
+        page.kind = persistence::SheetKind::new_canvas();
+        wb.sheets.push(page); // 2
+        let (source1, source2, page_id) = (wb.sheets[0].id, wb.sheets[1].id, wb.sheets[2].id);
+        let chart = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        wb.charts = vec![persistence::SavedChart {
+            id: chart,
+            sheet_id: source1,
+            spec: serde_json::json!({ "chartId": 1, "name": "Sales", "sheetIndex": 0, "spec": { "mark": "bar" } }),
+        }];
+        wb.controls = vec![
+            persistence::SavedSheetControls { sheet_id: source1, controls: serde_json::json!([button("btn-1")]) },
+            persistence::SavedSheetControls { sheet_id: source2, controls: serde_json::json!([button("btn-2")]) },
+        ];
+        wb.object_bindings = vec![
+            binding("control", "btn-1", "/properties/text", "=Source2!A1"),
+            binding("control", "btn-2", "/properties/text", "=Source2!A1"),
+            binding("canvasPage", &page_id.to_string(), "/background", "=Source1!A1"),
+            binding("chart", &chart.to_string(), "/spec/title", "=Source1!A1"),
+        ];
+        calcula_format::save_calcula(&wb, &source_path).unwrap();
+
+        let objects = |result: &DevPullResult| -> Vec<String> {
+            result.object_bindings.iter().map(|b| format!("{}:{}", b.object.kind, b.object.id)).collect()
+        };
+        let some = pull_dev(&source_path, &["Source1".to_string(), "Page".to_string()]).unwrap();
+        assert_eq!(
+            objects(&some),
+            vec![format!("canvasPage:{page_id}"), "control:btn-1".to_string()],
+            "the pulled sheets' button and page travel, the left-behind sheet's button and the chart do not"
+        );
+        assert_eq!(some.object_bindings[1].formula, "=Source2!A1", "carried as written");
+
+        let all = pull_dev(&source_path, &[]).unwrap();
+        assert_eq!(
+            objects(&all),
+            vec![format!("canvasPage:{page_id}"), "control:btn-1".to_string(), "control:btn-2".to_string()],
+            "a chart's row never travels with a dev pull, which brings no chart"
+        );
+
+        let none = pull_dev(&source_path, &["Source2".to_string()]).unwrap();
+        assert_eq!(objects(&none), vec!["control:btn-2".to_string()]);
     }
 
     #[test]

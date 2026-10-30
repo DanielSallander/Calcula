@@ -164,8 +164,8 @@ fn recalc_bulk(wb: &Workbook, seeds: &[(u32, u32)]) {
 /// the new formula, evaluate it, register its edges — and cascade to NOTHING.
 /// Returns the seed list the command now hands to phase B.
 ///
-/// The command computes the new formula text itself (via the private
-/// `relocate_references_in_formula`); the test supplies it, because what is
+/// The command computes the new formula text itself (via
+/// `relocate_references_for_move`); the test supplies it, because what is
 /// under test here is the CASCADE, not the regex rewrite.
 fn relocate_rewrite(wb: &Workbook, rewrites: &[(u32, u32, &str)]) -> Vec<(u32, u32)> {
     let effect = crate::document_effect::DocumentEffect::deliberately_clean(
@@ -322,10 +322,11 @@ fn relocating_references_reaches_a_cross_sheet_reader() {
 
 #[test]
 fn relocate_cell_references_seeds_the_shared_cascade() {
-    // The wiring half: `relocate_cell_references` takes `State` and cannot run
-    // in-process, and the failure mode is silent (stale values, no error).
+    // The wiring half, and the failure mode is silent (stale values, no error).
+    // The `relocate_cell_references` command is a one-line delegation to its
+    // `_core` body, which `move_relocation_tests` also drives in-process.
     const STRUCTURE_RS: &str = include_str!("structure.rs");
-    let body = body_of(STRUCTURE_RS, "relocate_cell_references");
+    let body = body_of(STRUCTURE_RS, "relocate_cell_references_core");
     assert!(
         body.contains("recalc_after_active_sheet_bulk_rewrite("),
         "`relocate_cell_references` rewrites formulas, re-evaluates them and \

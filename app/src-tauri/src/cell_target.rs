@@ -332,7 +332,9 @@ pub(crate) fn refuse_target_with_sheet(
 ///    recalc OFF (it stores, registers the cell's cross-sheet edges and
 ///    records undo inside the step). An explicit `style_index` is applied
 ///    FIRST, so the format the entry lands in decides how it is read (a Text
-///    cell keeps "007"), exactly as the sheet batch does.
+///    cell keeps "007"), exactly as the sheet batch does -- and, as there, a
+///    PASTE (`CellUpdateInput::pasted`) keeps its formula or number in a Text
+///    cell.
 /// 3. PHASE B, holding nothing from phase A: ONE recalculation of the
 ///    backing sheet's dependents anywhere -- a host formula `=Float1!A1`
 ///    included.
@@ -424,7 +426,9 @@ fn write_batch_on_backing(
         if let Some(style_index) = u.style_index {
             set_backing_style(state, file_state, t, u.row, u.col, style_index)?;
         }
-        crate::commands::data::update_cell_on_sheets_inner(
+        // A PASTE keeps its kind in a Text-formatted cell, as on the sheet
+        // (`CellUpdateInput::pasted`).
+        crate::commands::data::update_cell_on_sheets_as(
             state,
             file_state,
             user_files_state,
@@ -437,6 +441,8 @@ fn write_batch_on_backing(
             u.value.clone(),
             u.invariant,
             Some(false),
+            None,
+            u.is_paste(),
         )?;
         // A clear of a styled paste source keeps the format it brought: the
         // clear above removed the whole cell, so the style is put back.

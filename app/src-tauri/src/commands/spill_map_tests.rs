@@ -1299,8 +1299,10 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         // by the detector rather than by a sentence. An exemption that has to
         // be argued is the shape this register keeps finding defects behind.
         // -- Style only: an origin's FORMULA is untouched, so its spill lives -
-        // apply_formatting writes through write_style_delta; the border presets
-        // and adjust_number_format_decimals through write_range_style_plan.
+        // apply_formatting writes through write_style_delta (and, for whole
+        // rows / columns / Select All, BUG-0354, write_range_style_plan); the
+        // border presets and adjust_number_format_decimals through
+        // write_range_style_plan.
         ("commands/styles.rs", "write_style_delta", "style_index only — no formula is removed, so no range is orphaned"),
         ("commands/styles.rs", "set_cell_style", "style_index only"),
         ("commands/styles.rs", "set_cell_rich_text_core", "rich-text runs only (the body of set_cell_rich_text; P3 split it out so tests drive it)"),
@@ -1310,7 +1312,9 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
         ("computed_properties.rs", "apply_fill_color", "style_index only"),
         ("computed_properties.rs", "apply_style_change", "style_index only"),
-        ("mcp/tools.rs", "apply_cell_formatting", "style_index only"),
+        // (`mcp/tools.rs` `apply_cell_formatting` is no longer here: the AI's
+        // format tool writes through `apply_formatting_core`, never a walk of
+        // its own.)
         // -- Rewrites formula REFERENCES, not the formulas' existence --------
         ("tables.rs", "fill_calculated_columns", "writes one table's calculated columns into rows the caller just created or is re-filling. A calculated-column cell is never a spill ORIGIN (its formula is a scalar per row, and a dynamic-array result in a table cell is refused elsewhere), so it removes no origin and orphans nothing. Its three callers run the shared cascade, whose tear-down phase covers any seed that lost its formula"),
         ("named_ranges.rs", "rename_name_in_grids", "re-points defined-name references at the same range; every origin keeps its formula, so no spill ORIGIN is removed or overwritten and the map cannot be orphaned. Same class as the two table renames below"),
@@ -1319,7 +1323,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; every origin keeps its formula"),
         ("commands/structure.rs", "shift_cross_sheet_formulas", "re-points references inside surviving formulas"),
         ("commands/structure.rs", "shift_cross_sheet_formulas_for_off_sheet_edit", "re-points references inside surviving formulas"),
-        ("commands/structure.rs", "relocate_cell_references", "re-points references; seeds the shared cascade for the values"),
+        ("commands/structure.rs", "relocate_cell_references_core", "re-points references (the `relocate_cell_references` command is a one-line delegation to it); seeds the shared cascade for the values"),
         // -- The structural edits move the map in lockstep --------------------
         ("commands/structure.rs", "insert_rows_impl", "shift_flat_cell_stores moves BOTH spill maps with the edit (keys and values), and drops a sheet's claims when an origin is deleted"),
         ("commands/structure.rs", "insert_columns_impl", "shift_flat_cell_stores, as insert_rows_impl"),
@@ -1356,6 +1360,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("persistence.rs", "open_file", "document replacement: reset_document_scoped_stores clears both spill maps for the outgoing document, and `spill_restore::restore_spill_map_on_load` refills them for the incoming one from the extents the file carries (§2ab). Neither half writes a document cell"),
         // -- Helper: the CALLER maintains --------------------------------------
         ("consolidate.rs", "consolidate_data_inner", "`consolidate_data` seeds the shared cascade over its updated_cells"),
+        ("commands/data.rs", "clear_rect_on_background_sheet", "the per-rectangle body of the off-sheet and grouped clears: both callers (`clear_range_with_options_off_sheet_at`, `clear_range_on_sheets_inner`) release the spills the rectangle swallows with `take_spills_owned_within` in the same critical section and hand the released cells in, which it erases"),
         ("calp_commands.rs", "write_override_value", "the raw write; its one caller apply_override_value_to_grid releases orphaned claims on the written sheet"),
         ("calp_commands.rs", "calp_revert_override", "writes only through apply_override_value_to_grid, which releases orphaned claims on the sheet it wrote"),
         ("calp_commands.rs", "calp_accept_upstream", "as calp_revert_override"),
@@ -1381,11 +1386,11 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("drill_through.rs", "drill_through_to_ephemeral_sheet_core", "writes literals into a DETACHED grid for a sheet that did not exist yet (the model-visual drill-through's caption rows above a `write_pivot_to_grid` view), which can hold no pre-existing spill; the `drill_through` command's `toSheet` op delegates here"),
         ("bi/commands.rs", "bi_insert_result", "writes a query result block and seeds the shared cascade"),
         ("bi/commands.rs", "bi_refresh_connection", "rewrites the same result block and seeds the shared cascade"),
-        ("bi/cube.rs", "build_cube_prefetch", "builds a detached prefetch grid, never the document's"),
+        ("bi/cube.rs", "snapshot_prefetch_sheet", "read-only: the `cells.insert(` the detector matches is `cube_cells.insert`, the pre-fetch's OWN map of cube-bearing cells; the grids are taken with .read() and no cell is written (build_cube_prefetch's synchronous half, split out by rev4A#4 -- this entry named build_cube_prefetch, whose `cube_cells.insert` it was)"),
         ("tables.rs", "check_table_auto_expand", "extends a table's own rows; seeds the shared cascade"),
         // -- Reads, or writes something that is not the document ---------------
         ("commands/data.rs", "get_viewport_cells", "read path: builds the payload the canvas paints"),
-        ("scripting/udf.rs", "collect_udf_calls", "collects call sites; writes no document cell"),
+        ("scripting/udf.rs", "collect_udf_calls_impl", "collects call sites into a SCRATCH clone of the grids; writes no document cell (the body of the `collect_udf_calls` command, moved so it runs without a Tauri runtime)"),
         ("state_digest.rs", "digest_cells", "hashes cells"),
         // `get_workbook_state_digest` WAS exempt here. Its body moved into
         // `build_workbook_state_digest` so the lock-order guards could call it
@@ -1466,16 +1471,19 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
     // Non-vacuity: the census must be finding the members this pass fixed.
     for (file, func) in [
         ("commands/data.rs", "clear_range"),
-        ("commands/data.rs", "clear_range_with_options"),
-        ("commands/data.rs", "clear_range_with_options_off_sheet_at"),
-        ("commands/data.rs", "clear_range_on_sheets"),
+        // The active command is a one-line delegation to its `_inner` body now
+        // (testability split, review A#1); the off-sheet twin and the group
+        // door write through their shared per-rectangle body (review G#9).
+        ("commands/data.rs", "clear_range_with_options_inner"),
+        ("commands/data.rs", "clear_rect_on_background_sheet"),
         ("commands/data.rs", "clear_cell"),
         ("commands/data.rs", "sort_range"),
         ("commands/data.rs", "fill_range"),
         ("commands/data.rs", "remove_duplicates"),
         // The command's writing body (testability split — the `update_cell_on_sheets`
-        // wrapper itself writes nothing).
-        ("commands/data.rs", "update_cell_on_sheets_inner"),
+        // wrapper itself writes nothing, and neither does `update_cell_on_sheets_inner`,
+        // which hands its typed writes to the body with `pasted = false`).
+        ("commands/data.rs", "update_cell_on_sheets_as"),
         ("undo_commands.rs", "apply_changes_with"),
     ] {
         assert!(
@@ -1668,9 +1676,9 @@ fn every_release_policy_call_site_actually_releases_the_spill() {
     // list, the detector is reading the wrong thing.
     for expected in [
         "clear_range",
-        "clear_range_with_options",
+        "clear_range_with_options_inner",
         "clear_range_with_options_off_sheet_at",
-        "clear_range_on_sheets",
+        "clear_range_on_sheets_inner",
     ] {
         assert!(
             takers.iter().any(|t| t == expected),
@@ -1865,6 +1873,10 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
         // writing cells still has to answer for itself.
         "apply_spill_decision(",
         "release_origin_spill(",
+        // Round 5: a batch write into a spill the same batch made releases that
+        // array through the ONE tear-down -- a write and its maintenance, like
+        // the two above.
+        "release_fresh_spill_under_write(",
         "consolidate_data_inner(",
         "write_override_value(",
         "shift_per_sheet_cell_map(",
@@ -1893,6 +1905,7 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
         // §3bm: see the note in WRITES.
         "apply_spill_decision(",
         "release_origin_spill(",
+        "release_fresh_spill_under_write(",
         // The UNDO half. Every entry above maintains the map by re-deriving it
         // from the grid it just wrote; an undo cannot, because ownership is not
         // in the grid. It carries the claims in its snapshot and swaps them

@@ -28,7 +28,6 @@ import {
   renameNamedRange,
   renameSheet,
   resolveNamedRangeCoords,
-  setActiveSheet,
   setTabColor,
   sortRangeByColumn,
   undo,
@@ -48,6 +47,7 @@ import { getAllPivotTables, getAllTables } from "@api/backend";
 import type { ClearApplyTo, Table } from "@api/backend";
 import type { CellData, UsedRangeResult } from "@api/types";
 import { navigateToRange } from "@api/grid";
+import { activateSheet, changeSheetsAndFollow } from "@api/sheetSwitch";
 import { CommandRegistry, CoreCommands } from "@api/commands";
 import { commandRefusalFor } from "@api/commandRefusals";
 import { listWorkbookScripts } from "@api/workbookScripts";
@@ -62,8 +62,17 @@ import type { UndoTransactionTicket } from "@api/undoTicket";
 /** Everything the app CLI domain may do to the workbook. */
 export interface AppCliGateway {
   // --- Sheets --------------------------------------------------------------
+  //
+  // Every method below that CHANGES the sheet list resolves only once the grid,
+  // the tab strip and every listener FOLLOW the backend's answer
+  // (`@api/sheetSwitch` changeSheetsAndFollow): an add makes the new sheet
+  // active, a delete of the active sheet lands on a neighbour, a hide of the
+  // active sheet moves it -- and each of those used to move the BACKEND's
+  // active sheet alone, so the grid painted the old sheet while the next edit
+  // landed on the new one (BUG-0464, review revG#2). A refused change rejects
+  // and announces nothing.
   getSheets(): Promise<SheetsResult>;
-  /** `kind` omitted = a worksheet; "canvas" adds a canvas page. */
+  /** `kind` omitted = a worksheet; "canvas" adds a canvas page. Made active. */
   addSheet(name?: string, kind?: SheetKindName): Promise<SheetsResult>;
   /**
    * `expectedSheetId`: the STABLE id read together with `index`. The backend
@@ -77,6 +86,13 @@ export interface AppCliGateway {
   hideSheet(index: number, level?: "hidden" | "veryHidden"): Promise<SheetsResult>;
   unhideSheet(index: number): Promise<SheetsResult>;
   setTabColor(index: number, color: string): Promise<SheetsResult>;
+  /**
+   * Make sheet `index` the ACTIVE sheet the way a tab click does: the backend
+   * switches AND the grid, the tab strip and every listener follow it
+   * (`@api/sheetSwitch` activateSheet). A backend-only switch left the grid
+   * painting the old sheet while the CLI's next cell write -- and the user's
+   * -- landed on the new one (BUG-0464).
+   */
   setActiveSheet(index: number): Promise<SheetsResult>;
   getUsedRange(sheetIndex?: number): Promise<UsedRangeResult>;
 
@@ -212,18 +228,51 @@ async function throughCommand(
   return result;
 }
 
-/** The live gateway: each method delegates to exactly one @api function. */
+/**
+ * Every switch the command line causes leaves the KEYBOARD where it is (review
+ * rev3C#3). A switch gives the grid focus by default (a tab click leaves it on
+ * the tab), so `add sheet Report`, a delete or a hide of the active sheet, or a
+ * qualified `set cell Sheet2!A1` moved focus from the prompt to the grid, and
+ * the next line the user typed went into a cell -- Enter committed it as cell
+ * content.
+ */
+const KEEP_PROMPT_FOCUS = { keepFocus: true } as const;
+
+/** The live gateway: each method delegates to exactly one @api function (a
+ *  sheet-list change runs inside `@api/sheetSwitch` changeSheetsAndFollow). */
 export function createLiveAppGateway(): AppCliGateway {
   return {
     getSheets: () => getSheets(),
-    addSheet: (name?: string, kind?: SheetKindName) => addSheet(name, kind),
+    // Each sheet-list change FOLLOWED (see the interface): the wrapper's answer
+    // goes straight to the seam, which switches the grid when the backend moved
+    // its active sheet -- with what the change did to the numbering, so every
+    // later sheet keeps its own selection and scroll: a delete by the index it
+    // removed, an add by the index the backend gave the new sheet (the end of
+    // the USER sheets, so it lands BEFORE any object sheet in the tail and
+    // moves those up one -- the tab strip tells its own add the same way).
+    addSheet: (name?: string, kind?: SheetKindName) =>
+      changeSheetsAndFollow(
+        () => addSheet(name, kind),
+        (added) => ({ insertedIndex: added.activeIndex }),
+        KEEP_PROMPT_FOCUS,
+      ),
     deleteSheet: (index: number, expectedSheetId?: string) =>
-      deleteSheet(index, expectedSheetId === undefined ? undefined : { expectedSheetId }),
-    renameSheet: (index: number, newName: string) => renameSheet(index, newName),
-    hideSheet: (index: number, level?: "hidden" | "veryHidden") => hideSheet(index, level),
-    unhideSheet: (index: number) => unhideSheet(index),
-    setTabColor: (index: number, color: string) => setTabColor(index, color),
-    setActiveSheet: (index: number) => setActiveSheet(index),
+      changeSheetsAndFollow(
+        () => deleteSheet(index, expectedSheetId === undefined ? undefined : { expectedSheetId }),
+        { removedIndex: index },
+        KEEP_PROMPT_FOCUS,
+      ),
+    renameSheet: (index: number, newName: string) =>
+      changeSheetsAndFollow(() => renameSheet(index, newName), undefined, KEEP_PROMPT_FOCUS),
+    hideSheet: (index: number, level?: "hidden" | "veryHidden") =>
+      changeSheetsAndFollow(() => hideSheet(index, level), undefined, KEEP_PROMPT_FOCUS),
+    unhideSheet: (index: number) => changeSheetsAndFollow(() => unhideSheet(index), undefined, KEEP_PROMPT_FOCUS),
+    // The wrapper announces nothing at all: followed, the tab strip re-reads
+    // its list and shows the colour.
+    setTabColor: (index: number, color: string) =>
+      changeSheetsAndFollow(() => setTabColor(index, color), undefined, KEEP_PROMPT_FOCUS),
+    // THE TAB CLICK, not the bare backend switch (BUG-0464): the grid follows.
+    setActiveSheet: (index: number) => activateSheet(index, KEEP_PROMPT_FOCUS),
     getUsedRange: (sheetIndex?: number) => getUsedRange(sheetIndex),
 
     updateCell: (row: number, col: number, input: string) => updateCell(row, col, input),

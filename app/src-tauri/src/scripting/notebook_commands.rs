@@ -426,13 +426,11 @@ async fn run_cell_internal(
     // run-all / rewind / run-from all funnel through here.
     require_distributed_notebook_consent(app, app_state, script_state, notebook_id, cell_id, source)?;
 
-    // Phase 1 (sync): clone AppState data + checkpoint bookkeeping
-    let grids = app_state.grids.read().map_err(|e| e.to_string())?.clone();
+    // Phase 1 (sync): clone AppState data + checkpoint bookkeeping. The grids,
+    // the names and which sheet each grid IS come from ONE hold
+    // (`read_cell_run_inputs`); the style registry pairs with no index.
+    let CellRunInputs { grids, sheet_ids, sheet_names, active_sheet } = read_cell_run_inputs(app_state)?;
     let style_registry = app_state.style_registry.read().map_err(|e| e.to_string())?.clone();
-    let sheet_names = app_state.sheet_names.read().map_err(|e| e.to_string())?.clone();
-    let active_sheet = *app_state.active_sheet.read().map_err(|e| e.to_string())?;
-    // Which sheet each grid IS, for the rewind (see `NotebookCheckpoints`).
-    let sheet_ids = app_state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
 
     {
         let mut runtime = script_state
@@ -563,6 +561,41 @@ async fn run_cell_internal(
             Ok(NotebookCellResponse::Error { message, output })
         }
     }
+}
+
+/// The workbook as one notebook cell run reads it (phase 1 of
+/// `run_cell_internal`).
+pub(crate) struct CellRunInputs {
+    /// Every sheet's grid, in the workbook's sheet order.
+    pub grids: Vec<engine::grid::Grid>,
+    /// Which sheet each grid IS: `sheet_ids[i]` is the stamp
+    /// [`capture_checkpoint`] puts on `grids[i]`, and the rewind installs each
+    /// snapshot by it ([`plan_checkpoint_install`]).
+    pub sheet_ids: Vec<identity::SheetId>,
+    /// The names the interpreter resolves `Sheet2!A1` against, paired with
+    /// `grids` by index.
+    pub sheet_names: Vec<String>,
+    pub active_sheet: usize,
+}
+
+/// Read [`CellRunInputs`] under ONE hold of `grids` (BUG-0590 / BUG-0592).
+///
+/// Every field is paired with `grids` by index, so they must describe the
+/// same moment. The grids used to be cloned and RELEASED before the names and
+/// ids were read: a `move_sheet` landing in between (the user dragging a tab
+/// while a long cell starts on the async worker) gave a checkpoint stamped
+/// with permuted ids, and a later Rewind poured sheet A's snapshot onto sheet
+/// B. The names and the ids come through `calp_commands::sheet_ids_and_names`
+/// (names first) while `grids` is held -- the crate's order, `grid`/`grids`
+/// before everything else, which every sheet mover (`move_sheet`,
+/// `delete_sheet_impl`, `set_active_sheet`) also takes first.
+pub(crate) fn read_cell_run_inputs(app_state: &AppState) -> Result<CellRunInputs, String> {
+    let held = app_state.grids.read().map_err(|e| e.to_string())?;
+    let (sheet_ids, sheet_names) = crate::calp_commands::sheet_ids_and_names(app_state)?;
+    let active_sheet = *app_state.active_sheet.read().map_err(|e| e.to_string())?;
+    let grids: Vec<engine::grid::Grid> = (*held).clone();
+    drop(held);
+    Ok(CellRunInputs { grids, sheet_ids, sheet_names, active_sheet })
 }
 
 /// Record the checkpoint taken before `cell_id` runs: the grids as they are,

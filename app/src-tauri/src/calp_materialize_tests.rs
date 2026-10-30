@@ -2479,6 +2479,7 @@ fn a_dev_pull_keeps_the_partition_and_brings_its_floating_ranges() {
         &h.slicer,
         &h.timeline,
         &h.ribbon,
+        &h.pivot,
         &params,
     )
     .expect("dev subscribe");
@@ -2521,6 +2522,7 @@ fn a_dev_pull_keeps_the_partition_and_brings_its_floating_ranges() {
         &h.slicer,
         &h.timeline,
         &h.ribbon,
+        &h.pivot,
     )
     .expect("dev refresh");
     assert_eq!(h.state.sheet_names.read().unwrap().len(), sheets_before, "no sheet appended twice");
@@ -2566,6 +2568,7 @@ fn a_dev_pull_never_creates_two_sheets_with_one_name() {
         &h.slicer,
         &h.timeline,
         &h.ribbon,
+        &h.pivot,
         &params,
     )
     .expect("dev subscribe");
@@ -2595,6 +2598,7 @@ fn a_dev_pull_never_creates_two_sheets_with_one_name() {
         &h.slicer,
         &h.timeline,
         &h.ribbon,
+        &h.pivot,
     )
     .expect("dev refresh");
     assert_eq!(
@@ -3203,6 +3207,7 @@ fn a_second_dev_subscribe_to_the_same_source_is_refused_and_changes_nothing() {
             &h.slicer,
             &h.timeline,
             &h.ribbon,
+            &h.pivot,
             &params,
         )
     };
@@ -4777,4 +4782,262 @@ fn every_door_that_serialises_charts_stamps_them_through_the_one_collector() {
     }
     assert_eq!(calls.len(), 1, "the chart store must be serialised through exactly one call: {calls:?}");
     assert!(calls[0].starts_with("persistence.rs:"), "{calls:?}");
+}
+
+// ---------------------------------------------------------------------------
+// rev5B#1 (BUG-0476): the results cache of the sheets an install brings
+// ---------------------------------------------------------------------------
+
+/// A formula cell carrying the value its workbook last computed.
+fn saved_formula(formula: &str, value: engine::CellValue) -> SavedCell {
+    let mut cell = Cell::new_formula(formula.to_string());
+    cell.value = value;
+    SavedCell::from_cell(&cell)
+}
+
+/// What `save_file` runs before every Ctrl+S (`calculate_before_save`): the
+/// workbook pass with no cube data and no custom-function resolver.
+fn the_save_recalculation(h: &Harness) {
+    crate::calculation::run_calculation_pass(
+        crate::calculation::CalcScope::Workbook,
+        None,
+        &h.state,
+        &crate::persistence::UserFilesState::default(),
+        &h.pivot,
+        &h.pane,
+        &h.ribbon,
+        None,
+    )
+    .expect("the save's recalculation runs");
+}
+
+fn value_at(h: &Harness, sheet: usize, row: u32, col: u32) -> engine::CellValue {
+    h.state.grids.read().unwrap()[sheet]
+        .get_cell(row, col)
+        .map(|c| c.value.clone())
+        .unwrap_or(engine::CellValue::Empty)
+}
+
+/// Checkout, then Ctrl+S, then an edit. The application's cube and
+/// custom-function cells arrive with the values the publisher's workbook
+/// computed; nothing seeded their results cache (only an open did), so the
+/// save's recalculation refused every one and saved `#N/A` / `#NAME?` -- and
+/// any later recalculation without data that reached them did the same.
+///
+/// SABOTAGE (seeding): drop the `remember_installed_call_results` call in
+/// `materialize_pull_result` -- the edit's cascade then refuses B1.
+#[test]
+fn a_checked_out_application_keeps_its_cube_and_custom_function_values_through_a_save() {
+    use engine::CellValue;
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut sheet = Sheet::new("Report".to_string());
+    sheet.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    sheet
+        .cells
+        .insert((1, 0), SavedCell::from_cell(&Cell::new_text("Sales[country]=USA".to_string())));
+    sheet.cells.insert((0, 1), saved_formula("=MYFN(A1)", CellValue::Number(42.0)));
+    sheet
+        .cells
+        .insert((1, 1), saved_formula(r#"=CUBEVALUE("Sales","[Revenue]",A2)"#, CellValue::Number(175.0)));
+    sheet.cells.insert((2, 1), saved_formula("=MYFN(A1+1)*2", CellValue::Number(100.0)));
+    sheet
+        .cells
+        .insert((3, 1), saved_formula(r#"=CUBEVALUE("Sales","[Revenue]",A2)/1000"#, CellValue::Number(0.175)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![sheet];
+    let pulled = publish_and_pull(&dir, prof.path(), &wb);
+
+    let h = Harness::new();
+    h.empty_as_checkout_does();
+    h.materialize(pulled, MaterializeMode::Checkout);
+
+    for save in 1..=2 {
+        the_save_recalculation(&h);
+        assert_eq!(value_at(&h, 0, 0, 1), CellValue::Number(42.0), "save {save}: =MYFN(A1)");
+        assert_eq!(value_at(&h, 0, 1, 1), CellValue::Number(175.0), "save {save}: =CUBEVALUE(..,A2)");
+        assert_eq!(value_at(&h, 0, 2, 1), CellValue::Number(100.0), "save {save}: =MYFN(A1+1)*2");
+        assert_eq!(value_at(&h, 0, 3, 1), CellValue::Number(0.175), "save {save}: =CUBEVALUE(..,A2)/1000");
+    }
+
+    // An edit without a resolver that rewrites A1 with the SAME value: its
+    // cascade re-evaluates B1, which must be answered from the seeded cache,
+    // exactly as after an open -- and a new value is refused, never 42. The
+    // cascade walks the active sheet's dependency maps, which the frontend's
+    // activation of the working copy's sheet rebuilds; this stands in for it.
+    crate::undo_commands::rebuild_all_dependencies(&h.state);
+    let batch = |value: &str| {
+        crate::commands::data::update_cells_batch_core(
+            &h.state,
+            &crate::persistence::FileState::default(),
+            &crate::persistence::UserFilesState::default(),
+            &h.pivot,
+            vec![crate::api_types::CellUpdateInput {
+                row: 0,
+                col: 0,
+                value: value.to_string(),
+                style_index: None,
+                invariant: Some(true),
+                pasted: None,
+            }],
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("the batch writes");
+    };
+    batch("3");
+    assert_eq!(value_at(&h, 0, 0, 1), CellValue::Number(42.0), "the cascade served MYFN(3) from the seeded cache");
+    batch("4");
+    assert_eq!(
+        value_at(&h, 0, 0, 1),
+        CellValue::Error(engine::CellError::Name),
+        "MYFN(4) was never answered: refused, never MYFN(3)'s 42"
+    );
+}
+
+/// SUBSCRIBE an application whose formula reads a sheet it did not publish:
+/// `=MYFN(Inputs!A1)*2` was computed against the PUBLISHER's Inputs (3 -> 84)
+/// and here reads the subscriber's own Inputs (5). That value is not this
+/// workbook's answer, so the install must not let the save's recalculation
+/// keep it; a self-contained cell on another pulled sheet still is kept.
+///
+/// SABOTAGE: `InstallScope::is_foreign` answers false.
+#[test]
+fn a_subscribed_cell_reading_what_the_application_did_not_bring_is_refused_not_kept() {
+    use engine::CellValue;
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut report = Sheet::new("Report".to_string());
+    report.cells.insert((0, 1), saved_formula("=MYFN(Inputs!A1)*2", CellValue::Number(84.0)));
+    let mut summary = Sheet::new("Summary".to_string());
+    summary.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    summary.cells.insert((0, 1), saved_formula("=MYFN(A1)*2", CellValue::Number(84.0)));
+    let mut inputs = Sheet::new("Inputs".to_string());
+    inputs.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![report, summary, inputs];
+    publish_sheets(&dir, prof.path(), &wb, vec![0, 1]);
+    let pulled = subscribe_pull(&dir, prof.path());
+
+    let h = Harness::new();
+    {
+        let effect = test_effect();
+        h.state.sheet_names.write(&effect).unwrap()[0] = "Inputs".to_string();
+        let mut grid = h.state.grid.write(&effect).unwrap();
+        let mut grids = h.state.grids.write(&effect).unwrap();
+        grid.set_cell(0, 0, Cell::new_number(5.0));
+        grids[0].set_cell(0, 0, Cell::new_number(5.0));
+    }
+    h.materialize(pulled, MaterializeMode::Subscribe);
+    let names = h.state.sheet_names.read().unwrap().clone();
+    let report_at = names.iter().position(|n| n == "Report").expect("Report landed");
+    let summary_at = names.iter().position(|n| n == "Summary").expect("Summary landed");
+
+    the_save_recalculation(&h);
+    assert_eq!(
+        value_at(&h, report_at, 0, 1),
+        CellValue::Error(engine::CellError::Name),
+        "the save kept the publisher's MYFN(3)*2 beside this workbook's Inputs!A1 = 5"
+    );
+    assert_eq!(
+        value_at(&h, summary_at, 0, 1),
+        CellValue::Number(84.0),
+        "a cell reading only what the application brought keeps its value"
+    );
+}
+
+/// UPDATE, then Ctrl+S (NEW-update-refuses-composite-formulas). The update
+/// re-evaluated every refreshed sheet with the cascade rule, which refuses a
+/// cube or custom-function call the results cache cannot answer -- and the
+/// install seeds only ROOT calls -- so every composite formula on an updated
+/// sheet became `#NAME?` / `#N/A`, and the save kept the refusal. The
+/// update's recalculation now keeps the publisher's value while nothing the
+/// cell reads was written by the update (an override here) or changed by the
+/// recalculation, and refuses it whole otherwise.
+///
+/// SABOTAGE (keep): call `recalculate_sheet_values` per refreshed sheet again
+/// -- B1 and B2 are refused. SABOTAGE (changed set): drop the `written` cells
+/// from `KeepWithoutData::for_installed_sheets` -- B3 keeps MYFN(5)'s 20
+/// beside the override's 6. SABOTAGE (order): never mark a sheet not yet
+/// recalculated as unsettled -- B4 keeps MYFN(3)*2 although Data!A1, which
+/// Data's own turn recalculates later, becomes 4.
+#[test]
+fn an_updated_application_keeps_its_composite_values_through_a_save_and_refuses_what_an_override_changed() {
+    use engine::CellValue;
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut report = Sheet::new("Report".to_string());
+    report.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    report
+        .cells
+        .insert((1, 0), SavedCell::from_cell(&Cell::new_text("Sales[country]=USA".to_string())));
+    report.cells.insert((2, 0), SavedCell::from_cell(&Cell::new_number(5.0)));
+    report.cells.insert((0, 1), saved_formula("=MYFN(A1)*2", CellValue::Number(84.0)));
+    report
+        .cells
+        .insert((1, 1), saved_formula(r#"=CUBEVALUE("Sales","[Revenue]",A2)/1000"#, CellValue::Number(0.175)));
+    report.cells.insert((2, 1), saved_formula("=MYFN(A3)*2", CellValue::Number(20.0)));
+    report.cells.insert((3, 1), saved_formula("=MYFN(Data!A1)*2", CellValue::Number(84.0)));
+    report.cells.insert((0, 2), SavedCell::from_cell(&Cell::new_number(1.0)));
+    // Data comes AFTER Report: its A1 (=A2) is recalculated on its own turn.
+    let mut data = Sheet::new("Data".to_string());
+    data.cells.insert((0, 0), saved_formula("=A2", CellValue::Number(3.0)));
+    data.cells.insert((1, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![report, data];
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "composites", (1, 0, 0), None);
+
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "composites"), MaterializeMode::Subscribe);
+    let (at, data_at) = (h.index_of("Report"), h.index_of("Data"));
+    assert!(at < data_at, "precondition: Report is recalculated before Data");
+
+    // The subscriber overrides Report!A3 (5 -> 6) and Data!A2 (3 -> 4).
+    {
+        let effect = test_effect();
+        for (sheet, position, from, to) in [(at, (2, 0), "5", 6.0), (data_at, (1, 0), "3", 4.0)] {
+            let local = h.state.sheet_ids.read().unwrap()[sheet];
+            h.state.grids.write(&effect).unwrap()[sheet].set_cell(position.0, position.1, Cell::new_number(to));
+            h.state.override_layer.write(&effect).unwrap().set_override(calp::CellOverride {
+                sheet_id: local,
+                cell_id: identity::CellId::from_bytes(identity::generate_uuid_v7()),
+                position,
+                baseline: calp::OverrideValue::Value { display: from.to_string() },
+                current: calp::OverrideValue::Value { display: format!("{}", to) },
+                created_at: "2026-09-25T00:00:00Z".to_string(),
+                modified_at: "2026-09-25T00:00:00Z".to_string(),
+                author: String::new(),
+                conflict: false,
+                upstream_new: None,
+                extra: std::collections::HashMap::new(),
+            });
+        }
+    }
+
+    // v2 changes something else; the formulas and their inputs are as they were.
+    wb.sheets[0].cells.insert((0, 2), SavedCell::from_cell(&Cell::new_number(2.0)));
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "composites", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "composites"))]);
+
+    let (at, data_at) = (h.index_of("Report"), h.index_of("Data"));
+    assert_eq!(value_at(&h, at, 0, 2), CellValue::Number(2.0), "precondition: v2 landed");
+    assert_eq!(value_at(&h, at, 2, 0), CellValue::Number(6.0), "precondition: the override was painted back");
+    assert_eq!(value_at(&h, data_at, 0, 0), CellValue::Number(4.0), "precondition: Data!A1 follows its override");
+    for pass in ["the update", "a save after it"] {
+        assert_eq!(value_at(&h, at, 0, 1), CellValue::Number(84.0), "{pass}: =MYFN(A1)*2 refused");
+        assert_eq!(value_at(&h, at, 1, 1), CellValue::Number(0.175), "{pass}: =CUBEVALUE(..,A2)/1000 refused");
+        assert_eq!(
+            value_at(&h, at, 2, 1),
+            CellValue::Error(engine::CellError::Name),
+            "{pass}: =MYFN(A3)*2 kept the publisher's MYFN(5)*2 beside the subscriber's A3 = 6"
+        );
+        assert_eq!(
+            value_at(&h, at, 3, 1),
+            CellValue::Error(engine::CellError::Name),
+            "{pass}: =MYFN(Data!A1)*2 kept the publisher's MYFN(3)*2 although Data!A1 is now 4"
+        );
+        the_save_recalculation(&h);
+    }
 }

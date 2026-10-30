@@ -638,9 +638,10 @@ pub(crate) fn restore_sheet_view_from_workbook(
 //     `.calp` carrier's slicer/timeline collectors plus the rest of
 //     `calp_commands::assemble_publish_snapshot`) cannot be held the same way:
 //     they read `SlicerState::slicers`, and the async slicer-item fetch
-//     (`slicer::commands::get_slicer_items_core`) holds the slicers while it
-//     reads `grids`. A tail that took the slicers under the grid locks would
-//     close a cycle with it. So the tails keep the lock shape BUG-0591 gave
+//     (`slicer::commands::get_slicer_items_core`) held the slicers while it
+//     read `grids` when this was written (it copies and releases them since
+//     BUG-0593). A tail that took the slicers under the grid locks would have
+//     closed a cycle with it. So the tails keep the lock shape BUG-0591 gave
 //     them (copy and release, nothing held across a collector), and each
 //     snapshot is VALIDATED instead: the body reads
 //     `AppState::sheet_structure_generation` under its hold, every
@@ -3708,16 +3709,30 @@ pub fn save_file(
             // pending set when there is one and clears it on a clean finish, so
             // "recalculate before saving" really does mean the saved file is
             // fully calculated.
+            //
+            // It carries no cube data and runs no custom function, so a cube or
+            // custom-function cell it cannot answer from the results cache
+            // KEEPS its stored result when nothing it reads has changed, and is
+            // refused otherwise -- never saved as a refusal it did not earn
+            // (`calculation::KeepWithoutData`, rev5B#1).
             let _ = crate::calculation::calculate_now(
                 window.clone(),
                 state.clone(),
+                file_state.clone(),
                 user_files_state.clone(),
                 pivot_state.clone(),
                 pane_control_state.clone(),
                 ribbon_filter_state.clone(),
                 None,
             );
-        } else if state
+        } else {
+            // Saving WITHOUT recalculating clears the dirty flag, which is what
+            // vouches for a manual-calculation document's stored values; an
+            // edited one may hold stale values, so they stay unvouched.
+            crate::calculation::note_manual_edits_outlive_a_save(&state, file_state.is_dirty());
+        }
+        if !calc_before_save
+            && state
             .pending_recalc
             .read()
             .ok()
@@ -4912,6 +4927,16 @@ pub fn open_file(
         workbook.format_version,
     );
 
+    // THE RESULTS CACHE FOR THE WORKBOOK JUST READ (rev3A#3). A recalculation
+    // that carries no cube data or UDF resolver answers a cube or
+    // custom-function call with the answer recorded for exactly the arguments
+    // it has now. A root call's saved value is such an answer: it was
+    // calculated for the arguments saved beside it. Recorded HERE, after the
+    // grids, names and tables are installed and before anything can change an
+    // argument; recorded any later it would vouch for a stale value. Derived
+    // state, never saved, so no effect.
+    crate::bi::cube::remember_loaded_call_results(state.inner());
+
     collect_active_sheet_cells(&state)
 }
 
@@ -5061,7 +5086,14 @@ pub(crate) fn reset_document_scoped_stores(
         .clear();
 
     // ---- Grid, styles and per-sheet geometry -------------------------------
-    *state.grid.write(effect).map_err(|e| e.to_string())? = engine::grid::Grid::new();
+    // ONE blank sheet, held twice: the active-sheet mirror and `grids[0]` are
+    // clones of the same `Grid`, as `create_app_state` makes them, because a
+    // clone SHARES the sheet's derived results cache
+    // (`engine::cube::CallMemo`). Two separate `Grid::new()`s gave the two
+    // halves two memos, and the first pass that copies the mirror over
+    // `grids[active]` dropped every answer the other had recorded.
+    let blank_sheet = engine::grid::Grid::new();
+    *state.grid.write(effect).map_err(|e| e.to_string())? = blank_sheet.clone();
     *state.style_registry.write(effect).map_err(|e| e.to_string())? =
         engine::style::StyleRegistry::new();
     state.column_widths.write(effect).map_err(|e| e.to_string())?.clear();
@@ -5070,7 +5102,7 @@ pub(crate) fn reset_document_scoped_stores(
     {
         let mut grids = state.grids.write(effect).map_err(|e| e.to_string())?;
         grids.clear();
-        grids.push(engine::grid::Grid::new());
+        grids.push(blank_sheet);
     }
     // THE LIST, ITS IDS AND THE GENERATION'S MOVE IN ONE `sheet_names` HOLD, as
     // in every other renumbering: `snapshot_is_current` waits on `sheet_names`

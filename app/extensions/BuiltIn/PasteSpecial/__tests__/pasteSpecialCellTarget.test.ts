@@ -148,9 +148,12 @@ describe("the paste variants on a floating grid's cells", () => {
     expect(h.batch).toHaveBeenCalledTimes(1);
     const { updates, opts } = batchCall();
     expect(opts).toEqual({ target: REF });
+    // The copied formula is written as a PASTE (it stays one in an @ cell);
+    // this copy carries no stored values, so the constant is its display text,
+    // an entry as before.
     expect(updates).toEqual([
       { row: 3, col: 0, value: "10" },
-      { row: 3, col: 1, value: "=B2+1@2,-1" },
+      { row: 3, col: 1, value: "=B2+1@2,-1", pasted: true },
     ]);
     expect(h.writes, "a per-cell write hit the ACTIVE sheet").not.toHaveBeenCalled();
   });
@@ -192,15 +195,12 @@ describe("the paste variants on a floating grid's cells", () => {
     expect(batchCall().updates.map((u) => u.value)).toEqual(["=B2", "=C2"]);
   });
 
-  it("an operation reads the destination from the GRID's styled read", async () => {
+  it("an operation reads the destination from the GRID's typed read", async () => {
+    // The typed read carries what an operation needs -- the value, the formula
+    // it keeps (BUG-0346) and the display the collection check reads -- so the
+    // styled read is no longer asked as well.
+    h.readTyped.mockClear();
     h.readTyped.mockResolvedValueOnce([{ row: 3, col: 0, value: 5, display: "5", formula: null, type: "number" }]);
-    h.read.mockResolvedValue({
-      cells: [{ row: 3, col: 0, display: "5", formula: null, styleIndex: 0, valueKind: "number" }],
-      merges: [],
-      conditional: [],
-      styles: [],
-      rules: [],
-    });
     const done = await executePasteSpecial(
       SHEET_CLIP as never,
       frSelection!,
@@ -211,7 +211,7 @@ describe("the paste variants on a floating grid's cells", () => {
       REF,
     );
     expect(done).toBe(true);
-    expect(h.read).toHaveBeenCalledWith(REF, { startRow: 3, startCol: 0, endRow: 3, endCol: 1 });
+    expect(h.readTyped).toHaveBeenCalledWith(REF, { startRow: 3, startCol: 0, endRow: 3, endCol: 1 });
     expect(batchCall().updates.map((u) => u.value)).toEqual(["15", "11"]);
     expect(h.writes).not.toHaveBeenCalled();
   });
@@ -239,7 +239,12 @@ describe("the paste variants on a floating grid's cells", () => {
   it("positive control: on the sheet, Paste Formulas writes the active sheet per cell, no target", async () => {
     frSelection = null;
     await handlers.get(CoreCommands.PASTE_FORMULAS)!();
-    expect(h.batch).not.toHaveBeenCalled();
-    expect(h.writes.mock.calls.filter((c) => c[0] === "updateCell")).toHaveLength(2);
+    // The constant (no stored values in this copy): its display text, an entry.
+    expect(h.writes.mock.calls.filter((c) => c[0] === "updateCell")).toHaveLength(1);
+    // The formula: one per-cell batch on the ACTIVE sheet (no target), as a paste.
+    expect(h.batch).toHaveBeenCalledTimes(1);
+    const { updates, opts } = batchCall();
+    expect(opts).toEqual({ target: undefined });
+    expect(updates).toEqual([{ row: 40, col: 41, value: "=B2+1@39,39", pasted: true }]);
   });
 });

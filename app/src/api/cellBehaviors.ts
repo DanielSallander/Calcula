@@ -244,6 +244,16 @@ function ensureInit(): void {
     }
   });
 
+  // THE INDEX IS WORKBOOK-WIDE (every sheet's bindings, `bySheet`), and the
+  // backend moves a binding with its cells on EVERY structural route --
+  // including an insert/delete on a sheet the user is not looking at (a
+  // script's or the command line's `sheetIndex`, `off_sheet_structural_edit`).
+  // That route announces STRUCTURAL_EDIT_ELSEWHERE, not the ROWS_ family (whose
+  // coordinates are the active sheet's) and not the `objects` domain (whose
+  // fan-out deselects charts and closes open UI on the sheet on screen). A
+  // re-read is coordinate-free and paints nothing, so it disturbs nothing on
+  // screen. Without it the index kept the binding at its OLD cell: a click
+  // handler or an onBeforeCommit validator ran on the wrong cell (rev4A#1).
   const refreshEvents = [
     AppEvents.AFTER_OPEN,
     AppEvents.AFTER_NEW,
@@ -251,6 +261,7 @@ function ensureInit(): void {
     AppEvents.ROWS_DELETED,
     AppEvents.COLUMNS_INSERTED,
     AppEvents.COLUMNS_DELETED,
+    AppEvents.STRUCTURAL_EDIT_ELSEWHERE,
   ];
   for (const eventName of refreshEvents) {
     onAppEvent(eventName, () => {

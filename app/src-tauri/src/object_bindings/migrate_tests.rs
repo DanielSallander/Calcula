@@ -555,9 +555,11 @@ fn a_v10_files_literal_equals_chart_title_stays_text_on_reopen() {
 /// The two doors that decide the chart reading, pinned from source: the load
 /// path derives it from the archive's own format version, and every `.calp`
 /// pull/refresh call passes `Literals` (a pull parses only the bindings-era
-/// chart shape).
+/// chart shape) -- the dev pull's too (`land_dev_pull_bindings`, shared by dev
+/// subscribe and dev refresh, BUG-0471: a dev pull brings no chart, and the
+/// workbook's own were migrated when it was opened).
 ///
-/// SABOTAGE: pass `ChartTextFields::LegacyCellReferences` at either
+/// SABOTAGE: pass `ChartTextFields::LegacyCellReferences` at any
 /// `calp_commands.rs` call -- the count of `Literals` calls drops.
 #[test]
 fn the_load_path_and_the_calp_doors_choose_the_chart_reading() {
@@ -580,7 +582,7 @@ fn the_load_path_and_the_calp_doors_choose_the_chart_reading() {
         .match_indices("migrate::migrate_legacy_formulas(")
         .map(|(i, _)| calp[i..].chars().take(200).collect())
         .collect();
-    assert_eq!(calls.len(), 2, "the pull and the refresh door: {calls:#?}");
+    assert_eq!(calls.len(), 3, "the pull door, the refresh door and the dev pull's landing: {calls:#?}");
     for call in &calls {
         assert!(call.contains("ChartTextFields::Literals"), "a .calp door never migrates chart literals: {call}");
     }

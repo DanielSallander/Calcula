@@ -22,6 +22,7 @@ import {
   removalReorderDetail,
   type PlacedSheet,
 } from "../sheetPlacement";
+import { renumberedSheetIndex } from "../../../core/state/sheetRenumbering";
 
 // ---------------------------------------------------------------------------
 // A model of the backend, by its own definitions
@@ -212,16 +213,12 @@ describe("Move (no copy) to every position", () => {
 // ---------------------------------------------------------------------------
 
 /**
- * Core's `handleSheetReorder` (Spreadsheet.tsx), verbatim in effect: the per-
- * sheet selection/scroll cache is keyed by TRUE index and re-keyed by this on
- * every `sheet:reorder`. The test oracle for the two details below.
+ * Core's OWN re-keying rule (core/state/sheetRenumbering.ts, which the per-
+ * sheet selection/scroll cache runs on every `sheet:reorder` through
+ * Spreadsheet's switch listeners) -- no longer a copy of it here.
  */
-function remap(keys: number[], fromIndex: number, toIndex: number): number[] {
-  return keys.map((key) => {
-    if (key === fromIndex) return toIndex;
-    if (fromIndex < toIndex) return key > fromIndex && key <= toIndex ? key - 1 : key;
-    return key >= toIndex && key < fromIndex ? key + 1 : key;
-  });
+function remap(keys: number[], fromIndex: number, toIndex: number): Array<number | null> {
+  return keys.map((key) => renumberedSheetIndex(key, fromIndex, toIndex));
 }
 
 describe("an insertion or a removal, told to the per-sheet view cache", () => {
@@ -230,12 +227,20 @@ describe("an insertion or a removal, told to the per-sheet view cache", () => {
     expect(remap([0, 1, 2, 3, 7], fromIndex, toIndex)).toEqual([0, 1, 3, 4, 8]);
   });
 
-  it("removal at `at` shifts every key past it down by one, and parks the removed key out of reach", () => {
+  // Changed deliberately (review rev3C#5): the removed key used to be PARKED
+  // at the far index, and the next insertion -- a rotate FROM that index --
+  // handed it to the new sheet. It is dropped now.
+  it("removal at `at` shifts every key past it down by one, and DROPS the removed key", () => {
     const { fromIndex, toIndex } = removalReorderDetail(1);
-    const out = remap([0, 1, 2, 3], fromIndex, toIndex);
-    expect(out.slice(0, 1)).toEqual([0]);
-    expect(out.slice(2)).toEqual([1, 2]);
-    // The deleted sheet's view can never be restored onto a real sheet.
-    expect(out[1]).toBeGreaterThan(1_000_000);
+    expect(remap([0, 1, 2, 3], fromIndex, toIndex)).toEqual([0, null, 1, 2]);
+  });
+
+  it("an insertion after a removal leaves the new sheet's index empty", () => {
+    const removed = removalReorderDetail(1);
+    const inserted = insertionReorderDetail(3);
+    const afterRemoval = remap([0, 1, 2, 3], removed.fromIndex, removed.toIndex).filter(
+      (k): k is number => k !== null,
+    );
+    expect(remap(afterRemoval, inserted.fromIndex, inserted.toIndex)).toEqual([0, 1, 2]);
   });
 });

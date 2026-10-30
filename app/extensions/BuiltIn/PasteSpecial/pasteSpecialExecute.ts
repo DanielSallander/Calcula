@@ -24,12 +24,38 @@
 //          (Formatting, No Borders -- there is no style-index write that takes a
 //          target, BUG-0513), comments and validation (their doors refuse on a floating
 //          grid), and column widths (the object's widths are not the sheet's).
+//
+//          AN OPERATION (Add / Subtract / Multiply / Divide) asks two more
+//          questions before it writes (`operationRefusal`): does the paste area
+//          touch a DYNAMIC ARRAY (Excel: "You can't change part of an array.",
+//          nothing changes), and -- on a protected sheet -- does it cover a cell
+//          whose formula the typed read WITHHELD (the operation would have to
+//          keep a formula it is not allowed to read). And every formula or
+//          stored value this module writes is flagged as a PASTE
+//          (`CellUpdateInput.pasted`), so a pasted NUMBER or FORMULA stays one
+//          in a Text-formatted (@) cell in the same write: Excel's Text format
+//          governs typing, never a paste.
+//
+//          A CONSTANT -- and, under a values attribute, a formula's RESULT --
+//          is written from the value the copy read TYPED
+//          (`ClipboardData.values`, `storedConstantOf`), invariant: never by
+//          re-typing its display text, which held only what the source's
+//          number format showed (1.23456 under 0.00 pasted as 1.23).
 
 import type { CellData, Selection, StyleData, FormattingOptions } from "@api/types";
-import type { ClipboardData, FormulaShiftInput, AddCommentParams, CellUpdateInput, TypedCellData } from "@api/lib";
+import type {
+  ClipboardData,
+  FormulaShiftInput,
+  AddCommentParams,
+  CellUpdateInput,
+  TypedCellData,
+  SheetsResult,
+  PastedConstant,
+} from "@api/lib";
 import type { PasteSpecialOptions, PasteOperation, PasteAttribute } from "./types";
 import {
   getCell,
+  getSheets,
   updateCell,
   setCellStyle,
   getStyle,
@@ -47,6 +73,9 @@ import {
   pasteRowDeltas,
   updateCellsBatch,
   getRangeCellsTyped,
+  getSpillRanges,
+  isSheetProtected,
+  pastedConstantInput,
 } from "@api/lib";
 import { cellEvents } from "@api";
 import { alertAsync } from "@api/dialogs";
@@ -56,7 +85,8 @@ import {
   resolveCellTarget,
   type CellTargetRef,
 } from "@api/cellTarget";
-import { parseNumber } from "@api/locale";
+import { getFloatingRangeSpillRanges, type SpillRangeInfo } from "@api/floatingRangeSpills";
+import { decimalSeparator, parseNumber } from "@api/locale";
 import { getGridStateSnapshot } from "@api/state";
 import { quoteSheetNameForFormula } from "@api/externalEdit";
 import { ownUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
@@ -90,30 +120,184 @@ function isCellBlank(cell: CellData | null | undefined): boolean {
 /**
  * Check if a cell displays a List or Dict collection value.
  */
-function isCollectionCell(cell: CellData | null | undefined): boolean {
+function isCollectionCell(cell: { display?: string | null } | null | undefined): boolean {
   if (!cell?.display) return false;
   return cell.display.startsWith("[List(") || cell.display.startsWith("[Dict(");
 }
 
 /**
- * The NUMBERS an operation (Add / Subtract / Multiply / Divide) computes from,
- * read TYPED -- the value the engine stores (5.5), never the display text
- * ("5,50 kr", "1,234.00", "50%"). Display text is the app locale's and the
- * number format's, so `Number(display)` read every formatted number, and every
- * fraction under a comma-decimal locale, as 0.
+ * The attributes that paste the source's FORMULAS (shifted the Excel way);
+ * the others paste its values. An operation under one of these keeps a source
+ * formula a formula: `=5+(D3)`.
+ */
+const FORMULA_ATTRIBUTES: ReadonlySet<PasteAttribute> = new Set<PasteAttribute>([
+  "all",
+  "formulas",
+  "allExceptBorders",
+  "formulasAndNumberFormats",
+]);
+
+/**
+ * What an operation (Add / Subtract / Multiply / Divide) computes from: the
+ * cells read TYPED -- the value the engine stores (5.5), never the display
+ * text ("5,50 kr", "1,234.00", "50%"), which is the app locale's and the
+ * number format's (`Number(display)` read every formatted number, and every
+ * fraction under a comma-decimal locale, as 0) -- and their FORMULAS, which an
+ * operation keeps (BUG-0346: it used to write the computed number over the
+ * destination's formula).
  */
 interface OperationOperands {
-  /** The source's number at clipboard matrix position "r,c" (absent = 0). */
-  source: Map<string, number>;
-  /** The destination's number at "row,col", its own coordinates (absent = 0). */
-  dest: Map<string, number>;
-  /** The paste's place, passed on to the result's write (undefined = the active sheet). */
+  /** The source's typed cell at clipboard matrix position "r,c" (absent = blank). */
+  source: Map<string, TypedCellData>;
+  /** The destination's typed cell at "row,col", its own coordinates (absent = blank). */
+  dest: Map<string, TypedCellData>;
+  /**
+   * The source's formulas, shifted to where they land, keyed "r,c" -- when the
+   * attribute pastes formulas (FORMULA_ATTRIBUTES); null when it pastes values.
+   */
+  sourceFormulas: Map<string, string> | null;
+  /**
+   * The paste's place the operands were read from (undefined = the active
+   * sheet). The write itself takes its place from the route: `PasteContext.target`
+   * on the sheet, `writeTargetBatch`'s target on an object.
+   */
   target: CellTargetRef | undefined;
 }
 
-/** A typed cell's number for an operation: text, booleans, errors and blanks are 0. */
-function numberOfTyped(cell: TypedCellData): number {
-  return typeof cell.value === "number" && Number.isFinite(cell.value) ? cell.value : 0;
+/**
+ * One side of an operation, as Excel reads it (measured live through COM,
+ * 2026-10-29, Range.PasteSpecial with xlPasteSpecialOperationAdd ... Divide):
+ *   - a FORMULA stays a formula, wrapped in parentheses -- the destination's
+ *     own (`=A1` + 1 -> `=(A1)+1`, whatever it evaluates to: `=("x")+1` is
+ *     #VALUE!, and `=(1/0)+1` #DIV/0!) and, under an attribute that pastes
+ *     formulas, the source's, shifted (`5` + `=C1` -> `=5+(D3)`, both ->
+ *     `=(A1)+(D3)`);
+ *   - a NUMBER is spelled as a literal (`=(A1)+1.5`, `=(A1)--2`);
+ *   - a BLANK cell counts as 0 (`=(A1)+0`, `=0+(D3)`), but blank on blank
+ *     stays blank;
+ *   - text, a boolean or an error held as a CONSTANT is inert: the destination
+ *     is left exactly as it is, on either side ("abc" + 1 stays "abc", 5 + "abc"
+ *     stays 5, `=A1` + "abc" stays `=A1`). Under a VALUES attribute a source
+ *     formula's TRUE / FALSE counts as 1 / 0 (`=(A1)+1`), its text or error is
+ *     inert.
+ * Two constants compute a constant (5 + 1.5 = 6.5; 5 / 0 = #DIV/0!).
+ */
+type Operand =
+  | { kind: "formula"; body: string }
+  | { kind: "number"; value: number }
+  | { kind: "blank" }
+  | { kind: "inert" };
+
+/** A formula's text without its leading "=". */
+function formulaBody(formula: string): string {
+  return formula.startsWith("=") ? formula.slice(1) : formula;
+}
+
+/** A typed CONSTANT as an operand: a finite number, a blank, or inert. */
+function constantOperand(cell: TypedCellData | undefined): Operand {
+  if (!cell || cell.type === "empty") return { kind: "blank" };
+  if (cell.type === "number" && typeof cell.value === "number" && Number.isFinite(cell.value)) {
+    return { kind: "number", value: cell.value };
+  }
+  return { kind: "inert" };
+}
+
+/** The destination's side: its own formula when it has one, else its value. */
+function destOperand(cell: TypedCellData | undefined): Operand {
+  if (cell?.formula) return { kind: "formula", body: formulaBody(cell.formula) };
+  return constantOperand(cell);
+}
+
+/**
+ * The source's side: its formula, shifted to where it lands, when the
+ * attribute pastes formulas; else its VALUE (a formula's TRUE / FALSE as 1 / 0).
+ */
+function sourceOperand(
+  sourceCell: CellData | null,
+  srcR: number,
+  srcC: number,
+  operands: OperationOperands | null,
+): Operand {
+  const key = `${srcR},${srcC}`;
+  if (operands?.sourceFormulas) {
+    const formula = operands.sourceFormulas.get(key) ?? sourceCell?.formula ?? null;
+    if (formula) return { kind: "formula", body: formulaBody(formula) };
+  }
+  const typed = operands?.source.get(key);
+  if (typed?.formula && typed.type === "boolean") return { kind: "number", value: typed.value ? 1 : 0 };
+  return constantOperand(typed);
+}
+
+/** The operator an operation writes into its formula. */
+const OPERATION_SYMBOL: Record<Exclude<PasteOperation, "none">, string> = {
+  add: "+",
+  subtract: "-",
+  multiply: "*",
+  divide: "/",
+};
+
+/**
+ * A number as a literal INSIDE a formula the user's way: the shortest text
+ * that reads back as the same double, with the app locale's decimal separator
+ * (the formula is written through the user-input parser, like every pasted
+ * formula, which reads "1,5" as 1.5 under sv-SE / de-DE). Never grouped.
+ */
+function formulaNumberLiteral(value: number): string {
+  return String(value).replace(".", decimalSeparator());
+}
+
+/** One operand's text in the operation's formula. */
+function operandText(operand: Operand): string {
+  switch (operand.kind) {
+    case "formula":
+      return `(${operand.body})`;
+    case "number":
+      return formulaNumberLiteral(operand.value);
+    default:
+      return "0";
+  }
+}
+
+/**
+ * What an operation writes into one destination cell, or null to leave it as
+ * it is (an inert side; blank on blank). Two constants compute a constant,
+ * written INVARIANT; a formula on either side gives Excel's formula, written
+ * through the user-input parser as every pasted formula is.
+ */
+function operationWrite(
+  dest: Operand,
+  source: Operand,
+  operation: PasteOperation,
+): { value: string; invariant: boolean } | null {
+  if (operation === "none" || dest.kind === "inert" || source.kind === "inert") return null;
+  if (dest.kind === "blank" && source.kind === "blank") return null;
+  if (dest.kind !== "formula" && source.kind !== "formula") {
+    const d = dest.kind === "number" ? dest.value : 0;
+    const s = source.kind === "number" ? source.value : 0;
+    return { value: operationResultInput(applyOperation(d, s, operation)), invariant: true };
+  }
+  return { value: `=${operandText(dest)}${OPERATION_SYMBOL[operation]}${operandText(source)}`, invariant: false };
+}
+
+/**
+ * The one shape every pasted formula or stored value is written in: a PASTE
+ * (`pasted`), so the backend's typed-entry ladder skips its Text rung and a
+ * formula, a number, TRUE / FALSE or an error stays what it is in a
+ * Text-formatted (@) cell, keeping the cell's own style -- in the same write.
+ * Excel, measured live through COM (2026-10-29): `=A1` + Values > Add 1 ->
+ * `=(A1)+1`, 5 + Add 1 -> the number 6, Paste Formulas of `=A1` -> a formula,
+ * Paste Link -> `=$C$1`, all still @. (Round 3 rewrote such a cell with
+ * `styleIndex: 0` and put its style back afterwards; that rewrite also replaced
+ * the cell's PROTECTION flags, so an unlocked @ input cell on a protected sheet
+ * came back LOCKED, its style restore was refused and the cell was reported
+ * skipped though the write had landed.) Only the display-text fallback (a copy
+ * without stored values) stays an entry.
+ */
+function pastedUpdate(row: number, col: number, value: string, invariant: boolean): CellUpdateInput {
+  const update: CellUpdateInput = { row, col, value };
+  if (invariant) update.invariant = true;
+  update.pasted = true;
+  return update;
 }
 
 /** The most cells one typed sheet read asks for (the backend's MAX_TYPED_RANGE_CELLS). */
@@ -131,54 +315,100 @@ async function readSheetTyped(
   const rowBand = Math.max(1, Math.floor(TYPED_READ_BAND / Math.max(1, width)));
   const out: TypedCellData[] = [];
   for (let br = r0; br <= r1; br += rowBand) {
-    out.push(...(await getRangeCellsTyped(br, c0, Math.min(r1, br + rowBand - 1), c1, sheetIndex)));
+    // One push per cell, never `out.push(...band)`: a band is up to 100,000
+    // cells, and spreading that many arguments is at the edge of V8's call
+    // stack (see `matrixSize`).
+    for (const cell of await getRangeCellsTyped(br, c0, Math.min(r1, br + rowBand - 1), c1, sheetIndex)) {
+      out.push(cell);
+    }
   }
   return out;
 }
 
 /**
- * The source's numbers, keyed by clipboard matrix position: a typed read of
- * where the cells were copied FROM (a sheet, or an object's cells), each matrix
- * row mapped back through `sourceRows` (a filtered copy skips rows). When the
- * source can no longer be read (its sheet is gone), the clipboard's display
- * text is read as a number in the APP locale -- never with `Number()`.
+ * The source's typed cells, keyed by clipboard matrix position: a typed read of
+ * where the cells were copied FROM (a sheet -- found by its stable id, so a
+ * rename or a reorder since the copy reads the right one -- or an object's
+ * cells), each matrix row mapped back through `sourceRows` (a filtered copy
+ * skips rows). When the source can no longer be read (its sheet is gone), the
+ * stored values the copy read stand in (`ClipboardData.values`); only a copy
+ * without them falls back to its display text: a number read in the APP
+ * locale -- never with `Number()` -- or, when it reads as none, inert text.
  */
-async function readSourceOperands(clipboard: ClipboardData, height: number, width: number): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
+async function readSourceOperands(
+  clipboard: ClipboardData,
+  height: number,
+  width: number,
+): Promise<Map<string, TypedCellData>> {
+  const out = new Map<string, TypedCellData>();
   if (height === 0 || width === 0) return out;
   const minRow = Math.min(clipboard.sourceSelection.startRow, clipboard.sourceSelection.endRow);
   const minCol = Math.min(clipboard.sourceSelection.startCol, clipboard.sourceSelection.endCol);
-  const rows: number[] = [];
-  for (let r = 0; r < height; r++) rows.push(clipboard.sourceRows?.[r] ?? minRow + r);
-  const rowOf = new Map(rows.map((abs, r) => [abs, r] as const));
-  const r0 = Math.min(...rows);
-  const r1 = Math.max(...rows);
+  // The rows' extent by a loop, never `Math.min(...rows)`: see `matrixSize`.
+  const rowOf = new Map<number, number>();
+  let r0 = Infinity;
+  let r1 = -Infinity;
+  for (let r = 0; r < height; r++) {
+    const abs = clipboard.sourceRows?.[r] ?? minRow + r;
+    rowOf.set(abs, r);
+    if (abs < r0) r0 = abs;
+    if (abs > r1) r1 = abs;
+  }
   const c1 = minCol + width - 1;
   try {
-    const read = clipboard.sourceTarget
-      ? await getCellTargetCellsTyped(clipboard.sourceTarget, { startRow: r0, startCol: minCol, endRow: r1, endCol: c1 })
-      : await readSheetTyped(r0, minCol, r1, c1, clipboard.sourceSheetIndex);
+    let read: TypedCellData[];
+    if (clipboard.sourceTarget) {
+      read = await getCellTargetCellsTyped(clipboard.sourceTarget, { startRow: r0, startCol: minCol, endRow: r1, endCol: c1 });
+    } else {
+      const sheet = await sourceSheetNow(clipboard);
+      if (sheet === null) throw new Error(`the sheet "${clipboard.sourceSheetName}" no longer exists`);
+      read = await readSheetTyped(r0, minCol, r1, c1, sheet?.index ?? clipboard.sourceSheetIndex);
+    }
     for (const cell of read) {
       const r = rowOf.get(cell.row);
       if (r === undefined || cell.col < minCol || cell.col > c1) continue;
-      out.set(`${r},${cell.col - minCol}`, numberOfTyped(cell));
+      out.set(`${r},${cell.col - minCol}`, cell);
     }
   } catch (err) {
-    console.warn("[PasteSpecial] the copied cells could not be re-read; using their copied text:", err);
+    console.warn("[PasteSpecial] the copied cells could not be re-read; using what the copy read:", err);
     clipboard.cells.forEach((row, r) =>
       row.forEach((cell, c) => {
-        const n = cell?.display ? parseNumber(cell.display) : null;
-        if (n !== null && Number.isFinite(n)) out.set(`${r},${c}`, n);
+        // The STORED value the copy read typed (ClipboardData.values), when it
+        // has one; only a copy without them parses its display text.
+        const stored = clipboard.values?.[r]?.[c];
+        if (stored && stored.type !== "empty") {
+          out.set(`${r},${c}`, {
+            row: r,
+            col: c,
+            value: stored.value,
+            display: cell?.display ?? "",
+            formula: cell?.formula ?? null,
+            type: stored.type,
+          });
+          return;
+        }
+        if (clipboard.values) return;
+        if (!cell?.display) return;
+        const n = parseNumber(cell.display);
+        const isNumber = n !== null && Number.isFinite(n);
+        out.set(`${r},${c}`, {
+          row: r,
+          col: c,
+          value: isNumber ? n : cell.display,
+          display: cell.display,
+          formula: cell.formula ?? null,
+          type: isNumber ? "number" : "text",
+        });
       }),
     );
   }
   return out;
 }
 
-/** The destination's numbers over a rectangle, from a typed read (sheet or object). */
-function destOperandsOf(read: readonly TypedCellData[]): Map<string, number> {
-  const out = new Map<string, number>();
-  for (const cell of read) out.set(`${cell.row},${cell.col}`, numberOfTyped(cell));
+/** The destination's typed cells over a rectangle (sheet or object), keyed "row,col". */
+function destOperandsOf(read: readonly TypedCellData[]): Map<string, TypedCellData> {
+  const out = new Map<string, TypedCellData>();
+  for (const cell of read) out.set(`${cell.row},${cell.col}`, cell);
   return out;
 }
 
@@ -227,16 +457,59 @@ function buildLinkFormula(sheetPrefix: string, row: number, col: number, absolut
   return absolute ? `=${sheetPrefix}$${colLetter}$${row + 1}` : `=${sheetPrefix}${colLetter}${row + 1}`;
 }
 
+/** The sheet a copy came from, as it is NOW. */
+interface SourceSheetNow {
+  /** Its index in the workbook now. */
+  index: number;
+  /** Its name now -- what a link spells. */
+  name: string;
+  /** Whether it is the active sheet, the one a paste writes. */
+  isActive: boolean;
+}
+
+/**
+ * Where a SHEET copy's source sheet is now, found by the stable id the copy
+ * recorded (`ClipboardData.sourceSheetId`). The name and index recorded at the
+ * copy go stale: renaming the sheet left Paste Link spelling the OLD name, a
+ * link to nothing (#REF!, BUG-0348), and a sheet inserted, moved or deleted
+ * before it moves its index. Excel follows the sheet: renamed while the
+ * marching ants are up, it keeps copy mode and Paste Link writes the NEW name
+ * (`=Data!$A$1`; measured live through COM, 2026-10-29).
+ *
+ * Null when no sheet carries the id any more (the sheet was deleted).
+ * Undefined when nothing better than the recorded index and name is known: an
+ * object source, a copy that recorded no id (the sheet context had none), a
+ * sheet list that cannot be read or that carries no ids at all.
+ */
+async function sourceSheetNow(clipboard: ClipboardData): Promise<SourceSheetNow | null | undefined> {
+  const id = clipboard.sourceSheetId;
+  if (!id || clipboard.sourceTarget) return undefined;
+  let list: SheetsResult;
+  try {
+    list = await getSheets();
+  } catch (err) {
+    console.warn("[PasteSpecial] the sheet list could not be read; using the sheet recorded at the copy:", err);
+    return undefined;
+  }
+  const sheets = list?.sheets ?? [];
+  if (!sheets.some((s) => s.sheetId)) return undefined;
+  const sheet = sheets.find((s) => s.sheetId === id);
+  if (!sheet) return null;
+  return { index: sheet.index, name: sheet.name, isActive: sheet.index === list.activeIndex };
+}
+
 /**
  * The sheet prefix a link needs: none on the source sheet itself, `Name!`
  * anywhere else. Before ClipboardData recorded its source sheet the link was
  * always written bare, so a Paste Link on another sheet linked to the same
- * ADDRESSES on the destination sheet (clipboard survey defect 1). Unknown on
- * either side (a payload that predates the field, no grid state) is treated
- * as the same sheet -- the old behaviour, never a guess at a name.
+ * ADDRESSES on the destination sheet (clipboard survey defect 1). The source
+ * sheet is the one `sourceSheetNow` found (its name and place NOW); without
+ * one, the index and name recorded at the copy. Unknown on either side (a
+ * payload that predates the field, no grid state) is treated as the same
+ * sheet -- the old behaviour, never a guess at a name.
  */
-function linkSheetPrefix(clipboard: ClipboardData, target?: CellTargetRef): string {
-  const sourceName = clipboard.sourceSheetName;
+function linkSheetPrefix(clipboard: ClipboardData, target: CellTargetRef | undefined, source: SourceSheetNow | undefined): string {
+  const sourceName = source?.name ?? clipboard.sourceSheetName;
   const sourceTarget = clipboard.sourceTarget;
   if (target || sourceTarget) {
     // An OBJECT on either side (a floating grid's cells, P3). The link lives
@@ -246,6 +519,7 @@ function linkSheetPrefix(clipboard: ClipboardData, target?: CellTargetRef): stri
     if (target && sourceTarget && target.kind === sourceTarget.kind && target.id === sourceTarget.id) return "";
     return sourceName ? `${quoteSheetNameForFormula(sourceName)}!` : "";
   }
+  if (source) return source.isActive ? "" : `${quoteSheetNameForFormula(source.name)}!`;
   const targetSheet = getGridStateSnapshot()?.sheetContext?.activeSheetIndex;
   const sourceSheet = clipboard.sourceSheetIndex;
   if (targetSheet === undefined || sourceSheet === undefined || !sourceName) return "";
@@ -253,9 +527,21 @@ function linkSheetPrefix(clipboard: ClipboardData, target?: CellTargetRef): stri
   return `${quoteSheetNameForFormula(sourceName)}!`;
 }
 
-/** The matrix's size: rows, and the widest row. */
+/**
+ * The matrix's size: rows, and the widest row -- found by a LOOP. It was
+ * `Math.max(...cells.map((r) => r.length))`, one call argument per copied row,
+ * which overflows V8's call stack somewhere above 100,000 rows ("Maximum call
+ * stack size exceeded" at 150,000): a legal copy of A1:A200000 made EVERY
+ * Paste Special variant throw before writing anything, with only a console
+ * error to show for it, while plain Paste of the same clipboard worked.
+ */
 function matrixSize(cells: (CellData | null)[][]): { height: number; width: number } {
-  return { height: cells.length, width: cells.length === 0 ? 0 : Math.max(...cells.map((r) => r.length)) };
+  let width = 0;
+  for (const row of cells) {
+    const length = row?.length ?? 0;
+    if (length > width) width = length;
+  }
+  return { height: cells.length, width };
 }
 
 /**
@@ -311,6 +597,115 @@ async function mayPaste(
   return true;
 }
 
+/**
+ * The attributes that write no cell VALUE, so an operation chosen beside them
+ * computes nothing (`pasteSingleCell` never reaches `pasteWithOperation`) and
+ * has nothing for `operationRefusal` to guard.
+ */
+const NO_OPERATION_ATTRIBUTES: ReadonlySet<PasteAttribute> = new Set<PasteAttribute>([
+  "formats",
+  "comments",
+  "validation",
+  "columnWidths",
+]);
+
+/** Whether a spill (its formula and the cells it spills into) overlaps `area`. */
+function spillOverlaps(spill: SpillRangeInfo, area: PasteArea): boolean {
+  const top = Math.min(spill.originRow, spill.endRow);
+  const bottom = Math.max(spill.originRow, spill.endRow);
+  const left = Math.min(spill.originCol, spill.endCol);
+  const right = Math.max(spill.originCol, spill.endCol);
+  return (
+    top <= area.row + area.height - 1 &&
+    bottom >= area.row &&
+    left <= area.col + area.width - 1 &&
+    right >= area.col
+  );
+}
+
+/** A1-style address of a cell on the sheet (for a refusal sentence). */
+function cellAddress(row: number, col: number): string {
+  return `${indexToCol(col)}${row + 1}`;
+}
+
+/**
+ * Why an OPERATION (Add / Subtract / Multiply / Divide) must not paste into
+ * `area`, or null when it may. Asked after `mayPaste` and BEFORE any write or
+ * undo step, so a refusal changes nothing:
+ *
+ *   1. A DYNAMIC ARRAY under the paste area (its formula, or any cell it spills
+ *      into) -- on the sheet, or on the floating grid being pasted into. Excel
+ *      refuses the whole paste ("You can't change part of an array."). The
+ *      grid route writes cell by cell, so before this the formula cell was
+ *      rewritten as `=(SEQUENCE(3))+10` and re-spilled, and every spilled cell
+ *      after it was then refused on its own -- a half-done paste whose numbers
+ *      were neither the old ones nor the expected ones. Read failures fall
+ *      through: the backend's own per-write spill check still refuses a write
+ *      over a spilled cell.
+ *   2. On a PROTECTED sheet (the grid route), a cell whose formula the typed
+ *      read WITHHELD (`TypedCellData.formulaWithheld`: the sheet hides it).
+ *      The operation would see only the value and replace the formula with a
+ *      constant -- silently, on a cell whose formula the user cannot even see.
+ *      Excel keeps it (`=(A1)+1`); keeping it needs the formula text, which
+ *      only the backend may read, so this refuses instead, naming the cell
+ *      (fail closed: a protection state or a read that fails refuses too).
+ *      WHATEVER the cell's lock state -- a locked cell inside an allow-edit
+ *      range is writable -- and NEVER over a hidden-format cell that holds a
+ *      constant or nothing, which withholds nothing: Excel computes there (a
+ *      blank + 1 is 1, 7 + 1 is 8), and so does this paste.
+ */
+async function operationRefusal(
+  area: PasteArea,
+  label: string,
+  target: CellTargetRef | undefined,
+): Promise<string | null> {
+  if (area.height <= 0 || area.width <= 0) return null;
+
+  let spills: SpillRangeInfo[] = [];
+  try {
+    spills = target ? await getFloatingRangeSpillRanges(target.id) : await getSpillRanges();
+  } catch (err) {
+    console.warn("[PasteSpecial] the dynamic arrays under the paste could not be read:", err);
+  }
+  if ((spills ?? []).some((spill) => spillOverlaps(spill, area))) return pasteRefusalSentence.partOfArray(label);
+
+  // A floating grid's cells are never on a protected sheet of their own (the
+  // host's protection gates the write in the backend), and its typed read
+  // withholds nothing.
+  if (target) return null;
+  let protectedSheet: boolean;
+  try {
+    protectedSheet = await isSheetProtected();
+  } catch (err) {
+    console.warn("[PasteSpecial] the sheet's protection could not be read:", err);
+    return pasteRefusalSentence.protectionUnknown(label);
+  }
+  if (!protectedSheet) return null;
+
+  try {
+    const r1 = area.row + area.height - 1;
+    const c1 = area.col + area.width - 1;
+    for (const cell of await readSheetTyped(area.row, area.col, r1, c1)) {
+      if (cell.row < area.row || cell.row > r1 || cell.col < area.col || cell.col > c1) continue;
+      if (cell.formulaWithheld) return pasteRefusalSentence.hiddenFormula(label, cellAddress(cell.row, cell.col));
+    }
+  } catch (err) {
+    console.warn("[PasteSpecial] the protected cells under the paste could not be read:", err);
+    return pasteRefusalSentence.protectionUnknown(label);
+  }
+  return null;
+}
+
+/** The style table entry `index`, read once per `cache`. */
+function cachedStyle(cache: Map<number, Promise<StyleData>>, index: number): Promise<StyleData> {
+  let style = cache.get(index);
+  if (!style) {
+    style = getStyle(index);
+    cache.set(index, style);
+  }
+  return style;
+}
+
 // ============================================================================
 // Main Execution Functions
 // ============================================================================
@@ -346,6 +741,15 @@ export async function executePasteSpecial(
       ? null
       : pasteAreaOf(clipboard, targetSelection, options.transpose, totalRows, totalCols);
   if (!(await mayPaste(clipboard, area, label, target))) return false;
+  // An operation's own questions (a dynamic array, a hidden formula), still
+  // before any write or undo step: a refusal leaves the paste area untouched.
+  if (options.operation !== "none" && area && !NO_OPERATION_ATTRIBUTES.has(options.pasteAttribute)) {
+    const refusal = await operationRefusal(area, label, target);
+    if (refusal !== null) {
+      void alertAsync(refusal);
+      return false;
+    }
+  }
   if (target) await pasteCellsOnTarget(clipboard, targetSelection, options, totalRows, totalCols, target);
   else await pasteCells(clipboard, targetSelection, options, totalRows, totalCols);
   return true;
@@ -415,12 +819,7 @@ async function shiftedFormulasFor(
   const shiftedFormulaMap = new Map<string, string>();
   const cellsToPaste = clipboard.cells;
   const { height: sourceHeight, width: sourceWidth } = matrixSize(cellsToPaste);
-  const needsFormulaShift =
-    pasteAttribute === "all" ||
-    pasteAttribute === "formulas" ||
-    pasteAttribute === "allExceptBorders" ||
-    pasteAttribute === "formulasAndNumberFormats";
-  if (clipboard.isCut || !needsFormulaShift) return shiftedFormulaMap;
+  if (clipboard.isCut || !FORMULA_ATTRIBUTES.has(pasteAttribute)) return shiftedFormulaMap;
 
   const sourceSel = clipboard.sourceSelection;
   const sourceMinRow = Math.min(sourceSel.startRow, sourceSel.endRow);
@@ -515,19 +914,32 @@ async function pasteCells(
   // Shift formulas for copy operations (not cut)
   const shiftedFormulaMap = await shiftedFormulasFor(clipboard, pasteAttribute, transpose, targetRow, targetCol);
 
-  // An operation computes from NUMBERS: the source's and the destination's,
-  // read typed before anything is written (never their display text).
+  // An operation computes from the source's and the destination's cells, read
+  // typed before anything is written (never their display text), and keeps
+  // their formulas (Excel's `=(A1)+1`, BUG-0346).
   let operands: OperationOperands | null = null;
   if (operation !== "none" && actualPasteHeight > 0 && actualPasteWidth > 0) {
     const [source, destRead] = await Promise.all([
       readSourceOperands(clipboard, sourceHeight, sourceWidth),
       readSheetTyped(targetRow, targetCol, targetRow + actualPasteHeight - 1, targetCol + actualPasteWidth - 1),
     ]);
-    operands = { source, dest: destOperandsOf(destRead), target: undefined };
+    operands = {
+      source,
+      dest: destOperandsOf(destRead),
+      sourceFormulas: FORMULA_ATTRIBUTES.has(pasteAttribute) ? shiftedFormulaMap : null,
+      target: undefined,
+    };
   }
 
   // The grid route: no object target (`ctx.target` is the paste's place).
-  const ctx: PasteContext = { clipboard, shiftedFormulaMap, styles: new Map(), target: undefined, operands };
+  const ctx: PasteContext = {
+    clipboard,
+    shiftedFormulaMap,
+    styles: new Map(),
+    target: undefined,
+    operands,
+    contentLanded: false,
+  };
 
   // Begin undo transaction
   const cellCount = actualPasteHeight * actualPasteWidth;
@@ -536,8 +948,13 @@ async function pasteCells(
     UNDO_CLOSES,
   );
 
+  // A cell whose write was refused is SKIPPED; a cell whose content landed
+  // and whose formatting then failed is not -- its value changed -- and is
+  // reported as such.
   let failedCells = 0;
   let firstFailure: string | null = null;
+  let unformattedCells = 0;
+  let firstUnformatted: string | null = null;
   try {
     for (let pr = 0; pr < actualPasteHeight; pr++) {
       for (let pc = 0; pc < actualPasteWidth; pc++) {
@@ -561,6 +978,7 @@ async function pasteCells(
         // Grid bounds check
         if (destRow >= totalRows || destCol >= totalCols) continue;
 
+        ctx.contentLanded = false;
         const failure = await pasteSingleCell(
           sourceCell,
           destRow,
@@ -571,7 +989,10 @@ async function pasteCells(
           operation,
           ctx,
         );
-        if (failure !== null) {
+        if (failure !== null && ctx.contentLanded) {
+          unformattedCells++;
+          firstUnformatted = firstUnformatted ?? failure;
+        } else if (failure !== null) {
           failedCells++;
           firstFailure = firstFailure ?? failure;
         }
@@ -592,11 +1013,14 @@ async function pasteCells(
     void alertAsync(error instanceof Error ? error.message : String(error));
     throw error;
   }
+  const sentences: string[] = [];
   if (failedCells > 0) {
-    void alertAsync(
-      `Paste Special skipped ${failedCells} cell(s):\n${firstFailure ?? "unknown error"}`,
-    );
+    sentences.push(`Paste Special skipped ${failedCells} cell(s):\n${firstFailure ?? "unknown error"}`);
   }
+  if (unformattedCells > 0) {
+    sentences.push(pasteRefusalSentence.formattingNotApplied(unformattedCells, firstUnformatted ?? "unknown error"));
+  }
+  if (sentences.length > 0) void alertAsync(sentences.join("\n\n"));
 }
 
 /**
@@ -621,6 +1045,14 @@ export async function executePasteLink(
   const area = pasteAreaOf(clipboard, targetSelection, false, totalRows, totalCols);
   if (!(await mayPaste(clipboard, area, label, target))) return false;
 
+  // The source sheet as it is NOW (BUG-0348): renamed since the copy, the
+  // link spells the new name; deleted, there is nothing left to link to.
+  const source = await sourceSheetNow(clipboard);
+  if (source === null) {
+    void alertAsync(pasteRefusalSentence.sourceSheetGone(label, clipboard.sourceSheetName));
+    return false;
+  }
+
   const cellsToPaste = clipboard.cells;
 
   const targetRow = area.row;
@@ -636,7 +1068,7 @@ export async function executePasteLink(
 
   // Excel: one copied cell links absolutely, a copied range relatively.
   const absolute = pasteHeight === 1 && pasteWidth === 1;
-  const sheetPrefix = linkSheetPrefix(clipboard, target);
+  const sheetPrefix = linkSheetPrefix(clipboard, target, source);
 
   if (target) {
     const updates: CellUpdateInput[] = [];
@@ -644,7 +1076,8 @@ export async function executePasteLink(
       for (let c = 0; c < actualPasteWidth; c++) {
         const srcRow = clipboardSourceRow(clipboard.sourceRows, sourceMinRow, r);
         const srcCol = sourceMinCol + c;
-        updates.push({ row: targetRow + r, col: targetCol + c, value: buildLinkFormula(sheetPrefix, srcRow, srcCol, absolute) });
+        // Every link is a formula, pasted: it stays one in a Text-formatted cell.
+        updates.push(pastedUpdate(targetRow + r, targetCol + c, buildLinkFormula(sheetPrefix, srcRow, srcCol, absolute), false));
       }
     }
     await writeTargetBatch(updates, [], `Paste Link ${updates.length} cells`, target);
@@ -656,6 +1089,7 @@ export async function executePasteLink(
     UNDO_CLOSES,
   );
 
+  // A link is a formula, pasted: it stays one in a Text-formatted cell (pastedUpdate).
   let failedCells = 0;
   let firstFailure: string | null = null;
   try {
@@ -672,7 +1106,9 @@ export async function executePasteLink(
         const formula = buildLinkFormula(sheetPrefix, srcRow, srcCol, absolute);
 
         try {
-          const { cells: updatedCells } = await updateCell(destRow, destCol, formula);
+          // The sheet branch: no object target (that one returned above),
+          // passed on all the same so this write can never land elsewhere.
+          const updatedCells = await updateCellsBatch([pastedUpdate(destRow, destCol, formula, false)], { target });
           for (const cell of updatedCells) {
             if (cell.sheetIndex !== undefined) continue;
             cellEvents.emit({
@@ -726,16 +1162,131 @@ interface PasteContext {
   target: CellTargetRef | undefined;
   /** An operation's typed operands (null when the paste has no operation). */
   operands: OperationOperands | null;
+  /**
+   * Whether the cell being pasted has had its CONTENT written yet (set by
+   * `writeContent`, reset per cell): a failure after that -- the source's
+   * style or number format refused -- is not a skipped cell, because the
+   * cell's value already changed.
+   */
+  contentLanded: boolean;
 }
 
 /** The style table entry `index`, read once per paste. */
 function styleOf(ctx: PasteContext, index: number): Promise<StyleData> {
-  let style = ctx.styles.get(index);
-  if (!style) {
-    style = getStyle(index);
-    ctx.styles.set(index, style);
+  return cachedStyle(ctx.styles, index);
+}
+
+/**
+ * Write one cell's CONTENT on this paste's place and record that it landed.
+ * Every content write of the per-cell route goes through here, so a later
+ * failure of the same cell is told apart from a refused write.
+ */
+async function writeContent(update: CellUpdateInput, ctx: PasteContext): Promise<CellData[]> {
+  const written = await updateCellsBatch([update], { target: ctx.target });
+  ctx.contentLanded = true;
+  return written;
+}
+
+/** The display-text fallback (a copy without stored values; a collection's JSON): an ENTRY, as before. */
+async function writeEntry(row: number, col: number, value: string, ctx: PasteContext): Promise<CellData[]> {
+  const { cells } = await updateCell(row, col, value);
+  ctx.contentLanded = true;
+  return cells;
+}
+
+/** The formula a paste writes for source matrix cell (srcR, srcC), or null when it writes a value. */
+function pastedFormulaOf(
+  sourceCell: CellData | null,
+  srcR: number,
+  srcC: number,
+  shiftedFormulaMap: Map<string, string>,
+): string | null {
+  return shiftedFormulaMap.get(`${srcR},${srcC}`) ?? sourceCell?.formula ?? null;
+}
+
+/**
+ * What a paste writes for the copied cell at matrix position (srcR, srcC) as a
+ * VALUE: its stored value, from the typed read the copy made
+ * (`ClipboardData.values`; a formula cell's RESULT), through the one rule
+ * `pastedConstantInput` -- the number 1.23456, never the "1.23" it showed under
+ * 0.00, written invariant. Null when the copy carries no stored values (it could
+ * not read them typed) or the rule cannot vouch for this cell: the paste then
+ * writes the display text, as before.
+ */
+function storedConstantOf(clipboard: ClipboardData, sourceCell: CellData | null, srcR: number, srcC: number): PastedConstant | null {
+  const values = clipboard.values;
+  if (!values) return null;
+  return pastedConstantInput(values[srcR]?.[srcC], sourceCell?.display ?? "");
+}
+
+/**
+ * Write one copied CONSTANT into a cell of the active sheet: its stored value,
+ * invariant, as a PASTE -- a number, TRUE / FALSE or an error stays one in a
+ * Text-formatted cell (Excel, measured live through COM 2026-10-29: Paste
+ * Values and Paste Formulas of the number 5 into an @ cell -> the number 5).
+ */
+async function writeStoredConstant(
+  constant: PastedConstant,
+  destRow: number,
+  destCol: number,
+  ctx: PasteContext,
+): Promise<CellData[]> {
+  return writeContent({ row: destRow, col: destCol, ...constant }, ctx);
+}
+
+/**
+ * Paste the source's formula (shifted) -- or, for a constant, its STORED value
+ * (`storedConstantOf`) -- into one cell of the active sheet, as a PASTE: a
+ * formula or a number stays one in a Text-formatted cell. Only a copy with no
+ * stored values writes the display text, as an entry, as before.
+ */
+async function writeFormulaOrDisplay(
+  sourceCell: CellData | null,
+  destRow: number,
+  destCol: number,
+  srcR: number,
+  srcC: number,
+  ctx: PasteContext,
+): Promise<void> {
+  const formula = pastedFormulaOf(sourceCell, srcR, srcC, ctx.shiftedFormulaMap);
+  if (formula) {
+    emitUpdated(await writeContent(pastedUpdate(destRow, destCol, formula, false), ctx));
+    return;
   }
-  return style;
+  const constant = storedConstantOf(ctx.clipboard, sourceCell, srcR, srcC);
+  if (constant) {
+    emitUpdated(await writeStoredConstant(constant, destRow, destCol, ctx));
+    return;
+  }
+  emitUpdated(await writeEntry(destRow, destCol, sourceCell?.display ?? "", ctx));
+}
+
+/**
+ * Paste the source's VALUE into one cell of the active sheet (Paste Values and
+ * its variants): a List / Dict collection as its JSON text, as before; any
+ * other cell as its STORED value -- a formula's result, a constant -- written
+ * invariant (`storedConstantOf`); only a copy with no stored values writes
+ * the display text.
+ */
+async function writeValue(
+  sourceCell: CellData | null,
+  destRow: number,
+  destCol: number,
+  srcR: number,
+  srcC: number,
+  ctx: PasteContext,
+): Promise<void> {
+  if (isCollectionCell(sourceCell)) {
+    const jsonText = ctx.clipboard.collectionTexts?.get(`${srcR},${srcC}`);
+    emitUpdated(await writeEntry(destRow, destCol, jsonText || (sourceCell?.display ?? ""), ctx));
+    return;
+  }
+  const constant = storedConstantOf(ctx.clipboard, sourceCell, srcR, srcC);
+  if (constant) {
+    emitUpdated(await writeStoredConstant(constant, destRow, destCol, ctx));
+    return;
+  }
+  emitUpdated(await writeEntry(destRow, destCol, sourceCell?.display ?? "", ctx));
 }
 
 /**
@@ -763,17 +1314,17 @@ async function pasteSingleCell(
   operation: PasteOperation,
   ctx: PasteContext,
 ): Promise<string | null> {
-  const { clipboard, shiftedFormulaMap } = ctx;
+  const { clipboard } = ctx;
   try {
     switch (pasteAttribute) {
       case "all":
-        await pasteAll(sourceCell, destRow, destCol, srcR, srcC, operation, shiftedFormulaMap, ctx.operands);
+        await pasteAll(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
         break;
       case "formulas":
-        await pasteFormulas(sourceCell, destRow, destCol, srcR, srcC, operation, shiftedFormulaMap, ctx.operands);
+        await pasteFormulas(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
         break;
       case "values":
-        await pasteValues(sourceCell, destRow, destCol, srcR, srcC, operation, clipboard.collectionTexts, ctx.operands);
+        await pasteValues(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
         break;
       case "formats":
         await pasteFormats(sourceCell, destRow, destCol);
@@ -794,16 +1345,7 @@ async function pasteSingleCell(
         await pasteValuesAndNumberFormats(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
         break;
       case "valuesAndSourceFormatting":
-        await pasteValuesAndSourceFormatting(
-          sourceCell,
-          destRow,
-          destCol,
-          srcR,
-          srcC,
-          operation,
-          clipboard.collectionTexts,
-          ctx.operands,
-        );
+        await pasteValuesAndSourceFormatting(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
         break;
       case "columnWidths":
         // Handled before the cell loop (pasteCells); no cell is written.
@@ -834,7 +1376,9 @@ function emitUpdated(updatedCells: CellData[]): void {
 }
 
 /**
- * Paste All: value/formula + style (same as standard paste).
+ * Paste All: value/formula + style (same as standard paste). With an
+ * operation the source's style is pasted whether or not the operation wrote
+ * the cell (Excel: "abc" + Add 1 stays "abc" and takes the source's format).
  */
 async function pasteAll(
   sourceCell: CellData | null,
@@ -843,25 +1387,16 @@ async function pasteAll(
   srcR: number,
   srcC: number,
   operation: PasteOperation,
-  shiftedFormulaMap: Map<string, string>,
-  operands: OperationOperands | null,
+  ctx: PasteContext,
 ): Promise<void> {
   if (operation !== "none") {
     // With operation: compute and write result, also copy style
-    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, operands);
-    await setCellStyle(destRow, destCol, sourceStyleIndex(sourceCell));
+    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
   } else {
-    // No operation: paste formula/value + style
-    const value =
-      shiftedFormulaMap.get(`${srcR},${srcC}`) ??
-      sourceCell?.formula ??
-      sourceCell?.display ??
-      "";
-
-    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
-    await setCellStyle(destRow, destCol, sourceStyleIndex(sourceCell));
-    emitUpdated(updatedCells);
+    // No operation: paste formula/value, then the style
+    await writeFormulaOrDisplay(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
+  await setCellStyle(destRow, destCol, sourceStyleIndex(sourceCell));
 }
 
 /**
@@ -874,27 +1409,20 @@ async function pasteFormulas(
   srcR: number,
   srcC: number,
   operation: PasteOperation,
-  shiftedFormulaMap: Map<string, string>,
-  operands: OperationOperands | null,
+  ctx: PasteContext,
 ): Promise<void> {
   if (operation !== "none") {
-    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, operands);
+    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
   } else {
-    const value =
-      shiftedFormulaMap.get(`${srcR},${srcC}`) ??
-      sourceCell?.formula ??
-      sourceCell?.display ??
-      "";
-
-    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
     // Do NOT set style - keep target formatting
-    emitUpdated(updatedCells);
+    await writeFormulaOrDisplay(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
 }
 
 /**
- * Paste Values: display value only (flattens formulas), no formatting change.
- * For List/Dict cells, pastes the JSON representation if available.
+ * Paste Values: the stored value only (flattens formulas to their results),
+ * no formatting change (`writeValue`). For List/Dict cells, pastes the JSON
+ * representation if available.
  */
 async function pasteValues(
   sourceCell: CellData | null,
@@ -903,24 +1431,13 @@ async function pasteValues(
   srcR: number,
   srcC: number,
   operation: PasteOperation,
-  collectionTexts: Map<string, string> | undefined,
-  operands: OperationOperands | null,
+  ctx: PasteContext,
 ): Promise<void> {
   if (operation !== "none") {
-    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, operands);
+    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
   } else {
-    // For collection cells, use JSON text if available
-    let value = sourceCell?.display ?? "";
-    if (isCollectionCell(sourceCell)) {
-      const jsonText = collectionTexts?.get(`${srcR},${srcC}`);
-      if (jsonText) {
-        value = jsonText;
-      }
-    }
-
-    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
     // Do NOT set style - keep target formatting
-    emitUpdated(updatedCells);
+    await writeValue(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
 }
 
@@ -937,10 +1454,9 @@ async function pasteValuesAndSourceFormatting(
   srcR: number,
   srcC: number,
   operation: PasteOperation,
-  collectionTexts: Map<string, string> | undefined,
-  operands: OperationOperands | null,
+  ctx: PasteContext,
 ): Promise<void> {
-  await pasteValues(sourceCell, destRow, destCol, srcR, srcC, operation, collectionTexts, operands);
+  await pasteValues(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
   await setCellStyle(destRow, destCol, sourceStyleIndex(sourceCell));
 }
 
@@ -964,8 +1480,30 @@ async function pasteFormats(
 }
 
 /**
- * Paste with mathematical operation: read target, compute, write result.
- * Skips List/Dict collection cells (not meaningful for arithmetic).
+ * What an operation writes over one destination cell (see `Operand`), or null
+ * to leave it as it is. Skips List/Dict collection cells on either side (not
+ * meaningful for arithmetic). Reads only what `pasteCells` /
+ * `pasteCellsOnTarget` read typed BEFORE the paste wrote anything.
+ */
+function operationWriteFor(
+  sourceCell: CellData | null,
+  destRow: number,
+  destCol: number,
+  srcR: number,
+  srcC: number,
+  operation: PasteOperation,
+  operands: OperationOperands | null,
+): { value: string; invariant: boolean } | null {
+  const destCell = operands?.dest.get(`${destRow},${destCol}`);
+  if (isCollectionCell(sourceCell) || isCollectionCell(destCell)) return null;
+  return operationWrite(destOperand(destCell), sourceOperand(sourceCell, srcR, srcC, operands), operation);
+}
+
+/**
+ * Paste with mathematical operation (Excel's rules: `Operand`): a formula on
+ * either side gives `=(old)+src`; two constants give the computed constant,
+ * written INVARIANT; an inert side writes nothing. Either result is a number
+ * or a formula, written as a PASTE, so it stays one in a Text-formatted cell.
  */
 async function pasteWithOperation(
   sourceCell: CellData | null,
@@ -974,29 +1512,11 @@ async function pasteWithOperation(
   srcR: number,
   srcC: number,
   operation: PasteOperation,
-  operands: OperationOperands | null,
+  ctx: PasteContext,
 ): Promise<void> {
-  // Skip arithmetic for collection cells — they are not numeric
-  if (isCollectionCell(sourceCell)) return;
-
-  // Read current target cell value
-  const targetCell = await getCell(destRow, destCol);
-
-  // Also skip if target is a collection cell
-  if (isCollectionCell(targetCell)) return;
-
-  // The NUMBERS, read typed before the paste wrote anything (pasteCells).
-  const targetValue = operands?.dest.get(`${destRow},${destCol}`) ?? 0;
-  const sourceValue = operands?.source.get(`${srcR},${srcC}`) ?? 0;
-
-  const result = applyOperation(targetValue, sourceValue, operation);
-
-  // Write the computed result as a plain value, in INVARIANT form.
-  const updatedCells = await updateCellsBatch(
-    [{ row: destRow, col: destCol, value: operationResultInput(result), invariant: true }],
-    { target: operands?.target },
-  );
-  emitUpdated(updatedCells);
+  const write = operationWriteFor(sourceCell, destRow, destCol, srcR, srcC, operation, ctx.operands);
+  if (write === null) return;
+  emitUpdated(await writeContent(pastedUpdate(destRow, destCol, write.value, write.invariant), ctx));
 }
 
 // ----------------------------------------------------------------------------
@@ -1067,16 +1587,9 @@ async function pasteAllExceptBorders(
   const destStyle = await styleOf(ctx, destCell?.styleIndex ?? 0);
 
   if (operation !== "none") {
-    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx.operands);
+    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
   } else {
-    const value =
-      ctx.shiftedFormulaMap.get(`${srcR},${srcC}`) ??
-      sourceCell?.formula ??
-      sourceCell?.display ??
-      "";
-
-    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
-    emitUpdated(updatedCells);
+    await writeFormulaOrDisplay(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
 
   // Every style field of the source...
@@ -1108,16 +1621,9 @@ async function pasteFormulasAndNumberFormats(
   ctx: PasteContext,
 ): Promise<void> {
   if (operation !== "none") {
-    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx.operands);
+    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
   } else {
-    const value =
-      ctx.shiftedFormulaMap.get(`${srcR},${srcC}`) ??
-      sourceCell?.formula ??
-      sourceCell?.display ??
-      "";
-
-    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
-    emitUpdated(updatedCells);
+    await writeFormulaOrDisplay(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
 
   // Copy only the number format from source style
@@ -1128,7 +1634,7 @@ async function pasteFormulasAndNumberFormats(
 }
 
 /**
- * Paste Values and Number Formats: display value (flattened) + number format, keep other formatting.
+ * Paste Values and Number Formats: the stored value (flattened) + number format, keep other formatting.
  */
 async function pasteValuesAndNumberFormats(
   sourceCell: CellData | null,
@@ -1140,18 +1646,9 @@ async function pasteValuesAndNumberFormats(
   ctx: PasteContext,
 ): Promise<void> {
   if (operation !== "none") {
-    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx.operands);
+    await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
   } else {
-    let value = sourceCell?.display ?? "";
-    if (isCollectionCell(sourceCell)) {
-      const jsonText = ctx.clipboard.collectionTexts?.get(`${srcR},${srcC}`);
-      if (jsonText) {
-        value = jsonText;
-      }
-    }
-
-    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
-    emitUpdated(updatedCells);
+    await writeValue(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
 
   // Copy only the number format from source style
@@ -1269,6 +1766,8 @@ const TARGET_PASTE_ATTRIBUTES: ReadonlySet<PasteAttribute> = new Set<PasteAttrib
  * travels) to the object's cells in ONE batch, then each `numberFormats`
  * entry, all inside ONE undo step (the batch's own owned step joins it).
  * A refusal is shown and the step closed; nothing half-applied is left open.
+ * A pasted formula or stored value carries `pasted` (`pastedUpdate`), so it
+ * keeps its kind in a Text-formatted cell in this same batch.
  */
 async function writeTargetBatch(
   updates: CellUpdateInput[],
@@ -1304,6 +1803,47 @@ async function writeTargetBatch(
 }
 
 /**
+ * What a Paste All (or Values & Source Formatting) WITH AN OPERATION writes
+ * into an object cell the operation leaves alone -- an inert side ("abc" + 1),
+ * blank on blank -- so the source's style still arrives, as it does on the
+ * sheet (Excel, measured live through COM 2026-10-29: "abc" + Add of a bold
+ * 0.00% 1 stays "abc", bold, 0.00%). There is no style-index write that takes a
+ * target (BUG-0513), so the cell's own content is written back unchanged with
+ * the style, as a PASTE (it keeps its kind under an @ source style): a blank as
+ * a clear (the backend keeps the style a clear brings), a number, TRUE / FALSE
+ * or an error as its invariant literal, text behind an apostrophe (stored
+ * verbatim, never re-read as a number).
+ *
+ * Null -- the cell keeps its old format, as before -- where writing it back
+ * would not be exact: a FORMULA (re-entering it on a floating grid is not
+ * neutral: no UDF or CUBE pre-resolution reaches that route), rich text (the
+ * runs would be lost), a List / Dict collection.
+ */
+function contentWrittenBack(
+  dest: TypedCellData | undefined,
+  richText: boolean,
+): { value: string; invariant: boolean } | null {
+  if (!dest || dest.type === "empty") return { value: "", invariant: false };
+  if (dest.formula || dest.formulaWithheld || isCollectionCell(dest)) return null;
+  switch (dest.type) {
+    case "number":
+      return typeof dest.value === "number" && Number.isFinite(dest.value)
+        ? { value: String(dest.value), invariant: true }
+        : null;
+    case "boolean":
+      return { value: dest.value ? "TRUE" : "FALSE", invariant: true };
+    case "error":
+      return typeof dest.value === "string" && dest.value.startsWith("#")
+        ? { value: dest.value, invariant: true }
+        : null;
+    case "text":
+      return richText ? null : { value: `'${String(dest.value ?? "")}`, invariant: false };
+    default:
+      return null;
+  }
+}
+
+/**
  * Paste Special onto an OBJECT's cells: the same rules as `pasteCells`
  * (transpose, skip blanks, operations, Excel's relative shift), written as one
  * batch through the target instead of one active-sheet call per cell.
@@ -1329,12 +1869,19 @@ async function pasteCellsOnTarget(
 
   const shiftedFormulaMap = await shiftedFormulasFor(clipboard, pasteAttribute, transpose, targetRow, targetCol);
 
+  const carriesStyle = pasteAttribute === "all" || pasteAttribute === "valuesAndSourceFormatting";
+  const carriesNumberFormat =
+    pasteAttribute === "formulasAndNumberFormats" || pasteAttribute === "valuesAndNumberFormats";
+  const writesFormula =
+    pasteAttribute === "all" || pasteAttribute === "formulas" || pasteAttribute === "formulasAndNumberFormats";
+
   // An operation reads what the destination holds now: the object's cells,
-  // through its styled read (never the active sheet's cell at those coordinates).
-  // The collection check reads the display; the arithmetic reads NUMBERS,
-  // typed (the object's and the source's stored values, never display text).
-  const destNow = new Map<string, CellData>();
+  // through its typed read (never the active sheet's cell at those
+  // coordinates) -- the stored values, the formulas an operation keeps, and
+  // the display the collection check reads. When the source's style travels,
+  // the styled read says which cells carry rich text (`contentWrittenBack`).
   let operands: OperationOperands | null = null;
+  let richTextAt: ReadonlySet<string> | null = null;
   if (operation !== "none") {
     const rect = {
       startRow: targetRow,
@@ -1342,30 +1889,21 @@ async function pasteCellsOnTarget(
       endRow: targetRow + actualPasteHeight - 1,
       endCol: targetCol + actualPasteWidth - 1,
     };
-    const [read, typed, source] = await Promise.all([
-      getCellTargetCells(target, rect),
+    const [typed, source, styled] = await Promise.all([
       getCellTargetCellsTyped(target, rect),
       readSourceOperands(clipboard, sourceHeight, sourceWidth),
+      carriesStyle ? richTextCellsOf(target, rect) : Promise.resolve(null),
     ]);
-    for (const cell of read.cells) destNow.set(`${cell.row},${cell.col}`, cell);
-    operands = { source, dest: destOperandsOf(typed), target };
+    operands = {
+      source,
+      dest: destOperandsOf(typed),
+      sourceFormulas: FORMULA_ATTRIBUTES.has(pasteAttribute) ? shiftedFormulaMap : null,
+      target,
+    };
+    richTextAt = styled;
   }
 
   const styles = new Map<number, Promise<StyleData>>();
-  const styleOfIndex = (index: number): Promise<StyleData> => {
-    let style = styles.get(index);
-    if (!style) {
-      style = getStyle(index);
-      styles.set(index, style);
-    }
-    return style;
-  };
-
-  const carriesStyle = pasteAttribute === "all" || pasteAttribute === "valuesAndSourceFormatting";
-  const carriesNumberFormat =
-    pasteAttribute === "formulasAndNumberFormats" || pasteAttribute === "valuesAndNumberFormats";
-  const writesFormula =
-    pasteAttribute === "all" || pasteAttribute === "formulas" || pasteAttribute === "formulasAndNumberFormats";
 
   const updates: CellUpdateInput[] = [];
   const numberFormats: Array<{ row: number; col: number; numberFormat: string }> = [];
@@ -1378,41 +1916,48 @@ async function pasteCellsOnTarget(
       if (srcR >= sourceHeight || srcC >= sourceWidth) continue;
       const sourceCell = cellsToPaste[srcR]?.[srcC] ?? null;
       if (skipBlanks && isCellBlank(sourceCell)) continue;
+      const key = `${destRow},${destCol}`;
 
-      let value: string | null;
-      let invariant = false;
+      // Every write but the display-text fallback is a PASTE (`pastedUpdate`):
+      // a formula or a stored value keeps its kind in a Text-formatted cell.
+      let update: CellUpdateInput | null = null;
       if (operation !== "none") {
-        const destCell = destNow.get(`${destRow},${destCol}`) ?? null;
-        // Arithmetic skips collection cells on either side, as on a sheet.
-        if (isCollectionCell(sourceCell) || isCollectionCell(destCell)) {
-          value = null;
-        } else {
-          const result = applyOperation(
-            operands?.dest.get(`${destRow},${destCol}`) ?? 0,
-            operands?.source.get(`${srcR},${srcC}`) ?? 0,
-            operation,
-          );
-          value = operationResultInput(result);
-          invariant = true;
+        // The same rules as on a sheet (`Operand`): a formula stays a formula,
+        // an inert side or blank on blank writes nothing, collections are skipped.
+        const write = operationWriteFor(sourceCell, destRow, destCol, srcR, srcC, operation, operands);
+        if (write) update = pastedUpdate(destRow, destCol, write.value, write.invariant);
+        if (write === null && carriesStyle && richTextAt !== null) {
+          // The operation leaves the cell alone; the source's style still arrives.
+          const back = contentWrittenBack(operands?.dest.get(key), richTextAt.has(key));
+          if (back) update = pastedUpdate(destRow, destCol, back.value, back.invariant);
         }
-      } else if (writesFormula) {
-        value = shiftedFormulaMap.get(`${srcR},${srcC}`) ?? sourceCell?.formula ?? sourceCell?.display ?? "";
       } else {
-        value = sourceCell?.display ?? "";
-        if (isCollectionCell(sourceCell)) {
-          const jsonText = clipboard.collectionTexts?.get(`${srcR},${srcC}`);
-          if (jsonText) value = jsonText;
+        // A formula (when the attribute pastes formulas), else the STORED
+        // value -- a constant, or under a values attribute a formula's result
+        // -- invariant (`storedConstantOf`); a collection as its JSON text;
+        // only a copy with no stored values writes the display text.
+        const formula = writesFormula ? pastedFormulaOf(sourceCell, srcR, srcC, shiftedFormulaMap) : null;
+        const constant = formula || isCollectionCell(sourceCell) ? null : storedConstantOf(clipboard, sourceCell, srcR, srcC);
+        if (formula) {
+          update = pastedUpdate(destRow, destCol, formula, false);
+        } else if (constant) {
+          update = { row: destRow, col: destCol, ...constant };
+        } else {
+          let value = sourceCell?.display ?? "";
+          if (!writesFormula && isCollectionCell(sourceCell)) {
+            const jsonText = clipboard.collectionTexts?.get(`${srcR},${srcC}`);
+            if (jsonText) value = jsonText;
+          }
+          update = { row: destRow, col: destCol, value };
         }
       }
 
-      if (value !== null) {
-        const update: CellUpdateInput = { row: destRow, col: destCol, value };
-        if (invariant) update.invariant = true;
+      if (update !== null) {
         if (carriesStyle) update.styleIndex = sourceStyleIndex(sourceCell);
         updates.push(update);
       }
       if (carriesNumberFormat && sourceCell) {
-        const sourceStyle = await styleOfIndex(sourceCell.styleIndex);
+        const sourceStyle = await cachedStyle(styles, sourceCell.styleIndex);
         numberFormats.push({ row: destRow, col: destCol, numberFormat: sourceStyle.numberFormat });
       }
     }
@@ -1424,4 +1969,26 @@ async function pasteCellsOnTarget(
     `Paste Special (${pasteAttribute}) ${actualPasteHeight * actualPasteWidth} cells`,
     target,
   );
+}
+
+/**
+ * The object cells ("row,col") in `rect` that carry rich text, from the
+ * styled read; null when it cannot be read -- then no cell's content is
+ * written back (`contentWrittenBack`), as before.
+ */
+async function richTextCellsOf(
+  target: CellTargetRef,
+  rect: { startRow: number; startCol: number; endRow: number; endCol: number },
+): Promise<ReadonlySet<string> | null> {
+  try {
+    const read = await getCellTargetCells(target, rect);
+    const out = new Set<string>();
+    for (const cell of read?.cells ?? []) {
+      if (cell.richText && cell.richText.length > 0) out.add(`${cell.row},${cell.col}`);
+    }
+    return out;
+  } catch (err) {
+    console.warn("[PasteSpecial] the floating grid's cells could not be read for their rich text:", err);
+    return null;
+  }
 }

@@ -150,6 +150,11 @@ export function getControlPaintPreview(controlId: string): Readonly<Record<strin
   return previews.get(controlId)?.writes;
 }
 
+/** Every control id holding a container or a preview (an off-sheet re-key walks them). */
+export function controlContainerIds(): string[] {
+  return [...new Set<string>([...entries.keys(), ...previews.keys()])];
+}
+
 /** A re-anchor renamed a control: its entry follows it. */
 export function migrateControlContainer(oldId: string, newId: string): void {
   if (oldId === newId) return;

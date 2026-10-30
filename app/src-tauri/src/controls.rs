@@ -1493,22 +1493,34 @@ pub(crate) fn control_instance_id(sheet_index: usize, row: u32, col: u32) -> Str
     format!("control-{}-{}-{}", sheet_index, row, col)
 }
 
-/// Re-point every object script bound to `from_id` at `to_id`. Returns
-/// (script id, the binding it had) for the undo payload.
+/// Re-point every object script bound to `from_id` at `to_id`, through the one
+/// re-bind door (`scripting::script_rebind`): each script's SCHEDULED JOBS
+/// move with it, and every window is told once the store's guard is released,
+/// so the live mount re-keys too (rev6B#2). Returns (script id, the binding it
+/// had) for the undo payload.
 fn rekey_control_bindings(
     state: &AppState,
     effect: &DocumentEffect,
     from_id: &str,
     to_id: &str,
 ) -> Vec<(String, Option<String>)> {
-    let Ok(mut scripts) = state.object_scripts.write(effect) else { return Vec::new() };
-    let mut previous = Vec::new();
-    for script in scripts.iter_mut() {
-        if script.instance_id.as_deref() == Some(from_id) {
-            previous.push((script.id.clone(), script.instance_id.clone()));
-            script.instance_id = Some(to_id.to_string());
+    let (previous, rebound) = {
+        let Ok(mut scripts) = state.object_scripts.write(effect) else { return Vec::new() };
+        let mut previous = Vec::new();
+        let mut rebound = Vec::new();
+        for script in scripts.iter_mut() {
+            if script.instance_id.as_deref() == Some(from_id) {
+                previous.push((script.id.clone(), script.instance_id.clone()));
+                rebound.extend(crate::scripting::script_rebind::rebind_script(
+                    effect,
+                    script,
+                    Some(to_id.to_string()),
+                ));
+            }
         }
-    }
+        (previous, rebound)
+    };
+    crate::scripting::script_rebind::announce_rebinds(&rebound);
     previous
 }
 

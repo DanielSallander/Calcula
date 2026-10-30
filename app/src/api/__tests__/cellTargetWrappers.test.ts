@@ -53,6 +53,15 @@ vi.mock("../cellTargetCommands", async (importOriginal) => {
   return { ...actual, TARGET_COMMANDS: listHolder.list };
 });
 
+// The sheet ON SCREEN is Sheet1 (index 0), a member of the ambient group set
+// below: the formatting wrappers send a group only when the sheet on screen
+// belongs to it (review G#4), so without this the group would never be sent and
+// "a target DROPS the group" would hold by accident.
+vi.mock("../../core/state/GridContext", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../core/state/GridContext")>()),
+  getGridStateSnapshot: () => ({ sheetContext: { activeSheetIndex: 0 } }),
+}));
+
 import { invoke } from "@tauri-apps/api/core";
 import * as tauriApi from "../../core/lib/tauri-api";
 import * as backend from "../backend";

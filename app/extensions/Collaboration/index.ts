@@ -66,7 +66,6 @@ import {
   getActiveSheetId,
   getActiveSheetFrameRegions,
   hasWritebackFrames,
-  getDesignatedRegionCount,
   getActiveRegionAt,
   getActiveCellState,
   activeRangeOverlapsWriteback,
@@ -91,6 +90,7 @@ import {
   valuesText,
 } from "./lib/writebackTabModel";
 import { refreshCollectStreams, resetCollectStreams, wireCollectStreamsRefresh } from "./lib/collectStreamsStore";
+import { followStructuralEditsForDesignatedRegions } from "./lib/designatedRegionsFollowEdits";
 import { columnToLetter } from "@api/types";
 
 import { onSelectionOwnershipChanged } from "@api/selectionOwner";
@@ -857,21 +857,13 @@ function activate(context: ExtensionContext): void {
   // regions (the frame shows them too).
   refreshOn(WRITEBACK_REGIONS_CHANGED_EVENT);
   // Inserting or deleting rows/columns moves the author's own regions in the
-  // backend (subscribed regions refuse structural edits). Only a workbook that
-  // designated some re-reads.
-  for (const structural of [
-    AppEvents.ROWS_INSERTED,
-    AppEvents.ROWS_DELETED,
-    AppEvents.COLUMNS_INSERTED,
-    AppEvents.COLUMNS_DELETED,
-  ]) {
-    cleanupFns.push(
-      context.events.on(structural, () => {
-        if (getDesignatedRegionCount() === 0) return;
-        void refreshWriteback();
-      }),
-    );
-  }
+  // backend (subscribed regions refuse structural edits) -- on the sheet on
+  // screen, on its undo, AND on a sheet the user is not looking at (a script's
+  // or the command line's `sheetIndex`). Only a workbook that designated some
+  // re-reads (lib/designatedRegionsFollowEdits.ts).
+  cleanupFns.push(
+    followStructuralEditsForDesignatedRegions((eventName, cb) => context.events.on(eventName, cb)),
+  );
   // An environment switch can change the version, and with it the regions.
   refreshOn(ENVIRONMENTS_CHANGED_EVENT);
   // SHEET_CHANGED with NO sheet index is the "content replaced" announcement

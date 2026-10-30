@@ -28,8 +28,10 @@ pub(crate) mod structure_cells;
 // `LOG10` as column LOG row 10. The RIGHT edge is guarded non-consumingly by
 // `replace_all_guarded` (13 built-in functions end in digits: LOG10, BIN2DEC,
 // OCT2HEX, ... — `=LOG10(A5)` must not become `=LOG11(A6)` on a fill or shift).
-static CELL_REF_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(^|[^A-Za-z0-9_.])(\$?)([A-Za-z]{1,3})(\$?)(\d+)").unwrap());
+// (`CELL_REF_RE`, a lone-cell pattern with the same lead, went with the last
+// shifter that used it, the sheet-blind `relocate_references_in_formula`; every
+// cell pass now matches a cell WITH its range partner -- `CELL_REF_OR_RANGE_RE`
+// below, or `QUALIFIED_REF_RE` on the sheet-aware paths.)
 static ROW_RANGE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(^|[^A-Za-z0-9_.:$])(\$?)(\d+):(\$?)(\d+)").unwrap());
 static COL_RANGE_RE: Lazy<Regex> =
@@ -1787,12 +1789,11 @@ pub(crate) fn insert_rows_impl(
     // coordinate holders too. Sheet name is read here (not held) so the shift
     // can tell a local reference from one pointing at another sheet.
     let names_rewritten = {
-        let sheet_name = state
-            .sheet_names
-            .read()
-            .ok()
-            .and_then(|n| n.get(active_sheet).cloned())
-            .unwrap_or_default();
+        // From `sheet_names_snapshot`, taken at the top BEFORE `style_registry`
+        // (BUG-0045): read here, under `style_registry`, the lock was the
+        // pass's order inside out -- invisible to the census until it read a
+        // one-line `{ .. }` as ending nothing (rev5C#1).
+        let sheet_name = sheet_names_snapshot.get(active_sheet).cloned().unwrap_or_default();
         let rewritten = shift_named_ranges(
             &state,
             &effect,
@@ -1819,6 +1820,16 @@ pub(crate) fn insert_rows_impl(
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
+    // Chart and sparkline DATA RANGES on this sheet, whatever sheet the chart
+    // is on (BUG-0357), recorded into this step.
+    crate::chart_commands::range_shift::shift_chart_and_sparkline_ranges(
+        &state,
+        &effect,
+        &mut undo_stack,
+        active_sheet,
+        sheet_names_snapshot.get(active_sheet).map(String::as_str).unwrap_or(""),
+        &structure_cells::BandEdit::whole_lines(calp::writeback::StructuralEdit::RowInsert { at: row, count }),
     );
     // On-grid controls: cell key AND object-script binding move together.
     shift_controls(
@@ -2300,12 +2311,11 @@ pub(crate) fn insert_columns_impl(
     // coordinate holders too. Sheet name is read here (not held) so the shift
     // can tell a local reference from one pointing at another sheet.
     let names_rewritten = {
-        let sheet_name = state
-            .sheet_names
-            .read()
-            .ok()
-            .and_then(|n| n.get(active_sheet).cloned())
-            .unwrap_or_default();
+        // From `sheet_names_snapshot`, taken at the top BEFORE `style_registry`
+        // (BUG-0045): read here, under `style_registry`, the lock was the
+        // pass's order inside out -- invisible to the census until it read a
+        // one-line `{ .. }` as ending nothing (rev5C#1).
+        let sheet_name = sheet_names_snapshot.get(active_sheet).cloned().unwrap_or_default();
         let rewritten = shift_named_ranges(
             &state,
             &effect,
@@ -2331,6 +2341,15 @@ pub(crate) fn insert_columns_impl(
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
+    // Chart and sparkline DATA RANGES on this sheet (BUG-0357).
+    crate::chart_commands::range_shift::shift_chart_and_sparkline_ranges(
+        &state,
+        &effect,
+        &mut undo_stack,
+        active_sheet,
+        sheet_names_snapshot.get(active_sheet).map(String::as_str).unwrap_or(""),
+        &structure_cells::BandEdit::whole_lines(calp::writeback::StructuralEdit::ColInsert { at: col, count }),
     );
     // On-grid controls: cell key AND object-script binding move together.
     shift_controls(
@@ -3828,12 +3847,11 @@ pub(crate) fn delete_rows_impl(
     // coordinate holders too. Sheet name is read here (not held) so the shift
     // can tell a local reference from one pointing at another sheet.
     let names_rewritten = {
-        let sheet_name = state
-            .sheet_names
-            .read()
-            .ok()
-            .and_then(|n| n.get(active_sheet).cloned())
-            .unwrap_or_default();
+        // From `sheet_names_snapshot`, taken at the top BEFORE `style_registry`
+        // (BUG-0045): read here, under `style_registry`, the lock was the
+        // pass's order inside out -- invisible to the census until it read a
+        // one-line `{ .. }` as ending nothing (rev5C#1).
+        let sheet_name = sheet_names_snapshot.get(active_sheet).cloned().unwrap_or_default();
         let rewritten = shift_named_ranges(
             &state,
             &effect,
@@ -3860,6 +3878,15 @@ pub(crate) fn delete_rows_impl(
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
+    // Chart and sparkline DATA RANGES on this sheet (BUG-0357).
+    crate::chart_commands::range_shift::shift_chart_and_sparkline_ranges(
+        &state,
+        &effect,
+        &mut undo_stack,
+        active_sheet,
+        sheet_names_snapshot.get(active_sheet).map(String::as_str).unwrap_or(""),
+        &structure_cells::BandEdit::whole_lines(calp::writeback::StructuralEdit::RowDelete { at: row, count }),
     );
     // On-grid controls: cell key AND object-script binding move together.
     shift_controls(
@@ -4396,12 +4423,11 @@ pub(crate) fn delete_columns_impl(
     // coordinate holders too. Sheet name is read here (not held) so the shift
     // can tell a local reference from one pointing at another sheet.
     let names_rewritten = {
-        let sheet_name = state
-            .sheet_names
-            .read()
-            .ok()
-            .and_then(|n| n.get(active_sheet).cloned())
-            .unwrap_or_default();
+        // From `sheet_names_snapshot`, taken at the top BEFORE `style_registry`
+        // (BUG-0045): read here, under `style_registry`, the lock was the
+        // pass's order inside out -- invisible to the census until it read a
+        // one-line `{ .. }` as ending nothing (rev5C#1).
+        let sheet_name = sheet_names_snapshot.get(active_sheet).cloned().unwrap_or_default();
         let rewritten = shift_named_ranges(
             &state,
             &effect,
@@ -4427,6 +4453,15 @@ pub(crate) fn delete_columns_impl(
         &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
+    // Chart and sparkline DATA RANGES on this sheet (BUG-0357).
+    crate::chart_commands::range_shift::shift_chart_and_sparkline_ranges(
+        &state,
+        &effect,
+        &mut undo_stack,
+        active_sheet,
+        sheet_names_snapshot.get(active_sheet).map(String::as_str).unwrap_or(""),
+        &structure_cells::BandEdit::whole_lines(calp::writeback::StructuralEdit::ColDelete { at: col, count }),
     );
     // On-grid controls: cell key AND object-script binding move together.
     shift_controls(
@@ -4695,107 +4730,733 @@ pub(crate) fn delete_columns_impl(
 // CELL REFERENCE RELOCATION (for drag-move operations)
 // ============================================================================
 
-/// Helper: convert a 0-based column index to letters (e.g., 0 -> "A", 25 -> "Z", 26 -> "AA").
-fn index_to_col_letters(mut idx: u32) -> String {
-    let mut result = String::new();
-    loop {
-        result.insert(0, (b'A' + (idx % 26) as u8) as char);
-        if idx < 26 {
-            break;
-        }
-        idx = idx / 26 - 1;
-    }
-    result
-}
-
-/// Rewrite formula references that point into the source range so they point
-/// to the destination range instead.  References outside the source range are
-/// left untouched.  Absolute markers ($) are preserved.
-///
-/// `src_min_row` / `src_min_col` are 0-indexed grid coordinates.
-/// Formula row numbers are 1-indexed (A1 style), so we add 1 when comparing.
-pub(crate) fn relocate_references_in_formula(
-    formula: &str,
-    src_min_row: u32,
-    src_min_col: u32,
-    src_max_row: u32,
-    src_max_col: u32,
+/// Where ONE reference endpoint goes when the block `(min_row, min_col,
+/// max_row, max_col)` (0-based) moves by `(delta_row, delta_col)`: `None` when
+/// it is not in the block.
+fn moved_endpoint(
+    block: (u32, u32, u32, u32),
     delta_row: i32,
     delta_col: i32,
+    (row, col): (u32, u32),
+) -> Option<(u32, u32)> {
+    let (min_row, min_col, max_row, max_col) = block;
+    if row < min_row || row > max_row || col < min_col || col > max_col {
+        return None;
+    }
+    let new_row = i64::from(row) + i64::from(delta_row);
+    let new_col = i64::from(col) + i64::from(delta_col);
+    if new_row < 0 || new_col < 0 {
+        return None;
+    }
+    Some((new_row as u32, new_col as u32))
+}
+
+/// Excel's rule for a RANGE reference under a move, measured over COM
+/// [LIVE, Excel 16, 2026-10-29]: `Some(new corners)` when the range changes,
+/// `None` when it stays exactly as written.
+///
+/// * BOTH corners in the moved block: the whole range moves with it
+///   (`=SUM(A1:A3)`, cut A1:A3 to C1 -> `=SUM(C1:C3)`).
+/// * ONE corner in the block: that corner follows only when every cell it
+///   drags along moves too, and the range stays the right way round. A row
+///   change drags the corner's whole ROW edge (every column of the range must
+///   be in the block), a column change its whole COLUMN edge. So `=SUM(A1:A3)`
+///   with A3 cut to A6 becomes `=SUM(A1:A6)`, and `=SUM(A2:A4)` with A2 cut to
+///   A1 becomes `=SUM(A1:A4)`; but `=SUM(A1:A4)` with A1:A3 cut to C1,
+///   `=SUM(A1:B1)` with B1 cut to B5, `=SUM(A1:B2)` with B2 cut to D4,
+///   `=SUM(A1:A3)` with A3 cut to C3 and `=SUM(A3:A4)` with A3 cut to A6 (which
+///   would turn it inside out) all stay as they were.
+/// * NO corner in the block: unchanged, even when its middle moved
+///   (`=SUM(A1:A3)` with A2 cut to C2).
+///
+/// A corner that follows INWARD -- it lands on cells of the range itself --
+/// does not shrink the range to where it landed: the range keeps every cell
+/// the cut left behind. On the axis that moved, a followed start corner stops
+/// at most one line past the block (`min(landed, block end + 1)`) and a
+/// followed end corner one line before it (`max(landed, block start - 1)`)
+/// [LIVE, Excel 16, 2026-10-29, relocate/probe1.ps1]: `=SUM(A1:A5)` with A5 cut
+/// to A2 is `=SUM(A1:A4)`, with A1 cut to A4 `=SUM(A2:A5)`, with A4:A5 cut to A2
+/// `=SUM(A1:A3)`; `=SUM(A1:A3)` with A3 cut to A1 is `=SUM(A1:A2)`. An OUTWARD
+/// follow is unbounded (`=SUM(A1:A3)` with A3 cut to A6 is `=SUM(A1:A6)`). The
+/// rule before this one moved the corner to wherever it landed, so each of
+/// those sums silently lost cells.
+///
+/// The rule this replaced moved each corner on its own, so cutting the top
+/// three cells of `=SUM(A1:A4)` to column C turned it into `=SUM(C1:A4)` -- a
+/// twelve-cell rectangle -- with no error anywhere.
+fn relocated_range(
+    block: (u32, u32, u32, u32),
+    delta_row: i32,
+    delta_col: i32,
+    start: (u32, u32),
+    end: (u32, u32),
+) -> Option<((u32, u32), (u32, u32))> {
+    let moved_start = moved_endpoint(block, delta_row, delta_col, start);
+    let moved_end = moved_endpoint(block, delta_row, delta_col, end);
+    match (moved_start, moved_end) {
+        (Some(s), Some(e)) => Some((s, e)),
+        (None, None) => None,
+        (one_start, one_end) => {
+            // A range written back to front only ever moves whole.
+            if start.0 > end.0 || start.1 > end.1 {
+                return None;
+            }
+            let (min_row, min_col, max_row, max_col) = block;
+            let every_column_moves = min_col <= start.1 && end.1 <= max_col;
+            let every_row_moves = min_row <= start.0 && end.0 <= max_row;
+            if delta_row != 0 && !every_column_moves {
+                return None;
+            }
+            if delta_col != 0 && !every_row_moves {
+                return None;
+            }
+            // The inside-out refusal first, on where the corner LANDED; then
+            // the bound that keeps the cells the cut left behind (on an axis
+            // that did not move the bound changes nothing: the corner is still
+            // inside the block there).
+            match (one_start, one_end) {
+                (Some(s), _) => (s.0 <= end.0 && s.1 <= end.1)
+                    .then_some(((s.0.min(max_row.saturating_add(1)), s.1.min(max_col.saturating_add(1))), end)),
+                (_, Some(e)) => (start.0 <= e.0 && start.1 <= e.1)
+                    .then_some((start, (e.0.max(min_row.saturating_sub(1)), e.1.max(min_col.saturating_sub(1))))),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// What a move does to ONE reference that names the source sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MovedRef {
+    /// It follows the block: these are its new corners, on the DESTINATION sheet.
+    Follows((u32, u32), (u32, u32)),
+    /// It stays on the source sheet with these corners (a range that loses the
+    /// part a move to another sheet took away).
+    Shrinks((u32, u32), (u32, u32)),
+    /// Not affected by the move of the block.
+    Unchanged,
+}
+
+/// Excel's rule for a RANGE on the source sheet when the block moves to
+/// ANOTHER sheet, measured over COM [LIVE, Excel 16, 2026-10-29,
+/// cutpaste/probe-xsheet.ps1 + probe-more.ps1; A1:A3 cut to Sheet2!C1]:
+///
+/// * the whole range in the block: it follows (`=SUM(A1:A2)` ->
+///   `=SUM(Sheet2!C1:C2)`);
+/// * the block takes a whole EDGE STRIP of it -- every column of the range at
+///   its top or bottom rows, or every row at its left or right columns: the
+///   range SHRINKS to what is left on the source sheet (`=SUM(A1:A4)` ->
+///   `=SUM(A4:A4)`, `=SUM(A3:A9)` -> `=SUM(A4:A9)`, `=SUM(A1:C1)` ->
+///   `=SUM(B1:C1)`; with A1:B1 cut, `=SUM(A1:B2)` -> `=SUM(A2:B2)`);
+/// * otherwise unchanged (`=SUM(A1:B4)`, whose column B the block does not
+///   cover; a range written back to front).
+///
+/// A same-sheet move follows `relocated_range` instead: there a corner can
+/// follow the block along the sheet and the range grows or stays.
+fn relocated_range_off_sheet(
+    block: (u32, u32, u32, u32),
+    delta_row: i32,
+    delta_col: i32,
+    start: (u32, u32),
+    end: (u32, u32),
+) -> MovedRef {
+    let moved_start = moved_endpoint(block, delta_row, delta_col, start);
+    let moved_end = moved_endpoint(block, delta_row, delta_col, end);
+    if let (Some(s), Some(e)) = (moved_start, moved_end) {
+        return MovedRef::Follows(s, e);
+    }
+    if moved_start.is_none() && moved_end.is_none() {
+        return MovedRef::Unchanged;
+    }
+    if start.0 > end.0 || start.1 > end.1 {
+        return MovedRef::Unchanged;
+    }
+    let (min_row, min_col, max_row, max_col) = block;
+    let ((sr, sc), (er, ec)) = (start, end);
+    if min_col <= sc && ec <= max_col {
+        // Every column of the range is in the block: a top or bottom strip.
+        if min_row <= sr && sr <= max_row && er > max_row {
+            return MovedRef::Shrinks((max_row + 1, sc), end);
+        }
+        if min_row <= er && er <= max_row && sr < min_row {
+            return MovedRef::Shrinks(start, (min_row - 1, ec));
+        }
+    }
+    if min_row <= sr && er <= max_row {
+        // Every row of the range is in the block: a left or right strip.
+        if min_col <= sc && sc <= max_col && ec > max_col {
+            return MovedRef::Shrinks((sr, max_col + 1), end);
+        }
+        if min_col <= ec && ec <= max_col && sc < min_col {
+            return MovedRef::Shrinks(start, (er, min_col - 1));
+        }
+    }
+    MovedRef::Unchanged
+}
+
+/// For a move with `delta` along one axis: the lines along that axis (rows for
+/// a move up or down, columns for one left or right) that the move OVERWROTE
+/// in the lines `across` of the other axis -- the destination's lines, less
+/// the block's own when `across` lies in the block. `None` when the move did
+/// not go along this axis, or `across` lies only partly inside the destination
+/// or only partly inside the block (no whole strip of it was overwritten).
+fn overwritten_along(
+    delta: i32,
+    across: (u32, u32),
+    block_across: (u32, u32),
+    dest_across: (i64, i64),
+    block_along: (u32, u32),
+    dest_along: (i64, i64),
+) -> Option<(u32, u32)> {
+    if delta == 0 {
+        return None;
+    }
+    if i64::from(across.0) < dest_across.0 || i64::from(across.1) > dest_across.1 {
+        return None;
+    }
+    let inside_block = block_across.0 <= across.0 && across.1 <= block_across.1;
+    let outside_block = across.1 < block_across.0 || across.0 > block_across.1;
+    let (o0, o1) = if inside_block {
+        if delta > 0 {
+            (dest_along.0.max(i64::from(block_along.1) + 1), dest_along.1)
+        } else {
+            (dest_along.0, dest_along.1.min(i64::from(block_along.0) - 1))
+        }
+    } else if outside_block {
+        dest_along
+    } else {
+        return None;
+    };
+    if o0 > o1 || o0 < 0 {
+        return None;
+    }
+    Some((u32::try_from(o0).ok()?, u32::try_from(o1).ok()?))
+}
+
+/// ONE move of a block of cells -- a drag-move, a Cut + Paste, a merge's value
+/// move -- possibly onto ANOTHER sheet (a Cut on Sheet1 pasted on Sheet2).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CellMove<'a> {
+    /// The sheet the block was cut from.
+    pub source_sheet: &'a str,
+    /// The sheet it landed on (the source sheet for a move on one sheet).
+    pub dest_sheet: &'a str,
+    /// The SOURCE rectangle, 0-based `(min_row, min_col, max_row, max_col)`.
+    pub block: (u32, u32, u32, u32),
+    pub delta_row: i32,
+    pub delta_col: i32,
+}
+
+impl CellMove<'_> {
+    fn same_sheet(&self) -> bool {
+        self.source_sheet.eq_ignore_ascii_case(self.dest_sheet)
+    }
+
+    /// Where a reference on the SOURCE sheet goes (`end == start` for a
+    /// single cell).
+    fn follow(&self, start: (u32, u32), end: Option<(u32, u32)>) -> MovedRef {
+        let Some(end) = end else {
+            return match moved_endpoint(self.block, self.delta_row, self.delta_col, start) {
+                Some(p) => MovedRef::Follows(p, p),
+                None => MovedRef::Unchanged,
+            };
+        };
+        if !self.same_sheet() {
+            return relocated_range_off_sheet(self.block, self.delta_row, self.delta_col, start, end);
+        }
+        match relocated_range(self.block, self.delta_row, self.delta_col, start, end) {
+            Some((s, e)) if (s, e) != (start, end) => MovedRef::Follows(s, e),
+            Some(_) => MovedRef::Unchanged,
+            None => {
+                let corner_in_block = moved_endpoint(self.block, self.delta_row, self.delta_col, start).is_some()
+                    || moved_endpoint(self.block, self.delta_row, self.delta_col, end).is_some();
+                match (corner_in_block, self.overlap_strip(start, end)) {
+                    (false, Some((s, e))) => MovedRef::Shrinks(s, e),
+                    _ => MovedRef::Unchanged,
+                }
+            }
+        }
+    }
+
+    /// Excel's shrink for a range with NO corner in the block when the move
+    /// lands partly ON ITSELF (A1:A3 cut onto A2:A4): the range loses the edge
+    /// strip the move overwrote, on the axis it moved along, when that strip is
+    /// on the far side of the block [LIVE, Excel 16, 2026-10-29,
+    /// relocate/probe1.ps1 + probe2.ps1]. With A1:A3 cut onto A2:A4,
+    /// `=SUM(A4:A5)` is `=SUM(A5:A5)` and `=SUM(A4:B5)` (A1:B3 cut) is
+    /// `=SUM(A5:B5)`; with A4:A6 cut onto A3:A5, `=SUM(A1:A3)` is `=SUM(A1:A2)`;
+    /// with A1:C1 cut onto B1:D1, `=SUM(D1:F1)` is `=SUM(E1:F1)`; with A1:B3 cut
+    /// onto B2:C4, `=SUM(C3:C5)` is `=SUM(C5:C5)`.
+    ///
+    /// Excel does NOT shrink, and neither does this:
+    /// * when the block and its destination do not overlap (`=SUM(A10:A12)`
+    ///   with A1:A2 cut onto A10:A11 keeps its address -- measured);
+    /// * a strip on the near side, i.e. a range that spans the block
+    ///   (`=SUM(A1:A4)` with A2:A3 cut onto A3:A4; `=SUM(A3:A6)` with A4:A5 cut
+    ///   onto A3:A4);
+    /// * a strip across the direction of the move (`=SUM(C4:C6)` with A4:B4
+    ///   cut onto B4:C4);
+    /// * a strip only part of which was overwritten (`=SUM(A4:B5)` with A1:A3
+    ///   cut onto A2:A4).
+    ///
+    /// A range wholly inside the overwritten cells is `#REF!`
+    /// (`CellMove::overwrites`), not shrunk.
+    fn overlap_strip(&self, start: (u32, u32), end: (u32, u32)) -> Option<((u32, u32), (u32, u32))> {
+        if start.0 > end.0 || start.1 > end.1 {
+            return None;
+        }
+        let (min_row, min_col, max_row, max_col) = self.block;
+        let dest_rows = (i64::from(min_row) + i64::from(self.delta_row), i64::from(max_row) + i64::from(self.delta_row));
+        let dest_cols = (i64::from(min_col) + i64::from(self.delta_col), i64::from(max_col) + i64::from(self.delta_col));
+        let overlaps = dest_rows.0 <= i64::from(max_row)
+            && i64::from(min_row) <= dest_rows.1
+            && dest_cols.0 <= i64::from(max_col)
+            && i64::from(min_col) <= dest_cols.1;
+        if !overlaps {
+            return None;
+        }
+        let (mut s, mut e) = (start, end);
+        // Along the rows (a move up or down): the range's columns decide which
+        // of its rows the move overwrote.
+        if let Some((o0, o1)) = overwritten_along(
+            self.delta_row,
+            (start.1, end.1),
+            (min_col, max_col),
+            dest_cols,
+            (min_row, max_row),
+            dest_rows,
+        ) {
+            if self.delta_row > 0 && o0 <= s.0 && s.0 <= o1 && e.0 > o1 {
+                s.0 = o1 + 1;
+            } else if self.delta_row < 0 && o0 <= e.0 && e.0 <= o1 && s.0 < o0 {
+                e.0 = o0 - 1;
+            }
+        }
+        // Along the columns, the same with the axes swapped.
+        if let Some((o0, o1)) = overwritten_along(
+            self.delta_col,
+            (start.0, end.0),
+            (min_row, max_row),
+            dest_rows,
+            (min_col, max_col),
+            dest_cols,
+        ) {
+            if self.delta_col > 0 && o0 <= s.1 && s.1 <= o1 && e.1 > o1 {
+                s.1 = o1 + 1;
+            } else if self.delta_col < 0 && o0 <= e.1 && e.1 <= o1 && s.1 < o0 {
+                e.1 = o0 - 1;
+            }
+        }
+        ((s, e) != (start, end)).then_some((s, e))
+    }
+
+    /// Whether the move OVERWROTE every cell of `start..=end` on the
+    /// DESTINATION sheet: the range lies inside the destination rectangle and
+    /// -- on one sheet -- touches no cell of the block (a cell that was moved
+    /// away and landed on keeps following the block).
+    ///
+    /// Excel [LIVE]: a reference to such a cell is `#REF!` after the move,
+    /// even when the cell was EMPTY (E1 =C10, A10 cut onto C10 -> `=#REF!`;
+    /// `=SUM(C10:C11)` with A10:A11 cut onto it -> `=SUM(#REF!)`), while a
+    /// range only partly inside keeps its address (`=SUM(C9:C11)`).
+    fn overwrites(&self, start: (u32, u32), end: (u32, u32)) -> bool {
+        let (r0, r1) = (start.0.min(end.0), start.0.max(end.0));
+        let (c0, c1) = (start.1.min(end.1), start.1.max(end.1));
+        let (min_row, min_col, max_row, max_col) = self.block;
+        let dest_r0 = i64::from(min_row) + i64::from(self.delta_row);
+        let dest_r1 = i64::from(max_row) + i64::from(self.delta_row);
+        let dest_c0 = i64::from(min_col) + i64::from(self.delta_col);
+        let dest_c1 = i64::from(max_col) + i64::from(self.delta_col);
+        let inside = i64::from(r0) >= dest_r0
+            && i64::from(r1) <= dest_r1
+            && i64::from(c0) >= dest_c0
+            && i64::from(c1) <= dest_c1;
+        if !inside {
+            return false;
+        }
+        if !self.same_sheet() {
+            return true;
+        }
+        r1 < min_row || r0 > max_row || c1 < min_col || c0 > max_col
+    }
+}
+
+/// Re-point the references in `formula` for the move `mv`, the way Excel's
+/// move (drag, Cut + Paste, `Range.Cut Destination`) does [LIVE, Excel 16,
+/// 2026-10-29].
+///
+/// `read_sheet` is the sheet an UNQUALIFIED reference in `formula` means, and
+/// `home_sheet` the sheet the formula lives on after the move. They differ for
+/// exactly one kind of formula: one the move itself carried to another sheet
+/// (cut on Sheet1, pasted on Sheet2), whose `B5` meant Sheet1's B5.
+///
+/// * A reference INTO the block follows it -- relative and absolute alike,
+///   keeping its `$` markers -- to the destination sheet: unqualified when the
+///   formula lives there, qualified otherwise (`=A1` on Sheet1 becomes
+///   `=Sheet2!D4`; `=Sheet1!A1` anywhere becomes `=Sheet2!D4`, as Excel writes
+///   it). Within one sheet a qualifier keeps its spelling. Ranges follow
+///   `relocated_range` on one sheet and `relocated_range_off_sheet` between
+///   sheets.
+/// * A reference to a cell the move OVERWROTE (`CellMove::overwrites`) is
+///   `#REF!`. Excel writes `Sheet2!#REF!` for a qualified one; the qualifier is
+///   dropped here, as every shifter in this file does, because `Sheet2!#REF!`
+///   does not parse -- the value is the same `#REF!`.
+/// * Every other reference keeps naming the cell it named: that is what makes a
+///   moved formula keep pointing at the cells it read (`=A1` moved from B1 to
+///   B2 stays `=A1`). In a formula the move carried to another sheet, an
+///   unqualified one gains its old sheet's name (`=B5` -> `=Sheet1!B5`, and
+///   `=SUM(B:B)` -> `=SUM(Sheet1!B:B)`, Excel [LIVE]).
+/// * WHOLE-COLUMN and WHOLE-ROW references (`A:A`, `1:1`) follow the same
+///   rules as the rectangle they cover, but only on a move of whole lines:
+///   with A:B moved to D:E, `=SUM(A:A)` becomes `=SUM(D:D)` -- in the moved
+///   formulas and everywhere else -- `=SUM(A:C)` with C moved to E becomes
+///   `=SUM(A:E)`, and `=SUM(D:D)` with A moved onto D becomes `=SUM(#REF!)`;
+///   rows 1:2 moved to 10:11 turn `=SUM(1:1)` into `=SUM(10:10)`. A move that
+///   does not span the whole line never changes one (`=SUM(A:A)` stays when A1
+///   is cut to A5, A1:A3 to C1, or rows 1:2 to row 10) [LIVE, Excel 16,
+///   2026-10-29, relocate/probe1.ps1].
+/// * A 3-D reference (`Sheet2:Sheet3!A1`, `'Jan:Mar'!A:A`) is never touched,
+///   whichever sheet's cells move [LIVE, relocate/probe1.ps1 'threeD'].
+///
+/// It replaced the sheet-blind `relocate_references_in_formula` for the move
+/// gestures: that one renumbered `Sheet2!B1` in a Sheet1 formula when Sheet1's
+/// B1 moved, and could not be run over another sheet's formulas at all. (Its
+/// round-5 successor, `relocate_references_sheet_aware`, was this function for
+/// one sheet only, with no `#REF!`; this replaced it.)
+pub(crate) fn relocate_references_for_move(
+    formula: &str,
+    read_sheet: &str,
+    home_sheet: &str,
+    mv: &CellMove,
 ) -> String {
+    let rehomed = !read_sheet.eq_ignore_ascii_case(home_sheet);
+    if mv.same_sheet() && mv.delta_row == 0 && mv.delta_col == 0 && !rehomed {
+        return formula.to_string();
+    }
+    let same_sheet = mv.same_sheet();
+    // A whole-column reference can follow only a move of WHOLE COLUMNS (the
+    // block spans every row), a whole-row one only a move of whole rows.
+    let (block_min_row, block_min_col, block_max_row, block_max_col) = mv.block;
+    let columns_move = block_min_row == 0 && block_max_row >= engine::EXCEL_MAX_ROW_INDEX;
+    let rows_move = block_min_col == 0 && block_max_col >= engine::EXCEL_MAX_COL_INDEX;
+    // The qualifier a reference that keeps naming its cell is written with:
+    // its own, or -- in a formula carried to another sheet -- the sheet an
+    // unqualified one meant.
+    let staying_prefix = |quoted: &Option<String>, bare: &Option<String>| -> String {
+        if quoted.is_some() || bare.is_some() {
+            qualifier_prefix(quoted, bare)
+        } else if rehomed {
+            format!("{}!", engine::ast_render::quote_sheet_name(read_sheet))
+        } else {
+            String::new()
+        }
+    };
+    // The qualifier a reference that FOLLOWED the block is written with.
+    let following_prefix = |quoted: &Option<String>, bare: &Option<String>| -> String {
+        let qualified = quoted.is_some() || bare.is_some();
+        if same_sheet && qualified {
+            qualifier_prefix(quoted, bare)
+        } else if qualified || !mv.dest_sheet.eq_ignore_ascii_case(home_sheet) {
+            format!("{}!", engine::ast_render::quote_sheet_name(mv.dest_sheet))
+        } else {
+            String::new()
+        }
+    };
+    // What the move does to ONE reference, by its corners on the sheet it
+    // names (`end` is `None` for a single cell). `can_move` is false for a
+    // whole line the move does not span: it can only gain a qualifier then.
+    // The quoted qualifier arrives LIFTED (shift_with_quoted_names_lifted);
+    // `qualifier_is_edited_sheet` un-lifts it.
+    let fate = |quoted: &Option<String>,
+                bare: &Option<String>,
+                start: (u32, u32),
+                end: Option<(u32, u32)>,
+                can_move: bool|
+     -> RefFate {
+        if can_move {
+            if qualifier_is_edited_sheet(quoted, bare, read_sheet, mv.source_sheet) {
+                match mv.follow(start, end) {
+                    MovedRef::Follows(s, e) => return RefFate::Moved(following_prefix(quoted, bare), s, e),
+                    MovedRef::Shrinks(s, e) => return RefFate::Moved(staying_prefix(quoted, bare), s, e),
+                    MovedRef::Unchanged => {}
+                }
+            }
+            if qualifier_is_edited_sheet(quoted, bare, read_sheet, mv.dest_sheet)
+                && mv.overwrites(start, end.unwrap_or(start))
+            {
+                return RefFate::RefError;
+            }
+        }
+        if rehomed && quoted.is_none() && bare.is_none() {
+            return RefFate::Requalified(staying_prefix(quoted, bare));
+        }
+        RefFate::Kept
+    };
     rewrite_outside_strings(formula, |segment| {
-        // First pass: cell range references (A1:B5) — must run before single cell refs
-        let result = replace_all_guarded(&CELL_RANGE_RE, segment, |caps| {
+        let cells = replace_all_guarded(&QUALIFIED_REF_RE, segment, |caps| {
+            let original = caps[0].to_string();
             let lead = &caps[1];
-            let s_col_abs = &caps[2];
-            let s_col = &caps[3];
-            let s_row_abs = &caps[4];
-            let s_row: u32 = caps[5].parse().unwrap_or(0);
-
-            let e_col_abs = &caps[6];
-            let e_col = &caps[7];
-            let e_row_abs = &caps[8];
-            let e_row: u32 = caps[9].parse().unwrap_or(0);
-
-            let s_col_idx = col_letters_to_index(s_col);
-            let e_col_idx = col_letters_to_index(e_col);
-
-            // Check if both corners of the range are inside the source range
-            // Row numbers in formulas are 1-indexed, grid is 0-indexed
-            let s_in_range = s_row >= src_min_row + 1 && s_row <= src_max_row + 1
-                && s_col_idx >= src_min_col && s_col_idx <= src_max_col;
-            let e_in_range = e_row >= src_min_row + 1 && e_row <= src_max_row + 1
-                && e_col_idx >= src_min_col && e_col_idx <= src_max_col;
-
-            let new_s_row = if s_in_range { ((s_row as i32) + delta_row).max(1) as u32 } else { s_row };
-            let new_s_col = if s_in_range { index_to_col_letters(((s_col_idx as i32) + delta_col).max(0) as u32) } else { s_col.to_string() };
-            let new_e_row = if e_in_range { ((e_row as i32) + delta_row).max(1) as u32 } else { e_row };
-            let new_e_col = if e_in_range { index_to_col_letters(((e_col_idx as i32) + delta_col).max(0) as u32) } else { e_col.to_string() };
-
-            if !s_in_range && !e_in_range {
-                caps[0].to_string()
-            } else {
-                format!("{}{}{}{}{}:{}{}{}{}",
-                    lead,
-                    s_col_abs, new_s_col, s_row_abs, new_s_row,
-                    e_col_abs, new_e_col, e_row_abs, new_e_row)
+            let quoted = caps.get(2).map(|m| m.as_str().to_string());
+            let bare = caps.get(3).map(|m| m.as_str().to_string());
+            // THE END OF A 3-D SPAN. In `Sheet2:Sheet3!A1` this pattern matches
+            // `:Sheet3!A1`, lead `:`, and the span's last sheet reads as an
+            // ordinary qualifier: moving Sheet3's A1 rewrote the span on every
+            // sheet to `Sheet2:Sheet3!A5`, which then summed Sheet2's A5 too.
+            // Excel [LIVE] leaves a 3-D reference alone whichever sheet's cells
+            // move. A quoted span (`'Sheet 2:Sheet3'!A1`) is one qualifier whose
+            // name holds the colon, so it never names a sheet and stays too.
+            if lead == ":" && (quoted.is_some() || bare.is_some()) {
+                return original;
+            }
+            let col_abs = &caps[4];
+            let row_abs = &caps[6];
+            let Ok(row_num) = caps[7].parse::<u32>() else { return original };
+            if row_num == 0 {
+                return original;
+            }
+            let start = (row_num - 1, shift_col_to_index(&caps[5]));
+            let second = match (caps.get(8), caps.get(9), caps.get(10), caps.get(11)) {
+                (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) => {
+                    let Ok(row2) = rn2.as_str().parse::<u32>() else { return original };
+                    if row2 == 0 {
+                        return original;
+                    }
+                    Some((ca2.as_str(), ra2.as_str(), (row2 - 1, shift_col_to_index(cl2.as_str()))))
+                }
+                _ => None,
+            };
+            let end = second.map(|(_, _, e)| e);
+            let emit = |prefix: &str, s: (u32, u32), e: (u32, u32)| -> String {
+                match second {
+                    Some((ca2, ra2, _)) => format!(
+                        "{}{}{}{}{}{}:{}{}{}{}",
+                        lead,
+                        prefix,
+                        col_abs,
+                        shift_index_to_col(s.1),
+                        row_abs,
+                        s.0 + 1,
+                        ca2,
+                        shift_index_to_col(e.1),
+                        ra2,
+                        e.0 + 1
+                    ),
+                    None => format!("{}{}{}{}{}{}", lead, prefix, col_abs, shift_index_to_col(s.1), row_abs, s.0 + 1),
+                }
+            };
+            match fate(&quoted, &bare, start, end, true) {
+                RefFate::Moved(prefix, s, e) => emit(&prefix, s, e),
+                RefFate::RefError => format!("{}{}", lead, REF_ERROR),
+                RefFate::Requalified(prefix) => format!("{}{}{}", lead, prefix, &original[lead.len()..]),
+                RefFate::Kept => original,
             }
         });
-
-        // Second pass: single cell references (A1, $B$5, etc.)
-        replace_all_guarded(&CELL_REF_RE, &result, |caps| {
-            let lead = &caps[1];
-            let col_abs = &caps[2];
-            let col_letters = &caps[3];
-            let row_abs = &caps[4];
-            let row_num: u32 = caps[5].parse().unwrap_or(0);
-
-            let col_idx = col_letters_to_index(col_letters);
-
-            // Check if this reference is inside the source range (row is 1-indexed)
-            let in_range = row_num >= src_min_row + 1 && row_num <= src_max_row + 1
-                && col_idx >= src_min_col && col_idx <= src_max_col;
-
-            if in_range {
-                let new_row = ((row_num as i32) + delta_row).max(1) as u32;
-                let new_col = index_to_col_letters(((col_idx as i32) + delta_col).max(0) as u32);
-                format!("{}{}{}{}{}", lead, col_abs, new_col, row_abs, new_row)
-            } else {
-                caps[0].to_string()
-            }
-        })
+        // The whole-line passes run only when they can change something: in a
+        // formula the move carried to another sheet (its unqualified `B:B` and
+        // `3:3` meant its OLD sheet's lines, and keep meaning them), or on a
+        // move of whole columns / whole rows.
+        let columns = if rehomed || columns_move {
+            replace_all_guarded(&QUALIFIED_COL_RANGE_RE, &cells, |caps| {
+                relocate_line_range(caps, LineAxis::Columns, columns_move, &fate)
+            })
+        } else {
+            cells
+        };
+        if rehomed || rows_move {
+            replace_all_guarded(&QUALIFIED_ROW_RANGE_RE, &columns, |caps| {
+                relocate_line_range(caps, LineAxis::Rows, rows_move, &fate)
+            })
+        } else {
+            columns
+        }
     })
 }
 
-/// Relocate all formula references in the current sheet that point into the
-/// source range, making them point to the destination instead.
+/// What [`relocate_references_for_move`] decided for one reference.
+enum RefFate {
+    /// Rewrite it with this qualifier and these corners.
+    Moved(String, (u32, u32), (u32, u32)),
+    /// It named a cell the move overwrote.
+    RefError,
+    /// Keep its address, with this qualifier in front (a formula carried to
+    /// another sheet naming its old sheet's cells).
+    Requalified(String),
+    /// Leave it exactly as written.
+    Kept,
+}
+
+/// Which whole-line pattern a match came from.
+#[derive(Clone, Copy)]
+enum LineAxis {
+    Columns,
+    Rows,
+}
+
+/// One `QUALIFIED_COL_RANGE_RE` / `QUALIFIED_ROW_RANGE_RE` match under a move:
+/// the whole lines it names, as the rectangle they cover, through the same
+/// `fate` as a cell range. `can_move` is whether the move spans whole lines of
+/// this kind; when it does not, the reference can only gain a qualifier.
+fn relocate_line_range(
+    caps: &regex::Captures,
+    axis: LineAxis,
+    can_move: bool,
+    fate: &impl Fn(&Option<String>, &Option<String>, (u32, u32), Option<(u32, u32)>, bool) -> RefFate,
+) -> String {
+    let original = caps[0].to_string();
+    let lead = &caps[1];
+    // `!A:A` / `!1:1` with no qualifier of its own is the tail of a 3-D span
+    // (`Sheet2:Sheet3!A:A`): its qualifier is the span the pattern could not
+    // consume, never the formula's own sheet. Excel [LIVE] leaves a 3-D
+    // reference alone, so is this.
+    if lead == "!" {
+        return original;
+    }
+    let quoted = caps.get(2).map(|m| m.as_str().to_string());
+    let bare = caps.get(3).map(|m| m.as_str().to_string());
+    let (abs1, first, abs2, second) = (&caps[4], &caps[5], &caps[6], &caps[7]);
+    let (start, end) = match axis {
+        LineAxis::Columns => (
+            (0, shift_col_to_index(first)),
+            (engine::EXCEL_MAX_ROW_INDEX, shift_col_to_index(second)),
+        ),
+        LineAxis::Rows => {
+            let (Ok(r1), Ok(r2)) = (first.parse::<u32>(), second.parse::<u32>()) else {
+                return original;
+            };
+            if r1 == 0 || r2 == 0 {
+                return original;
+            }
+            ((r1 - 1, 0), (r2 - 1, engine::EXCEL_MAX_COL_INDEX))
+        }
+    };
+    match fate(&quoted, &bare, start, Some(end), can_move) {
+        // A move of whole lines keeps every line of the other axis, so the
+        // result still spans them; anything else would not be a whole line any
+        // more and is left as written rather than guessed at.
+        RefFate::Moved(prefix, s, e) => match axis {
+            LineAxis::Columns if s.0 == 0 && e.0 == end.0 => format!(
+                "{}{}{}{}:{}{}",
+                lead,
+                prefix,
+                abs1,
+                shift_index_to_col(s.1),
+                abs2,
+                shift_index_to_col(e.1)
+            ),
+            LineAxis::Rows if s.1 == 0 && e.1 == end.1 => {
+                format!("{}{}{}{}:{}{}", lead, prefix, abs1, s.0 + 1, abs2, e.0 + 1)
+            }
+            _ => original,
+        },
+        RefFate::RefError => format!("{}{}", lead, REF_ERROR),
+        RefFate::Requalified(prefix) => format!("{}{}{}", lead, prefix, &original[lead.len()..]),
+        RefFate::Kept => original,
+    }
+}
+
+/// Whether a formula's tree holds a SHEET-QUALIFIED reference (`Sheet1!A1`,
+/// `Sheet1!A:A`, a 3-D span, a sheet-qualified name) -- the only kind a move
+/// can re-point in a formula on a sheet that is neither the move's source nor
+/// its destination. Read from the tree so a move need not render every formula
+/// in the workbook to text to find out; a `!` inside a string literal is not a
+/// reference, and the text rewrite never touches one either.
+pub(crate) fn names_a_sheet(expr: &engine::Expression) -> bool {
+    use engine::Expression as E;
+    match expr {
+        E::CellRef { sheet, .. } | E::ColumnRef { sheet, .. } | E::RowRef { sheet, .. } => sheet.is_some(),
+        E::Range { sheet, start, end, .. } => sheet.is_some() || names_a_sheet(start) || names_a_sheet(end),
+        E::Sheet3DRef { .. } => true,
+        E::NamedRef { name, .. } => name.contains('!'),
+        E::Literal(_) | E::TableRef { .. } => false,
+        E::BinaryOp { left, right, .. } => names_a_sheet(left) || names_a_sheet(right),
+        E::UnaryOp { operand, .. } | E::ImplicitIntersection { operand } => names_a_sheet(operand),
+        E::FunctionCall { args, .. } => args.iter().any(names_a_sheet),
+        E::IndexAccess { target, index } => names_a_sheet(target) || names_a_sheet(index),
+        E::ArrayLiteral { rows } => rows.iter().flatten().any(names_a_sheet),
+        E::ListLiteral { elements } => elements.iter().any(names_a_sheet),
+        E::DictLiteral { entries } => entries.iter().any(|(k, v)| names_a_sheet(k) || names_a_sheet(v)),
+        E::SpillRef { cell, .. } => names_a_sheet(cell),
+    }
+}
+
+/// Re-point every defined name whose definition points INTO a moved block
+/// (Excel [LIVE]: a name on `=Sheet1!$A$1:$A$3` follows a cut of A1:A3 to C1
+/// and becomes `=Sheet1!$C$1:$C$3`, and to `=Sheet2!$C$1:$C$3` when the cut
+/// is pasted on Sheet2; a name on another sheet's cells is left alone; a name
+/// on a cell the move OVERWROTE is `#REF!`). The same scoping as
+/// `shift_named_ranges`: an unqualified reference means the name's own scope
+/// sheet (`sheet_names[scope]`), and a workbook-scoped unqualified one is
+/// ambiguous and left as it is. Records one `obj_named_ranges` undo entry when
+/// anything moved and returns the names it rewrote, for
+/// `recalc_after_name_change`.
+fn relocate_named_ranges(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    sheet_names: &[String],
+    mv: &CellMove,
+) -> Vec<String> {
+    // The name store is released BEFORE the undo stack is taken: the name
+    // writers hold `named_ranges` while they record their step (after `grid`
+    // and `grids`), so holding the stack here while taking the store closed a
+    // cycle with them (no_function_holds_the_undo_stack_and_a_name_store_...).
+    let mut store = match state.named_ranges.write(effect) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    if store.is_empty() {
+        return Vec::new();
+    }
+    let previous: Vec<(String, crate::named_ranges::NamedRange)> =
+        store.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut changed_names: Vec<String> = Vec::new();
+    for nr in store.values_mut() {
+        let formula_sheet: &str =
+            nr.sheet_index.and_then(|i| sheet_names.get(i)).map(String::as_str).unwrap_or("");
+        let relocated = relocate_references_for_move(&nr.refers_to, formula_sheet, formula_sheet, mv);
+        if relocated != nr.refers_to {
+            nr.refers_to = relocated;
+            changed_names.push(nr.name.clone());
+        }
+    }
+    drop(store);
+    if !changed_names.is_empty() {
+        changed_names.sort();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.record_custom_restore(
+            "obj_named_ranges".to_string(),
+            crate::undo_commands::named_ranges_snapshot_bytes(previous),
+            "Move named ranges",
+        );
+    }
+    changed_names
+}
+
+/// Re-point every reference INTO a moved block, the way Excel's move does
+/// (drag, Cut + Paste): the cell data has already been moved from the source
+/// rectangle to `(dest_start_row, dest_start_col)` ON THE ACTIVE SHEET, but
+/// formulas still name the old coordinates. `src_sheet_index` is the sheet the
+/// block came FROM when that is another sheet (a Cut on Sheet1 pasted on
+/// Sheet2); absent, the block moved on the active sheet.
 ///
-/// This is called after a drag-move operation: the cell data has already been
-/// moved from `(src_start_row, src_start_col)` to `(dest_start_row, dest_start_col)`,
-/// but formulas on the sheet still reference the old coordinates.
+/// WHAT IS REWRITTEN [LIVE, Excel 16, `Range.Cut Destination`], through
+/// `relocate_references_for_move`:
+///   * every formula on the ACTIVE sheet -- the MOVED formulas included, which
+///     the caller writes UNSHIFTED: a moved formula's reference to a cell
+///     outside the block keeps naming that cell (`=A1` moved from B1 to B2
+///     stays `=A1`; moved to another sheet it becomes `=Sheet1!A1`), and only
+///     a reference into the block follows it (`=B1` in C1, moved with B1:C1 to
+///     B3, becomes `=B3`);
+///   * every formula on EVERY OTHER sheet that names the moved cells
+///     (`=Sheet1!A1` becomes `=Sheet1!A5`, or `=Sheet2!D4` when the block went
+///     to Sheet2; on the source sheet itself `=A1` becomes `=Sheet2!D4`);
+///   * every defined name on them (`relocate_named_ranges`);
+///   * a reference to a cell the move OVERWROTE becomes `#REF!` -- in a
+///     formula, a moved one or a name -- even when that cell was empty
+///     (E1 =C10, A10 cut onto C10 -> `=#REF!`).
+/// References to another sheet's cells at the same coordinates are left alone.
 ///
-/// Returns the list of cells whose formulas were rewritten (with updated values),
-/// FOLLOWED BY every cell the shared cascade re-derived from them.
+/// Returns the active-sheet cells whose formulas were rewritten (with updated
+/// values), FOLLOWED BY every cell the shared cascade re-derived from them.
 ///
 /// DEPENDENTS RECALCULATE (D3). This used to re-evaluate the formulas it
 /// rewrote and stop there, so a formula reading one of those rewritten cells
@@ -4803,12 +5464,16 @@ pub(crate) fn relocate_references_in_formula(
 /// became `=SUM(C1:C3)` while any `=B1*2` reading THAT total still showed the
 /// old product. Excel updates the whole chain, so the rewritten cells are seeds
 /// for the ONE shared cascade, run as a SECOND lock phase after this command's
-/// own guards are dropped.
+/// own guards are dropped; a rewritten formula on another sheet recalculates
+/// its sheet (`recalc_after_off_sheet_write`), and a rewritten name its readers
+/// (`recalc_after_name_change`).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn relocate_cell_references(
     state: State<AppState>,
     file_state: State<crate::persistence::FileState>,
     user_files_state: State<crate::UserFilesState>,
+    pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     src_start_row: u32,
@@ -4817,6 +5482,42 @@ pub fn relocate_cell_references(
     src_end_col: u32,
     dest_start_row: u32,
     dest_start_col: u32,
+    src_sheet_index: Option<usize>,
+) -> Result<Vec<CellData>, String> {
+    relocate_cell_references_core(
+        state.inner(),
+        file_state.inner(),
+        user_files_state.inner(),
+        pivot_state.inner(),
+        pane_control_state.inner(),
+        ribbon_filter_state.inner(),
+        src_start_row,
+        src_start_col,
+        src_end_row,
+        src_end_col,
+        dest_start_row,
+        dest_start_col,
+        src_sheet_index,
+    )
+}
+
+/// The body of [`relocate_cell_references`], over plain references so the
+/// tests drive it with no Tauri runtime.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn relocate_cell_references_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &crate::UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    src_start_row: u32,
+    src_start_col: u32,
+    src_end_row: u32,
+    src_end_col: u32,
+    dest_start_row: u32,
+    dest_start_col: u32,
+    src_sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
     // Cut/paste relocation re-evaluates the formulas it rewrites and WRITES the
     // results, so it is an Interactive surface: same ceiling as typing them.
@@ -4832,7 +5533,25 @@ pub fn relocate_cell_references(
     let delta_row = dest_start_row as i32 - src_min_row as i32;
     let delta_col = dest_start_col as i32 - src_min_col as i32;
 
-    if delta_row == 0 && delta_col == 0 {
+    if src_sheet_index.is_none() && delta_row == 0 && delta_col == 0 {
+        return Ok(Vec::new());
+    }
+
+    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else. Held
+    // PENDING through the source-sheet gate (one critical section, no
+    // read-drop-write window), authorized once it has passed.
+    let grid_pending = state.grid.lock_pending().unwrap();
+    let grids_pending = state.grids.lock_pending().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let source_sheet = src_sheet_index.unwrap_or(active_sheet);
+    if source_sheet >= sheet_names.len() || source_sheet >= grids_pending.len() {
+        return Err(format!(
+            "The sheet the cells were cut from (index {}) no longer exists; nothing was re-pointed.",
+            source_sheet
+        ));
+    }
+    if source_sheet == active_sheet && delta_row == 0 && delta_col == 0 {
         return Ok(Vec::new());
     }
 
@@ -4840,11 +5559,8 @@ pub fn relocate_cell_references(
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut grid = grid_pending.authorize(&effect);
+    let mut grids = grids_pending.authorize(&effect);
     let styles = state.style_registry.read().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
@@ -4859,38 +5575,81 @@ pub fn relocate_cell_references(
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let locale = state.locale.lock().unwrap();
 
-    // Collect cells whose formulas reference the source range
-    let dest_max_row = dest_start_row + (src_max_row - src_min_row);
-    let dest_max_col = dest_start_col + (src_max_col - src_min_col);
-    let mut rewrites: Vec<(u32, u32, String)> = Vec::new();
+    let block = (src_min_row, src_min_col, src_max_row, src_max_col);
+    // The sheet the block landed on (the active one) and the one it left.
+    let dest_name: String = sheet_names.get(active_sheet).cloned().unwrap_or_default();
+    let source_name: String = sheet_names.get(source_sheet).cloned().unwrap_or_default();
+    let between_sheets = source_sheet != active_sheet;
+    let mv = CellMove {
+        source_sheet: &source_name,
+        dest_sheet: &dest_name,
+        block,
+        delta_row,
+        delta_col,
+    };
+    // The destination rectangle on the active sheet: after the caller's
+    // writes, every formula in it is a MOVED one.
+    let dest_end_row = dest_start_row.saturating_add(src_max_row - src_min_row);
+    let dest_end_col = dest_start_col.saturating_add(src_max_col - src_min_col);
+    let in_destination = |r: u32, c: u32| {
+        r >= dest_start_row && r <= dest_end_row && c >= dest_start_col && c <= dest_end_col
+    };
 
-    for r in 0..=grid.max_row {
-        for c in 0..=grid.max_col {
-            // Skip cells that are IN the destination range (they were just written)
-            if r >= dest_start_row && r <= dest_max_row
-                && c >= dest_start_col && c <= dest_max_col
-            {
+    // 1. THE ACTIVE SHEET: every formula, the MOVED ones in the destination
+    // included. The caller writes a moved formula UNSHIFTED (Excel keeps its
+    // references to cells outside the block), so the references it makes INTO
+    // the block are re-pointed here like anyone else's. This loop used to SKIP
+    // the destination, which was only right while the caller shifted every
+    // reference of a moved formula -- the outside ones too, which is the wrong
+    // answer (`=A1` moved from B1 to B2 became `=A2`). A moved formula that
+    // came from ANOTHER sheet was written there: its unqualified references
+    // still mean the source sheet, which is what it is read against. Only the
+    // REWRITTEN cells are put in order (the map is unordered); sorting every
+    // stored key first cost a sort of the whole sheet on every move.
+    let mut rewrites: Vec<(u32, u32, String)> = Vec::new();
+    for (&(r, c), cell) in grid.cells.iter() {
+        let Some(formula) = formula_to_rewrite(cell) else {
+            continue;
+        };
+        let read_sheet: &str = if between_sheets && in_destination(r, c) { &source_name } else { &dest_name };
+        let new_formula = relocate_references_for_move(&formula, read_sheet, &dest_name, &mv);
+        if new_formula != formula {
+            rewrites.push((r, c, new_formula));
+        }
+    }
+    rewrites.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+
+    // 2. EVERY OTHER SHEET: only a reference qualified with the source's or
+    // the destination's name can point into the block or at a cell it
+    // overwrote (`=Sheet1!A1` on Sheet2 follows A1 to A5, Excel [LIVE]), so a
+    // formula with no qualifier at all is skipped -- except on the SOURCE
+    // sheet of a move between sheets, where `=A1` named a moved cell. The skip
+    // is decided from the formula's TREE (`names_a_sheet`), before any text is
+    // rendered: this loop runs under both grid write locks, and it used to
+    // render EVERY formula on EVERY sheet to text only to throw most of them
+    // away at a `contains('!')` test.
+    let mut off_sheet_rewrites: Vec<(usize, u32, u32, String)> = Vec::new();
+    for (sheet_idx, other) in grids.iter().enumerate() {
+        if sheet_idx == active_sheet {
+            continue;
+        }
+        let Some(other_name) = sheet_names.get(sheet_idx) else {
+            continue;
+        };
+        for (&(r, c), cell) in other.cells.iter() {
+            if sheet_idx != source_sheet && !cell.ast.as_deref().is_some_and(names_a_sheet) {
                 continue;
             }
-
-            if let Some(cell) = grid.get_cell(r, c) {
-                if let Some(formula) = formula_to_rewrite(cell) {
-                    let new_formula = relocate_references_in_formula(
-                        &formula,
-                        src_min_row,
-                        src_min_col,
-                        src_max_row,
-                        src_max_col,
-                        delta_row,
-                        delta_col,
-                    );
-                    if new_formula != formula {
-                        rewrites.push((r, c, new_formula));
-                    }
-                }
+            let Some(formula) = formula_to_rewrite(cell) else {
+                continue;
+            };
+            let new_formula = relocate_references_for_move(&formula, other_name, other_name, &mv);
+            if new_formula != formula {
+                off_sheet_rewrites.push((sheet_idx, r, c, new_formula));
             }
         }
     }
+    off_sheet_rewrites.sort_unstable_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
 
     // Apply rewrites
     let mut result: Vec<CellData> = Vec::new();
@@ -4954,10 +5713,43 @@ pub fn relocate_cell_references(
         }
     }
 
+    // The other sheets' rewrites: the formula and its CROSS-SHEET edges (the
+    // only edges a background sheet keeps -- its own-sheet maps are rebuilt
+    // when it is visited). Its value is re-derived in phase B, by the
+    // recalculation of its sheet. Never reported in `result`: those cells are
+    // not on the sheet the caller is painting.
+    let mut touched_sheets: Vec<usize> = Vec::new();
+    for (sheet_idx, r, c, new_formula) in &off_sheet_rewrites {
+        let Some(prev) = grids.get(*sheet_idx).and_then(|g| g.get_cell(*r, *c)).cloned() else {
+            continue;
+        };
+        let mut new_cell = prev.clone();
+        if !store_rewritten_formula(&mut new_cell, new_formula, "cut/paste relocation", *r, *c) {
+            continue;
+        }
+        undo_stack.record_cell_change(*sheet_idx, *r, *c, Some(prev));
+        if let Ok(parsed) = parser::parse(new_formula) {
+            let refs = crate::extract_all_references(&parsed, &grids[*sheet_idx]);
+            crate::update_cross_sheet_dependencies(
+                (*sheet_idx, *r, *c),
+                crate::normalize_cross_sheet_refs(&refs.cross_sheet_cells, &sheet_names),
+                &mut cross_sheet_dependencies_map,
+                &mut cross_sheet_dependents_map,
+            );
+            new_cell.set_cached_ast(crate::convert_expr(&parsed));
+        }
+        grids[*sheet_idx].set_cell(*r, *c, new_cell);
+        if !touched_sheets.contains(sheet_idx) {
+            touched_sheets.push(*sheet_idx);
+        }
+    }
+
     // PHASE B — the dependents OF the rewritten formulas, after every guard
     // above is released (std mutexes are not reentrant, and the cascade takes
     // the same grid + dependency maps + user files this phase holds).
     let seeds: Vec<(u32, u32)> = rewrites.iter().map(|(r, c, _)| (*r, *c)).collect();
+    // A name's scope sheet is looked up by index after the guards go.
+    let names_of_sheets: Vec<String> = sheet_names.to_vec();
     drop(locale);
     drop(undo_stack);
     drop(cross_sheet_dependencies_map);
@@ -4975,6 +5767,10 @@ pub fn relocate_cell_references(
     drop(grid);
     drop(sheet_names);
 
+    // 3. DEFINED NAMES: the name store, released, then the undo stack -- never
+    // both at once (the name writers take the store before the stack).
+    let changed_names = relocate_named_ranges(state, &effect, &names_of_sheets, &mv);
+
     recalc_after_active_sheet_bulk_rewrite(
         &state,
         &user_files_state,
@@ -4982,6 +5778,24 @@ pub fn relocate_cell_references(
         &ribbon_filter_state,
         &seeds,
         &mut result,
+    );
+    if !touched_sheets.is_empty() {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &touched_sheets,
+        );
+    }
+    crate::named_ranges::recalc_after_name_change(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &changed_names,
     );
 
     Ok(result)
@@ -5319,7 +6133,7 @@ mod structural_formula_shift_tests {
 
     /// A COLUMN NAME THAT LOOKS LIKE A CELL ADDRESS USED TO BE REWRITTEN.
     ///
-    /// The shifters are A1 regexes over formula TEXT. `CELL_REF_RE`'s leading
+    /// The shifters are A1 regexes over formula TEXT. `CELL_REF_OR_RANGE_RE`'s leading
     /// class `[^A-Za-z0-9_.]` admits `[`, and `replace_all_guarded`'s trailing
     /// guard does not block `]` — so `Table1[Q1]` filled one row down became
     /// `Table1[Q2]`. Quarter and half-year names are exactly that shape, which
@@ -5337,7 +6151,7 @@ mod structural_formula_shift_tests {
 
     /// A DOTTED RANGE USED TO STOP TRACKING ITS DATA, SILENTLY.
     ///
-    /// Every shifter here is an A1 regex over formula TEXT, and `CELL_REF_RE`'s
+    /// Every shifter here is an A1 regex over formula TEXT, and `CELL_REF_OR_RANGE_RE`'s
     /// leading class `[^A-Za-z0-9_.]` excludes `.` on purpose — so that a dotted
     /// defined name like `Q1.Sales` is not read as a reference. The `.` operator
     /// puts a dot in exactly that position, so each dot froze the end it touched:
@@ -6000,7 +6814,7 @@ mod structural_formula_shift_tests {
         }
     }
 
-    // The fill/copy path shares CELL_REF_RE with these shifters — before the
+    // The fill/copy path shares CELL_REF_OR_RANGE_RE with these shifters — before the
     // lead+trailing guards it matched LOG10 as column LOG row 10, so filling
     // =LOG10(A1) down produced =LOG11(A2) (#NAME?).
     #[test]
@@ -6278,7 +7092,7 @@ fn replace_all_guarded(
 /// quote, per Excel.)
 ///
 /// THE BRACKET HALF, AND WHY IT IS NOT COSMETIC. The shifters are A1 REGEXES
-/// over formula TEXT, and `CELL_REF_RE`'s leading class `[^A-Za-z0-9_.]` admits
+/// over formula TEXT, and `CELL_REF_OR_RANGE_RE`'s leading class `[^A-Za-z0-9_.]` admits
 /// `[` while `replace_all_guarded`'s trailing guard does not block `]`. So a
 /// table column whose NAME LOOKS LIKE A CELL ADDRESS was rewritten as if it were
 /// one — and quarter and half-year names are exactly that:
@@ -6385,7 +7199,7 @@ fn rewrite_outside_strings(formula: &str, mut rewrite: impl FnMut(&str) -> Strin
 /// the text, then puts them back on the same colons.
 ///
 /// WHY, MEASURED. Every shifter in this file is an A1 regex over formula TEXT,
-/// and `CELL_REF_RE`'s leading class `[^A-Za-z0-9_.]` excludes `.` — deliberately,
+/// and `CELL_REF_OR_RANGE_RE`'s leading class `[^A-Za-z0-9_.]` excludes `.` — deliberately,
 /// so a dotted defined name like `Q1.Sales` is not mistaken for a reference. The
 /// dot operator puts a `.` in exactly that position, and the result was a range
 /// that silently stopped moving:
@@ -6716,6 +7530,28 @@ pub(crate) fn store_rewritten_formula(
 /// References to any other sheet are left exactly as they are — that is the
 /// difference between this and the sheet-blind version, and the reason this can
 /// safely run over every sheet in the workbook rather than only the active one.
+///
+/// A 3-D REFERENCE (`Sheet2:Sheet4!A5`, `Sheet2:Sheet4!B:B`, `Sheet2:Sheet4!5:5`,
+/// `'Data 2:Data 3'!A5`) is never touched. Excel [LIVE, Excel 16, 2026-10-30,
+/// shifters/probe3d.ps1] leaves every one of them as written under a row or
+/// column insert or delete on the span's first, middle or last sheet and on the
+/// formula's own sheet -- even a delete of the very row it reads, which gives no
+/// `#REF!` -- while `=Sheet4!A5` beside it follows its row. The patterns cannot
+/// consume a bare span's `Sheet2:` (a qualifier holds no colon), so they see its
+/// TAIL instead, and each pass has a guard for it:
+/// * the cell pass matches `:Sheet4!A5` -- lead `:` with a qualifier -- and
+///   read the span's LAST sheet as an ordinary qualifier, so a row inserted on
+///   Sheet4 re-pointed the span on every sheet to `Sheet2:Sheet4!A6`, which then
+///   read Sheet2's and Sheet3's row 6 too. The renderer never qualifies a range's
+///   second endpoint (`render_no_sheet_into`), so a qualified match after `:` is
+///   always a span's end;
+/// * the whole-line passes match `!B:B` / `!5:5` -- lead `!` with no qualifier --
+///   and read it as the formula's OWN sheet. Only a span leaves a `!` for a lead:
+///   a single qualifier, bare or quoted, is consumed with its reference;
+/// * a quoted span is one qualifier whose name holds the colon, so it never
+///   equals a sheet name and needs no guard.
+///
+/// The move rewriter (`relocate_references_for_move`) carries the same guards.
 pub(crate) fn shift_formula_rows_sheet_aware(
     formula: &str,
     formula_sheet: &str,
@@ -6733,6 +7569,11 @@ pub(crate) fn shift_formula_rows_sheet_aware(
             let lead = &caps[1];
             let quoted = caps.get(2).map(|m| m.as_str().to_string());
             let bare = caps.get(3).map(|m| m.as_str().to_string());
+            // `:Sheet4!A5` is the END of a 3-D span, never a reference to
+            // Sheet4 alone (see the doc comment): left as written.
+            if is_3d_span_end(lead, &quoted, &bare) {
+                return caps[0].to_string();
+            }
             // The quoted form arrives LIFTED (see shift_with_quoted_names_lifted),
             // so the comparison has to go through the un-lift or a sheet whose
             // name contains a digit would never recognise itself.
@@ -6779,6 +7620,11 @@ pub(crate) fn shift_formula_rows_sheet_aware(
         // Pass 2: whole-row ranges (3:5).
         replace_all_guarded(&QUALIFIED_ROW_RANGE_RE, &pass1, |caps| {
             let lead = &caps[1];
+            // `!5:5` is the tail of a 3-D span (`Sheet2:Sheet4!5:5`), never the
+            // formula's own rows: left as written.
+            if is_3d_span_line_tail(lead) {
+                return caps[0].to_string();
+            }
             let quoted = caps.get(2).map(|m| m.as_str().to_string());
             let bare = caps.get(3).map(|m| m.as_str().to_string());
             // The quoted form arrives LIFTED (see shift_with_quoted_names_lifted),
@@ -6809,7 +7655,8 @@ pub(crate) fn shift_formula_rows_sheet_aware(
     })
 }
 
-/// Column twin of [`shift_formula_rows_sheet_aware`].
+/// Column twin of [`shift_formula_rows_sheet_aware`], with the same two 3-D
+/// span guards.
 pub(crate) fn shift_formula_cols_sheet_aware(
     formula: &str,
     formula_sheet: &str,
@@ -6831,6 +7678,10 @@ pub(crate) fn shift_formula_cols_sheet_aware(
             let lead = &caps[1];
             let quoted = caps.get(2).map(|m| m.as_str().to_string());
             let bare = caps.get(3).map(|m| m.as_str().to_string());
+            // The end of a 3-D span -- see the row twin.
+            if is_3d_span_end(lead, &quoted, &bare) {
+                return caps[0].to_string();
+            }
             // The quoted form arrives LIFTED (see shift_with_quoted_names_lifted),
             // so the comparison has to go through the un-lift or a sheet whose
             // name contains a digit would never recognise itself.
@@ -6876,6 +7727,10 @@ pub(crate) fn shift_formula_cols_sheet_aware(
         // Pass 2: whole-column ranges (B:B, $A:$C).
         replace_all_guarded(&QUALIFIED_COL_RANGE_RE, &pass1, |caps| {
             let lead = &caps[1];
+            // `!B:B` is the tail of a 3-D span -- see the row twin.
+            if is_3d_span_line_tail(lead) {
+                return caps[0].to_string();
+            }
             let quoted = caps.get(2).map(|m| m.as_str().to_string());
             let bare = caps.get(3).map(|m| m.as_str().to_string());
             // The quoted form arrives LIFTED (see shift_with_quoted_names_lifted),
@@ -6903,6 +7758,19 @@ pub(crate) fn shift_formula_cols_sheet_aware(
             }
         })
     })
+}
+
+/// A `QUALIFIED_REF_RE` match that is the END of a 3-D span: `:Sheet4!A5` in
+/// `Sheet2:Sheet4!A5`. See [`shift_formula_rows_sheet_aware`].
+fn is_3d_span_end(lead: &str, quoted: &Option<String>, bare: &Option<String>) -> bool {
+    lead == ":" && (quoted.is_some() || bare.is_some())
+}
+
+/// A whole-line match that is the TAIL of a 3-D span: `!B:B` in
+/// `Sheet2:Sheet4!B:B`, `!5:5` in `Sheet2:Sheet4!5:5`. See
+/// [`shift_formula_rows_sheet_aware`].
+fn is_3d_span_line_tail(lead: &str) -> bool {
+    lead == "!"
 }
 
 #[cfg(test)]
@@ -6989,6 +7857,88 @@ mod sheet_aware_shift_tests {
     fn three_d_sheet_spans_are_not_column_ranges() {
         let out = shift_formula_cols_sheet_aware("=SUM(Jan:Mar!A1)", "Sheet1", "Sheet1", 0, 1);
         assert!(out.starts_with("=SUM(Jan:Mar!"), "3-D span mangled: {out}");
+    }
+
+    /// NEW-structural-shift-rewrites-3d-span. The cell pass read `:SHEET4!A5`
+    /// as a reference to Sheet4 (a row inserted there turned the span into
+    /// `SHEET2:SHEET4!A6` on every sheet), and the line passes read `!B:B` /
+    /// `!5:5` as the formula's OWN sheet (a column inserted there turned
+    /// `SHEET2:SHEET4!B:B` into `...!C:C`). Excel [LIVE, Excel 16, 2026-10-30,
+    /// shifters/probe3d.ps1, sheets Sheet1..Sheet4 and 'Data 2'/'Data 3'] leaves
+    /// every 3-D reference as written under an insert or delete of rows or
+    /// columns on the span's first, middle and last sheet and on the formula's
+    /// own sheet -- a delete of the very row the span reads included -- while a
+    /// plain reference beside it follows.
+    #[test]
+    fn a_3d_reference_is_left_alone_by_every_insert_and_delete() {
+        let spans = [
+            // As the renderer writes a bare span (the lexer uppercases it)...
+            "=SUM(SHEET2:SHEET4!A5)",
+            "=SUM(SHEET2:SHEET4!$A$5)",
+            "=SUM(SHEET2:SHEET4!A5:B6)",
+            "=SUM(SHEET2:SHEET4!B:B)",
+            "=SUM(SHEET2:SHEET4!$B:$C)",
+            "=SUM(SHEET2:SHEET4!5:5)",
+            "=SUM(SHEET2:SHEET4!$5:$6)",
+            // ...a span that includes the formula's own sheet...
+            "=SUM(SHEET1:SHEET3!B5)",
+            "=SUM(SHEET1:SHEET3!B:B)",
+            // ...as a user types one into a defined name...
+            "=Sheet2:Sheet4!$A$5:$A$9",
+            // ...and a quoted span, one qualifier that holds the colon.
+            "=SUM('Data 2:Data 3'!A5)",
+            "=SUM('Data 2:Data 3'!B:B)",
+            "=SUM('Data 2:Data 3'!5:5)",
+        ];
+        let edited_sheets = ["Sheet1", "Sheet2", "Sheet3", "Sheet4", "Data 2", "Data 3"];
+        let mut wrong = Vec::new();
+        for formula in spans {
+            assert!(parser::parse(formula).is_ok(), "`{formula}` must be a formula the parser reads");
+            // The formula lives outside the span (Sheet1), inside it (Sheet3),
+            // or is a workbook-scoped name ("").
+            for home in ["Sheet1", "Sheet3", ""] {
+                for edited in edited_sheets {
+                    let results = [
+                        ("insert row 1", shift_formula_rows_sheet_aware(formula, home, edited, 0, 1)),
+                        ("delete row 1", shift_formula_rows_sheet_aware(formula, home, edited, 0, -1)),
+                        ("delete row 5", shift_formula_rows_sheet_aware(formula, home, edited, 4, -1)),
+                        ("insert column A", shift_formula_cols_sheet_aware(formula, home, edited, 0, 1)),
+                        ("delete column B", shift_formula_cols_sheet_aware(formula, home, edited, 1, -1)),
+                    ];
+                    for (edit, got) in results {
+                        if got != formula {
+                            wrong.push(format!("{formula} on '{home}', {edit} on {edited}: got {got}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "a 3-D reference was rewritten; Excel leaves it alone:\n  {}", wrong.join("\n  "));
+
+        // Controls: the plain references beside a span still follow their sheet
+        // -- `=Sheet4!A5` became A6 in the same probe -- and only they move.
+        assert_eq!(
+            shift_formula_rows_sheet_aware(
+                "=SUM(SHEET2:SHEET4!A5)+SHEET4!A5+SUM(SHEET2:SHEET4!5:5)",
+                "Sheet1",
+                "Sheet4",
+                0,
+                1
+            ),
+            "=SUM(SHEET2:SHEET4!A5)+SHEET4!A6+SUM(SHEET2:SHEET4!5:5)"
+        );
+        assert_eq!(
+            shift_formula_cols_sheet_aware("=SUM(SHEET2:SHEET4!B:B)+SUM(B:B)+B5", "Sheet1", "Sheet1", 0, 1),
+            "=SUM(SHEET2:SHEET4!B:B)+SUM(C:C)+C5"
+        );
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=SUM(SHEET2:SHEET4!5:5)+SUM(5:5)", "Sheet3", "Sheet3", 0, 1),
+            "=SUM(SHEET2:SHEET4!5:5)+SUM(6:6)"
+        );
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=SUM('Data 2:Data 3'!A5)+'Data 3'!A5", "Sheet1", "Data 3", 0, 1),
+            "=SUM('Data 2:Data 3'!A5)+'Data 3'!A6"
+        );
     }
 
     // REGRESSION: A1-looking text inside string literals was rewritten —
@@ -7349,18 +8299,22 @@ fn shift_controls(
 
     // Re-key the object-script bindings that name these controls. Keyed by the
     // script's own stable id (see ControlsObjSnapshot) so a later script
-    // deletion cannot make the undo payload target the wrong script.
-    let previous_ids = {
+    // deletion cannot make the undo payload target the wrong script. Through
+    // the one re-bind door (scripting/script_rebind.rs): each script's
+    // SCHEDULED JOBS move with its binding, and every window is told, so the
+    // live mount re-keys too (rev6B#2, NEW-control-rekey-live-script-mount).
+    let (previous_ids, rebound) = {
         let mut scripts = match state.object_scripts.write(effect) { Ok(s) => s, Err(_) => return };
         let mut prev = Vec::new();
+        let mut rebound = Vec::new();
         for script in scripts.iter_mut() {
             let Some(current) = script.instance_id.clone() else { continue };
             if let Some(moved_to) = id_moves.get(&current) {
                 prev.push((script.id.clone(), Some(current)));
-                script.instance_id = moved_to.clone();
+                rebound.extend(crate::scripting::script_rebind::rebind_script(effect, script, moved_to.clone()));
             }
         }
-        prev
+        (prev, rebound)
     };
 
     if let Ok(mut store) = state.controls.write(effect) {
@@ -7372,6 +8326,8 @@ fn shift_controls(
         crate::undo_commands::controls_snapshot_bytes(previous_controls, previous_ids),
         "Shift controls",
     );
+    // The script store's guard is released (script_rebind::announce_rebinds).
+    crate::scripting::script_rebind::announce_rebinds(&rebound);
 }
 
 #[cfg(test)]
@@ -7602,6 +8558,12 @@ pub(crate) fn off_sheet_structural_edit(
         let mut mirror = state.grid.write(&effect).map_err(|e| e.to_string())?;
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        // The sheet names BEFORE the undo stack, copied (rev5C#1). Read under
+        // the stack they were the inverse of `set_freeze_panes_impl`, which
+        // holds `sheet_names` while it records its undo step and takes no grid
+        // lock: each could hold what the other waited for.
+        let sheet_names_snapshot: Vec<String> =
+            state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
         let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
 
         while grids.len() <= target {
@@ -7670,8 +8632,6 @@ pub(crate) fn off_sheet_structural_edit(
         shift_style_tiers_single(&mut grids[target], edit);
         shift_misc_coordinate_stores(state, &effect, &mut undo_stack, target, edit);
 
-        let sheet_names_snapshot: Vec<String> =
-            state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
         let edited_sheet_name = sheet_names_snapshot
             .get(target)
             .cloned()
@@ -7682,6 +8642,15 @@ pub(crate) fn off_sheet_structural_edit(
         // Object property BINDING formulas that read the edited sheet (WP-D).
         crate::object_bindings::cascade::shift_object_bindings(state, &effect, &mut undo_stack, &edited_sheet_name, edit);
         shift_sheet_range_strings(state, &effect, &mut undo_stack, target, edit);
+        // Chart and sparkline DATA RANGES on the edited sheet (BUG-0357).
+        crate::chart_commands::range_shift::shift_chart_and_sparkline_ranges(
+            state,
+            &effect,
+            &mut undo_stack,
+            target,
+            &edited_sheet_name,
+            &structure_cells::BandEdit::whole_lines(edit),
+        );
         shift_controls(state, &effect, &mut undo_stack, target, edit);
         shift_per_sheet_range_stores(state, &effect, &mut undo_stack, target, edit);
         shift_flat_cell_stores(state, &effect, target, edit);

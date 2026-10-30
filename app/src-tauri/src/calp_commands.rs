@@ -7111,6 +7111,14 @@ pub(crate) fn materialize_pull_result(
     // the sheet by, and `restore_published_sheet_references` the references.
     let sheet_renames = calp::sheet_renames::SheetRenames::new(sheet_rename_map.iter());
     let counts = sheet_renames.rename_pull(&mut result);
+    // ...and the OLD formula-typed control properties of an application
+    // published before bindings (revC#1, BUG-0471): `rename_pull` leaves them
+    // alone on purpose (to it they are literals), but the migration at the end
+    // of this door turns them into bindings resolved against THIS workbook's
+    // sheets -- unrenamed, `=Data!A1` bound the subscriber's own "Data".
+    crate::object_bindings::migrate::rename_legacy_control_formulas(&mut result.controls, &|text: &str| {
+        sheet_renames.rename_formula(text)
+    });
     if counts != calp::sheet_renames::RenameCounts::default() {
         crate::log_info!(
             "CALP",
@@ -8076,6 +8084,29 @@ pub(crate) fn materialize_pull_result(
                 rewritten
             );
         }
+    }
+
+    // THE RESULTS CACHE FOR THE SHEETS JUST INSTALLED (rev5B#1, BUG-0476).
+    // They arrive with the values the publisher's workbook computed, and only
+    // an open used to seed the cache -- so the save's own recalculation, which
+    // carries no cube data and no custom-function resolver, refused every cube
+    // and custom-function cell on them and saved `#N/A` / `#NAME?`. HERE: after
+    // the sheets, their spill extents, the names and the tables are installed,
+    // and BEFORE the pivots below re-render their output, so every fingerprint
+    // is computed from the very values the publisher's answers were computed
+    // for. No lock is held; derived state, so no effect. A cell whose formula
+    // reads what this pull did not bring is not seeded
+    // (`remember_installed_call_results`).
+    {
+        let own_names: std::collections::HashMap<String, String> = result
+            .named_ranges
+            .iter()
+            .map(|nr| (nr.name.to_uppercase(), nr.refers_to.clone()))
+            .collect();
+        crate::bi::cube::remember_installed_call_results(
+            state,
+            crate::bi::cube::InstalledSheets { sheets: &pulled_indices, names: &own_names },
+        );
     }
 
     // Restore pivot definitions from the application and render to grid.
@@ -9066,10 +9097,14 @@ pub fn calp_hold_back_cells(
     // CUBE, GATHER and custom-function cells break that: their value comes from
     // a model, from the workspace's writeback submissions, or from the script
     // host, and none of those is available to this synchronous command. What
-    // they do instead is worse than an error — on a non-active sheet
-    // `preserved_cube_value` reads the cell's OLD value straight back out of the
-    // grid and re-writes it, so the stale number is re-committed as though
-    // freshly computed. (`docs/design/open-items.md` §2.aa called for this
+    // they did instead was worse than an error — on a non-active sheet
+    // `preserved_cube_value` read the cell's OLD value straight back out of the
+    // grid and re-wrote it, so the stale number was re-committed as though
+    // freshly computed. Since rev3A#3 a rolled-back argument makes them `#N/A` /
+    // `#NAME?` unless the results cache recorded an answer for exactly the
+    // rolled-back arguments (a value is never shown for other arguments) --
+    // a refusal where the author had a number, or an answer only as current as
+    // the recalculation that recorded it: still not something to publish. (`docs/design/open-items.md` §2.aa called for this
     // refusal whichever route the feature took; the feature shipped without it.)
     //
     // Refused by NAME rather than resolved either way, the same shape
@@ -11454,7 +11489,15 @@ pub(crate) fn prepare_refresh_payloads(
                     pulled.name = name;
                 }
             }
-            let counts = names.renames().rename_pull(&mut payload.pull_result);
+            let renames = names.renames();
+            let counts = renames.rename_pull(&mut payload.pull_result);
+            // The old formula-typed control properties too, which
+            // `apply_refresh_payloads` migrates into bindings against THIS
+            // workbook's sheets (revC#1; see `materialize_pull_result`).
+            crate::object_bindings::migrate::rename_legacy_control_formulas(
+                &mut payload.pull_result.controls,
+                &|text: &str| renames.rename_formula(text),
+            );
             if counts != calp::sheet_renames::RenameCounts::default() {
                 crate::log_info!(
                     "CALP",
@@ -12604,6 +12647,31 @@ pub(crate) fn apply_refresh_payloads(
             }
         }
 
+        // THE RESULTS CACHE FOR THE REFRESHED SHEETS (rev5B#1, BUG-0476), each
+        // of which the wholesale replacement above rebuilt from a fresh grid --
+        // with the publisher's values and an EMPTY cache, so the save's own
+        // recalculation (no cube data, no custom-function resolver) refused
+        // every cube and custom-function cell on them. HERE: after the names
+        // and tables are installed, and BEFORE the pivots below re-render their
+        // output and the subscriber's overrides and writeback values are
+        // painted back on -- the publisher's values were computed for the
+        // publisher's cells, and the recalculation at the end re-evaluates
+        // whatever those later writes change. The names are the ones the upsert
+        // above installed, already following the local sheet names.
+        {
+            let own_names: std::collections::HashMap<String, String> = payloads
+                .iter()
+                .flat_map(|p| p.pull_result.named_ranges.iter())
+                .map(|nr| (nr.name.to_uppercase(), nr.refers_to.clone()))
+                .collect();
+            let mut seeded: Vec<usize> = refreshed_indices.iter().copied().collect();
+            seeded.sort_unstable();
+            crate::bi::cube::remember_installed_call_results(
+                state,
+                crate::bi::cube::InstalledSheets { sheets: &seeded, names: &own_names },
+            );
+        }
+
         // §2.z — ADOPT the refreshed application's pivots.
         //
         // HERE, and not earlier, for two reasons that are both orderings rather
@@ -13207,8 +13275,8 @@ pub(crate) fn apply_refresh_payloads(
     // new version's regions, so an entry whose region was removed upstream --
     // and dropped from the layer just above -- is not resurrected) and BEFORE
     // the recalculation below, which then sees them like any typed value.
-    let writeback_cells_restored =
-        reproject_writeback_layer_onto_grids(&state, &effect, &refreshed_sheet_ids).len();
+    let writeback_cells = reproject_writeback_layer_onto_grids(&state, &effect, &refreshed_sheet_ids);
+    let writeback_cells_restored = writeback_cells.len();
     if writeback_cells_restored > 0 {
         crate::log_info!(
             "CALP",
@@ -13238,9 +13306,51 @@ pub(crate) fn apply_refresh_payloads(
         // pulled/refreshed application can carry floating ranges, whose backing
         // sheets are never active and therefore never lazily re-edge.
         crate::floating_range::register_object_sheet_edges(&state);
-        for idx in refreshed_indices {
-            crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx, Some((&*pane_control_state, &*ribbon_filter_state)));
-        }
+        // WHAT THIS UPDATE WROTE AFTER THE INSTALL -- the subscriber's
+        // overrides (at the position `apply_override_value_to_grid` resolved),
+        // the writeback values put back above, and every pivot's output on a
+        // refreshed sheet (`apply_refreshed_pivots` re-rendered it from THIS
+        // workbook's data). Everything else on these sheets is the publisher's
+        // value for the publisher's cells, which is what lets the recalculation
+        // below keep a composite cube or custom-function formula the results
+        // cache cannot answer instead of refusing it, as long as nothing it
+        // reads is in this set or changes in the recalculation
+        // (NEW-update-refuses-composite-formulas, BUG-0476). Each store is read
+        // on its own, with no grid lock held.
+        let written: Vec<(usize, u32, u32)> = {
+            let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+            let mut written = writeback_cells;
+            {
+                let id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+                for ovr in &to_overlay {
+                    let Some(sheet) = sheet_ids.iter().position(|id| *id == ovr.sheet_id) else {
+                        continue;
+                    };
+                    let (row, col) = id_reg.cell_position(ovr.sheet_id, ovr.cell_id).unwrap_or(ovr.position);
+                    written.push((sheet, row, col));
+                }
+            }
+            let regions = state.protected_regions.lock().map_err(|e| e.to_string())?;
+            for region in regions
+                .iter()
+                .filter(|r| r.region_type == "pivot" && refreshed_indices.contains(&r.sheet_index))
+            {
+                for row in region.start_row..=region.end_row {
+                    for col in region.start_col..=region.end_col {
+                        written.push((region.sheet_index, row, col));
+                    }
+                }
+            }
+            written
+        };
+        crate::calculation::recalculate_installed_sheet_values(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &refreshed_indices,
+            &written,
+            Some((&*pane_control_state, &*ribbon_filter_state)),
+        );
     }
 
     // ANNOUNCE THE SHEET COLLECTION. This command APPENDS sheets — `grids.push`
@@ -14047,6 +14157,7 @@ pub fn calp_dev_subscribe(
     slicer_state: State<'_, crate::slicer::SlicerState>,
     timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
     params: DevSubscribeParams,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
@@ -14057,6 +14168,7 @@ pub fn calp_dev_subscribe(
         &slicer_state,
         &timeline_slicer_state,
         &ribbon_filter_state,
+        &pivot_state,
         &params,
     )?;
     // The pull appended sheets, may have rotated them in front of an object
@@ -14154,6 +14266,7 @@ pub(crate) fn dev_subscribe_inner(
     slicer_state: &crate::slicer::SlicerState,
     timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pivot_state: &crate::pivot::types::PivotState,
     params: &DevSubscribeParams,
 ) -> Result<PullResponse, String> {
     let source = std::path::Path::new(&params.source_path);
@@ -14226,6 +14339,15 @@ pub(crate) fn dev_subscribe_inner(
         for pulled in result.sheets.iter_mut() {
             renames.rename_sheet_formulas(&mut pulled.sheet);
         }
+        // ...and so do the property bindings the pull carries (BUG-0471): a
+        // caption bound to the source's "Data" reads "Data (2)" here.
+        renames.rename_binding_formulas(&mut result.object_bindings);
+        // ...and the OLD formula-typed captions of a pre-bindings source,
+        // which `land_dev_pull_bindings` migrates against THIS workbook's
+        // sheets: unrenamed, `=Data!A1` bound the subscriber's own "Data".
+        crate::object_bindings::migrate::rename_legacy_control_formulas(&mut result.controls, &|text: &str| {
+            renames.rename_formula(text)
+        });
 
         let mut map = std::collections::HashMap::new();
         for (pulled, local_name) in result.sheets.iter().zip(local_names) {
@@ -14300,6 +14422,20 @@ pub(crate) fn dev_subscribe_inner(
             extra: std::collections::HashMap::new(),
         });
     }
+    // THE SOURCE'S OBJECT PROPERTY BINDINGS (BUG-0471), after every object
+    // family above has landed: a dev-pulled button whose caption follows
+    // `=Data!A1` used to arrive showing its frozen literal. A subscribe owned
+    // nothing before, so nothing is replaced.
+    land_dev_pull_bindings(
+        state,
+        &effect,
+        slicer_state,
+        timeline_state,
+        pivot_state,
+        &result,
+        &dev_map,
+        &std::collections::HashSet::new(),
+    )?;
 
     // Store the dev subscription (with the provenance ledger, so the Application
     // Explorer works for dev subscriptions too).
@@ -14316,6 +14452,18 @@ pub(crate) fn dev_subscribe_inner(
 
     // A backing sheet is never active, so nothing else installs its edges.
     crate::floating_range::register_object_sheet_edges(state);
+
+    // The results cache for the sheets just installed, as a real pull seeds
+    // it (rev5B#1): without it the save's own recalculation refuses every cube
+    // and custom-function cell on them. A dev pull carries no defined names,
+    // so a formula naming one reads the workbook's and is not seeded.
+    {
+        let installed: Vec<usize> = dev_map.values().copied().collect();
+        crate::bi::cube::remember_installed_call_results(
+            state,
+            crate::bi::cube::InstalledSheets { sheets: &installed, names: &std::collections::HashMap::new() },
+        );
+    }
 
     Ok(PullResponse {
         package_name,
@@ -14428,6 +14576,64 @@ pub(crate) fn materialize_dev_controls(
     Ok(())
 }
 
+/// A dev pull's object property BINDINGS (BUG-0471), landed through the same
+/// carriage a real pull uses (`object_bindings::carriage`): captured with the
+/// source -> local sheet map as it stands after the partition repair, then only
+/// the rows of objects this pull carried AND placed on one of its sheets are
+/// installed, after every binding of `previously_owned` (a refresh's view of
+/// what the dev subscription owned before it ran; empty on a subscribe) and of
+/// the landed objects is removed -- REPLACE, not merge, so a binding the source
+/// removed stops binding. Then the old formula-typed control spelling a source
+/// saved before bindings still carries becomes a binding under this door's
+/// effect, as on a file open -- its sheet references already renamed to the
+/// local sheet names by the door (`migrate::rename_legacy_control_formulas`),
+/// because the migration resolves them against THIS workbook's sheets; charts
+/// are literals (a dev pull brings none, and the workbook's own were migrated
+/// when it was opened).
+///
+/// Call it AFTER the controls, the floating ranges and the sheets have
+/// materialized, with no lock held. Shared by dev subscribe and dev refresh.
+#[allow(clippy::too_many_arguments)]
+fn land_dev_pull_bindings(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    pivot_state: &crate::pivot::types::PivotState,
+    result: &calp::dev_mode::DevPullResult,
+    dev_map: &std::collections::HashMap<SheetId, usize>,
+    previously_owned: &std::collections::HashSet<crate::api_types::ObjectBindingRef>,
+) -> Result<(), String> {
+    let pulled = {
+        let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+        crate::object_bindings::carriage::PulledBindings::from_dev_pull(result, |source| {
+            dev_map.get(&source).and_then(|&idx| sheet_ids.get(idx).copied())
+        })
+    };
+    let stores = crate::object_bindings::object_json::ObjectStores {
+        state,
+        slicers: slicer_state,
+        timelines: timeline_state,
+        pivots: pivot_state,
+    };
+    let landed =
+        crate::object_bindings::carriage::land_pulled_bindings(&stores, effect, &pulled, previously_owned);
+    if landed.installed > 0 || landed.removed > 0 {
+        crate::log_info!(
+            "CALP",
+            "dev pull: {} property binding(s) installed, {} replaced or removed",
+            landed.installed,
+            landed.removed
+        );
+    }
+    crate::object_bindings::migrate::migrate_legacy_formulas(
+        state,
+        effect,
+        crate::object_bindings::migrate::ChartTextFields::Literals,
+    );
+    Ok(())
+}
+
 /// Re-pull from the dev source, refreshing HEAD sheets in the workbook.
 #[tauri::command]
 pub fn calp_dev_refresh(
@@ -14436,6 +14642,7 @@ pub fn calp_dev_refresh(
     slicer_state: State<'_, crate::slicer::SlicerState>,
     timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -14445,6 +14652,7 @@ pub fn calp_dev_refresh(
         &slicer_state,
         &timeline_slicer_state,
         &ribbon_filter_state,
+        &pivot_state,
     )?;
     crate::object_deps::announce_cascade(
         window_app_handle(&window),
@@ -14460,6 +14668,7 @@ pub(crate) fn dev_refresh_inner(
     slicer_state: &crate::slicer::SlicerState,
     timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pivot_state: &crate::pivot::types::PivotState,
 ) -> Result<PullResponse, String> {
     // Find the dev subscription.
     let (source_path, sub_index) = {
@@ -14479,9 +14688,10 @@ pub(crate) fn dev_refresh_inner(
     let now = chrono::Utc::now().to_rfc3339();
     let source = std::path::Path::new(&source_path);
 
-    // Determine which sheet names were originally requested (empty = all), and
-    // the local ids this subscription already tracks.
-    let (sheet_names, tracked_ids): (Vec<String>, Vec<SheetId>) = {
+    // Determine which sheet names were originally requested (empty = all), the
+    // local ids this subscription already tracks, and its provenance ledger
+    // (what it owned before this refresh, for the binding REPLACE below).
+    let (sheet_names, tracked_ids, ledger_before): (Vec<String>, Vec<SheetId>, Vec<(String, String)>) = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let sub = subs
             .subscriptions
@@ -14490,6 +14700,7 @@ pub(crate) fn dev_refresh_inner(
         (
             sub.sheets.iter().map(|s| s.local_name.clone()).collect(),
             sub.sheets.iter().map(|s| s.local_sheet_id).collect(),
+            sub.objects.iter().map(|o| (o.kind.clone(), o.id.clone())).collect(),
         )
     };
 
@@ -14504,6 +14715,35 @@ pub(crate) fn dev_refresh_inner(
 
     let sheets_pulled = result.sheets.len();
     let package_name = format!("dev:{}", source_path);
+
+    // THE DEV SUBSCRIPTION'S BOUND OBJECTS AS THEY ARE NOW, before anything
+    // below replaces them (BUG-0471): its bindings are REPLACED at the end
+    // (`land_dev_pull_bindings`), so a binding the source removed -- or one of
+    // a control the source deleted -- stops binding. The objects: every one its
+    // ledger names (its floating ranges), and every control and canvas page on
+    // a sheet this refresh re-materializes in place (a tracked sheet the pull
+    // brings again -- its controls are reset wholesale below). Read with no
+    // lock held, the real refresh's own rule
+    // (`carriage::application_objects_before_refresh`).
+    let bindings_owned_before: std::collections::HashSet<crate::api_types::ObjectBindingRef> = {
+        let refreshed_in_place: std::collections::HashSet<SheetId> = result
+            .sheets
+            .iter()
+            .map(|p| p.sheet.id)
+            .filter(|id| tracked_ids.contains(id))
+            .collect();
+        let stores = crate::object_bindings::object_json::ObjectStores {
+            state,
+            slicers: slicer_state,
+            timelines: timeline_state,
+            pivots: pivot_state,
+        };
+        crate::object_bindings::carriage::application_objects_before_refresh(
+            &stores,
+            ledger_before,
+            &refreshed_in_place,
+        )
+    };
 
     // Replace sheets already tracked by this subscription; append any new ones.
     //
@@ -14533,6 +14773,12 @@ pub(crate) fn dev_refresh_inner(
         for pulled in result.sheets.iter_mut() {
             renames.rename_sheet_formulas(&mut pulled.sheet);
         }
+        renames.rename_binding_formulas(&mut result.object_bindings);
+        // The pre-bindings captions too, ahead of the migration (see
+        // `dev_subscribe_inner`).
+        crate::object_bindings::migrate::rename_legacy_control_formulas(&mut result.controls, &|text: &str| {
+            renames.rename_formula(text)
+        });
 
         let mut map = std::collections::HashMap::new();
         for (pulled, local_name) in result.sheets.iter().zip(local_names) {
@@ -14664,6 +14910,18 @@ pub(crate) fn dev_refresh_inner(
             extra: std::collections::HashMap::new(),
         });
     }
+    // The source's property bindings, REPLACING what this dev subscription's
+    // objects were bound to before (BUG-0471; see `bindings_owned_before`).
+    land_dev_pull_bindings(
+        state,
+        &effect,
+        slicer_state,
+        timeline_state,
+        pivot_state,
+        &result,
+        &dev_map,
+        &bindings_owned_before,
+    )?;
 
     // Update the subscription timestamp, its sheet list and its provenance
     // ledger. A dev subscription owns only tables, control sheets and floating
@@ -14688,6 +14946,17 @@ pub(crate) fn dev_refresh_inner(
 
     // A backing sheet is never active, so nothing else installs its edges.
     crate::floating_range::register_object_sheet_edges(state);
+
+    // The results cache for the sheets this refresh rebuilt from fresh grids,
+    // as a real refresh seeds it (rev5B#1). A dev pull carries no defined
+    // names, so a formula naming one reads the workbook's and is not seeded.
+    {
+        let installed: Vec<usize> = dev_map.values().copied().collect();
+        crate::bi::cube::remember_installed_call_results(
+            state,
+            crate::bi::cube::InstalledSheets { sheets: &installed, names: &std::collections::HashMap::new() },
+        );
+    }
 
     Ok(PullResponse {
         package_name,

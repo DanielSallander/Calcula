@@ -40,6 +40,10 @@ vi.mock("../../lib/tauri-api", async (importOriginal) => ({
   beginUndoTransaction: (d: string) => api.beginUndoTransaction(d),
   commitUndoTransaction: (t?: number | null) => api.commitUndoTransaction(t),
   cancelUndoTransaction: (t?: number | null) => api.cancelUndoTransaction(t),
+  // A cut's paste marks the point it is taken back to when the move cannot
+  // finish (round 8, rev6A#5): the door joins the paste's step 9.
+  beginUndoSavepoint: vi.fn(async () => ({ ticket: null, savepoint: { transaction: 9, changes: 0 } })),
+  rollBackToUndoSavepoint: vi.fn(async () => ({ success: true })),
   updateCellsBatch: (...a: unknown[]) => api.updateCellsBatch(...a),
   clearCell: (...a: unknown[]) => api.clearCell(...a),
   clearRangeWithOptions: (...a: unknown[]) => api.clearRangeWithOptions(...a),
@@ -188,9 +192,11 @@ describe("Paste into a floating grid's cells", () => {
       unknown,
     ];
     expect(opts).toEqual({ target: REF });
+    // The formula is written as a PASTE (it stays one in an @ cell); this copy
+    // read no stored values, so the constant is its display text, an entry.
     expect(updates).toEqual([
       { row: 4, col: 3, value: "B2", styleIndex: 0 },
-      { row: 4, col: 4, value: "=A1+1@3,2", styleIndex: 4 },
+      { row: 4, col: 4, value: "=A1+1@3,2", styleIndex: 4, pasted: true },
     ]);
     expect(seam.selectTargetCells).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "object" }),

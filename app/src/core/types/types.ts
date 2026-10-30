@@ -455,6 +455,11 @@ export type CellValueType = "number" | "text" | "boolean" | "empty" | "error";
  *   "text" with their display text as the value.
  * - `formula`: the localized formula ("=A1+B1"), null when the cell has none or
  *   when a protected sheet hides it.
+ * - `formulaWithheld`: true when the cell HOLDS a formula this read withheld (a
+ *   protected sheet hiding it, whatever the cell's lock state); absent
+ *   otherwise -- a hidden-format cell holding a constant or nothing withholds
+ *   nothing. A read/modify/write must not mistake such a cell's value for all
+ *   of it.
  */
 export interface TypedCellData {
   row: number;
@@ -462,6 +467,7 @@ export interface TypedCellData {
   value: number | string | boolean | null;
   display: string;
   formula: string | null;
+  formulaWithheld?: boolean;
   type: CellValueType;
 }
 
@@ -844,6 +850,17 @@ export interface FormattingResult {
   cells: CellData[];
   /** New or modified styles */
   styles: StyleEntry[];
+}
+
+/**
+ * A contiguous run of row or column indices, `first..=last` -- mirrors
+ * `IndexRun` in api_types.rs. `apply_formatting` accepts one in place of a
+ * `rows` / `cols` list (BUG-0354: Select All used to send all 1,048,576 row
+ * indices); `encodeIndexList` (tauri-api.ts) decides when to send it.
+ */
+export interface IndexRun {
+  first: number;
+  last: number;
 }
 
 /**
@@ -2194,6 +2211,18 @@ export interface ClearRangeResult {
   count: number;
   /** Updated cells (with new display values if only formatting was cleared) */
   updatedCells: CellData[];
+}
+
+/**
+ * One further rectangle of a multi-area clear (`clear_range_on_sheets`'
+ * `moreAreas`: the other Ctrl+click blocks of a grouped-sheet clear).
+ * Mirrors Rust `api_types::ClearArea`.
+ */
+export interface ClearArea {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
 }
 
 // ============================================================================

@@ -24,6 +24,7 @@ import {
   isCurrentOperation,
   getInflightOperation,
   setInflightOperation,
+  markCachedPivotViewStale,
 } from "./pivotViewStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { surfacePivotNotices } from "@api/pivotNotices";
@@ -32,6 +33,40 @@ import { formatNumber } from "@api/locale";
 import { confirmAsync } from "@api/dialogs";
 import { pivotOverwriteQuestion, takeBackPivotOverwrite } from "@api/pivotOverwrite";
 import type { BiHierarchyMeta } from "@api/backend";
+import { announcePivotOutputChanged, asPivotOutputDoor } from "./pivotRegionRefresh";
+
+/**
+ * A door's ACCEPTED result: cache the view it returned, then announce that the
+ * pivot's output changed so its region is re-read from the backend and the
+ * Core re-reads the cells (a shrunk pivot's vacated cells, a grown one's new
+ * ones). BUG-0594: the doors cached and stopped, so the region and the cells
+ * followed only when the CALLER also dispatched "pivot:refresh" -- the @api
+ * facade route (`pivot.applyFilter` from a script, another extension, a
+ * journey) never did, and a filtered pivot kept painting its unfiltered rows.
+ * Every `cachePivotView` of a door goes through here (pinned by
+ * pivotOutputAnnounce.test.ts). The announcement is coalesced
+ * (lib/pivotRegionRefresh.ts): a caller that dispatches "pivot:refresh" itself
+ * right after gets ONE event in all.
+ *
+ * Caching the view matters on its own (revD#1): the region refresh re-reads
+ * only the ACTIVE sheet's views, so a door on a pivot of another sheet that
+ * did not cache its result left that sheet's cached view at the old numbers,
+ * and the return to the sheet reused it.
+ */
+function adoptPivotOutput(pivotId: PivotId, result: PivotViewResponse): void {
+  cachePivotView(pivotId, result);
+  announcePivotOutputChanged(pivotId);
+}
+
+/**
+ * A door changed `pivotId`'s output but its response is not cached as the
+ * view: the cached one is stale (never reused on a return to its sheet) and
+ * the change is announced.
+ */
+function notePivotOutputChanged(pivotId: PivotId | undefined): void {
+  if (pivotId !== undefined && pivotId !== null) markCachedPivotViewStale(pivotId);
+  announcePivotOutputChanged(pivotId);
+}
 
 /**
  * Pipeline stages (total = 4):
@@ -175,7 +210,9 @@ import { notePivotDeleted } from "./pivotCrossFilterView";
 export async function createPivotTable(
   request: CreatePivotRequest
 ): Promise<PivotViewResponse> {
-  return apiCreatePivotTable<CreatePivotRequest, PivotViewResponse>(request);
+  const result = await apiCreatePivotTable<CreatePivotRequest, PivotViewResponse>(request);
+  notePivotOutputChanged(result.pivotId);
+  return result;
 }
 
 /**
@@ -225,7 +262,7 @@ export async function updatePivotFields(
       }
     }
     const dt = performance.now() - t0;
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     clearPreviousView(request.pivotId);
     console.log(
       `[PERF][pivot] updatePivotFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
@@ -261,7 +298,7 @@ export async function togglePivotGroup(
     throw new Error("Pivot operation cancelled - would overwrite data");
   }
   const dt = performance.now() - t0;
-  cachePivotView(request.pivotId, result);
+  adoptPivotOutput(request.pivotId, result);
   console.log(
     `[PERF][pivot] togglePivotGroup pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
   );
@@ -315,7 +352,9 @@ export async function deletePivotTable(pivotId: PivotId): Promise<void> {
  * Relocate a pivot table to a new destination cell.
  */
 export async function relocatePivot(pivotId: PivotId, newRow: number, newCol: number): Promise<void> {
-  return apiRelocatePivot(pivotId, newRow, newCol);
+  await apiRelocatePivot(pivotId, newRow, newCol);
+  // The output moved: the old cells are vacated, the new ones written.
+  notePivotOutputChanged(pivotId);
 }
 
 /**
@@ -366,6 +405,16 @@ export async function refreshPivotCache(pivotId: PivotId): Promise<PivotViewResp
       }
     }
     clearPreviousView(pivotId);
+    // Cached AND announced: a refresh over changed source data grows or
+    // shrinks the pivot, and the pivot store service's refresh (scripts)
+    // dispatches nothing itself. The view is cached because the region
+    // refresh re-reads only the ACTIVE sheet's views (revD#1): a refresh of a
+    // pivot on another sheet (BI Connections > Refresh, the data aftermath of
+    // a "view as" switch, a script on another page) left that sheet's cached
+    // view at the old numbers, and the return to the sheet reused it. The
+    // response is the backend's own view of the refreshed pivot (the same
+    // `view_to_response`, with the members' keys for a model pivot).
+    adoptPivotOutput(result.pivotId ?? pivotId, result);
     return result;
   } catch (err) {
     if (isCurrentOperation(pivotId, seq)) {
@@ -586,7 +635,7 @@ export async function changePivotDataSource(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     // Only the CURRENT operation may clear: a superseded one must leave the
@@ -616,7 +665,7 @@ export async function updatePivotLayout(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -642,7 +691,7 @@ export async function addPivotHierarchy(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -661,7 +710,7 @@ export async function removePivotHierarchy(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -680,7 +729,7 @@ export async function movePivotField(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -699,7 +748,7 @@ export async function setPivotAggregation(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -715,7 +764,7 @@ export async function setPivotNumberFormat(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiSetPivotNumberFormat<SetNumberFormatRequest, PivotViewResponse>(request);
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -734,7 +783,7 @@ export async function applyPivotFilter(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -753,7 +802,7 @@ export async function clearPivotFilter(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -769,7 +818,7 @@ export async function sortPivotField(
   setLoading(request.pivotId, "Sorting...");
   try {
     const result = await apiSortPivotField<SortPivotFieldRequest, PivotViewResponse>(request);
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -798,7 +847,7 @@ export async function setPivotItemVisibility(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -818,9 +867,15 @@ export async function getAllPivotTables(): Promise<PivotTableInfo[]> {
 export async function refreshAllPivotTables(): Promise<PivotViewResponse[]> {
   const results = await apiRefreshAllPivotTables<PivotViewResponse[]>();
   for (const result of results) {
+    // A refusal stops here; the views not adopted are marked stale by the
+    // "pivot:refresh" the refusal dispatches (an event the doors did not make).
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
+    // Each view cached as the region refresh would read it: most of these
+    // pivots are on OTHER sheets, whose views the region refresh never
+    // re-reads (revD#1). One coalesced announcement for all of them.
+    adoptPivotOutput(result.pivotId, result);
   }
   return results;
 }
@@ -841,7 +896,7 @@ export async function setPivotItemExpanded(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -860,7 +915,7 @@ export async function expandCollapseLevel(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -879,7 +934,7 @@ export async function expandCollapseAll(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -902,7 +957,7 @@ export async function groupPivotField(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -921,7 +976,7 @@ export async function createManualGroup(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -940,7 +995,7 @@ export async function ungroupPivotField(
     if (!await confirmOverwriteOrUndo(result)) {
       throw new Error("Pivot operation cancelled - would overwrite data");
     }
-    cachePivotView(request.pivotId, result);
+    adoptPivotOutput(request.pivotId, result);
     return result;
   } finally {
     clearLoading(request.pivotId);
@@ -1032,7 +1087,7 @@ export async function createFromBiModel(
   const t0 = performance.now();
   const result = await apiCreatePivotFromBiModel<CreatePivotFromBiModelRequest, PivotViewResponse>(request);
   const dt = performance.now() - t0;
-  cachePivotView(result.pivotId, result);
+  adoptPivotOutput(result.pivotId, result);
   console.log(
     `[PERF][pivot] createFromBiModel pivot_id=${result.pivotId} | ipc=${dt.toFixed(1)}ms (cached)`
   );
@@ -1084,10 +1139,9 @@ export async function updateBiFields(
       }
     }
     const dt = performance.now() - t0;
-    cachePivotView(request.pivotId, result);
+    // Cached AND announced: the overlay refresh redraws with the new data.
+    adoptPivotOutput(request.pivotId, result);
     clearPreviousView(request.pivotId);
-    // Trigger overlay refresh so the grid redraws with the new pivot data
-    window.dispatchEvent(new CustomEvent("pivot:refresh"));
     console.log(
       `[PERF][pivot] updateBiFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
     );
@@ -1131,6 +1185,7 @@ export async function addCalculatedField(
   if (!await confirmOverwriteOrUndo(result)) {
     throw new Error("Pivot operation cancelled - would overwrite data");
   }
+  notePivotOutputChanged(request.pivotId);
   return result;
 }
 
@@ -1142,6 +1197,7 @@ export async function updateCalculatedField(
   if (!await confirmOverwriteOrUndo(result)) {
     throw new Error("Pivot operation cancelled - would overwrite data");
   }
+  notePivotOutputChanged(request.pivotId);
   return result;
 }
 
@@ -1153,6 +1209,7 @@ export async function removeCalculatedField(
   if (!await confirmOverwriteOrUndo(result)) {
     throw new Error("Pivot operation cancelled - would overwrite data");
   }
+  notePivotOutputChanged(request.pivotId);
   return result;
 }
 
@@ -1164,6 +1221,7 @@ export async function addCalculatedItem(
   if (!await confirmOverwriteOrUndo(result)) {
     throw new Error("Pivot operation cancelled - would overwrite data");
   }
+  notePivotOutputChanged(request.pivotId);
   return result;
 }
 
@@ -1175,6 +1233,7 @@ export async function removeCalculatedItem(
   if (!await confirmOverwriteOrUndo(result)) {
     throw new Error("Pivot operation cancelled - would overwrite data");
   }
+  notePivotOutputChanged(request.pivotId);
   return result;
 }
 
@@ -1614,14 +1673,20 @@ export type {
 // IoC: register the implementation into the API facade. Consumers (including
 // this extension's own UI) use the `pivot` object from @api/pivot, which
 // delegates here. Runs at module load — before any runtime pivot.* call.
+//
+// Every door that changes a pivot's output is registered as an OUTPUT DOOR
+// (`asPivotOutputDoor`, lib/pivotRegionRefresh.ts): a loop of them through the
+// facade -- BI Connections > Refresh, the data aftermath of a "view as" switch,
+// a script -- is one chain, announced ONCE when its last door finishes rather
+// than once per pivot (revD#2). Pinned by pivotOutputAnnounce.test.ts.
 import { registerPivotApi } from '@api/pivot';
 registerPivotApi({
-  create: createPivotTable,
-  updateFields: updatePivotFields,
-  toggleGroup: togglePivotGroup,
+  create: asPivotOutputDoor(createPivotTable),
+  updateFields: asPivotOutputDoor(updatePivotFields),
+  toggleGroup: asPivotOutputDoor(togglePivotGroup),
   getView: getPivotView,
   delete: deletePivotTable,
-  refreshCache: refreshPivotCache,
+  refreshCache: asPivotOutputDoor(refreshPivotCache),
   getSourceData: getPivotSourceData,
   getAtCell: getPivotAtCell,
   getDataFormula: getPivotDataFormula,
@@ -1640,28 +1705,28 @@ registerPivotApi({
   getInfo: getPivotTableInfo,
   updateProperties: updatePivotProperties,
   getLayoutRanges: getPivotLayoutRanges,
-  updateLayout: updatePivotLayout,
+  updateLayout: asPivotOutputDoor(updatePivotLayout),
   getHierarchies: getPivotHierarchies,
-  addHierarchy: addPivotHierarchy,
-  removeHierarchy: removePivotHierarchy,
-  moveField: movePivotField,
-  setAggregation: setPivotAggregation,
-  setNumberFormat: setPivotNumberFormat,
-  applyFilter: applyPivotFilter,
-  clearFilter: clearPivotFilter,
-  sortField: sortPivotField,
+  addHierarchy: asPivotOutputDoor(addPivotHierarchy),
+  removeHierarchy: asPivotOutputDoor(removePivotHierarchy),
+  moveField: asPivotOutputDoor(movePivotField),
+  setAggregation: asPivotOutputDoor(setPivotAggregation),
+  setNumberFormat: asPivotOutputDoor(setPivotNumberFormat),
+  applyFilter: asPivotOutputDoor(applyPivotFilter),
+  clearFilter: asPivotOutputDoor(clearPivotFilter),
+  sortField: asPivotOutputDoor(sortPivotField),
   getFieldInfo: getPivotFieldInfo,
-  setItemVisibility: setPivotItemVisibility,
+  setItemVisibility: asPivotOutputDoor(setPivotItemVisibility),
   getAll: getAllPivotTables,
-  refreshAll: refreshAllPivotTables,
-  setItemExpanded: setPivotItemExpanded,
-  expandCollapseLevel,
-  expandCollapseAll,
-  groupPivotField,
-  createManualGroup,
-  ungroupPivotField,
+  refreshAll: asPivotOutputDoor(refreshAllPivotTables),
+  setItemExpanded: asPivotOutputDoor(setPivotItemExpanded),
+  expandCollapseLevel: asPivotOutputDoor(expandCollapseLevel),
+  expandCollapseAll: asPivotOutputDoor(expandCollapseAll),
+  groupPivotField: asPivotOutputDoor(groupPivotField),
+  createManualGroup: asPivotOutputDoor(createManualGroup),
+  ungroupPivotField: asPivotOutputDoor(ungroupPivotField),
   drillThroughToSheet,
-  createFromBiModel,
-  updateBiFields,
+  createFromBiModel: asPivotOutputDoor(createFromBiModel),
+  updateBiFields: asPivotOutputDoor(updateBiFields),
   setBiLookupColumns,
 });

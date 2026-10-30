@@ -21,7 +21,7 @@
 //
 //          NOTHING IS LOST SILENTLY. The zones cannot hold everything the DSL
 //          can say (SORT, TOP N, CALC, an inclusion filter with no member list
-//          to invert, an aliased measure the serializer cannot re-spell), so
+//          to invert), so
 //          the wells are offered for editing ONLY when serializing the
 //          compiled zones gives back the same query (`sameDesignQuery`, the
 //          canonical comparison). Otherwise they are shown read-only with the
@@ -169,7 +169,7 @@ export interface WellsModel extends WellsState {
 export const WELLS_QUERY_HAS_ERRORS =
   "The query has errors, so its fields cannot be shown here. Fix it on the Design tab.";
 export const WELLS_QUERY_NOT_REPRESENTABLE =
-  "This query uses clauses the field wells cannot show (such as SORT, TOP, CALC, an alias or a filter's item list). Edit it on the Design tab.";
+  "This query uses clauses the field wells cannot show (such as SORT, TOP, CALC or a filter's item list). Edit it on the Design tab.";
 
 /** The gauge's series indices as the painter resolves them (types.ts GaugeMarkOptions). */
 function gaugeIndices(opts: MarkOptions | undefined, count: number): { target: number; min: number; max: number } {

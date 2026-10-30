@@ -16,20 +16,23 @@ function announceViewUpdated(pivotId: string, view: PivotViewResponse): void {
 }
 
 /**
- * Tracks which pivotIds were just cached by updatePivotFields/togglePivotGroup.
- * refreshPivotViewCache only skips the IPC fetch when this flag is set,
- * ensuring that other refresh paths (filters, dialogs, context menu) always
- * fetch fresh data from the backend.
+ * Tracks which pivotIds were just cached by a pivot-api door (`cachePivotView`,
+ * through pivot-api's `adoptPivotOutput`). The region refresh that follows the
+ * door skips the IPC fetch for a fresh view and consumes the flag; a refresh
+ * that does not visit the pivot (it is on another sheet) settles the flag into
+ * an ordinary cached view (`settleFreshPivotViewsNotIn`, revD#1), so it never
+ * outlives a later change.
  */
 const freshCacheIds = new Set<string>();
 
 /**
- * Store a PivotViewResponse in the cache and mark it as fresh.
- * Called by updatePivotFields/togglePivotGroup after IPC completes.
+ * Store a PivotViewResponse in the cache and mark it as fresh (and not stale).
+ * Called by the pivot-api doors after their IPC completes.
  */
 export function cachePivotView(pivotId: string, view: PivotViewResponse): void {
   pivotViewCache.set(pivotId, view);
   freshCacheIds.add(pivotId);
+  staleViewIds.delete(String(pivotId));
   // Seed cell window cache with the initial window from the response
   if (view.isWindowed) {
     const cache = getOrCreateCellWindowCache(pivotId);
@@ -67,6 +70,7 @@ export function consumeFreshFlag(pivotId: string): void {
  */
 export function setCachedPivotView(pivotId: string, view: PivotViewResponse): void {
   pivotViewCache.set(pivotId, view);
+  staleViewIds.delete(String(pivotId));
   // Also seed cell window cache for windowed responses
   if (view.isWindowed) {
     const cache = getOrCreateCellWindowCache(pivotId);
@@ -104,6 +108,83 @@ export function deleteCachedPivotView(pivotId: string): void {
   cellWindowCaches.delete(pivotId);
   loadingPivots.delete(pivotId);
   previousViews.delete(pivotId);
+  // No view, nothing fresh: a fresh flag outliving its view would make the
+  // next region refresh skip the fetch and publish the pivot with NO view.
+  freshCacheIds.delete(pivotId);
+  staleViewIds.delete(String(pivotId));
+}
+
+// ============================================================================
+// STALE VIEWS (a cached view the backend may no longer agree with)
+// ============================================================================
+
+/**
+ * Pivots whose cached view may no longer be what the backend holds (revD#1,
+ * follow-up of BUG-0594). The region refresh re-reads the views of the ACTIVE
+ * sheet's pivots only, and a return to a sheet reuses the cached view to show
+ * it at once -- a claim that "nothing changed while we were away". A pivot
+ * changed while its sheet was not active (BI Connections > Refresh, a "view
+ * as" switch, a slicer on another page, an MCP edit, an undo, a locale switch,
+ * another document) broke that claim: its canvas box painted pre-change
+ * numbers on the way back. A view is marked stale whenever its output may have
+ * changed without the new view being cached, and a stale view is never reused;
+ * caching it again (`cachePivotView` / `setCachedPivotView`) clears the mark.
+ * Keyed by `String(pivotId)`: ids arrive as numbers from the backend and as
+ * strings from callers.
+ */
+const staleViewIds = new Set<string>();
+
+/** `pivotId`'s output changed and its new view was not cached: never reuse the old one. */
+export function markCachedPivotViewStale(pivotId: string | number): void {
+  // Marking a pivot with no cached view is harmless: the mark is cleared by
+  // the fetch that first caches one.
+  staleViewIds.add(String(pivotId));
+}
+
+/**
+ * Something changed some pivots' output and does not say which: every cached
+ * view goes stale. A view a door has JUST cached (fresh, not yet consumed by a
+ * region refresh) is the backend's newest answer and is kept, unless
+ * `includeFresh` -- a change that invalidates even that one (the display
+ * locale, a replaced document).
+ */
+export function markAllCachedPivotViewsStale(options: { includeFresh?: boolean } = {}): void {
+  for (const id of pivotViewCache.keys()) {
+    if (!options.includeFresh && freshCacheIds.has(id)) continue;
+    staleViewIds.add(String(id));
+  }
+  if (options.includeFresh) freshCacheIds.clear();
+}
+
+/** True when `pivotId`'s cached view is marked stale. */
+export function isCachedPivotViewStale(pivotId: string | number): boolean {
+  return staleViewIds.has(String(pivotId));
+}
+
+/**
+ * The cached view, if it may stand in for a fetch: present and not stale. The
+ * one reader is the region refresh's cached hit (a return to a sheet).
+ */
+export function getReusableCachedPivotView(pivotId: string): PivotViewResponse | undefined {
+  if (staleViewIds.has(String(pivotId))) return undefined;
+  return pivotViewCache.get(pivotId);
+}
+
+/**
+ * A region refresh read the ACTIVE sheet's pivots (`onSheet`): a fresh flag of
+ * any OTHER pivot is turned into an ordinary cached view. The flag means "a
+ * door just cached this, skip the next fetch" and is consumed by the refresh
+ * that follows the door -- but that refresh never visits a pivot on another
+ * sheet, so the flag used to outlive every later change to it, and the return
+ * to its sheet skipped the fetch on a view that had gone stale since. The view
+ * itself stays (it was the newest when cached) and is reused on the return
+ * unless something marks it stale first.
+ */
+export function settleFreshPivotViewsNotIn(onSheet: ReadonlyArray<string | number>): void {
+  const keep = new Set(onSheet.map((id) => String(id)));
+  for (const id of [...freshCacheIds]) {
+    if (!keep.has(String(id))) freshCacheIds.delete(id);
+  }
 }
 
 // ============================================================================

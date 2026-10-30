@@ -381,6 +381,46 @@ describe("drawSparkline", () => {
     });
   });
 
+  // BUG-0346's pattern (round-6 announce lead (a)): the scale was found with
+  // Math.min(...values) / Math.max(...values), one call argument per point, and
+  // V8 throws RangeError above ~125,000 arguments -- so a sparkline over a data
+  // range that long (fetchGroupData reads one in bands) threw in the PAINT path
+  // and drew nothing.
+  describe("a sparkline over a data range longer than a call's argument limit", () => {
+    it("paints a 300,000-point line scaled to its true minimum and maximum, without throwing", () => {
+      const POINTS = 300_000;
+      const result = createSparklineGroup(
+        { startRow: 0, startCol: 5, endRow: 0, endCol: 5 },
+        { startRow: 0, startCol: 0, endRow: POINTS - 1, endCol: 0 },
+        "line",
+      );
+      expect(result.valid).toBe(true);
+      const values = Array.from({ length: POINTS }, (_, i) => i % 1000);
+      values[0] = -100; // the minimum: the first point sits on the plot's floor
+      values[150_000] = 5000; // the maximum: one point touches its ceiling
+      setCachedGroupData(result.group!.id, [values]);
+      markDataCacheClean();
+
+      // Record the drawn y extent without keeping 300,000 mock calls.
+      const ctx = makeCtx();
+      const ys: { first: number | null; min: number; max: number } = { first: null, min: Infinity, max: -Infinity };
+      const record = (_x: number, y: number) => {
+        if (ys.first === null) ys.first = y;
+        if (y < ys.min) ys.min = y;
+        if (y > ys.max) ys.max = y;
+      };
+      (ctx as unknown as { moveTo: unknown }).moveTo = record;
+      (ctx as unknown as { lineTo: unknown }).lineTo = record;
+
+      expect(() => drawSparkline(makeDecorationContext(0, 5, ctx)), "the paint threw on a long data range").not.toThrow();
+      expect(ctx.stroke).toHaveBeenCalled();
+      // The cell spans y 24..48 with 3 px of padding: the plot is y 27..45.
+      expect(ys.first, "the minimum (-100) is not on the plot's floor").toBeCloseTo(45, 6);
+      expect(ys.max).toBeCloseTo(45, 6);
+      expect(ys.min, "the maximum (5000) does not touch the plot's ceiling").toBeCloseTo(27, 6);
+    });
+  });
+
   describe("multi-cell sparkline groups", () => {
     it("renders different data for each cell in a column group", () => {
       const result = createSparklineGroup(

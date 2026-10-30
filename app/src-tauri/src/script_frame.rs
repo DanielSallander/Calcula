@@ -223,6 +223,26 @@ pub const SCRIPT_FRAME_LOADER: &str = r#"<!DOCTYPE html>
     new ResizeObserver(reportSize).observe(document.documentElement);
   }
 
+  // THE RELOAD KEYS NEVER RELOAD THE APP FROM IN HERE (BUG-0393, review
+  // revG#6). A keystroke inside this frame never reaches the app window's own
+  // guard (api/keybindings.ts, `isUnboundBrowserReloadKey`): the frame is a
+  // separate document, and its keys are not forwarded. An unprevented F5 or
+  // Ctrl+R then reaches WebView2's reload accelerator, which reloads the WHOLE
+  // app -- the open workbook's unsaved session with it. The same keys as the
+  // app's guard: F5 and Ctrl+R with or without Ctrl / Shift, the keyboard's
+  // Refresh key, Ctrl+R by its virtual key too (82: a Cyrillic layout types
+  // another letter on it and still reloads), never with Alt or AltGr. Capture
+  // phase, ahead of the script's own handlers; only the DEFAULT is prevented,
+  // so a template that listens for F5 still hears it.
+  window.addEventListener('keydown', function (e) {
+    if (e.altKey || e.metaKey) return;
+    var key = typeof e.key === 'string' ? e.key : '';
+    if (key === 'F5' || key === 'BrowserRefresh' ||
+        (e.ctrlKey && (key.toLowerCase() === 'r' || e.keyCode === 82))) {
+      e.preventDefault();
+    }
+  }, true);
+
   // The host cannot push until this document exists, and it has no other way to
   // learn that: a sandboxed frame's load event is not reliably observable from
   // the embedder. So the loader announces itself, and the host holds the newest
