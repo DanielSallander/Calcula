@@ -34,10 +34,22 @@ export type PlotOrder = "default" | "rightToLeft";
 export interface SparklineGroup {
   /** Unique ID for this group */
   id: number;
-  /** Location range (where sparklines are drawn) */
+  /** Location range (where sparklines are drawn) -- the group's FIRST area */
   location: CellRange;
-  /** Data source range (the numbers) */
+  /** Data source range (the numbers) -- the group's FIRST area */
   dataRange: CellRange;
+  /**
+   * The group's further AREAS, each a location over a data range mapped by the
+   * same rules as `location` / `dataRange`. Absent (never empty) for a group
+   * of one area. Excel keeps a group ONE group whatever a structural edit does
+   * to its cells (column F inserted beside E2:E6 over A2:C6 leaves one group
+   * of ten, F2:F6 over B2:D6 among them), and the backend's shift writes the
+   * parts such an edit leaves here (app/src-tauri/src/chart_range_shift.rs,
+   * GROUP IDENTITY), so a group-level edit still reaches every sparkline.
+   * Editing the group's location/data (the Edit Data dialog) replaces every
+   * area with the one entered, as Excel's "Edit Group Location & Data" does.
+   */
+  moreAreas?: SparklineArea[];
   /** Sparkline type */
   type: SparklineType;
   /** Line color (for line type) or positive bar color */
@@ -100,6 +112,32 @@ export interface CellRange {
   startCol: number;
   endRow: number;
   endCol: number;
+}
+
+/** One area of a sparkline group: a location over the data it draws. */
+export interface SparklineArea {
+  location: CellRange;
+  dataRange: CellRange;
+}
+
+/** Every area of a group, its own `location` / `dataRange` first. */
+export function groupAreas(group: Pick<SparklineGroup, "location" | "dataRange" | "moreAreas">): SparklineArea[] {
+  const first: SparklineArea = { location: group.location, dataRange: group.dataRange };
+  return Array.isArray(group.moreAreas) ? [first, ...group.moreAreas] : [first];
+}
+
+/** Does any area of the group's location overlap the range? */
+export function groupLocationOverlaps(
+  group: Pick<SparklineGroup, "location" | "dataRange" | "moreAreas">,
+  range: CellRange,
+): boolean {
+  return groupAreas(group).some(
+    ({ location: loc }) =>
+      loc.startRow <= range.endRow &&
+      loc.endRow >= range.startRow &&
+      loc.startCol <= range.endCol &&
+      loc.endCol >= range.startCol,
+  );
 }
 
 /** Orientation of data slicing when mapping data rows/cols to location cells */

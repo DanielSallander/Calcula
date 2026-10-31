@@ -2,15 +2,17 @@
 // PURPOSE: Goal Seek dialog - single-variable solver UI.
 // CONTEXT: Two-phase dialog: input form, then result/status display.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   getCell,
-  updateCellsBatch,
   goalSeek,
+  cancelGoalSeek,
   columnToLetter,
 } from "@api";
+import { alertAsync } from "@api/dialogs";
+import { emitAppEvent, AppEvents } from "@api/events";
 import { formatGoalSeekValue, parseGoalSeekTarget } from "../lib/goalSeekParse";
 
 // ============================================================================
@@ -210,6 +212,13 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
   const [changingCellRef, setChangingCellRef] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // A run (or a Cancel) in flight, set SYNCHRONOUSLY before the first await.
+  // Excel's Goal Seek is modal: while it runs, a second OK (Enter pressed
+  // again -- only the button was disabled), Esc, Cancel, X and a click outside
+  // do nothing. A second run used to start beside the first, snapshot the
+  // first's TRIAL value as the cell's original, and leave the changing cell at
+  // a trial value; Cancel then put back that trial.
+  const runningRef = useRef(false);
 
   // Result phase state
   const [result, setResult] = useState<{
@@ -219,9 +228,8 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
     variableValue: number;
     targetResult: number;
     iterations: number;
-    originalVariableValue: number;
-    variableRow: number;
-    variableCol: number;
+    /** The run's own undo step, which Cancel takes back (null: none recorded). */
+    undoSeq: number | null;
   } | null>(null);
 
   // Pre-fill Set cell with active cell on mount
@@ -247,7 +255,7 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
       }
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        if (!runningRef.current) onClose();
       }
       if (e.key === "Enter") {
         e.stopPropagation();
@@ -261,6 +269,7 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
   // Click outside to close
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent) => {
+      if (runningRef.current) return;
       if (dialogRef.current && !dialogRef.current.contains(e.target as Node)) {
         if (!result) {
           onClose();
@@ -273,6 +282,20 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
   // --- Handlers ---
 
   const handleOk = useCallback(async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    try {
+      await runGoalSeek();
+    } finally {
+      runningRef.current = false;
+    }
+  }, [setCellRef, toValue, changingCellRef]);
+
+  const handleInputCancel = useCallback(() => {
+    if (!runningRef.current) onClose();
+  }, [onClose]);
+
+  const runGoalSeek = async () => {
     setValidationError(null);
 
     // Parse cell references
@@ -331,8 +354,11 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
         return;
       }
 
-      // Refresh the grid to show updated values
+      // Refresh the grid to show updated values. The run leaves the workbook
+      // calculated (Excel, under manual calculation too), so the cells are
+      // announced and the status bar asks the calculation state again.
       window.dispatchEvent(new CustomEvent("grid:refresh"));
+      emitAppEvent(AppEvents.CELLS_UPDATED);
 
       // Show result phase
       setResult({
@@ -342,34 +368,55 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
         variableValue: gsResult.variableValue,
         targetResult: gsResult.targetResult,
         iterations: gsResult.iterations,
-        originalVariableValue: gsResult.originalVariableValue,
-        variableRow: variableCoords.row,
-        variableCol: variableCoords.col,
+        undoSeq: gsResult.undoSeq ?? null,
       });
     } catch (err) {
       setValidationError(`Goal Seek failed: ${err}`);
     } finally {
       setIsLoading(false);
     }
-  }, [setCellRef, toValue, changingCellRef]);
+  };
 
   // Accept result and close
   const handleAccept = useCallback(() => {
     onClose();
   }, [onClose]);
 
-  // Revert to original value and close
+  // Cancel, as Excel's: put the changing cell back EXACTLY as it was -- a
+  // text, an empty cell or a number, with its format -- and leave NOTHING in
+  // the history, no undo step and no redo step (Excel [LIVE]: after Cancel,
+  // Undo and Redo are both disabled). The run recorded ONE undo step holding
+  // the cell as it was; `cancelGoalSeek` takes THAT step off the history and
+  // writes the cell back, recalculating its dependents. It used to be a scoped
+  // undo, which moved the step onto the redo stack, so Ctrl+Y re-applied the
+  // result. If something else changed the workbook in the meantime the backend
+  // refuses and says so, rather than taking that back.
+  //
+  // A REFUSED Cancel KEEPS THE STATUS DIALOG OPEN. The backend refuses while an
+  // animation holds cells on loan or another what-if run is going -- both
+  // things the user can end and then press Cancel again -- and it used to
+  // close the dialog after the alert, keeping the result with no way back but
+  // a plain Undo (which leaves a redo step Excel's Cancel never does). The
+  // dialog now says why and stays: Cancel can be retried, OK keeps the result.
   const handleRevert = useCallback(async () => {
-    if (result) {
+    // One Cancel: a second Esc while the first is putting the cell back would
+    // ask again and report a refusal for a step already taken back.
+    if (runningRef.current) return;
+    runningRef.current = true;
+    if (result && result.undoSeq !== null) {
+      let refusal = "";
       try {
-        await updateCellsBatch([{
-          row: result.variableRow,
-          col: result.variableCol,
-          value: String(result.originalVariableValue),
-        }]);
+        const answer = await cancelGoalSeek(result.undoSeq);
         window.dispatchEvent(new CustomEvent("grid:refresh"));
+        refusal = typeof answer?.error === "string" ? answer.error.trim() : "";
+        if (refusal === "") emitAppEvent(AppEvents.CELLS_UPDATED);
       } catch (err) {
-        console.error("[GoalSeek] Revert failed:", err);
+        refusal = String(err);
+      }
+      if (refusal !== "") {
+        await alertAsync(`Goal Seek could not put the changing cell back: ${refusal}`);
+        runningRef.current = false;
+        return;
       }
     }
     onClose();
@@ -424,7 +471,7 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
         {/* Header — drag handle */}
         <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Goal Seek</span>
-          <button style={styles.closeBtn} onClick={onClose}>
+          <button style={styles.closeBtn} onClick={handleInputCancel} disabled={isLoading}>
             X
           </button>
         </div>
@@ -480,7 +527,7 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
 
         {/* Footer */}
         <div style={styles.footer}>
-          <button style={styles.btn} onClick={onClose}>
+          <button style={styles.btn} onClick={handleInputCancel} disabled={isLoading}>
             Cancel
           </button>
           <button

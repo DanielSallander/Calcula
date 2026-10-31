@@ -92,6 +92,15 @@ export interface ApiChangelogEntry {
  * (SheetFocusOptions) and a formatting wrapper can be held to the active sheet
  * (FormatPlacementOptions); the backend's announcement that it re-bound an
  * object script names the new binding (ObjectScriptsChangedDetail.instanceId).
+ * Round 9 changed the scripting reach (BUG-0616): whole-line formats and
+ * clears, a contents clear in an approved macro's run, and a sandboxed
+ * extension's scheduled job calling a method published for its own jobs.
+ * Rounds 9-10 (BUG-0614) gave the stores whose cell coordinates the backend
+ * never holds one way to follow every coordinate change (@api/structuralFollow):
+ * an Undo / Redo hands them the changes it made as STRUCTURED DELTAS read from
+ * the step itself (StructuralUndoPayload.deltas, UndoResult.structuralDeltas),
+ * Insert / Delete Cells its band (CellShiftResult.delta), and a Cut + Paste
+ * its move (AppEvents.CELLS_MOVED).
  * Every type it names can be imported from @api
  * (ClearArea from @api/lib, FormatPlacementOptions from @api/cellTarget);
  * docs/EXTENSION_GUIDE.md "New in API v1.7.0" mirrors it.
@@ -220,8 +229,121 @@ export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
         pattern:
           "export interface ObjectScriptsChangedDetail \\{(?:(?!\\n\\})[\\s\\S])*?instanceId\\?: string \\| null;",
       },
+      // ---- ONE way for a store whose cell coordinates the backend never
+      // holds (a watch, a bookmark, an overlay's range, a driver cell) to
+      // follow row / column edits, Insert / Delete Cells and moved cells on
+      // any sheet, and their Undo / Redo (rounds 9-10, BUG-0614).
+      { name: "followStructuralEdits", module: "@api/structuralFollow" },
+      { name: "shiftCellByEdit", module: "@api/structuralFollow" },
+      { name: "shiftRangeByEdit", module: "@api/structuralFollow" },
+      { name: "followCell", module: "@api/structuralFollow" },
+      { name: "followRange", module: "@api/structuralFollow" },
+      { name: "inverseStructuralEdit", module: "@api/structuralFollow" },
+      { name: "sameStructuralEdit", module: "@api/structuralFollow" },
+      { name: "followSheetRenumbering", module: "@api/structuralFollow" },
+      { name: "StructuralLineEdit", declaredIn: "src/api/structuralFollow.ts", pattern: "export interface StructuralLineEdit \\{" },
+      { name: "StructuralCellMove", declaredIn: "src/api/structuralFollow.ts", pattern: "export type StructuralCellMove = StructuralMoveDelta;" },
+      { name: "StructuralFollowEdit", declaredIn: "src/api/structuralFollow.ts", pattern: "export type StructuralFollowEdit = " },
+      { name: "StructuralFollowStep", declaredIn: "src/api/structuralFollow.ts", pattern: "export interface StructuralFollowStep<" },
+      { name: "StructuralFollowCause", declaredIn: "src/api/structuralFollow.ts", pattern: "export type StructuralFollowCause = " },
+      { name: "StructuralRange", declaredIn: "src/api/structuralFollow.ts", pattern: "export interface StructuralRange \\{" },
+      { name: "FollowStructuralEditsOptions", declaredIn: "src/api/structuralFollow.ts", pattern: "export interface FollowStructuralEditsOptions \\{" },
+      {
+        name: "FollowStructuralEditsWithMovesOptions",
+        declaredIn: "src/api/structuralFollow.ts",
+        pattern: "export interface FollowStructuralEditsWithMovesOptions extends FollowStructuralEditsOptions \\{",
+      },
+      { name: "StructuralFollowSubscribe", declaredIn: "src/api/structuralFollow.ts", pattern: "export type StructuralFollowSubscribe = " },
+      // ---- The coordinate change a step made, as the backend reports it
+      // (api_types::StructuralDelta): what an Undo / Redo reversed or replayed,
+      // read from the step itself -- never parsed from its description, which
+      // could not name a grouped step or a cell shift (round 10).
+      { name: "StructuralDelta", declaredIn: "src/core/types/types.ts", pattern: "export type StructuralDelta = StructuralLineDelta \\| StructuralMoveDelta;" },
+      { name: "StructuralLineDelta", declaredIn: "src/core/types/types.ts", pattern: "export interface StructuralLineDelta \\{" },
+      { name: "StructuralMoveDelta", declaredIn: "src/core/types/types.ts", pattern: "export interface StructuralMoveDelta \\{" },
+      { name: "DeltaBand", declaredIn: "src/core/types/types.ts", pattern: "export interface DeltaBand \\{" },
+      { name: "StructuralUndoPayload", declaredIn: "src/api/events.ts", pattern: "export interface StructuralUndoPayload \\{" },
+      { name: "AppEvents.CELLS_MOVED", module: "@api/events" },
+      { name: "CellsMovedPayload", declaredIn: "src/api/events.ts", pattern: "export interface CellsMovedPayload \\{" },
+      // ---- A data command that rewrote cells in place (Sort, Remove
+      // Duplicates, Text to Columns) ends the clipboard mode as Excel's does
+      // [LIVE], and a paste door that is not plain Paste waits for a stale
+      // snapshot's re-read (round 11, lane clip3).
+      { name: "AppEvents.DATA_COMMAND_APPLIED", module: "@api/events" },
+      { name: "DataCommandAppliedPayload", declaredIn: "src/api/events.ts", pattern: "export interface DataCommandAppliedPayload \\{" },
+      { name: "settledInternalClipboard", module: "@api/lib" },
+      // ---- Excel's Insert Copied Cells (round 12, lane clip4 [LIVE]): with a
+      // COPY pending, Insert makes room for the copied block and pastes it
+      // there as ONE undo step; the menus then say "Insert Copied Cells...".
+      { name: "insertCopiedCells", module: "@api/lib" },
+      { name: "insertCopiedCellsLabel", module: "@api/lib" },
+      { name: "pendingCopyOfSheetCells", module: "@api/lib" },
+      { name: "InsertCopiedCellsRequest", declaredIn: "src/core/hooks/useClipboard.ts", pattern: "export type InsertCopiedCellsRequest =" },
+      { name: "InsertCopiedCellsResult", declaredIn: "src/core/hooks/useClipboard.ts", pattern: "export type InsertCopiedCellsResult =" },
+      // ---- Excel TILES a copy into a selection that is an exact multiple of
+      // it (round 13, lane clip5 [LIVE]): ONE rule for Paste, Paste Special and
+      // Insert Copied Cells.
+      { name: "pasteTiles", module: "@api/lib" },
+      { name: "pasteMayTile", module: "@api/lib" },
+      { name: "PASTE_ONCE", module: "@api/lib" },
+      { name: "PasteTiles", declaredIn: "src/core/lib/pasteTiling.ts", pattern: "export interface PasteTiles \\{" },
+      { name: "PasteTilingSelection", declaredIn: "src/core/lib/pasteTiling.ts", pattern: "export interface PasteTilingSelection \\{" },
+      {
+        name: "UndoResult.structuralDeltas",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface UndoResult \\{(?:(?!\\n\\})[\\s\\S])*?structuralDeltas\\?: StructuralDelta\\[\\];",
+      },
+      {
+        name: "CellShiftResult.delta",
+        declaredIn: "src/core/types/types.ts",
+        pattern: "export interface CellShiftResult \\{(?:(?!\\n\\})[\\s\\S])*?delta\\?: StructuralDelta \\| null;",
+      },
+      // ---- A grid menu item can STAND IN for others while it shows (round
+      // 16, rev14A): Insert Copied Cells replaces Core's header Insert Row /
+      // Insert Column, and Core no longer guesses from the clipboard.
+      {
+        name: "GridContextMenuItem.replaces",
+        declaredIn: "src/api/extensions.ts",
+        pattern: "export interface GridContextMenuItem \\{(?:(?!\\n\\})[\\s\\S])*?replaces\\?: readonly string\\[\\];",
+      },
+      // ---- A MOVED write names its SOURCE cell (round 18, rev16A): the
+      // backend carries a moved cell's format onto a protected sheet without
+      // Format Cells only when that source shows the style written.
+      {
+        name: "CellUpdateInput.moved",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface CellUpdateInput \\{(?:(?!\\n\\})[\\s\\S])*?moved\\?: MovedFrom;",
+      },
+      { name: "MovedFrom", declaredIn: "src/core/lib/tauri-api.ts", pattern: "export interface MovedFrom \\{" },
+      // ---- File > Open's picker and its load, apart (round 18, misc17): so
+      // something can be asked between them (unsaved changes made meanwhile).
+      { name: "workbook.pickFileToOpen", declaredIn: "src/api/system.ts", pattern: "\\n  pickFileToOpen,\\n" },
+      { name: "workbook.openAtPath", declaredIn: "src/api/system.ts", pattern: "\\n  openAtPath: openFileAtPath,\\n" },
     ],
     changed: [
+      "STRUCTURAL_UNDO's payload is StructuralUndoPayload (rounds 9-10, BUG-0614): an Undo or Redo of a structural step carries source \"undo\" | \"redo\" and deltas, the coordinate changes it made in the order made, as the backend read them from the step (UndoResult.structuralDeltas: an undo reports the INVERSE of each change, newest first; a redo each change again, oldest first; a grouped step every edit; Insert / Delete Cells its band), and Insert / Delete Cells announces it with source \"edit\" and its band (CellShiftResult.delta) -- never parse the description; an Undo / Redo of a step that moved cells but restored no structure (a Cut + Paste) announces CELLS_MOVED instead",
+      "a pending COPY's source follows the row and column edits Excel makes it follow, and keeps its address where Excel keeps it (round 10, BUG-0614 [LIVE 2026-10-30]): an Undo or Redo of an insert, a delete or an Insert Cells keeps a copy AND a cut and their ADDRESS (getInternalClipboard() returns the snapshot read again there -- Excel pastes what stands at the copied address now); an Insert Cells band and a script's row or column INSERT end a cut but MOVE a copy's source (ClipboardData.sourceSelection, sourceRows and the marching ants) with its cells, while a DELETE -- Delete Cells, or a script's row, column or cell delete on any sheet -- ends a copy as well as a cut (round 11 [LIVE]); an insert that cuts into the copied block leaves the copy pasting the snapshot it has; a sheet inserted or removed renumbers ClipboardData.sourceSheetIndex",
+      "the clipboard mode -- a copy's and a cut's -- ENDS on a Sort (sortRange: the ribbon, the Sort dialog, an AutoFilter dropdown, a script), a removeDuplicates and a Text to Columns that succeeded, as Excel's does from the ribbon and COM alike (round 11 [LIVE]); each announces AppEvents.DATA_COMMAND_APPLIED once it has landed, a refused one nothing",
+      "where Excel keeps the clipboard mode, a paste takes what the source holds NOW whatever its size (round 11): a stale snapshot (an undo, a rename, a write onto the source) is read again -- sparse and banded, in the background up to 100,000 cells and when a paste asks above that (a whole column) -- and with it ClipboardData.text (and the system clipboard, while it still holds this copy's text), comments, validations and collectionTexts; a snapshot whose re-read FAILED is never pasted: plain Paste refuses it (a copy's as well as a cut's) and ends the mode, and settledInternalClipboard() answers null; every Paste Special door reads the clipboard through settledInternalClipboard(); getInternalClipboard() still answers at once",
+      "a drag of whole rows or columns (Core's row / column move) is recorded and announced as a moved block like a Cut + Paste (round 11 [LIVE]: it overwrites the lines it lands on, and the lines it passes over stay): AppEvents.CELLS_MOVED after it commits, and UndoResult.structuralDeltas carries the move for its Undo / Redo",
+      "with a COPY pending, core.grid.insert / core.grid.insertCells (Home > Insert, Ctrl+Plus, the new cell right-click \"Insert...\" item) are Excel's Insert Copied Cells (round 12 [LIVE]): the room is the copy's size at the selection's top-left, a block asks the two-choice Insert dialog (Shift cells right / down) unless { shift } names one, whole copied rows (columns) go in over whole selected rows (columns) with no dialog, a mismatch is refused (\"This selection isn't valid...\"), and the copy stays pending with its source moved along; a ROWS_INSERTED / COLUMNS_INSERTED that is not Insert Copied Cells' own still ends the clipboard mode. The grid paste command (core.clipboard.paste) takes { at: { row, col } } to paste with that cell as the top-left",
+      "the clipboard mode -- a copy's and a cut's -- also ENDS, as Excel's does (round 13 [LIVE]), on Calculate Now / Calculate Sheet (calculateNow / calculateSheet, every route: F9, Shift+F9, the Formulas menu, a script, the command line; recalcWithCube, Excel's CalculateFull, keeps it), on turning an AutoFilter on or applying or clearing its criteria (applyAutoFilter, setColumnFilterValues / CustomFilter / TopBottomFilter / DynamicFilter, clearColumnCriteria, clearAutoFilterCriteria; reapplyAutoFilter and removeAutoFilter keep it), on a Merge or Unmerge (mergeCells / unmergeCells, never a probe) -- each announces AppEvents.DATA_COMMAND_APPLIED once it landed, DataCommandAppliedPayload.command gaining \"autoFilter\", \"merge\" and \"calculate\" -- and on Group / Ungroup rows or columns and Clear Outline (OUTLINE_CHANGED with those commands; collapse, expand and show-level keep it)",
+      "the clipboard mode -- a copy's and a cut's -- also ENDS (round 14 [LIVE]), on setCalculationMode (Formulas > Calculation Options, a script, the release of a script's manual mode), either way and even to the mode already in effect, once the switch landed: AppEvents.DATA_COMMAND_APPLIED with DataCommandAppliedPayload.command \"calculationMode\"; a refused switch ends nothing",
+      "a gesture TAKEN BACK to its undo savepoint is shown the way Ctrl+Z shows a restore (round 14): Insert Copied Cells whose paste did not land, and a refused Cut + Paste or drag-move, re-read the dimensions and cells and announce MUTATION_REFRESH, and the changes the followers were told about come back to them as their Undo with nothing to Redo -- STRUCTURAL_UNDO with StructuralUndoPayload.source \"rollback\" (the inverse line deltas; a pending copy's source follows them back and the copy stays pending) and, for a move announced from a step that JOINED an outer one (a granted run's Merge & Center), CELLS_MOVED with CellsMovedPayload.source \"rollback\"; @api/structuralFollow hands a follower such a change with cause \"undo\" and the edit's own seq; a move that was never announced is never handed back",
+      "the clipboard mode -- a copy's and a cut's -- also ENDS on a refresh of the data underneath the grid (round 15 [LIVE]: Excel's Data > Refresh All ends it even with nothing to refresh, and so does a PivotTable's Refresh; Excel's CalculateFull and ribbon commands such as Zoom keep it): @api/dataAftermath's announceUnderlyingDataChanged -- Collaboration's refresh of subscribed content, a BI view-as role switch -- announces AppEvents.DATA_COMMAND_APPLIED with DataCommandAppliedPayload.command \"refresh\" after its recalculation, whichever recalculation it ran",
+      "a granted application macro run that is TAKEN BACK (owner decision B, all or nothing) is shown through the same take-back announcement as a gesture's (round 15): the line edits the run made come back to their followers as STRUCTURAL_UNDO source \"rollback\", and a move announced from a step that joined the run (its Merge & Center) as CELLS_MOVED source \"rollback\", so a pending copy's source, bookmarks and Watch Window entries go back where they were; it used to announce MUTATION_REFRESH alone",
+      "plain Paste never writes a snapshot its source has moved on from (round 15): a write onto the copied cells that lands while the paste is being prepared (its clipboard, merge or formula-shift reads), or marks that keep landing past the bounded settle, start the paste again from the top before anything is written -- a bounded number of times, after which it pastes the snapshot of the last re-read that paste made (round 19: Excel pastes what the source holds at the paste [LIVE]); only a snapshot no re-read of that paste reached is refused (\"kept changing\"), the copy kept pending",
+      "a TILED Paste Special (a selection that is a multiple of the copy) writes every cell's content in ONE updateCellsBatch, the source's style riding each update (CellUpdateInput.styleIndex), every tile's formulas from ONE shiftFormulasBatch, and a number format once per copied cell over its tiles' rows x columns (round 15): a one-cell copy over a column was one awaited write per cell; Paste Formatting's style-only writes, No Borders' sides, comments and validation are still one call per cell",
+      "CellUpdateInput.styleIndex on a PROTECTED sheet is a format like any other (round 14, as Excel [LIVE]): dropped when the sheet does not allow Format Cells (the cell keeps its own style), and every written cell keeps its Locked flag whatever the index says -- a paste or a fill can never unlock a cell",
+      "with a COPY pending, the row and column header right-click menu offers \"Insert Copied Cells\" in place of Insert Row / Insert Column, and the cell right-click item reads \"Insert Copied Cells\" (no dots, no dialog) for copied whole rows or columns, as Excel's menus do [LIVE] (round 14); the header item runs core.grid.insert, which inserts the copied lines (a copied block onto whole lines is refused, as Excel refuses it)",
+      "a copied formula whose VALUE changes while the copy is pending (a script's or a scheduled job's write it depends on) is pasted with its CURRENT value by Paste Values and every value-pasting door, and ClipboardData.text and the system clipboard follow it, as Excel's do [LIVE] (round 13): a CELL_VALUES_CHANGED change on a copied cell marks the snapshot stale -- any change, even one whose formula and shown text are as copied (round 15: a number format can show the same text for a new stored value, and Paste Values pastes the stored value); a snapshot is refused as unreadable only when a read of it FAILED, never because a write landed while the paste was waiting; and when the system clipboard cannot be written, ClipboardData.text keeps the text the system clipboard still holds",
+      "Paste and every Paste Special door TILE a copy into a selection that is an exact multiple of it, rows AND columns, as Excel does [LIVE] (round 13): the block is repeated over the selection, each tile's formulas shifted to where that tile lands; any other size, a selection holding a merged cell, a cut and a floating grid's cells paste once (pasteTiles, @api/lib). Insert Copied Cells sizes its room the same way (the whole selection when it is a multiple of the copy, rows and columns alike; round 15: asked over the area the copy's own paste then fills, so a room the paste would fill only once -- past its 5,000,000-cell tiling cap -- is made only once), and the grid paste command's { at } also takes endRow / endCol, the room to fill",
+      "Merge & Center / Merge Cells / Merge Across that MOVE a value into the top-left cell (its top-left was empty) announce AppEvents.CELLS_MOVED for each moved value once the step is kept, as Excel's Watch Window follows it [LIVE] (round 12): the step already recorded the move for its Undo / Redo, so the followers now move forward too instead of only on the Undo",
+      "the Undo of a moved block (a Cut + Paste, a drag, a merge's moved value) overwrites nothing: a cell bookmark or a Watch Window entry on a cell the block returns to stays, as Excel's watch does [LIVE] (round 12); the Redo moves the block again and overwrites again",
+      "a drag-move of cells is all or nothing (round 12): a refused destination write, source clear or relocation takes the whole move back to a savepoint, commits nothing and announces nothing; and a drag, a Cut + Paste or a Copy + Paste of sheet cells that would run past the sheet's last row or column is refused whole with Excel's words [LIVE] -- it used to write the part that fit, clear the whole source and announce the whole block as moved (a floating grid's own extent still clamps)",
+      "a sandboxed (worker) extension's context.capabilities.schedule gains expose(name, fn) (round 9, BUG-0616 #3; not an @api export -- the worker realm's own context): it publishes fn under name for the extension's OWN scheduled jobs, so schedule.every / schedule.at have something to run (Excel's Application.OnTime calls a named procedure; before it every such job failed at every firing); nothing else can call it, it needs the schedule capability, a firing runs at most 30 s, and it resolves to a function that withdraws the name",
+      "a script's format and clear take WHOLE rows, WHOLE columns and the whole sheet in one call (round 9, BUG-0616 #1), as VBA's Columns(\"C\").ClearFormats / Rows(5).Font.Bold = True / Cells.ClearFormats do: api.setRangeFormat, api.clearRangeFormat, api.clearRange and their sheet.* twins accept a rectangle that is whole lines or almost-whole lines (A2:D1048576) at any size -- the backend writes them as row / column formats -- and any other rectangle up to 4,000,000 cells (was 100,000 for every rectangle); reads, value writes, api.applyNamedStyle and every other range call keep 100,000, and a recorded whole-column format or Clear Formats now replays as that one call",
+      "an approved application macro that you run (owner decision B) may call api.clearRange with { applyTo: \"contents\" } on any sheet -- Range.ClearContents, cell access like a write: Rust's grant, every cell it changed on the run's trail, the run undone whole if it fails (round 9, BUG-0616 #2); \"formats\" and \"all\" stay refused (formatting is not cell access), and the pre-flight names a clear that does not say \"contents\" before anything runs. clearRangeWithOptions on a sheet other than the active one now answers the cells it changed (updatedCells, each with its sheetIndex) where it answered none",
       "handleGlobalKeyDown: prevents the default of every F5 and BrowserRefresh (with or without Ctrl or Shift) and every Ctrl+R / Ctrl+Shift+R (by character or virtual key 82, so on any layout) -- never with Alt -- that no binding took -- during a cell edit, in a text field, with the keyboard on a ribbon button or a pane -- so WebView2 never reloads the page (BUG-0393); the key still propagates",
       "updateCellsBatch / updateCellOnSheets: a written CUBE formula shows its value instead of #N/A (BUG-0476): the write first asks the backend for exactly the cube data it evaluates (one cube_prefetch call more), which the backend serves to the cells it evaluates, and it latches the session's cube flag, so a later Calculate Now prefetches too; once the session has latched, EVERY updateCellsBatch on the sheet prefetches -- a paste, a fill or a setValue into a cube ARGUMENT cell re-evaluates the cube cell that reads it -- while a session that has written no CUBE formula keeps each batch ONE IPC call, and a batch on a floating grid's cells (target) never prefetches; updateCellOnSheets prefetches, one call per target sheet, only for a written CUBE formula -- any other value is one IPC call, latched or not",
       "insertRows / insertColumns / deleteRows / deleteColumns on a sheet other than the active one, or on a floating grid's cells, announce STRUCTURAL_EDIT_ELSEWHERE (once per burst: the first call at once, the calls of the following 50 ms in one trailing announcement), TABLE_DEFINITIONS_UPDATED and a cell refetch (\"grid:refresh\"), plus MUTATION_REFRESH { domains: ['slicer', 'pivot', 'ribbonFilter'] } after a delete on another sheet -- never STRUCTURAL_UNDO or the objects domain, so nothing on the sheet on screen is disturbed -- and the stores that cache what the backend moved there re-read it on STRUCTURAL_EDIT_ELSEWHERE: the chart and sparkline ranges (BUG-0357) and @api/cellBehaviors' workbook-wide index (rev4A#1); its payload lists every edit of the burst in the order made (StructuralEditElsewherePayload.edits: sheetIndex, null for a floating grid's own lines, kind, at, count -- never folded), an on-screen insert or delete delivers the edits still waiting in the window before its own ROWS_ event, and the stores whose coordinates the backend never holds replay them on the sheet named: forms embedded on that sheet move with their anchor cells, and Controls re-keys the side state of the shapes there (html frame, canvas renderer, declared properties, container, script badge) as the backend re-keyed the controls",
@@ -239,6 +361,17 @@ export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
       "adjustNumberFormatDecimals: its FormattingResult.styles lists every style carrying the new number format first, ahead of the old style an almost-whole range's left-out cells keep, so styles[0] carries the format the step wrote",
       "clearRangeWithOptions / clearRangeOnSheets with applyTo 'formats' or 'all' leave every cleared position showing Normal, as Excel does: a whole row's or column's own format is removed (or replaced by an explicit Normal where another line's format would show through; an almost-whole range's left-out cells keep their look) instead of only the stored cells being reset, so a value typed there later is plain; a formats clear that would have to write more than 2,000,000 separate cells is refused before anything is written",
       "onObjectScriptsChanged / ObjectScriptsChangedDetail.change / ObjectScriptsChangedDetail.instanceId: the BACKEND now announces OBJECT_SCRIPTS_CHANGED_EVENT itself when it moves or removes an object script, and change gains \"rebound\": the script moved to another object instance with its id, source and provenance unchanged, and instanceId names the binding it has now (null when it has none: its control went with a deleted row, column or sheet). Every re-bind is announced -- a named-range rename (by any route), a control moving with its cells (Insert / Delete Rows, Columns or Cells, on any sheet), a control moved to another cell, a sheet added, moved, deleted or copied (or an application pull's or refresh's sheet-order repair) renumbering its controls, and the undo or redo of each; the scripts a name delete prunes are announced \"deleted\"; the undo or redo of a name delete, a table delete or a Convert to Range announces each script it puts back \"saved\" and each it removes \"deleted\" (rev4B#2, rev6B#2, rev6B#5)",
+      "a PivotTable's Refresh by the USER -- its right-click Refresh and PivotTable Analyze > Refresh -- ends the clipboard mode, a copy's and a cut's, once the refresh landed (round 16 [LIVE]: Excel's PivotTable.RefreshTable sets CutCopyMode to 0): AppEvents.DATA_COMMAND_APPLIED with DataCommandAppliedPayload.command \"refresh\"; a refused refresh ends nothing, and @api pivot.refreshCache / pivot.refreshAll (Excel's PivotCache.Refresh and Workbook.RefreshAll over COM, which keep it) announce nothing",
+      "settledInternalClipboard() also answers null -- with the copy KEPT pending and the user told once to paste again -- when the copied cells kept changing past its bounded settle (round 16), instead of handing back a snapshot its source no longer holds; a caller tells that refusal from \"nothing is copied\" by getInternalClipboard(), which still answers the pending copy. Plain Paste checks the snapshot again right before its write, after its undo step opened. The settle itself is bounded too (round 17): a writer that writes the copied cells on every re-read (an animation, a scheduled job) no longer keeps it -- and every paste door awaiting it -- waiting for as long as it runs; it answers after a bounded number of reads -- since round 19 with the snapshot of the last re-read it made (what the source held then, as Excel pastes what the source holds at the paste [LIVE]), and null with the refusal only when no re-read of that call landed",
+      "Data > Refresh Data (Collaboration, externalData:refreshData) ends the clipboard mode, a copy's and a cut's, once the refresh ran, whatever it found to refresh (round 17 [LIVE]: Excel's Data > Refresh All sets CutCopyMode to 0 even with nothing to refresh): AppEvents.DATA_COMMAND_APPLIED with DataCommandAppliedPayload.command \"refresh\"; a refresh that failed ends nothing",
+      "an expand of a row or column group and showOutlineLevel also SHOW the lines hidden by hand inside the detail of every group they leave expanded, as Excel's ShowDetail / ShowLevels clear the one hidden flag a line has (round 16 [LIVE]); the lines shown are in GroupResult.hiddenRowsChanged / hiddenColsChanged, and one Ctrl+Z collapses the group and hides them again",
+      "a form embedded on a sheet follows the Undo / Redo of a row or column insert or delete, an Insert / Delete Cells band and a gesture's take-back (STRUCTURAL_UNDO source \"rollback\") through @api/structuralFollow; the Undo of a delete that took its anchor puts it back on its cell (round 16)",
+      "Collaboration > Open Application for Editing (AFTER_OPEN with source \"checkout\") PAYS a script's manual-calculation debt -- calculation goes back to automatic as the script's realm goes -- while File > Open still forgets it under the mode the opened file set (round 16)",
+      "CellUpdateInput.moved is no longer a flag but the SOURCE cell of the move (MovedFrom: sheetIndex, row, col, or target for a floating grid's own cell), and on a sheet it is BOUND, not asserted (round 18): on a protected sheet without Format Cells the backend writes a moved cell's styleIndex only when that source cell -- read before any write of the batch, an object source on its backing sheet -- shows exactly that style; otherwise the write is a copy and its format is dropped. Core's Cut + Paste sets it for sheet and floating-grid sources",
+      "GridContextMenuItem.replaces has one deterministic rule (round 18): only a SHOWING item leaves out the items it stands in for (in a chain A replaces B replaces C, A and C show), and items that replace each other in a cycle are decided by registration order -- the earliest registered shows; two items that replaced each other used to hide both",
+      "canEditCells answers off the main thread and refuses a list longer than four whole columns (4 x 1,048,576 cells) with \"Too many cells to check at once...\" before it reads anything (round 18)",
+      "Paste Special > Formats on a protected sheet goes silent only when the sheet's Format Cells option is what refused (Excel [LIVE]: nothing raised over unlocked cells and over locked cells inside an Allow Edit Range); any other failure of its whole-area check (a canvas sheet, an IPC error) is shown and nothing is pasted (round 18)",
+      "File > Open asks about unsaved changes before the picker AND again after it when the workbook turned dirty while the picker was open (a push recording its version, a scheduled job, a script) -- workbook.open() is now workbook.pickFileToOpen() then workbook.openAtPath(path) (round 18)",
     ],
   },
   {

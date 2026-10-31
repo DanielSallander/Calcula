@@ -341,8 +341,9 @@ function activate(context: ExtensionContext): void {
   // The backend also SHIFTS hyperlinks through row/column insert & delete, and
   // this cache decides where the pointer cursor shows, where Ctrl+click follows
   // and which cell the context menu edits — a stale entry offers "Open
-  // Hyperlink" on a cell that has none. STRUCTURAL_UNDO is included because its
-  // payload carries no coordinates, so the only correct response is a re-fetch.
+  // Hyperlink" on a cell that has none. STRUCTURAL_UNDO is included: the
+  // backend moved the hyperlinks back, and it holds them, so the correct
+  // response is a re-fetch rather than a replay of the payload's `deltas`.
   const onIndicatorsStale = () => { void refreshIndicators(); };
   for (const evt of [
     AppEvents.SHEET_CHANGED,

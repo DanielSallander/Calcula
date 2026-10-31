@@ -13,14 +13,19 @@
 //          crate over core/parser): the bare spellings parse, and each name
 //          listed as quoted FAILS bare (`=SUM(Q1-2026!C:C)` -> "Expected
 //          RParen, found Exclamation"; `=2024Budget!A1`; `=TRUE!A1`;
-//          `=Q1.!A1`; `=a..b!A1`; `=Sales(EU)!A1`; `=Tab+1!A1`; `=Å!A1`).
+//          `=Q1.!A1`; `=a..b!A1`; `=Sales(EU)!A1`; `=Tab+1!A1`). `=Å!A1`
+//          failed too until the lexer learned non-ASCII letters (round 13);
+//          it is bare now, as in Excel.
 
 import { describe, it, expect } from "vitest";
 import { isBareSheetName, quoteSheetNameForFormula } from "../formulaEditTarget";
 import { quoteSheetNameForFormula as viaApi } from "../../../api/externalEdit";
 
 describe("isBareSheetName mirrors the backend's is_bare_sheet_name", () => {
-  it.each(["Sheet1", "A1", "C3", "Sheet.1", "_x", "Data", "Q1_2026", "a.b.c"])(
+  // Excel [LIVE, 2026-10-31] writes a non-ASCII letter bare (`=Översikt!A1`)
+  // and quotes a cell-shaped or R1C1-shaped name (`A1`, `C3`, `R1x`) -- the
+  // reason `A1` and `C3` moved from this list to the quoted one.
+  it.each(["Sheet1", "Sheet.1", "_x", "Data", "Q1_2026", "a.b.c", "Översikt", "Straße", "Å", "År2024", "XFE1", "A0", "Rx", "RCx", "R1.x"])(
     "%s is bare",
     (name) => {
       expect(isBareSheetName(name)).toBe(true);
@@ -41,7 +46,15 @@ describe("isBareSheetName mirrors the backend's is_bare_sheet_name", () => {
     "Tab+1",
     "Q1 2026",
     "R&D",
-    "Å",
+    "A1",
+    "C3",
+    "Q1",
+    "XFD1048576",
+    "R",
+    "RC",
+    "R1x",
+    "RC1x",
+    "x×y",
     "it's",
     "",
   ])("%s must be quoted", (name) => {

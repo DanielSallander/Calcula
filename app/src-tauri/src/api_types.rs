@@ -321,7 +321,10 @@ pub struct CellUpdateInput {
     /// style, except that 0 (Normal) under a row/column format is written as
     /// the explicit Normal (`own_index_for_requested_look`); with an empty
     /// value the position keeps that look as an empty cell. When None,
-    /// preserves existing style.
+    /// preserves existing style. On a PROTECTED sheet it is a format like any
+    /// other (`update_cells_batch_core`, Excel [LIVE]): dropped when the sheet
+    /// does not allow Format Cells (the cell keeps its own), and the cell
+    /// keeps its Locked flag whatever the index says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_index: Option<usize>,
     /// When true, the value is already in invariant (US) format — skip delocalization.
@@ -341,12 +344,48 @@ pub struct CellUpdateInput {
     /// typed into an `@` cell stays the text "007").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pasted: Option<bool>,
+    /// Set, this write is the destination half of a MOVE (Cut + Paste) of the
+    /// named SOURCE cell: the cell's format moves with it. On a PROTECTED sheet
+    /// that does not allow Format Cells, `style_index` is then still written (a
+    /// copy's is dropped), and the cell still keeps its Locked flag. Excel
+    /// [LIVE, Excel 16 COM, 2026-10-31, rev14A/probe-cut.ps1]: A1 = 5 bold 0.00
+    /// cut to C1 on a protected sheet lands 5 bold 0.00 in C1 with Format Cells
+    /// off or on, while a COPY lands 5 in General. Absent: a copy or an entry.
+    ///
+    /// BOUND, NOT ASSERTED (round 18): the caller names WHERE the cell came
+    /// from, and the batch honours the move only when that source cell -- read
+    /// under the batch's own guards, before any of its writes -- shows exactly
+    /// `style_index`. Anything else is written as a copy. So a move can carry a
+    /// format only from a cell that holds it, never an arbitrary style index
+    /// onto an unlocked cell of a protected sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<MovedFrom>,
+}
+
+/// The source cell of a moved write (`CellUpdateInput::moved`): the sheet by
+/// INDEX (read under the batch's held grid guards) and the cell -- or, with
+/// `target`, a cell of that OBJECT (a floating grid's own cell, `row` / `col`
+/// in its coordinates; `sheet_index` is then not used).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovedFrom {
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<CellTargetRef>,
 }
 
 impl CellUpdateInput {
     /// Whether this write pastes rather than enters (see `pasted`).
     pub fn is_paste(&self) -> bool {
         self.pasted.unwrap_or(false)
+    }
+
+    /// Whether this write CLAIMS to land a moved cell (see `moved`). A claim
+    /// only: the batch honours it once the source is shown to hold the style.
+    pub fn is_move(&self) -> bool {
+        self.moved.is_some()
     }
 }
 
@@ -814,6 +853,15 @@ pub struct UpdateCellResult {
     /// When true, slicer computed properties changed a slicer — frontend should refresh slicer overlays.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub slicer_changed: bool,
+    /// A GROUPED entry (`update_cell` with `group_sheets`): the other grouped
+    /// sheets the same call ACTUALLY wrote, in the one undo step it recorded.
+    /// Absent for an ordinary edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_written: Option<Vec<usize>>,
+    /// A GROUPED entry whose replication was refused (a grouped sheet protects
+    /// the cell, ...): the reason. The edit's own sheet was written all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_error: Option<String>,
 }
 
 /// Spill range information for visual rendering.
@@ -856,6 +904,94 @@ pub struct CellShiftResult {
     /// the command into an ENTIRE-row (column) insert or delete -- the caller
     /// announces rows/columns changed instead of a cell shift.
     pub whole_lines: bool,
+    /// The shift as COORDINATES, when cells moved by a partial band (never on
+    /// the whole-line route or a stop to ask): a row (column) insert or delete
+    /// confined to the band of columns (rows) the range covers. The frontend
+    /// stores whose coordinates the backend never holds (a Watch Window entry,
+    /// a cell bookmark, a pending Copy's source) follow it through
+    /// `@api/structuralFollow`, as Excel's own references do.
+    #[serde(default)]
+    pub delta: Option<StructuralDelta>,
+}
+
+/// The perpendicular extent of a PARTIAL structural edit (Insert / Delete
+/// Cells): the columns a row-wise shift moves, or the rows a column-wise one
+/// does, inclusive. A cell outside the band does not move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeltaBand {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One coordinate change a step made, in the words a follower needs: WHERE
+/// lines (or a band of cells) were inserted or deleted, or WHICH block of
+/// cells a cut-paste moved where.
+///
+/// The undo step records each one beside its snapshot (the CustomRestore
+/// `structural_delta`, `undo_commands.rs`), so an Undo or Redo can say what it
+/// reversed or replayed (`UndoResult::structural_deltas`) instead of the
+/// frontend guessing from the step's description -- which could not name a
+/// grouped step (a macro holding several inserts) or a cell shift at all.
+///
+/// Wire shape (internally tagged): `{ kind: "rowInsert", sheetIndex, at,
+/// count, band }` for the four line kinds, `{ kind: "move", fromSheetIndex,
+/// fromStartRow, fromStartCol, fromEndRow, fromEndCol, toSheetIndex, toRow,
+/// toCol }` for a move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum StructuralDelta {
+    RowInsert { sheet_index: usize, at: u32, count: u32, band: Option<DeltaBand> },
+    RowDelete { sheet_index: usize, at: u32, count: u32, band: Option<DeltaBand> },
+    ColInsert { sheet_index: usize, at: u32, count: u32, band: Option<DeltaBand> },
+    ColDelete { sheet_index: usize, at: u32, count: u32, band: Option<DeltaBand> },
+    Move {
+        from_sheet_index: usize,
+        from_start_row: u32,
+        from_start_col: u32,
+        from_end_row: u32,
+        from_end_col: u32,
+        to_sheet_index: usize,
+        to_row: u32,
+        to_col: u32,
+    },
+}
+
+impl StructuralDelta {
+    /// The change that undoes this one: an insert's undo deletes the same lines
+    /// (the same band), a delete's undo inserts them, and a move's undo moves
+    /// the landed block back to where it came from.
+    pub fn inverse(&self) -> StructuralDelta {
+        match *self {
+            StructuralDelta::RowInsert { sheet_index, at, count, band } => StructuralDelta::RowDelete { sheet_index, at, count, band },
+            StructuralDelta::RowDelete { sheet_index, at, count, band } => StructuralDelta::RowInsert { sheet_index, at, count, band },
+            StructuralDelta::ColInsert { sheet_index, at, count, band } => StructuralDelta::ColDelete { sheet_index, at, count, band },
+            StructuralDelta::ColDelete { sheet_index, at, count, band } => StructuralDelta::ColInsert { sheet_index, at, count, band },
+            StructuralDelta::Move {
+                from_sheet_index,
+                from_start_row,
+                from_start_col,
+                from_end_row,
+                from_end_col,
+                to_sheet_index,
+                to_row,
+                to_col,
+            } => {
+                let height = from_start_row.max(from_end_row) - from_start_row.min(from_end_row);
+                let width = from_start_col.max(from_end_col) - from_start_col.min(from_end_col);
+                StructuralDelta::Move {
+                    from_sheet_index: to_sheet_index,
+                    from_start_row: to_row,
+                    from_start_col: to_col,
+                    from_end_row: to_row + height,
+                    from_end_col: to_col + width,
+                    to_sheet_index: from_sheet_index,
+                    to_row: from_start_row.min(from_end_row),
+                    to_col: from_start_col.min(from_end_col),
+                }
+            }
+        }
+    }
 }
 
 /// What the ribbon's merge gestures ask of `merge_cells` beyond a plain
@@ -1574,6 +1710,23 @@ pub struct GoalSeekParams {
     pub tolerance: f64,
 }
 
+/// What `set_calculation_mode` answers: the mode in effect afterwards (a
+/// request older than one already applied changes nothing and reports the
+/// later one's mode), and -- when THIS request took calculation out of manual
+/// -- the active sheet's cells the Calculate Now it then ran repainted (Excel:
+/// setting calculation to automatic recalculates). `None` when nothing was
+/// recalculated. The switch is reported even when that recalculation then
+/// fails: `recalculation_error` says why, and the mode is still the one in
+/// effect (the values stay marked possibly stale, "pending", as after a
+/// cancelled pass).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculationModeChange {
+    pub mode: String,
+    pub recalculated: Option<Vec<CellData>>,
+    pub recalculation_error: Option<String>,
+}
+
 /// Result of goal_seek command.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1592,6 +1745,10 @@ pub struct GoalSeekResult {
     pub updated_cells: Vec<CellData>,
     /// Error message if goal seek failed validation
     pub error: Option<String>,
+    /// The id of the ONE undo step the run recorded (the changing cell as it
+    /// was), for the status dialog's Cancel to take back by a scoped `undo`;
+    /// `None` when the run was refused or failed and wrote nothing.
+    pub undo_seq: Option<u64>,
 }
 
 // ============================================================================
@@ -2525,6 +2682,10 @@ pub struct SolverResult {
     pub updated_cells: Vec<CellData>,
     /// Original variable values (for reverting)
     pub original_values: Vec<SolverVariableValue>,
+    /// The sheet the run solved on, by STABLE id: the result dialog's Restore
+    /// (`solver_revert`) names it so, never by index, so a tab moved while the
+    /// dialog was open restores the right sheet. `None` on a refusal.
+    pub sheet_id: Option<identity::SheetId>,
     /// Error message if any
     pub error: Option<String>,
 }
@@ -2967,6 +3128,37 @@ pub enum CellTargetRef {
     FloatingRange { id: identity::EntityId },
 }
 
+/// The whole rectangle (inclusive) a multi-cell STYLE gesture is about to
+/// write -- a Format Painter stroke, a paste's formatting writes -- handed to
+/// `set_cell_style` as `checkArea`. With it the call is a CHECK only: every
+/// gate the write would ask of each cell (the formatCells option, the cells'
+/// lock flags, a target's extent and host protection) is asked of the whole
+/// rectangle at once, and NOTHING is written. A gesture that writes cell by
+/// cell asks it first, so a refusal comes before its first cell changes
+/// (Excel refuses a protected format whole, before anything changes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StyleCheckArea {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
+/// One cell of `set_cell_style`'s style-only BATCH (`cells`): point (row, col)
+/// at the LOOK `style_index` names, as a single `set_cell_style` would. With
+/// `keep_borders`, every border side stays the cell's own (Paste Special >
+/// All Except Borders: the source's style except its borders).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellStyleWrite {
+    pub row: u32,
+    pub col: u32,
+    pub style_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_borders: Option<bool>,
+}
+
 /// The styled read of a rectangle of a cell target (`get_cell_target_cells`):
 /// everything the floating grid's renderer needs to paint the cells exactly
 /// as the sheet would, all of it read from the BACKING sheet.
@@ -3049,8 +3241,9 @@ pub struct FloatingRangePatch {
     pub hidden_cols: Option<Vec<u32>>,
 }
 
-/// Default row height and column width for the workbook.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The ACTIVE sheet's standard row height and column width (each sheet keeps
+/// its own, as in Excel; the application standard when it set none).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DefaultDimensions {
     pub default_row_height: f64,

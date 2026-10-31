@@ -121,6 +121,7 @@ pub async fn cube_prefetch(
                 style_index: None,
                 invariant: None,
                 pasted: None,
+                moved: None,
             }],
             CubeWriteDoor::Edit,
         ),
@@ -241,6 +242,325 @@ pub(crate) fn remember_installed_call_results(state: &AppState, installed: Insta
     remember_saved_call_results(state, Some(installed));
 }
 
+/// The reserved script id (and, with a suffix, the per-application ids) that
+/// carry a Custom Functions library: JSON `{ "functions": [{ "name": .. }] }`.
+const CUSTOM_FUNCTION_LIBRARY_ID_PREFIX: &str = "__calcula_custom_functions__";
+
+/// The uppercased names every Custom Functions library in the workbook's
+/// script store defines (BUG-0615#1).
+pub(crate) fn library_custom_function_names(
+    scripts: &HashMap<String, crate::scripting::types::WorkbookScript>,
+) -> Vec<String> {
+    let mut names: Vec<String> = scripts
+        .iter()
+        .filter(|(id, _)| id.starts_with(CUSTOM_FUNCTION_LIBRARY_ID_PREFIX))
+        .filter_map(|(_, script)| serde_json::from_str::<serde_json::Value>(&script.source).ok())
+        .flat_map(|lib| {
+            lib.get("functions")
+                .and_then(|f| f.as_array())
+                .map(|fns| {
+                    fns.iter()
+                        .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
+                        .map(|n| n.trim().to_uppercase())
+                        .filter(|n| !n.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// What every custom function the workbook's Custom Functions libraries define
+/// IS: uppercased name -> its definition (the library record it lives in, the
+/// library's capabilities, and the function's own JSON -- params, body,
+/// volatility). Two snapshots that differ for a name mean that function's
+/// CODE may have changed ([`forget_redefined_custom_functions`]).
+pub(crate) fn custom_function_definitions_in(
+    scripts: &HashMap<String, crate::scripting::types::WorkbookScript>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut definitions: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for (id, script) in scripts.iter().filter(|(id, _)| id.starts_with(CUSTOM_FUNCTION_LIBRARY_ID_PREFIX)) {
+        let Ok(lib) = serde_json::from_str::<serde_json::Value>(&script.source) else { continue };
+        let capabilities = lib.get("capabilities").map(|c| c.to_string()).unwrap_or_default();
+        let Some(functions) = lib.get("functions").and_then(|f| f.as_array()) else { continue };
+        for function in functions {
+            let Some(name) = function.get("name").and_then(|n| n.as_str()) else { continue };
+            let name = name.trim().to_uppercase();
+            if name.is_empty() {
+                continue;
+            }
+            definitions.entry(name).or_default().push(format!("{}\u{1f}{}\u{1f}{}", id, capabilities, function));
+        }
+    }
+    definitions
+        .into_iter()
+        .map(|(name, mut defs)| {
+            defs.sort();
+            (name, defs.join("\u{1e}"))
+        })
+        .collect()
+}
+
+/// A Custom Functions library CHANGED (rev8A): the author saved it (or edited
+/// it in the JSON view -- both through `scripting::commands`'s one writer,
+/// `write_script_record`), or an
+/// application's subscribe or update merged its functions in or out
+/// (`materialize_distributed_scripts`). `before` and `after` are
+/// [`custom_function_definitions_in`] of the store around the change.
+///
+/// - A function whose definition differs -- edited, newly defined, or gone --
+///   forgets every answer it gave on every sheet
+///   (`CallMemo::forget_custom_function_answers`): those answers belong to the
+///   old code, and nothing would ever replace the one for an argument no cell
+///   holds when the new code is installed, so the cross-sheet walk, F9 or the
+///   save would serve the old code's number for it as current.
+/// - A function the libraries no longer define is forgotten altogether
+///   (`CallMemo::forget_custom_function`): a call of it is Excel's ordinary
+///   `#NAME?` again, which an IFERROR handles (`=IFERROR(GONEFN(A1),0)` is 0),
+///   not the sticky refusal of a function the workbook defines.
+///
+/// Forgetting only turns an answer into a refusal until the call is served
+/// again. Run AFTER the store is written and its lock released: canonical
+/// order, `grid` then `grids` (reads; each memo records through its own lock).
+pub(crate) fn forget_redefined_custom_functions(
+    state: &AppState,
+    before: &std::collections::BTreeMap<String, String>,
+    after: &std::collections::BTreeMap<String, String>,
+) {
+    let changed: Vec<(&String, bool)> = before
+        .keys()
+        .chain(after.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|name| before.get(*name) != after.get(*name))
+        .map(|name| (name, after.contains_key(name)))
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    let (Ok(grid), Ok(grids)) = (state.grid.read(), state.grids.read()) else { return };
+    for memo in std::iter::once(grid.call_memo()).chain(grids.iter().map(|sheet| sheet.call_memo())) {
+        for &(name, still_defined) in &changed {
+            if still_defined {
+                memo.forget_custom_function_answers(name);
+            } else {
+                memo.forget_custom_function(name);
+            }
+        }
+    }
+    crate::log_info!(
+        "CALC",
+        "custom-function library changed: forgot the answers of {} function(s) whose definition changed",
+        changed.len()
+    );
+}
+
+/// Tells every sheet's results cache which names are the workbook's custom
+/// functions (`CallMemo::note_custom_function`) -- the ones its Custom
+/// Functions libraries define -- before a full recalculation (BUG-0615#1).
+///
+/// A full pass runs no custom function, so a call of one is answered from the
+/// cache or refused, and the engine answers a refusal of a KNOWN function
+/// whole (`=IFERROR(MYFN(A1),0)` is never a plausible 0) while an UNKNOWN name
+/// stays Excel's `#NAME?`, which IFERROR handles (`=IFERROR(TYPO(RAND()),0)`
+/// is 0 in Excel). Until now a function was known only once a resolver had
+/// served it or a saved ROOT call of it was seeded -- so right after an open a
+/// function used only inside composite formulas was not, and the pass had to
+/// refuse every cell whole to stay safe, typos included. The library is the
+/// authority on what the workbook defines.
+///
+/// The page's REGISTERED functions count the same way (rev10 rev9A): an
+/// add-in's function (`formulas.registerFunction`) is defined by the add-in
+/// being loaded, not by any library, and F9 and the save serve no custom
+/// function at all -- so without this a composite call of one right after an
+/// open (`=IFERROR(FXRATE("USD",TODAY()),0)`) was an unknown name and the
+/// save wrote IFERROR's plausible 0. Run before every full pass and at every
+/// open (`persistence::open_file`): seeding a saved value vouches for no name.
+///
+/// Lock order: the script store and the registry are read and released before
+/// `grid` / `grids` (reads; `CallMemo` records through its own lock).
+pub(crate) fn note_library_custom_functions(state: &AppState, script_state: &crate::scripting::types::ScriptState) {
+    let names = workbook_custom_function_names(script_state);
+    note_custom_function_names(state, &names);
+}
+
+/// Every name that is one of the workbook's custom functions NOW: its
+/// libraries' ([`library_custom_function_names`]) and the page's registered
+/// ones (`ScriptState::registered_custom_functions`), uppercased, sorted,
+/// deduplicated. Each store is read and released here.
+pub(crate) fn workbook_custom_function_names(script_state: &crate::scripting::types::ScriptState) -> Vec<String> {
+    let mut names = script_state
+        .workbook_scripts
+        .read()
+        .map(|scripts| library_custom_function_names(&scripts))
+        .unwrap_or_default();
+    if let Ok(registered) = script_state.registered_custom_functions.lock() {
+        names.extend(registered.iter().cloned());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The library generation (rev10 cache2 residual): bumped by every
+/// application install that changed a custom function's definition
+/// ([`hold_custom_functions_until_reinstalled`]) and carried by the
+/// `custom-functions:refresh` event, so the page can say WHICH library it has
+/// installed. Process-wide and monotonic: only its order matters.
+static CUSTOM_FUNCTION_LIBRARY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The newest library generation ([`CUSTOM_FUNCTION_LIBRARY_GENERATION`]).
+pub(crate) fn custom_function_library_generation() -> u64 {
+    CUSTOM_FUNCTION_LIBRARY_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The `custom-functions:refresh` event's payload: the library generation the
+/// page installs when it hears it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomFunctionsRefresh {
+    pub generation: u64,
+}
+
+/// THE CALP WINDOW (rev10 cache2 residual). An application's subscribe or
+/// update merged a Custom Functions library in the BACKEND, and
+/// [`forget_redefined_custom_functions`] forgot what the changed functions
+/// answered. But the page re-installs only when it hears
+/// `custom-functions:refresh`, and until then its OLD realm still serves edits:
+/// an answer served in that window is the old code's, and filing it would
+/// hand the cross-sheet walk, F9 and the save the old code's number as
+/// current. So every function whose definition changed is HELD on every
+/// sheet's results cache under a fresh library generation
+/// (`CallMemo::hold_custom_function`): a served answer still answers its edit
+/// but is not filed, until the page reports it has installed that generation
+/// ([`note_custom_function_registry_impl`]). Returns the generation (the
+/// current one when nothing changed); the caller emits it with the event.
+///
+/// The authoring Save does not hold: the dialog installs the new realm FIRST
+/// and saves after, so no old realm is live when the backend forgets.
+pub(crate) fn hold_custom_functions_until_reinstalled(
+    state: &AppState,
+    before: &std::collections::BTreeMap<String, String>,
+    after: &std::collections::BTreeMap<String, String>,
+) -> u64 {
+    let changed: Vec<&String> = before
+        .keys()
+        .chain(after.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|name| before.get(*name) != after.get(*name))
+        .collect();
+    if changed.is_empty() {
+        return custom_function_library_generation();
+    }
+    let generation = CUSTOM_FUNCTION_LIBRARY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let (Ok(grid), Ok(grids)) = (state.grid.read(), state.grids.read()) else { return generation };
+    for memo in std::iter::once(grid.call_memo()).chain(grids.iter().map(|sheet| sheet.call_memo())) {
+        for name in &changed {
+            memo.hold_custom_function(name, generation);
+        }
+    }
+    generation
+}
+
+/// What the page reports about its custom-function registry: every name it
+/// registers now that this side cannot read itself (every add-in's; the page
+/// leaves the Custom Functions library's names out, since the libraries are
+/// read here from the workbook held -- rev11C), and -- after a successful
+/// install of the library it read -- the generation it installed. Derived,
+/// session-only state: no `DocumentEffect`.
+///
+/// - The names are kept (`ScriptState::registered_custom_functions`) for every
+///   later full pass and open, and noted on every sheet's results cache now,
+///   so a refused call of an add-in's function is the sticky refusal on every
+///   route -- never IFERROR's plausible 0 (rev10 rev9A).
+/// - A name the page STOPPED registering (its add-in was unloaded) that no
+///   library defines is no longer known (`CallMemo::unnote_custom_function`):
+///   a call of it is Excel's ordinary `#NAME?` again, which IFERROR handles.
+///   Its recorded answers stay -- they are what those calls computed.
+/// - `installed_generation` releases every hold of that generation or older
+///   ([`hold_custom_functions_until_reinstalled`]).
+///
+/// Lock order: the registry and the script store are taken and released one
+/// at a time before `grid` / `grids` (reads).
+pub(crate) fn note_custom_function_registry_impl(
+    state: &AppState,
+    script_state: &crate::scripting::types::ScriptState,
+    names: Vec<String>,
+    installed_generation: Option<u64>,
+) {
+    let mut names: Vec<String> =
+        names.into_iter().map(|n| n.trim().to_uppercase()).filter(|n| !n.is_empty()).collect();
+    names.sort();
+    names.dedup();
+    let previous = match script_state.registered_custom_functions.lock() {
+        Ok(mut registered) => std::mem::replace(&mut *registered, names.clone()),
+        Err(_) => return,
+    };
+    let library: HashSet<String> = script_state
+        .workbook_scripts
+        .read()
+        .map(|scripts| library_custom_function_names(&scripts).into_iter().collect())
+        .unwrap_or_default();
+    let dropped: Vec<&String> =
+        previous.iter().filter(|name| names.binary_search(name).is_err() && !library.contains(*name)).collect();
+    let (Ok(grid), Ok(grids)) = (state.grid.read(), state.grids.read()) else { return };
+    for memo in std::iter::once(grid.call_memo()).chain(grids.iter().map(|sheet| sheet.call_memo())) {
+        for name in &dropped {
+            memo.unnote_custom_function(name);
+        }
+        for name in &names {
+            memo.note_custom_function(name);
+        }
+        if let Some(generation) = installed_generation {
+            memo.release_custom_functions_up_to(generation);
+        }
+    }
+}
+
+/// The page reports its custom-function registry (see
+/// [`note_custom_function_registry_impl`]): on every registry change, and with
+/// the installed library generation after every successful install of the
+/// library it READ from the backend.
+///
+/// Answers the CURRENT library generation ([`custom_function_library_generation`]).
+/// A generation is bumped only after its library write has landed, so a page
+/// that asks before it reads the library knows every generation up to the
+/// answer is in what it reads -- and may report that one once its install of
+/// it has succeeded. That is what lets ANY successful install (the refresh
+/// listener's, the consent reinstall's, an open's, the authoring dialog's Save)
+/// release a hold, not only the refresh-driven one: a hold whose refresh
+/// install failed, or whose door errored before it emitted the event, used to
+/// stay for the rest of the session (rev11C).
+#[tauri::command]
+pub fn note_custom_function_registry(
+    state: tauri::State<'_, AppState>,
+    script_state: tauri::State<'_, crate::scripting::types::ScriptState>,
+    names: Vec<String>,
+    installed_generation: Option<u64>,
+) -> u64 {
+    note_custom_function_registry_impl(&state, &script_state, names, installed_generation);
+    custom_function_library_generation()
+}
+
+/// [`note_library_custom_functions`] with the names already in hand.
+pub(crate) fn note_custom_function_names(state: &AppState, names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    for name in names {
+        grid.call_memo().note_custom_function(name);
+        for sheet in grids.iter() {
+            sheet.call_memo().note_custom_function(name);
+        }
+    }
+}
+
 /// The body of both doors. `installed: None` is a workbook just read from
 /// disk: every sheet, nothing foreign.
 fn remember_saved_call_results(state: &AppState, installed: Option<InstalledSheets<'_>>) {
@@ -272,7 +592,7 @@ fn remember_saved_call_results(state: &AppState, installed: Option<InstalledShee
             .sheets
             .iter()
             .filter_map(|&s| sheet_names.get(s))
-            .map(|name| name.to_uppercase())
+            .map(|name| identity::sheet_name_key(name))
             .collect(),
         sheet_indices: installed.sheets.iter().copied().collect(),
         names: installed.names,
@@ -282,6 +602,14 @@ fn remember_saved_call_results(state: &AppState, installed: Option<InstalledShee
     for sheet in sheets {
         let grid = &grids[sheet];
         let Some(sheet_name) = sheet_names.get(sheet) else { continue };
+        // A workbook saved with calculation INCOMPLETE (Excel's
+        // `calcCompleted="0"`, BUG-0615#2) was marked on open: a saved value
+        // may belong to arguments its cell no longer has, so none is filed as
+        // an answer -- every call is served or refused until a recalculation
+        // with data answers it.
+        if installed.is_none() && grid.call_memo().values_may_be_stale() {
+            continue;
+        }
         // Row-major, so a call two root cells make is seeded the same way on
         // every open (the later cell's value), never by hash order.
         let mut roots: Vec<((u32, u32), &Expression)> = Vec::new();
@@ -382,7 +710,7 @@ impl InstallScope<'_> {
     fn names_foreign(&self, expr: &Expression) -> bool {
         match expr {
             Expression::NamedRef { name, .. } => {
-                let key = name.to_uppercase();
+                let key = crate::name_resolution::name_key(name);
                 match (self.names.get(&key), self.workbook_names.get(&key)) {
                     (Some(own), Some(now)) => *own != now.refers_to,
                     _ => true,
@@ -390,7 +718,7 @@ impl InstallScope<'_> {
             }
             Expression::TableRef { table_name, .. } => !self
                 .table_names
-                .get(&table_name.to_uppercase())
+                .get(&crate::tables::table_name_key(table_name))
                 .is_some_and(|(sheet, _)| self.sheet_indices.contains(sheet)),
             _ => engine::cube::sub_expressions(expr).into_iter().any(|e| self.names_foreign(e)),
         }
@@ -401,7 +729,7 @@ impl InstallScope<'_> {
         let names_outside = |sheet: &Option<String>| {
             sheet
                 .as_ref()
-                .is_some_and(|name| !self.sheet_names.contains(&name.to_uppercase()))
+                .is_some_and(|name| !self.sheet_names.contains(&identity::sheet_name_key(name)))
         };
         match expr {
             Expression::CellRef { sheet, .. }
@@ -848,7 +1176,7 @@ fn collect_qualified_refs(
     for a in args {
         match a {
             Expression::CellRef { sheet: Some(s), col, row, .. } => {
-                let upper = s.to_uppercase();
+                let upper = identity::sheet_name_key(s);
                 if upper != own_upper {
                     out.insert((upper, row.saturating_sub(1), col_to_index(col) as u32));
                 }
@@ -970,7 +1298,7 @@ pub(crate) async fn build_full_refresh_prefetch(state: &AppState, bi: &BiState) 
     let mut prefetch = prefetch_sheet(state, bi, None, active_sheet, active_sheet).await;
     for sheet in (0..sheet_count).filter(|&s| s != active_sheet) {
         let other = prefetch_sheet(state, bi, None, sheet, active_sheet).await;
-        let Some(name) = other.scope.as_ref().filter(|s| !s.covered.is_empty()).map(|s| s.sheet.to_uppercase()) else {
+        let Some(name) = other.scope.as_ref().filter(|s| !s.covered.is_empty()).map(|s| identity::sheet_name_key(&s.sheet)) else {
             continue; // no cube cell on that sheet
         };
         prefetch.other_sheets.insert(name, other);
@@ -1008,7 +1336,7 @@ async fn prefetch_sheet(
     ) else {
         return CubePrefetch::default();
     };
-    let own_upper = sheet_name.to_uppercase();
+    let own_upper = identity::sheet_name_key(&sheet_name);
 
     let mut prefetch = CubePrefetch::default();
     let mut scope = engine::cube::CubePrefetchScope { sheet: sheet_name.clone(), covered: HashSet::new() };
@@ -1170,7 +1498,7 @@ fn snapshot_prefetch_sheet(
     locale: &engine::LocaleSettings,
     automatic: bool,
 ) -> Option<PrefetchSnapshot> {
-    let own_upper = sheet_name.to_uppercase();
+    let own_upper = identity::sheet_name_key(&sheet_name);
     let active_guard = if on_active_sheet { Some(state.grid.read().unwrap()) } else { None };
     let grids = state.grids.read().unwrap();
     let grid: &engine::Grid = match &active_guard {
@@ -1298,7 +1626,7 @@ fn snapshot_prefetch_sheet(
     snapshot.qualified = qualified_refs
         .into_iter()
         .map(|(name, r, c)| {
-            let read = match sheet_names.iter().position(|n| n.to_uppercase() == name) {
+            let read = match sheet_names.iter().position(|n| identity::sheet_name_key(n) == name) {
                 Some(idx) => QualifiedSnapshot::Cell(grids.get(idx).and_then(|g| g.get_cell(r, c).cloned())),
                 None => QualifiedSnapshot::NoSuchSheet,
             };
@@ -1452,10 +1780,10 @@ impl CubeResolver for AppCubeResolver<'_> {
         }
     }
     fn is_own_sheet(&self, sheet: &str) -> bool {
-        sheet.to_uppercase() == self.own_sheet_upper
+        identity::sheet_name_key(sheet) == self.own_sheet_upper
     }
     fn qualified_cell_arg(&self, sheet: &str, row: u32, col: u32) -> Result<String, CubeError> {
-        let upper = sheet.to_uppercase();
+        let upper = identity::sheet_name_key(sheet);
         let target = if upper == self.own_sheet_upper {
             engine::cube::QualifiedCell::OwnSheet
         } else {
@@ -2397,7 +2725,7 @@ fn collect_cell_refs(args: &[Expression], own_upper: &str, out: &mut Vec<(u32, u
 
 fn collect_cell_refs_expr(expr: &Expression, own_upper: &str, out: &mut Vec<(u32, u32)>) {
     if let Expression::CellRef { sheet, col, row, .. } = expr {
-        if sheet.as_ref().is_none_or(|s| s.to_uppercase() == own_upper) {
+        if sheet.as_ref().is_none_or(|s| identity::sheet_name_key(s) == own_upper) {
             out.push((row.saturating_sub(1), col_to_index(col) as u32));
         }
     }
@@ -3008,6 +3336,7 @@ mod integration_tests {
             style_index: None,
             invariant: Some(true),
             pasted: None,
+            moved: None,
         }
     }
 
@@ -3239,6 +3568,7 @@ mod integration_tests {
             style_index: None,
             invariant: None,
             pasted: None,
+            moved: None,
         }];
         rt.block_on(build_cube_prefetch(
             &host.state,
@@ -3512,6 +3842,7 @@ mod integration_tests {
                 style_index: Some(text),
                 invariant: Some(true),
                 pasted: None,
+                moved: None,
             },
             write(0, 1, r#"=CUBEVALUE(A1,"[Revenue]")"#),
         ];
@@ -3614,6 +3945,7 @@ mod integration_tests {
                 style_index: case.explicit_text.then_some(text),
                 invariant: Some(case.invariant),
                 pasted: case.pasted.then_some(true),
+                moved: None,
             };
             // A formula's VALUE is not the parse's to predict (the write
             // evaluates it): what must agree is THAT it is a formula.
@@ -4092,6 +4424,116 @@ mod integration_tests {
             .expect("open_file must record the saved cube / custom-function values (rev3A#3)");
         let cells = body.find("collect_active_sheet_cells(&state)").expect("open_file returns the cells");
         assert!(rebuild < seed && seed < cells, "the seeding runs once the document is installed");
+        // ...and then says which names are the workbook's custom functions:
+        // the seeding itself vouches for none (rev10 cache2).
+        let names = body
+            .find("note_library_custom_functions(state.inner(), script_state.inner())")
+            .expect("open_file must note the libraries' and the page's registered custom functions");
+        assert!(seed < names && names < cells, "the names are noted once the document is installed");
+    }
+
+    /// rev10 rev9A. An add-in registers FXRATE (`formulas.registerFunction`);
+    /// no library defines it, and F9 and the save serve no custom function.
+    /// `=IFERROR(FXRATE("USD",TODAY()),0)` has no plain root call, so right
+    /// after an open nothing made FXRATE known: the pass refused the call as an
+    /// unknown name and wrote IFERROR's plausible 0 into the saved file. Excel
+    /// computes the loaded add-in's function; Calcula cannot on this route, so
+    /// the refusal stays whole. A name nothing defines is still Excel's
+    /// ordinary #NAME? for IFERROR (BUG-0615#1), and so is FXRATE once its
+    /// add-in is unloaded.
+    ///
+    /// SABOTAGE (registry): `note_custom_function_registry_impl` notes nothing.
+    /// SABOTAGE (open): `workbook_custom_function_names` ignores the registry.
+    #[test]
+    fn an_add_ins_custom_function_stays_a_refusal_around_iferror_and_a_typo_does_not() {
+        let opened = || {
+            let host = Host::new(1);
+            host.put_saved(
+                0,
+                &[
+                    (0, 1, "=IFERROR(FXRATE(\"USD\",TODAY()),0)", CellValue::Number(10.5)),
+                    (1, 1, "=IFERROR(NOSUCHFN(RAND()),0)", CellValue::Number(0.0)),
+                ],
+            );
+            crate::undo_commands::rebuild_all_dependencies(&host.state);
+            remember_loaded_call_results(&host.state);
+            host
+        };
+
+        // The add-in registers FXRATE while the workbook is open.
+        let host = opened();
+        let scripts = crate::scripting::types::ScriptState::new();
+        note_custom_function_registry_impl(&host.state, &scripts, vec!["fxRate".to_string()], None);
+        calculate_now_without_cube_data(&host);
+        assert_eq!(
+            host.value(0, 0, 1),
+            CellValue::Error(engine::CellError::Name),
+            "the save wrote IFERROR's plausible 0 around an add-in's call nobody computed"
+        );
+        assert_eq!(host.value(0, 1, 1), CellValue::Number(0.0), "a name nothing defines is Excel's #NAME? for IFERROR");
+
+        // The add-in was registered BEFORE the open: what `open_file` notes.
+        let host = opened();
+        *scripts.registered_custom_functions.lock().unwrap() = vec!["FXRATE".to_string()];
+        note_library_custom_functions(&host.state, &scripts);
+        assert!(
+            host.state.grids.read().unwrap()[0].call_memo().knows_custom_function("FXRATE"),
+            "the open did not note the page's registered function"
+        );
+        calculate_now_without_cube_data(&host);
+        assert_eq!(host.value(0, 0, 1), CellValue::Error(engine::CellError::Name));
+
+        // The add-in is unloaded: FXRATE is a name nothing defines.
+        note_custom_function_registry_impl(&host.state, &scripts, Vec::new(), None);
+        calculate_now_without_cube_data(&host);
+        assert_eq!(
+            host.value(0, 0, 1),
+            CellValue::Number(0.0),
+            "an unloaded add-in's function is Excel's #NAME? for IFERROR"
+        );
+    }
+
+    /// rev10 cache2 residual. Seeding a saved ROOT call noted its function as
+    /// known even when nothing defines it any more, so a composite call of it
+    /// (`=IFERROR(GONEFN(RAND()),0)`) stayed the sticky refusal on F9 where
+    /// Excel answers 0. The seeded answer itself stays: it is what that call
+    /// computed. A function a library defines is still sticky.
+    ///
+    /// SABOTAGE: note the name again in `Evaluator::remember_stored_call_answer`.
+    #[test]
+    fn a_saved_root_call_of_a_function_nothing_defines_does_not_make_it_sticky() {
+        let opened = || {
+            let host = Host::new(1);
+            host.put_saved(
+                0,
+                &[
+                    (0, 0, "3", CellValue::Number(3.0)),
+                    (0, 1, "=GONEFN(A1)", CellValue::Number(30.0)),
+                    (1, 1, "=IFERROR(GONEFN(RAND()),0)", CellValue::Number(42.0)),
+                ],
+            );
+            crate::undo_commands::rebuild_all_dependencies(&host.state);
+            remember_loaded_call_results(&host.state);
+            host
+        };
+        let host = opened();
+        note_library_custom_functions(&host.state, &crate::scripting::types::ScriptState::new());
+        calculate_now_without_cube_data(&host);
+        assert_eq!(host.value(0, 0, 1), CellValue::Number(30.0), "the seeded root answer");
+        assert_eq!(
+            host.value(0, 1, 1),
+            CellValue::Number(0.0),
+            "seeding a saved value made GONEFN a known function although nothing defines it"
+        );
+
+        let host = opened();
+        note_library(&host, &["GONEFN"]);
+        calculate_now_without_cube_data(&host);
+        assert_eq!(
+            host.value(0, 1, 1),
+            CellValue::Error(engine::CellError::Name),
+            "a function the library defines stays a whole refusal"
+        );
     }
 
     // ---- Round 7 (rev5B#1, rev5B#2): the SAVE's own recalculation ----
@@ -4180,7 +4622,15 @@ mod integration_tests {
         // A pending cell's stored value may be stale by definition: no keep,
         // and the refusal is the WHOLE cell -- =IFERROR(MYFN(A1),0) must not
         // answer a plausible 0 around a call nobody computed.
+        //
+        // CHANGED ON PURPOSE (BUG-0615#1): MYFN is one of the workbook's
+        // custom functions, so its library says so -- as the commands tell the
+        // caches before every pass (`note_library_custom_functions`). Without
+        // that, MYFN is a name nobody defined, and Excel's own answer for
+        // `=IFERROR(UNKNOWNFN(..),0)` is 0 (see
+        // `a_full_pass_answers_iferror_around_an_unknown_name_as_excel_does`).
         let host = opened_with_composites();
+        note_library(&host, &["myFn"]);
         host.put_saved(0, &[(3, 1, "=IFERROR(MYFN(A1),0)", CellValue::Number(42.0))]);
         {
             let seed = crate::document_effect::test_seed_effect();
@@ -4204,6 +4654,274 @@ mod integration_tests {
             "a refused cell is refused whole, never IFERROR's plausible 0"
         );
         assert_eq!(host.value(0, 1, 1), CellValue::Number(43.0), "a cell that is not pending keeps its value");
+    }
+
+    /// Puts a Custom Functions library defining `names` into a script store and
+    /// tells the host's caches about it, as `run_calculation_pass_with` does
+    /// for the commands.
+    fn note_library(host: &Host, names: &[&str]) {
+        let script_state = crate::scripting::types::ScriptState::new();
+        let functions: Vec<serde_json::Value> =
+            names.iter().map(|n| serde_json::json!({ "name": n, "params": [], "body": "return 1;" })).collect();
+        let effect = crate::document_effect::test_seed_effect();
+        script_state.workbook_scripts.write(&effect).unwrap().insert(
+            "__calcula_custom_functions__".to_string(),
+            crate::scripting::types::WorkbookScript {
+                id: "__calcula_custom_functions__".to_string(),
+                name: "Custom Functions (data)".to_string(),
+                description: None,
+                source: serde_json::json!({ "functions": functions }).to_string(),
+                scope: Default::default(),
+                source_package: None,
+            },
+        );
+        note_library_custom_functions(&host.state, &script_state);
+    }
+
+    /// BUG-0615#1. `=IFERROR(UNKNOWNFN(RAND()),0)` is 0 in Excel [LIVE, Excel
+    /// 16, CalculateFull]: an unknown function is `#NAME?`, an ordinary error
+    /// IFERROR catches. A full pass cannot keep the cell (RAND() is volatile)
+    /// and used to overwrite IFERROR's 0 with the refusal `#NAME?`. A refused
+    /// call of a function the workbook DOES define stays sticky: no plausible
+    /// 0 around a call nobody computed.
+    ///
+    /// SABOTAGE: put back the pass's `Error(refused)` override for a
+    /// non-error result.
+    #[test]
+    fn a_full_pass_answers_iferror_around_an_unknown_name_as_excel_does() {
+        let host = opened_with_composites();
+        note_library(&host, &["MYFN"]);
+        host.put_saved(
+            0,
+            &[
+                (5, 1, "=IFERROR(UNKNOWNFN(RAND()),0)", CellValue::Number(0.0)),
+                (6, 1, "=IFERROR(MYFN(RAND()),0)", CellValue::Number(42.0)),
+                (7, 1, "=IFERROR(MYFN(A1),0)", CellValue::Number(42.0)),
+            ],
+        );
+        crate::undo_commands::rebuild_all_dependencies(&host.state);
+        calculate_now_without_cube_data(&host);
+        assert_eq!(
+            host.value(0, 5, 1),
+            CellValue::Number(0.0),
+            "F9 answered =IFERROR(UNKNOWNFN(RAND()),0) with #NAME?; Excel answers 0"
+        );
+        assert_eq!(
+            host.value(0, 6, 1),
+            CellValue::Error(engine::CellError::Name),
+            "a refused call of the workbook's own custom function must stay sticky"
+        );
+        assert_eq!(
+            host.value(0, 7, 1),
+            CellValue::Number(42.0),
+            "nothing MYFN(A1) reads changed: the stored value is kept"
+        );
+    }
+
+    /// BUG-0615#2. Excel [LIVE, Excel 16]: under manual calculation, change an
+    /// input and save without recalculating -- the file says
+    /// `calcCompleted="0"` and marks the dirty cell, and the reopened workbook
+    /// shows the stale value with `CalculationState` = xlPending until F9
+    /// recalculates it. Calcula saved the stale values and reopened them as
+    /// vouched for: the next Calculate Now (manual, nothing edited since the
+    /// open) KEPT a stale composite and seeded a stale root call's value as the
+    /// answer for its new argument. Now the save writes the mark and the open
+    /// applies it, so neither happens.
+    ///
+    /// SABOTAGE: drop the mark in `restore_pending_recalc_on_load`.
+    #[test]
+    fn a_manual_workbook_saved_without_recalculating_reopens_marked_stale() {
+        // The session: A1 changes 3 -> 4 under manual; B1 (=MYFN(A1)*2) still
+        // shows MYFN(3)'s 84. Saved WITHOUT recalculating.
+        let session = opened_with_composites();
+        crate::calculation::set_calculation_mode_impl(&session.state, "manual");
+        session.batch(vec![write(0, 0, "4")], None);
+        assert_eq!(session.value(0, 0, 1), CellValue::Number(84.0), "precondition: B1 is stale under manual");
+        crate::calculation::note_manual_edits_outlive_a_save(&session.state, true);
+        let bi = BiState::new();
+        let (saved, _) = crate::persistence::build_workbook_for_save(
+            &session.state,
+            &session.files,
+            &bi,
+            crate::persistence::ChartKeysFor::Document,
+        )
+        .expect("the save builds");
+        assert!(saved.calculation_incomplete, "the save did not say its values may be stale");
+
+        // The reopen: the same cells as saved, plus a ROOT call whose saved
+        // value belongs to A1's OLD argument.
+        let reopened = Host::new(1);
+        *reopened.state.calculation_mode.lock().unwrap() = "manual".to_string();
+        reopened.put_saved(
+            0,
+            &[
+                (0, 0, "4", CellValue::Number(4.0)),
+                (0, 1, "=MYFN(A1)*2", CellValue::Number(84.0)),
+                (4, 1, "=MYFN(A1)", CellValue::Number(42.0)),
+            ],
+        );
+        crate::undo_commands::rebuild_all_dependencies(&reopened.state);
+        crate::persistence::restore_pending_recalc_on_load(&reopened.state, &saved);
+        remember_loaded_call_results(&reopened.state);
+        note_library(&reopened, &["MYFN"]);
+        calculate_now_as_the_commands_do(&reopened, true);
+        assert_eq!(
+            reopened.value(0, 0, 1),
+            CellValue::Error(engine::CellError::Name),
+            "a value the saved file marked stale was kept as calculated"
+        );
+        assert_eq!(
+            reopened.value(0, 4, 1),
+            CellValue::Error(engine::CellError::Name),
+            "a stale root value was filed as MYFN(4)'s answer"
+        );
+
+        // A calculated workbook carries no mark.
+        let clean = opened_with_composites();
+        let (saved, _) = crate::persistence::build_workbook_for_save(
+            &clean.state,
+            &clean.files,
+            &bi,
+            crate::persistence::ChartKeysFor::Document,
+        )
+        .expect("the save builds");
+        assert!(!saved.calculation_incomplete);
+    }
+
+    #[test]
+    fn the_library_names_every_custom_function_it_defines() {
+        let mut scripts = HashMap::new();
+        for (id, source) in [
+            ("__calcula_custom_functions__", r#"{"functions":[{"name":"myFn"},{"name":" Other "}]}"#),
+            ("__calcula_custom_functions__pkg:Sales", r#"{"functions":[{"name":"PKGFN"},{"name":""}]}"#),
+            ("ordinary_module", r#"{"functions":[{"name":"NOTAFUNCTION"}]}"#),
+            ("__calcula_custom_functions__broken", "not json"),
+        ] {
+            scripts.insert(
+                id.to_string(),
+                crate::scripting::types::WorkbookScript {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    description: None,
+                    source: source.to_string(),
+                    scope: Default::default(),
+                    source_package: None,
+                },
+            );
+        }
+        assert_eq!(library_custom_function_names(&scripts), vec!["MYFN", "OTHER", "PKGFN"]);
+    }
+
+    /// The authoring dialog's Save of the Custom Functions library, through
+    /// the command's own body: `(name, body)` per function.
+    fn save_library(host: &Host, scripts: &crate::scripting::types::ScriptState, functions: &[(&str, &str)]) {
+        let functions: Vec<serde_json::Value> = functions
+            .iter()
+            .map(|(name, body)| serde_json::json!({ "name": name, "params": ["x"], "body": body }))
+            .collect();
+        crate::scripting::commands::save_script_core(
+            &host.state,
+            &host.file,
+            scripts,
+            crate::scripting::types::WorkbookScript {
+                id: "__calcula_custom_functions__".to_string(),
+                name: "Custom Functions (data)".to_string(),
+                description: None,
+                source: serde_json::json!({ "functions": functions, "capabilities": [] }).to_string(),
+                scope: Default::default(),
+                source_package: None,
+            },
+        )
+        .expect("the library saves");
+    }
+
+    /// What the frontend's resolver serves: `(name, argument, answer)`.
+    fn served(answers: &[(&str, f64, f64)]) -> HashMap<String, crate::scripting::udf::UdfValue> {
+        answers
+            .iter()
+            .map(|(name, arg, answer)| {
+                (
+                    crate::scripting::udf::udf_key(name, &[crate::scripting::udf::UdfValue::Number { value: *arg }]),
+                    crate::scripting::udf::UdfValue::Number { value: *answer },
+                )
+            })
+            .collect()
+    }
+
+    /// rev8A: custom-function answers were never forgotten when the function's
+    /// CODE changed. MYFN(x) = x*10 answered MYFN(4) = 40 and MYFN(3) = 30;
+    /// the author edits it to x*100 and the new code re-serves the cell's
+    /// current call (MYFN(3) = 300). A1 back to 4 through a write without a
+    /// resolver served the OLD code's 40 as current. A function the edit did
+    /// not touch keeps its answers.
+    ///
+    /// SABOTAGE: `forget_redefined_custom_functions` returns at once.
+    #[test]
+    fn an_edited_custom_function_never_serves_its_old_codes_answer() {
+        let host = Host::new(1);
+        let scripts = crate::scripting::types::ScriptState::new();
+        save_library(&host, &scripts, &[("MYFN", "return x*10;"), ("OTHER", "return x+3;")]);
+        host.batch(vec![write(0, 0, "4")], None);
+        host.batch_with_udf(
+            vec![write(0, 1, "=MYFN(A1)"), write(0, 2, "=OTHER(A1)")],
+            served(&[("MYFN", 4.0, 40.0), ("OTHER", 4.0, 7.0)]),
+        );
+        host.batch_with_udf(vec![write(0, 0, "3")], served(&[("MYFN", 3.0, 30.0), ("OTHER", 3.0, 6.0)]));
+        assert_eq!(host.value(0, 0, 1), CellValue::Number(30.0), "precondition: MYFN(3) served");
+
+        save_library(&host, &scripts, &[("MYFN", "return x*100;"), ("OTHER", "return x+3;")]);
+        host.batch_with_udf(vec![write(0, 0, "3")], served(&[("MYFN", 3.0, 300.0), ("OTHER", 3.0, 6.0)]));
+        assert_eq!(host.value(0, 0, 1), CellValue::Number(300.0), "precondition: the new code served MYFN(3)");
+
+        host.batch(vec![write(0, 0, "4")], None);
+        assert_eq!(
+            host.value(0, 0, 1),
+            CellValue::Error(engine::CellError::Name),
+            "MYFN(4) showed the OLD code's 40 as current"
+        );
+        assert_eq!(host.value(0, 0, 2), CellValue::Number(7.0), "OTHER's code did not change: its answer stands");
+        host.batch(vec![write(0, 0, "3")], None);
+        assert_eq!(host.value(0, 0, 1), CellValue::Number(300.0), "the new code's answer is served from the cache");
+    }
+
+    /// keeprule leftover: a custom function the library DROPPED stayed known,
+    /// so `=IFERROR(GONEFN(..),0)` stayed the sticky `#NAME?` until a reopen.
+    /// Excel: once the function is gone a call of it is `#NAME?`, which IFERROR
+    /// catches -- 0. Before the drop the sticky refusal is right: the workbook
+    /// defines the function and nobody computed the call.
+    ///
+    /// SABOTAGE: `forget_redefined_custom_functions` forgets only the answers
+    /// of a function that is gone (`forget_custom_function_answers`).
+    #[test]
+    fn a_custom_function_the_library_dropped_is_an_ordinary_name_error_again() {
+        let host = Host::new(1);
+        let scripts = crate::scripting::types::ScriptState::new();
+        save_library(&host, &scripts, &[("GONEFN", "return x*10;")]);
+        host.batch(vec![write(0, 0, "3")], None);
+        host.batch_with_udf(vec![write(0, 1, "=IFERROR(GONEFN(A1),0)")], served(&[("GONEFN", 3.0, 30.0)]));
+        assert_eq!(host.value(0, 0, 1), CellValue::Number(30.0), "precondition: served");
+        host.put_saved(0, &[(1, 1, "=IFERROR(GONEFN(RAND()),0)", CellValue::Number(42.0))]);
+        crate::undo_commands::rebuild_all_dependencies(&host.state);
+        calculate_now_without_cube_data(&host);
+        assert_eq!(
+            host.value(0, 1, 1),
+            CellValue::Error(engine::CellError::Name),
+            "precondition: a call of the workbook's own function nobody computed is refused whole"
+        );
+
+        save_library(&host, &scripts, &[]);
+        host.batch(vec![write(0, 0, "4")], None);
+        assert_eq!(
+            host.value(0, 0, 1),
+            CellValue::Number(0.0),
+            "=IFERROR(GONEFN(A1),0) after GONEFN was deleted: Excel answers 0"
+        );
+        calculate_now_without_cube_data(&host);
+        assert_eq!(
+            host.value(0, 1, 1),
+            CellValue::Number(0.0),
+            "F9 on =IFERROR(GONEFN(RAND()),0) after GONEFN was deleted: Excel answers 0"
+        );
     }
 
     #[test]

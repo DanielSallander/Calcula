@@ -123,7 +123,7 @@ impl RowVisibility {
     /// uppercased here so callers never have to remember the key convention.
     pub fn insert(&mut self, sheet_name: &str, visibility: SheetRowVisibility) {
         self.by_sheet
-            .insert(sheet_name.to_uppercase(), visibility);
+            .insert(identity::sheet_name_key(sheet_name), visibility);
     }
 
     /// Builder form of [`Self::insert`].

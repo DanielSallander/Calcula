@@ -34,7 +34,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { indexToCol } from "@api";
 import type { SheetInfo } from "@api/lib";
 import type { ChartSeries, DataRangeRef, SeriesOrientation } from "../../types";
-import { autoDetectSeries } from "../../lib/chartDataReader";
+import { autoDetectSeries, readRangeHeaderLabels } from "../../lib/chartDataReader";
 import { resolveDataSource } from "../../lib/dataSourceResolver";
 import {
   bindRangeText,
@@ -55,19 +55,31 @@ export interface RangeAxis {
 
 /**
  * The axes a range offers: one per column ("A", "B", ...) when series are in
- * columns, one per row ("Row 1", ...) when they are in rows.
+ * columns, one per row ("Row 1", ...) when they are in rows. With
+ * `headerLabels` (the header row's / column's display text, when the range has
+ * headers) an axis whose header cell is not empty is labelled by it instead --
+ * the name series detection gives that series, so the dialog's series list
+ * says what the legend will say (BUG-0448).
  */
-export function rangeAxes(ref: DataRangeRef, orientation: SeriesOrientation): RangeAxis[] {
+export function rangeAxes(
+  ref: DataRangeRef,
+  orientation: SeriesOrientation,
+  headerLabels: readonly string[] | null = null,
+): RangeAxis[] {
   const axes: RangeAxis[] = [];
+  const named = (i: number, fallback: string): string => {
+    const h = headerLabels?.[i];
+    return h ? h : fallback;
+  };
   if (orientation === "columns") {
     const numCols = ref.endCol - ref.startCol + 1;
     for (let c = 0; c < numCols; c++) {
-      axes.push({ index: c, label: indexToCol(ref.startCol + c) });
+      axes.push({ index: c, label: named(c, indexToCol(ref.startCol + c)) });
     }
   } else {
     const numRows = ref.endRow - ref.startRow + 1;
     for (let r = 0; r < numRows; r++) {
-      axes.push({ index: r, label: `Row ${ref.startRow + r + 1}` });
+      axes.push({ index: r, label: named(r, `Row ${ref.startRow + r + 1}`) });
     }
   }
   return axes;
@@ -307,13 +319,6 @@ export function useRangeSource(opts: UseRangeSourceOptions): RangeSourceState {
     };
   }, [nameCandidate, sheets]);
 
-  // boundRefKey stands for boundRef (see rangeRefKey).
-  const availableAxes = useMemo<RangeAxis[]>(
-    () => (boundRef ? rangeAxes(boundRef, orientation) : []),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [boundRefKey, orientation],
-  );
-
   // The caller's setters, read through a ref so their identity never re-runs
   // detection (only the range, the header flag and the orientation do).
   const detectionRef = useRef(detection);
@@ -321,6 +326,39 @@ export function useRangeSource(opts: UseRangeSourceOptions): RangeSourceState {
   const headersForcedOffRef = useRef(false);
   const detectionOn = detection !== null;
   const hasHeaders = detection?.hasHeaders ?? false;
+
+  // The header text of each axis, while the range has a header row (BUG-0448:
+  // the series list said B, C, D while the legend said Q1, Q2, Q3). Keyed by
+  // what it was read for, so a stale answer never labels another range.
+  const headerKey =
+    boundRef && hasHeaders && !isSingleCell ? `${boundRefKey}|${orientation}` : "";
+  const [headerRead, setHeaderRead] = useState<{ key: string; labels: string[] } | null>(null);
+  useEffect(() => {
+    if (headerKey === "" || !boundRef) return;
+    let live = true;
+    readRangeHeaderLabels({ ...boundRef }, orientation).then(
+      (labels) => {
+        if (live) setHeaderRead({ key: headerKey, labels });
+      },
+      (err: unknown) => {
+        // The letters stay: a label is a convenience, never a reason to fail.
+        console.warn("[chart range] header labels unavailable:", err);
+      },
+    );
+    return () => {
+      live = false;
+    };
+    // headerKey stands for boundRef + orientation (see rangeRefKey).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headerKey]);
+  const headerLabels = headerKey !== "" && headerRead?.key === headerKey ? headerRead.labels : null;
+
+  // boundRefKey stands for boundRef (see rangeRefKey).
+  const availableAxes = useMemo<RangeAxis[]>(
+    () => (boundRef ? rangeAxes(boundRef, orientation, headerLabels) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [boundRefKey, orientation, headerLabels],
+  );
 
   // Re-detect the series when the BOUND range changes (its cells or its sheet).
   // Not while the caller holds a stored chart's series (see holdStoredSeries):

@@ -21,7 +21,11 @@
 //          job's address BY THE JOB'S OWN SCRIPT, or the run FAILS. The lenient
 //          door answers a missing method with `undefined`, which made a job
 //          whose address went stale (a renamed name) report every tick as a
-//          healthy run that did nothing (rev4B#1).
+//          healthy run that did nothing (rev4B#1). A SANDBOXED EXTENSION's job
+//          is the one exception to the registry: its worker publishes the
+//          method for its own jobs only (`ext.scheduleExpose`, BUG-0616 #3),
+//          on its mount, and the firing reaches it through
+//          `callExtensionJobHandler` -- equally strict.
 //
 // BOUNDED WORK: every firing is bounded twice over. In the renderer the relayed
 //          call carries METHOD_CALL_TIMEOUT_MS (30s, protocol.ts), so a wedged
@@ -78,6 +82,10 @@ interface DueJob {
 /** The surface marking a job that drives a script-fed BI connector's refresh
  *  cycle; its `handler` is the connector's sourceId, not an exposed method. */
 const CONNECTOR_SURFACE = "connector";
+
+/** The surface marking a SANDBOXED EXTENSION's job (`cap.scheduleEvery` from a
+ *  worker extension, extensionWorkerHost.ts); `objectType` is the extension id. */
+const EXTENSION_WORKER_SURFACE = "extension-worker";
 
 type SchedulerRequest = Record<string, unknown> & { op: string };
 
@@ -153,6 +161,14 @@ async function tick(): Promise<void> {
           // wrapper runs, not how script code is reached.
           const { refreshScriptConnector } = await import("../scriptConnectors");
           await refreshScriptConnector(job.handler);
+        } else if (job.surface === EXTENSION_WORKER_SURFACE) {
+          // A sandboxed extension's job (BUG-0616 #3) calls the method that
+          // extension published for its OWN jobs (`ext.scheduleExpose`), held
+          // on its mount -- never the cross-script registry, which a worker
+          // extension has no door into. THROWS when it is not published: a
+          // FAILED run, never a success.
+          const { callExtensionJobHandler } = await import("./extensionWorkerHost");
+          await callExtensionJobHandler(job.scriptId, job.objectType, job.handler);
         } else {
           // THROWS when the job's script exposes no such method under the
           // job's address: a FAILED run (reported below), never a success.

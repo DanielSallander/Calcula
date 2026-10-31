@@ -465,7 +465,7 @@ fn a_pivot_is_repointed_at_the_published_sheet_name() {
         .find("renamed_for_publish.get(&local)")
         .expect("the pivot destination rewrite is gone");
     let check = body
-        .find("published_names.contains(&destination.to_ascii_lowercase())")
+        .find("published_names.contains(&identity::sheet_name_key(&destination))")
         .expect("the pivot retention check moved");
     assert!(
         rewrite < check,
@@ -474,23 +474,66 @@ fn a_pivot_is_repointed_at_the_published_sheet_name() {
     );
 }
 
-/// SHEET NAMES ARE COMPARED CASE-INSENSITIVELY, everywhere. The lexer uppercases
-/// bare identifiers, so `Data` and `data` are one name to a formula. This set
-/// was matched case-SENSITIVELY, which silently dropped a pivot whose
-/// `destination_sheet` was recorded as `data` from a tab spelled `Data`.
+/// SHEET NAMES ARE COMPARED BY EXCEL'S CASE RULE, everywhere. The lexer
+/// uppercases bare identifiers, so `Data` and `data` are one name to a formula,
+/// and Excel calls `Ärende` and `ärende` one name too [LIVE]. This set was
+/// matched case-SENSITIVELY, which silently dropped a pivot whose
+/// `destination_sheet` was recorded as `data` from a tab spelled `Data`; it then
+/// folded ASCII only, which still dropped one recorded as `ärende` beside the
+/// tab `Ärende`, and left an anchor spelled `ärende (2)` stale beside the
+/// rename map's `Ärende (2)` (rev10C). Run through the real function.
 ///
-/// SABOTAGE: drop the `.to_ascii_lowercase()` from either side.
+/// SABOTAGE: key the published-name set, or the anchor lookup, by
+/// `to_ascii_lowercase` again.
 #[test]
-fn the_pivot_retention_set_is_case_insensitive_like_every_other_name_compare() {
-    let body = body_of("fn prune_unpublished_pivots(");
-    assert!(
-        body.contains("s.name.to_ascii_lowercase()"),
-        "the published-name set is case-sensitive again"
+fn the_pivot_retention_set_and_anchor_map_use_excels_case_rule() {
+    let pivot_def = |id: u8, destination: &str, source: &str| ::persistence::SavedPivotDefinition {
+        id: identity::EntityId::from_bytes([id; 16]),
+        source_type: "grid".to_string(),
+        source_sheet_index: Some(0),
+        definition: serde_json::json!({
+            "name": format!("P{id}"),
+            "destination_sheet": destination,
+            "source_sheet": source,
+        }),
+    };
+    let mut wb = ::persistence::Workbook::default();
+    wb.sheets = vec![
+        ::persistence::Sheet::new("\u{c4}rende (2)".to_string()),
+        ::persistence::Sheet::new("\u{d6}versikt".to_string()),
+    ];
+    wb.pivot_definitions = vec![
+        // Destination recorded in another case than its (published) tab.
+        pivot_def(1, "\u{f6}VERSIKT", "\u{e4}rende (2)"),
+        // A sheet the push does not carry: still left behind.
+        pivot_def(2, "Elsewhere", "\u{c4}rende (2)"),
+    ];
+    // The assembly's collision-rename restoration, keyed as it keys it.
+    let renamed: std::collections::HashMap<String, String> =
+        [(identity::sheet_name_key("\u{c4}rende (2)"), "\u{c4}rende".to_string())].into_iter().collect();
+
+    let unpublished = crate::calp_commands::prune_unpublished_pivots(&mut wb, &[0, 1], &renamed);
+
+    assert_eq!(
+        unpublished.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
+        vec!["P2"],
+        "a pivot on \u{d6}versikt recorded as \u{f6}VERSIKT is ON a published sheet by Excel's rule"
     );
-    assert!(
-        body.contains("published_names.contains(&destination.to_ascii_lowercase())"),
-        "the lookup side is case-sensitive again — both halves have to agree"
+    assert_eq!(wb.pivot_definitions.len(), 1);
+    assert_eq!(
+        wb.pivot_definitions[0].definition["source_sheet"],
+        "\u{c4}rende",
+        "the anchor spelled \u{e4}rende (2) follows the restored published name"
     );
+
+    // The two maps that feed it key the same way.
+    for (signature, needle) in [
+        ("fn assemble_publish_snapshot(", "renamed.insert(identity::sheet_name_key(&sheet.name)"),
+        ("fn subscriber_published_names(", "out.insert(identity::sheet_name_key(local)"),
+    ] {
+        let body = body_of(signature);
+        assert!(body.contains(needle), "{signature} no longer keys its rename map by Excel's sheet-name key");
+    }
 }
 
 // ---------------------------------------------------------------------------

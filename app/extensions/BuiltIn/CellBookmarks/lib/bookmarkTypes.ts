@@ -47,8 +47,15 @@ export interface Bookmark {
   row: number;
   /** Cell column (0-based) */
   col: number;
-  /** Sheet index */
+  /** Sheet index, kept CURRENT as sheets are moved, inserted or deleted */
   sheetIndex: number;
+  /**
+   * The sheet's STABLE id (`SheetInfo.sheetId`): the bookmark follows its
+   * sheet by it -- a moved sheet keeps its bookmarks, a deleted one takes them
+   * with it, as Excel's Watch Window entries do [LIVE 2026-10-30]. Absent from
+   * a bookmark saved before it existed; filled in from the index on load.
+   */
+  sheetId?: string;
   /** Sheet name at time of bookmark creation */
   sheetName: string;
   /** User-provided label (defaults to cell reference like "A1") */
@@ -63,4 +70,6 @@ export interface Bookmark {
 export interface BookmarkCreateOptions {
   label?: string;
   color?: BookmarkColor;
+  /** The sheet's stable id, when the caller knows it. */
+  sheetId?: string;
 }

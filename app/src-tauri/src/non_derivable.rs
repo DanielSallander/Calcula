@@ -147,12 +147,10 @@ pub(crate) fn dependents_closure(
 ) -> HashSet<Node> {
     // CASE-INSENSITIVE, because the lexer UPPERCASES bare identifiers: `=Sheet1!A2`
     // is stored as `SHEET1!A2` while quoted `='Sheet1'!A2` keeps its case. The
-    // same rule `build_workbook_plan`'s own `sheet_index_of` applies, and the
-    // one that a raw registration got wrong once already (BUG-0019).
+    // same rule `build_workbook_plan` applies through
+    // `crate::resolve_cross_sheet_ref`, and the one that a raw registration got
+    // wrong once already (BUG-0019).
     let sheet_names = name_tables.sheet_names;
-    let sheet_index_of = |name: &str| -> Option<usize> {
-        sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
-    };
 
     // precedent -> the formula cells that read it.
     let mut forward: HashMap<Node, Vec<Node>> = HashMap::new();
@@ -175,9 +173,17 @@ pub(crate) fn dependents_closure(
             for &r in &refs.rows {
                 by_row.entry((sheet_index, r)).or_default().push(node);
             }
+            // A whole column or row on another sheet (`WHOLE_LINE`) and every
+            // sheet of a 3D span are reads too (calcref, round 18).
             for (sheet_name, r, c) in &refs.cross_sheet_cells {
-                let Some(target) = sheet_index_of(sheet_name) else { continue };
-                forward.entry((target, *r, *c)).or_default().push(node);
+                let (targets, line) = crate::resolve_cross_sheet_ref(sheet_name, *r, *c, sheet_names);
+                for target in targets {
+                    match line {
+                        crate::CrossSheetLine::Cell(r, c) => forward.entry((target, r, c)).or_default().push(node),
+                        crate::CrossSheetLine::Column(c) => by_column.entry((target, c)).or_default().push(node),
+                        crate::CrossSheetLine::Row(r) => by_row.entry((target, r)).or_default().push(node),
+                    }
+                }
             }
         }
     }

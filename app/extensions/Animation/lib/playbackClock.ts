@@ -44,6 +44,13 @@ export interface PlaybackClock {
 export interface ClockDeps {
   now?: () => number;
   delay?: (ms: number) => Promise<void>;
+  /**
+   * Told why playback could not start or stopped early: the driver's snapshot
+   * or a frame failed (the backend refuses an animation while a what-if run --
+   * Data Table, Goal Seek, Solver, a scenario -- is going). The clock is idle
+   * again when this is called.
+   */
+  onError?: (message: string) => void;
 }
 
 const DEFAULT_FPS = 12;
@@ -111,8 +118,35 @@ export function createPlaybackClock(deps: ClockDeps = {}): PlaybackClock {
     }
   }
 
+  function report(e: unknown): void {
+    if (!deps.onError) return;
+    try {
+      deps.onError(e instanceof Error ? e.message : String(e));
+    } catch (le) {
+      console.error("[Animation] error listener failed", le);
+    }
+  }
+
+  /**
+   * Snapshot, or go back to idle and say why. A refused snapshot filed no
+   * restore buffer, so there is nothing to restore and no frame may run (it
+   * used to throw out of the loop and leave the transport saying "playing").
+   */
+  async function snapshotOrIdle(): Promise<boolean> {
+    try {
+      await ensureSnapshot();
+      return true;
+    } catch (e) {
+      console.error("[Animation] snapshot refused", e);
+      status = "idle";
+      notify();
+      report(e);
+      return false;
+    }
+  }
+
   async function runLoop(renderCurrentFirst: boolean): Promise<void> {
-    await ensureSnapshot();
+    if (!(await snapshotOrIdle())) return;
     let first = true;
     while (status === "playing") {
       const target =
@@ -121,8 +155,13 @@ export function createPlaybackClock(deps: ClockDeps = {}): PlaybackClock {
           : nextFrameIndex(frame, rangeStart, rangeEnd, loop);
       first = false;
       if (target === null) {
-        status = "paused";
-        notify();
+        // FINISHED (the end of a non-looping range): playback is over, so it
+        // ends the way Stop does -- the model restored and the restore buffer
+        // released. It used to park in "paused" with the cells still on loan,
+        // and every what-if command (Goal Seek, Data Table, Solver, a
+        // scenario) was refused until the user pressed Stop on an animation
+        // that looked finished (CLAUDE.md rule 6: restore on stop).
+        await finish();
         break;
       }
       const t0 = nowFn();
@@ -138,6 +177,7 @@ export function createPlaybackClock(deps: ClockDeps = {}): PlaybackClock {
         }
         snapshotted = false;
         notify();
+        report(e);
         break;
       }
       frame = target;
@@ -147,6 +187,27 @@ export function createPlaybackClock(deps: ClockDeps = {}): PlaybackClock {
       const budget = 1000 / Math.max(1, fps);
       if (elapsed < budget) await delayFn(budget - elapsed);
     }
+  }
+
+  /** The end of a non-looping play: restore, release, idle at the range start. */
+  async function finish(): Promise<void> {
+    if (snapshotted && driver) {
+      try {
+        await driver.restore();
+        snapshotted = false;
+      } catch (e) {
+        // The buffer may still be on file: keep `snapshotted` so Stop retries
+        // the restore, and stay "paused" so the transport offers Stop.
+        console.error("[Animation] restore at the end of playback failed", e);
+        status = "paused";
+        notify();
+        report(e);
+        return;
+      }
+    }
+    status = "idle";
+    frame = rangeStart;
+    notify();
   }
 
   function startLoop(renderCurrentFirst: boolean): void {
@@ -210,13 +271,17 @@ export function createPlaybackClock(deps: ClockDeps = {}): PlaybackClock {
         /* ignore */
       }
     }
-    await ensureSnapshot();
+    if (!(await snapshotOrIdle())) return;
     frame = clampInt(target, rangeStart, rangeEnd);
     try {
       await driver.applyFrame(frame);
     } catch (e) {
       console.error("[Animation] seek applyFrame failed", e);
     }
+    // A frame on screen means cells on loan (the snapshot is filed): from idle
+    // the clock is "paused", so the transport offers Stop. It stayed "idle",
+    // and a what-if command was then refused with nothing showing as playing.
+    if (!wasPlaying && status === "idle") status = "paused";
     notify();
     if (wasPlaying) {
       status = "playing";

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 617,
+  "nextId": 660,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -10244,7 +10244,7 @@
     },
     {
       "id": "BUG-0344",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-04",
       "source": {
         "kind": "manual",
@@ -10260,7 +10260,12 @@
       "repro": {
         "description": "Open Fill Color's palette, type 12ab34 without Enter, click Red; then Ctrl+Z once: if the cell shows #12ab34, it applied twice."
       },
-      "notes": "Needs a live check, then a decision on the field's commit-on-blur contract. app/src/api/layout/primitives/Color.tsx (commitHex). Recorded in docs/design/open-items.md 2.ai."
+      "notes": "Needs a live check, then a decision on the field's commit-on-blur contract. app/src/api/layout/primitives/Color.tsx (commitHex). Recorded in docs/design/open-items.md 2.ai.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Reproduced through the real component (two applies, two undo steps). The palette body's mousedown drops a typed hex draft when the press lands on a swatch or the OS picker, so the swatch applies once; a blur that is not a pick still commits the draft. color.test.tsx."
+      }
     },
     {
       "id": "BUG-0345",
@@ -10419,7 +10424,7 @@
     },
     {
       "id": "BUG-0352",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-04",
       "source": {
         "kind": "manual",
@@ -10435,11 +10440,16 @@
       "repro": {
         "description": "Home > Format > Default Width... 12 on Sheet1, switch to Sheet2: Sheet2's standard width changed too."
       },
-      "notes": "Same persistence work as the per-sheet default row height (open-items 2.ai). app/src-tauri/src/lib.rs:448. Recorded in docs/design/open-items.md 2.ai."
+      "notes": "Same persistence work as the per-sheet default row height (open-items 2.ai). app/src-tauri/src/lib.rs:448. Recorded in docs/design/open-items.md 2.ai.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "The standard column width and row height live per sheet on engine::Grid (AppState's workbook-wide values removed), travel with add/delete/move/copy and structural undo, persist in .cala metadata.json (feature id sheet_default_sizes, no version link), in calp sheet metadata and in .xlsx sheetFormatPr. Round 10-12 follow-ups: xlsx widths no longer inflate (px = round(w*7)); the writer states defaultColWidth instead of 16,384 custom <col> runs; the reader takes the width most columns share and treats a defaultColWidth within 1px of the app standard as no override. Excel probed live. Tests: the_standard_width_is_per_sheet_and_its_undo_follows_its_sheet, per_sheet_standard_sizes_survive_the_xlsx_roundtrip."
+      }
     },
     {
       "id": "BUG-0353",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-04",
       "source": {
         "kind": "manual",
@@ -10455,7 +10465,12 @@
       "repro": {
         "description": "Ctrl+A, Home > Format > Row Height... 30: refused with a toast."
       },
-      "notes": "Fix: a persisted per-sheet default row height (core/persistence Sheet, calcula-format layout.json as a feature id, xlsx sheetFormatPr, calp html_export, AppState, get_default_dimensions) -- owner question in open-items 2.ai. app/src/shell/registries/gridFormatCommands.ts, app/src-tauri/src/commands/dimensions.rs. Recorded in docs/design/open-items.md 2.ai."
+      "notes": "Fix: a persisted per-sheet default row height (core/persistence Sheet, calcula-format layout.json as a feature id, xlsx sheetFormatPr, calp html_export, AppState, get_default_dimensions) -- owner question in open-items 2.ai. app/src/shell/registries/gridFormatCommands.ts, app/src-tauri/src/commands/dimensions.rs. Recorded in docs/design/open-items.md 2.ai.\n\nRemaining: a row hidden by an ADVANCED filter is left to that filter in the all-hidden case (it has no undo record).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Select All (or a whole-column selection) + Row Height sets the SHEET's standard row height in one owned undo step, clearing per-row heights, as Excel writes sheetFormatPr defaultRowHeight; the Home tab no longer refuses it. Round 12-16 follow-ups (Excel probed live): a batch Row Height / Column Width unhides the lines it sizes, except hidden rows under an applied filter when the runs hold a visible row; when every row is hidden it also shows filtered-out rows; collapsed outline groups that hid a sized line expand; Ctrl+Z restores visibility and recalculates SUBTOTAL/AGGREGATE; the macro recorder records one rowHeights/columnWidths event per batch (api.setRowHeights / setColumnWidths). Tests: dimensions_batch_tests, plus the frontend Select All cases."
+      }
     },
     {
       "id": "BUG-0354",
@@ -10569,7 +10584,7 @@
     },
     {
       "id": "BUG-0359",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-04",
       "source": {
         "kind": "manual",
@@ -10585,7 +10600,12 @@
       "repro": {
         "description": "New workbook, select an empty range, Clear Formats: the title gets its asterisk."
       },
-      "notes": "app/src-tauri/src/commands/data.rs:5024. Fix touches the subscriber-override path, so it was left for a focused change. Recorded in docs/design/open-items.md 2.ai."
+      "notes": "app/src-tauri/src/commands/data.rs:5024. Fix touches the subscriber-override path, so it was left for a focused change. Recorded in docs/design/open-items.md 2.ai.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Round 10 minted the effect only on a real change; round 11 measured live Excel (Workbook.Saved) and reversed the no-op half to match it. clear_range_with_options_inner mints DocumentEffect::mutates after every refusing gate (protection, spill, region, writeback claim, plan) and before the no-op return. So a refused clear stays clean, while a clear that changes nothing (Delete on empty cells, Clear Formats on a plain number) dirties the workbook as Excel does, writing nothing and recording no undo step. clear_tiers_tests a_clear_that_changes_nothing_dirties_the_document_as_excel_does."
+      }
     },
     {
       "id": "BUG-0360",
@@ -10761,7 +10781,7 @@
     },
     {
       "id": "BUG-0368",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-04",
       "source": {
         "kind": "manual",
@@ -10777,7 +10797,12 @@
       "repro": {
         "description": "Two sheets, hide Sheet2, right-click Sheet1's tab: Delete is enabled."
       },
-      "notes": "One-line change to the visible-sheet rule once Excel's behaviour (greyed or enabled-with-refusal) is probed. app/src/shell/registries/sheetExtensions.ts:271. Recorded in docs/design/open-items.md 2.ai."
+      "notes": "One-line change to the visible-sheet rule once Excel's behaviour (greyed or enabled-with-refusal) is probed. app/src/shell/registries/sheetExtensions.ts:271. Recorded in docs/design/open-items.md 2.ai.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "The tab menu's Delete uses isLastVisibleSheet, like Hide Sheet, for both disabled and the click guard (Excel refuses deleting the last visible sheet). sheetTabMenuColorAndHide.test.tsx."
+      }
     },
     {
       "id": "BUG-0369",
@@ -10847,7 +10872,7 @@
     },
     {
       "id": "BUG-0372",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-04",
       "source": {
         "kind": "manual",
@@ -10863,11 +10888,16 @@
       "repro": {
         "description": "Home > Format > Tab Color > More Colors..., drag in the picker, and count core.sheet.setTabColor executions."
       },
-      "notes": "Kit fix: a commit-on-close mode or a change-only prop. app/src/api/layout/primitives/Color.tsx. Recorded in docs/design/open-items.md 2.ai."
+      "notes": "Kit fix: a commit-on-close mode or a change-only prop. app/src/api/layout/primitives/Color.tsx. Recorded in docs/design/open-items.md 2.ai.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Same root cause and fix as BUG-0536: Format > Tab Color > More Colors commits SHEET_TAB_COLOR once, on the picker's closing change, then closes the palette and menu chain. color.test.tsx (the old 'reports live' test was inverted on purpose)."
+      }
     },
     {
       "id": "BUG-0373",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-04",
       "source": {
         "kind": "manual",
@@ -10883,7 +10913,12 @@
       "repro": {
         "description": "Comment on C4, then invoke('get_comment_indicators_in_range', { startRow: 4, startCol: 3, endRow: 2, endCol: 1 }): []."
       },
-      "notes": "The Home tab's Clear menu normalises first, so it is not affected. app/src-tauri/src/comments.rs:657, app/src-tauri/src/notes.rs:500. Recorded in docs/design/open-items.md 2.ai."
+      "notes": "The Home tab's Clear menu normalises first, so it is not affected. app/src-tauri/src/comments.rs:657, app/src-tauri/src/notes.rs:500. Recorded in docs/design/open-items.md 2.ai.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "get_comment_indicators_in_range and get_note_indicators_in_range normalise the rectangle with min/max (bodies in comment_indicators_in_range / note_indicators_in_range). range_clear_undo_tests indicator_reads_find_the_same_items_whichever_way_the_range_was_drawn."
+      }
     },
     {
       "id": "BUG-0374",
@@ -12632,7 +12667,7 @@
     },
     {
       "id": "BUG-0443",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-08",
       "source": {
         "kind": "manual",
@@ -12648,7 +12683,12 @@
       "repro": {
         "description": "Race a move against the toggle (not reproduced; by reading)."
       },
-      "notes": "Left in place by decision and documented in the doc comment (sheets.rs:2163-2180): holding sheet_kinds across eight doors' store writes would add a sheet_kinds -> store edge against the slicer/timeline doors' store -> sheet_kinds order and can deadlock behind a queued writer. Owner question in open-items §2.aj."
+      "notes": "Left in place by decision and documented in the doc comment (sheets.rs:2163-2180): holding sheet_kinds across eight doors' store writes would add a sheet_kinds -> store edge against the slicer/timeline doors' store -> sheet_kinds order and can deadlock behind a queued writer. Owner question in open-items §2.aj.\n\nOpen follow-up BUG-0656: undo/redo restore paths and the raw JSON object editor never ask Lock Objects.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Barrier design, no new lock edge: every geometry door decides Lock Objects while holding the store it writes (sheets::canvas_objects_locked_now), covering charts (save_chart and update_chart via lock_pending, the AI tool's update_chart), controls, floating ranges, the canvas pivot box, bindings, slicers and timelines; when objects_locked goes false -> true, set_canvas_layout_inner runs lock_objects_barrier over each store (ObjectFamilyStores for slicer/timeline/pivot), so a move that saw 'unlocked' lands before the toggle returns. Round 13: the MCP update_chart refusal no longer dirties the document, and a race-test flag that could not fail was removed. Tests: canvas_objects_lock_tests.rs (chart and slicer races)."
+      }
     },
     {
       "id": "BUG-0444",
@@ -12672,7 +12712,7 @@
     },
     {
       "id": "BUG-0445",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-08",
       "source": {
         "kind": "manual",
@@ -12688,11 +12728,16 @@
       "repro": {
         "description": "Line and clustered column chart, Chart Design > 2nd axis on."
       },
-      "notes": "Pre-existing; charts survey §7.2, charts lane 'not fixed (out of scope)'."
+      "notes": "Pre-existing; charts survey §7.2, charts lane 'not fixed (out of scope)'.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "comboChartPainter.ts has one reader (comboSecondarySeries) and writers that keep markOptions.secondaryYAxis and secondaryAxisSeries in step; the dialog's Design tab has a Secondary Axis checkbox per series; the band switch applies Excel's 'Clustered Column - Line on Secondary Axis' preset; no series on the axis means no right-hand strip. Round 11: the dialog refuses putting every series (or a one-series combo's only series) on the secondary axis, as live Excel does. Tests: comboChartPainter.test.ts, designTabComboSeries.test.tsx, chartDesignSections.test.tsx."
+      }
     },
     {
       "id": "BUG-0446",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-08",
       "source": {
         "kind": "manual",
@@ -12708,7 +12753,12 @@
       "repro": {
         "description": "Select a pie chart, open the quick-access Elements button."
       },
-      "notes": "Pre-existing; Charts/components/QuickAccessPopup.tsx (charts lane)."
+      "notes": "Pre-existing; Charts/components/QuickAccessPopup.tsx (charts lane).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "The quick-access Chart Elements popup offers only Chart Title, Legend and Data Labels when !isCartesianChart(spec.mark) (pie, doughnut, funnel). Live Excel: a pie reports no axes and refuses gridlines. quickAccessElements.test.tsx."
+      }
     },
     {
       "id": "BUG-0447",
@@ -12748,7 +12798,7 @@
     },
     {
       "id": "BUG-0448",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-08",
       "source": {
         "kind": "manual",
@@ -12764,7 +12814,12 @@
       "repro": {
         "description": "Insert a column chart over a range with a header row; open the dialog's series list."
       },
-      "notes": "Pre-existing; seen live by the live-e2e lane (CreateChartDialog)."
+      "notes": "Pre-existing; seen live by the live-e2e lane (CreateChartDialog).\n\nRemaining: header labels are read once per range/orientation; editing a header cell while the dialog is open does not relabel.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "chartDataReader.readRangeHeaderLabels reads the header row/column from the range's id-resolved sheet, and the Create Chart series list names each series by its header text (letter only for an empty header), as Excel's Select Data does. Tests: app/extensions/Charts/components/data/__tests__/useRangeSource.test.tsx::a range with a header row offers its axes by HEADER TEXT, not column letter (BUG-0448), app/extensions/Charts/components/data/__tests__/useRangeSource.test.tsx::rangeAxes: header text names an axis; an empty header cell keeps the letter (BUG-0448), app/extensions/Charts/components/data/__tests__/rangeSourceSeriesNames.test.tsx::a plotted series is listed by the name the legend shows, not its column letter, app/extensions/Charts/components/data/__tests__/rangeSourceSeriesNames.test.tsx::an unplotted series shows its header label, and ticking it names the series by it, app/extensions/Charts/lib/__tests__/chartDataReaderSourceSheet.test.ts::follows the sheet by id after it moved (stored index 0, live index 1)."
+      }
     },
     {
       "id": "BUG-0449",
@@ -13439,7 +13494,7 @@
     },
     {
       "id": "BUG-0477",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-15",
       "source": {
         "kind": "manual",
@@ -13455,7 +13510,12 @@
       "repro": {
         "description": "Unit tier: insert a canvas pivot, update_pivot_properties_core(frame_request(id, f)), mark_saved, then the SAME request again -> undo depth unchanged but wb.file.is_dirty() is true. Same for a style-only request with the style the pivot already has (canvas_sheet_tests a_worksheet_pivot_style_is_one_undoable_step_and_rides_its_region checks only the undo depth for that no-op)."
       },
-      "notes": "Pre-existing for frame saves (since the canvas-pivot programme); WP-C makes this door the Format pane's pivot door, so an unchanged commit now reaches it more often. Fix shape: decide the no-op under a read guard (or lock_pending if pivot_tables gains it) before pivot_write_definition_only, as update_timeline_with does."
+      "notes": "Pre-existing for frame saves (since the canvas-pivot programme); WP-C makes this door the Format pane's pivot door, so an unchanged commit now reaches it more often. Fix shape: decide the no-op under a read guard (or lock_pending if pivot_tables gains it) before pivot_write_definition_only, as update_timeline_with does.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Round 10 minted the effect only on a real change; round 11 measured live Excel (Workbook.Saved) and reversed the no-op half to match it. update_pivot_properties_core compares every requested field under a pending guard after all refusals. Excel per property: re-applying the SAME style dirties (no undo step); the same name, the same flags, an empty request and a canvas frame stay clean; only a real change writes and records undo. canvas_sheet_tests a_pivot_properties_request_that_changes_nothing_dirties_only_as_excel_does."
+      }
     },
     {
       "id": "BUG-0478",
@@ -13683,7 +13743,7 @@
     },
     {
       "id": "BUG-0488",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-16",
       "source": {
         "kind": "manual",
@@ -13700,7 +13760,12 @@
         "description": "Headless: create a pivot with one value field, mark the document saved, call set_pivot_number_format { pivotId, valueFieldIndex: 5, numberFormat: \"0.0\" } -> Err(\"Value field index 5 out of range\") AND is_modified() == true. Then a valid call with index 0 -> the format changes, and undo restores nothing from it. Reachable from the Pivot service's `setNumberFormat` (Pivot/lib/pivot-api.ts:1639, backend.ts setPivotNumberFormat). WP-C's Data format card does NOT use this door (it rides the fields update, Pivot/lib/pivotDataFormats.ts), so the Format tab is unaffected."
       },
       "triage": "Backend: the gate-before-effect order of the DocumentEffect rule (CLAUDE.md) is broken by the shared pivot_write helper; and the command predates per-command undo recording.",
-      "notes": "Fix shape: check the index (and that the format really changes) before pivot_write, or take the read guard first and construct the effect only inside the changing branch; record a pivot definition undo step like update_pivot_properties_core does. Not fixed in WP-C (outside its doors). Not seen live."
+      "notes": "Fix shape: check the index (and that the format really changes) before pivot_write, or take the read guard first and construct the effect only inside the changing branch; record a pivot definition undo step like update_pivot_properties_core does. Not fixed in WP-C (outside its doors). Not seen live.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "set_pivot_number_format_core runs every refusal (existence, destination kind, value-field index under the pending guard) before the effect, so a refusal is clean, and a real change records ONE 'PivotTable number format' undo step. Round 11 reversed the no-op half to match live Excel: assigning the SAME number format dirties the workbook (no undo step). canvas_sheet_tests a_pivot_number_format_refusal_is_clean_and_a_change_is_one_undo_step."
+      }
     },
     {
       "id": "BUG-0489",
@@ -14232,7 +14297,7 @@
     },
     {
       "id": "BUG-0513",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-16",
       "source": {
         "kind": "manual",
@@ -14250,8 +14315,9 @@
         "description": "Select a sheet cell with a fill, Home > Format Painter, click a floating grid's cell: 'Format Painter cannot paint into a floating grid's cells yet' (expected: the fill is painted there). Same for Home > Paste > Formatting on a floating grid's cell."
       },
       "fix": {
-        "status": "open",
-        "description": "Give set_cell_style (or a style-only CellUpdateInput / a set_cell_styles batch) a `target: Option<CellTargetRef>` resolved through cell_target.rs (host gate 'formatCells', extent, backing index, one owned undo step), add it to TARGET_COMMANDS, then route formatPainterLogic.applyFormatToTarget and the 'formats'/'allExceptBorders' paste attributes (pasteSpecialExecute TARGET_PASTE_ATTRIBUTES) through it."
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "set_cell_style takes an optional CellTargetRef (set_cell_style_core: extent, the HOST's Format Cells option, backing-sheet undo), so Format Painter, Paste Formatting and Paste (No Borders) reach a floating grid's cells; an operation's inert cells take the source style through setCellStyle. Follow-ups: an optional checkArea makes the whole stroke/paste all-or-nothing on refusal; set_cell_style takes a cells list (set_cell_styles_core), so tiled style-only pastes are one IPC. Excel probed live. Tests: format_home_tests.rs, pasteSpecialStyleOnTarget.test.ts."
       },
       "links": [
         "BUG-0185"
@@ -14259,7 +14325,7 @@
     },
     {
       "id": "BUG-0514",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-16",
       "source": {
         "kind": "manual",
@@ -14277,8 +14343,9 @@
         "description": "Put an icon-set rule on a floating grid's column, select a cell of it, Home > Sort & Filter > Custom Sort, Sort On 'Cell Icon': the Order list says no icons were found."
       },
       "fix": {
-        "status": "open",
-        "description": "Give get_range_icons a `target: Option<CellTargetRef>` (resolve_icons over the backing sheet's rules, clipped to the extent), add it to TARGET_COMMANDS, and pass the dialog's target in sortHelpers.getUniqueIconsInColumn."
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "get_range_icons takes an optional CellTargetRef, clips to the write extent, reads the BACKING sheet's rules and answers through the same resolve_icons the targeted sort keys on. Tests: get_range_icons_on_a_target_lists_the_icons_the_grids_column_shows, iconListOnTarget.test.ts."
       }
     },
     {
@@ -14850,7 +14917,7 @@
     },
     {
       "id": "BUG-0536",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-17",
       "source": {
         "kind": "manual",
@@ -14867,6 +14934,11 @@
       "whyNobodyNoticed": "Every journey fired a synthetic input+change pair; the real picker was never driven until Q7 (the ChooseColor driver found no dialog, because WebView2 shows none).",
       "repro": {
         "description": "Live: canvas-round2-quick Q7 records native-pick-events input=8 change=1. The per-step commit of the two listed inputs is inferred from their onChange={(e) => onChange(e.target.value)} wiring, not yet driven live: pick a custom colour through either and count undo steps."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "WebView2's colour popup sends one input event per drag or key step and one change on close. useNativeColorPick (now in @api/layout) previews on input and commits once on change, for the layout kit's More Colors, ColorSwatch native, the page navigator's colour rows and the Properties pane; More Colors closes the palette like Excel's OK. Tests: color.test.tsx, pageNavigatorButtonsSection.test.tsx, propertyRowColor.test.tsx."
       }
     },
     {
@@ -16229,7 +16301,7 @@
     },
     {
       "id": "BUG-0589",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-23",
       "source": {
         "kind": "manual",
@@ -16248,6 +16320,11 @@
       "whyNobodyNoticed": "The collaboration journeys check out and push, but assert sheets, cells, scripts and writeback -- not which connection a pivot, slicer or ribbon filter binds after a subscriber's refresh -- and none reopens the subscriber afterwards. The materialize unit tests publish from a LOCAL connection, where the session uuid IS the stable key, so the re-key is invisible there.",
       "repro": {
         "description": "Publish v1 from a local connection with a canvas page holding a BI pivot, a model slicer, a ribbon filter and a design-query chart; subscribe from workbook S; check out v1 (Collaboration > Open Application for Editing) and push v2 without changes; in S, refresh: the ribbon filter is gone, and the pivot and slicer read v1's model while the chart reads v2's; save and reopen S: the pivot has no model. Unit evidence: calp_materialize_tests `the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_is_filed_under` (the push files the data source under the working connection's uuid while the checked-out connection's package key is the publisher's id). Investigated 2026-10-23 with a full change list (open-items 2.aq): a stable published id -- the connection's package key when it has one, else its own id -- used by the capture, the writeback declarations, the carrier's chart keys and `calp_publish_model`; `create_pivot_from_bi_model` stamping that key; one live connection per key at pull (checkout refused on a collision); a capture refusal for two connections with one key; the ribbon-filter and single-source pivot fallbacks. It needs three owner decisions (is a data source's identity global across applications; which version serves a shared connection; does a NEW application published from a subscribed workbook keep the source's data-source id)."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "published_data_source_id takes the connection's STABLE key (package_data_source_id, or its own id for a model authored in the workbook), the rule pivots, slicers, ribbon filters, grid reports and binding measure keys already used; it governs the capture, writeback declarations, design-query chart keys, calp_publish_model and create_pivot_from_bi_model. The capture refuses two live connections with one key; pivot fallbacks answer only for a single data source. Follow-ups found by review (BUG-0622): a NEW application published from a subscribed workbook files the model under a derived key, and subscribe/checkout/refresh refuse a data-source id another subscription claims. Tests: calp_materialize_tests an_untouched_working_copy_push_keeps_every_subscribers_model_and_ribbon_filters and companions."
       }
     },
     {
@@ -16562,7 +16639,7 @@
       "fix": {
         "status": "fixed",
         "date": "2026-10-30",
-        "description": "Every rename goes through rename_named_range_core, which re-binds the name's scripts (scripting/script_rebind.rs: one door that moves jobs and announces 'rebound') in the same undo step; undo uses a by-id restore (obj_object_scripts_by_id); the broker re-keys exposures without leaking them; hook forwarders read the current binding; a missing exposed method is a failed scheduled run. named_ranges rename_tests, objectsWave4, followReboundScripts, schedulerStaleAddress. Round-8 caveat: undefined came from a lane that stopped at the usage limit before reporting; the tree compiles and every suite is green (app_lib 4504, engine 984, vitest), but its sabotage proofs and code review were not completed."
+        "description": "Every rename goes through rename_named_range_core, which re-binds the name's scripts (scripting/script_rebind.rs: one door that moves jobs and announces 'rebound') in the same undo step; undo uses a by-id restore (obj_object_scripts_by_id); the broker re-keys exposures without leaking them; hook forwarders read the current binding; a missing exposed method is a failed scheduled run. named_ranges rename_tests, objectsWave4, followReboundScripts, schedulerStaleAddress. Round-8 caveat: this work came from a lane that stopped at the usage limit before reporting; the tree compiles and every suite is green (app_lib 4504, engine 984, vitest), but its sabotage proofs and code review were not completed."
       }
     },
     {
@@ -16668,7 +16745,7 @@
       "fix": {
         "status": "fixed",
         "date": "2026-10-30",
-        "description": "See BUG-0476's fix: the exact-fingerprint results cache, the full-pass keep rule and seeding (core/engine cube.rs / evaluator.rs, bi/cube.rs, calculation.rs). Round-8 caveat: undefined came from a lane that stopped at the usage limit before reporting; the tree compiles and every suite is green (app_lib 4504, engine 984, vitest), but its sabotage proofs and code review were not completed."
+        "description": "See BUG-0476's fix: the exact-fingerprint results cache, the full-pass keep rule and seeding (core/engine cube.rs / evaluator.rs, bi/cube.rs, calculation.rs). Round-8 caveat: this work came from a lane that stopped at the usage limit before reporting; the tree compiles and every suite is green (app_lib 4504, engine 984, vitest), but its sabotage proofs and code review were not completed."
       }
     },
     {
@@ -16731,7 +16808,7 @@
       "fix": {
         "status": "fixed",
         "date": "2026-10-30",
-        "description": "Each taker releases or orders its store before the undo stack; the census reads braces in order and a general undo-stack census (no_function_holds_the_undo_stack_and_any_store_in_an_order_that_can_cycle) guards every store. Round-8 caveat: undefined came from a lane that stopped at the usage limit before reporting; the tree compiles and every suite is green (app_lib 4504, engine 984, vitest), but its sabotage proofs and code review were not completed."
+        "description": "Each taker releases or orders its store before the undo stack; the census reads braces in order and a general undo-stack census (no_function_holds_the_undo_stack_and_any_store_in_an_order_that_can_cycle) guards every store. Round-8 caveat: this work came from a lane that stopped at the usage limit before reporting; the tree compiles and every suite is green (app_lib 4504, engine 984, vitest), but its sabotage proofs and code review were not completed."
       }
     },
     {
@@ -16773,12 +16850,12 @@
       "fix": {
         "status": "fixed",
         "date": "2026-10-30",
-        "description": "The structural shifters skip span ends and quoted spans. structure_lines_tests inserting_or_deleting_lines_on_any_sheet_leaves_a_3d_reference_as_written. Round-8 caveat: undefined came from a lane that stopped at the usage limit before reporting; the tree compiles and every suite is green (app_lib 4504, engine 984, vitest), but its sabotage proofs and code review were not completed."
+        "description": "The structural shifters skip span ends and quoted spans. structure_lines_tests inserting_or_deleting_lines_on_any_sheet_leaves_a_3d_reference_as_written. Round-8 caveat: this work came from a lane that stopped at the usage limit before reporting; the tree compiles and every suite is green (app_lib 4504, engine 984, vitest), but its sabotage proofs and code review were not completed."
       }
     },
     {
       "id": "BUG-0613",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-29",
       "source": {
         "kind": "manual",
@@ -16793,11 +16870,17 @@
       },
       "triage": {
         "proposedFix": "Recalculate cross-sheet dependents through the shared cascade on every what-if route (goal_seek.rs, solver.rs, scenario_manager.rs, data_tables.rs, animation_commands.rs, ai/preview_eval.rs) or mark the touched cells changed for the keep rule."
-      }
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Every what-if route writes its inputs and recalculates through the shared cascade (new whatif_recalc.rs: write_cells_and_recalc(_on) -> recalc_after_active_sheet_bulk_rewrite / recalc_after_off_sheet_write): Goal Seek, Solver solve/revert, Scenario Show/Summary, both data tables and animation frame/restore; trials read the target's STORED value, so readers on other sheets and cube/custom-function dependents are recalculated, never kept. An application update also recalculates the subscriber's own reader sheets (recalc_readers_of_installed_sheets). Goal Seek no longer refuses a target that does not depend on the changing cell (Excel returns False and leaves the last trial). Later rounds: trials run the seeded cascade whatever the calculation mode (cascade_whatever_the_mode, then cascade_seeded_on_sheet for a background sheet); under manual calculation a run ends with ONE Calculate Now pass as Excel does (calculate_workbook_at_run_end); see BUG-0617 (sheet binding, single-flight), BUG-0618 (manual calculation) and BUG-0619 (result values). Excel probed live. Tests: whatif_recalc_tests.rs, calp_materialize_tests an_update_recalculates_the_subscribers_own_readers_of_a_refreshed_cell."
+      },
+      "notes": "ai/preview_eval.rs is not a what-if route (it evaluates a detached grid). Open follow-up BUG-0652: a data table under manual calculation computes its body, and Calcula has no live TABLE() formula."
     },
     {
       "id": "BUG-0614",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-29",
       "source": {
         "kind": "manual",
@@ -16812,11 +16895,17 @@
       },
       "triage": {
         "proposedFix": "Subscribe each store to the ROWS_/COLUMNS_ events and STRUCTURAL_EDIT_ELSEWHERE edits; decide undo for frontend-owned coordinates."
-      }
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "One @api helper, @api/structuralFollow (followStructuralEdits), moves Watch Window entries, cell bookmarks, Insights range overlays, animation driver cells and embedded form placements with row/column inserts and deletes on any sheet, Insert/Delete Cells bands, cut-paste and drag moves (new AppEvents.CELLS_MOVED), whole-line reorders, and their Undo/Redo/rollback. Each structural edit records a structural_delta marker in its undo step and STRUCTURAL_UNDO carries StructuralUndoPayload.deltas, so no description is parsed. Watches and bookmarks carry sheetId and follow sheet reorder/delete (followSheetRenumbering). Excel rules probed live: a watch moves with its cell, is REMOVED when its row/column is deleted (Undo does not restore it), and follows a cut-paste. Animation cells on a deleted line become #REF! and Load refuses them. Tests: app/src/api/__tests__/structuralFollow.test.ts::an on-screen insert is an edit on the active sheet; its Undo / Redo follow the step's deltas, same seq, app/src/api/__tests__/structuralFollow.test.ts::an edit on another sheet is followed on that sheet, and a floating grid's own lines are not, app/extensions/WatchWindow/lib/__tests__/watchStructuralFollow.test.ts::[LIVE] deleting the watched cell's row removes the entry, and its Undo does not bring it back, app/extensions/WatchWindow/lib/__tests__/watchStructuralFollow.test.ts::[LIVE] a cut-pasted cell takes its watch along, onto another sheet too, and Undo brings it back, app/extensions/BuiltIn/CellBookmarks/__tests__/bookmarkStructuralFollow.test.ts::move with an inserted row, and back on Undo, and the lookup key moves with them, app/extensions/Animation/lib/__tests__/animationStructuralFollow.test.ts::a deleted driver cell is #REF! (refDeleted) and its Undo clears it at the old address, app/extensions/Insights/__tests__/sheetOverlay.test.ts::rows inserted above move the rectangle and its cues at once, and it is recomputed there, app/src/core/components/Spreadsheet/__tests__/undoSheetActivation.test.tsx::hands STRUCTURAL_UNDO the backend's structural deltas and whether it was an Undo or a Redo (BUG-0614), app/src-tauri/src/commands/structural_delta_tests.rs::a_cut_paste_move_is_reported_reversed_on_undo_and_replayed_on_redo, app/src-tauri/src/commands/structural_delta_tests.rs::insert_cells_hands_back_its_band_and_its_undo_reverses_it."
+      },
+      "notes": "Review findings on this fix (merge undo, set-aside bookmarks, drag-move refusal, edge clipping, joined moves) are BUG-0626."
     },
     {
       "id": "BUG-0615",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-29",
       "source": {
         "kind": "manual",
@@ -16828,6 +16917,11 @@
         "severity": "low",
         "message": "Results-cache / keep-rule follow-ups from the final review: =IFERROR(UNKNOWNFN(RAND()),0) becomes #NAME? on F9 (Excel: 0); a manual-calculation workbook saved without recalculation reopens with stale composite values vouched for; switching calculation mode during Calculate Now blocks the UI thread; reads_a_changed_cell is O(changed x ranges); a script badge is lost after a structural undo.",
         "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "(1) =IFERROR(UNKNOWNFN(RAND()),0) gives 0 on F9 as in Excel: the full pass writes the engine's answer, and the Custom Functions libraries' names are noted before each pass so a refused call of the workbook's own function stays sticky. (2) A manual-calculation workbook saved without recalculating saves Workbook::calculation_incomplete (calc_state.json, manifest feature calculation_incomplete, .cala format 12) and reopens with every sheet marked stale; .xlsx writes and reads Excel's calcPr calcCompleted=\"0\" and calcMode; .cala records the mode (calc_mode.json, feature id calculation_mode) and the open adopts it; get_calculation_state answers pending (status bar 'Calculate') for manual edits, after save and after reopen; AutoRecover snapshots are marked. (3) set_calculation_mode is #[tauri::command(async)], so switching mode during Calculate Now no longer freezes the window. (4) KeepWithoutData::reads_a_changed_cell indexes changed cells per column (ChangedCells), no longer O(changed x ranges). (5) A shape's script badge is re-read from the backend after a structural undo (resyncShapeScriptBadges). Excel probed live. Tests: a_full_pass_answers_iferror_around_an_unknown_name_as_excel_does, a_manual_workbook_saved_without_recalculating_reopens_marked_stale, the_calculation_mode_switch_never_runs_on_the_ui_thread, a_large_changed_set_answers_every_reference_exactly, shapeScriptBadgeUndo.test.ts."
       }
     },
     {
@@ -16844,6 +16938,888 @@
         "severity": "low",
         "message": "Owner decisions raised by the programme: (1) the script API's 100,000-cell cap blocks whole-column format/clear (VBA Columns(\"C\").ClearFormats) and a recorded whole-column format; (2) api.clearRange is not in the approved-macro grant, so grouped clears cannot replay there; (3) an extension worker can schedule jobs but has no expose door; (4) Excel keeps a sparkline group one group across inserts; (5) Excel ends COPY mode on Esc; (6) a plain click on a member tab clears the group (Excel keeps it); (7) pasting an empty formatted cell now carries its format (Excel parity).",
         "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "partial",
+        "date": "2026-10-31",
+        "description": "Decided and implemented, Excel probed live where Excel has an answer: (1) The script API formats and clears whole rows, whole columns, Select All and almost-whole lines at any size (vFormatRangeRef / assertFormatRangeSize; other rectangles up to 4,000,000 cells), so VBA's Columns(\"C\").ClearFormats has an equivalent and recorded whole-line formats replay; api.applyNamedStyle keeps the 100,000 bound (its Rust path is a cell walk). (2) PARTIAL: api.clearRange with applyTo 'contents' joined the approved-macro CELL grant (owner decision B), audited and rolled back whole on failure; 'formats'/'all' stay refused as formatting. (3) Worker extensions publish job methods through capabilities.schedule.expose (broker row ext.scheduleExpose); later rounds: publishing needs no consent prompt, a withdraw removes only its own registration, an overwritten handler is freed, and a forged workbook job row cannot fire an extension's method. (4) A sparkline group stays ONE group across structural edits (moreAreas; manifest feature id sparkline_group_areas, no version bump). (5) Esc ends COPY mode as well as cut mode, and every cut-mode ending ends a copy; copy/cut mode also ends on Sort, Remove Duplicates, Text to Columns, AutoFilter criteria, Group, Merge, F9/Shift+F9, a calculation-mode change, a pivot Refresh, Data > Refresh Data and any delete, as Excel does. Cut mode is KEPT across Undo/Redo, a write onto the cut cells and a sheet rename (rounds 7-8 had ended it; Excel keeps it), and the snapshot is re-read from its source by stable sheet id. (6) Tab clicks follow Excel's group rules: a click on another member keeps the group unless every visible tab is grouped, a click outside ends it, Shift+click selects a visible range. (7) Pasting an empty formatted cell carries its format: confirmed Excel behaviour, pinned by tests."
+      },
+      "notes": "Owner questions still open after round 20: (a) FormulaHidden on a format paste: on a protected sheet that allows Format Cells, Excel carries FormulaHidden with a pasted or painted format and Calcula now does too; keep_cell_lock (app/src-tauri/src/commands/styles.rs) keeps only the Locked flag and could also keep formula_hidden if the owner prefers that a format paste never hides a formula. (b) Should the decision-B approved-macro grant also cover formatting (api.clearRange 'formats'/'all', sheet.clearRangeFormat, api.setRangeFormat; VBA Range.Clear / ClearFormats)? Today a recorded Clear All or Clear Formats in an application's macro is refused up front in a person-run. (c) calpkey identity contract: a working copy keeps the source data-source id only when it pushes the application it was checked out from; every other package files the model under data_source_key_for_application(package, K). Writeback COLUMN ids and object ids (charts, ribbon filters) republished in a new application keep the source's ids; confirm this is the intended contract. (d) Table/defined-name namespace gate: Excel's COM ListObject.Name accepts a table renamed onto an existing defined name (the name then wins in formulas), while Names.Add refuses a name a table holds; Calcula refuses both directions. Decide whether to copy Excel's one-way gate.",
+      "triage": {
+        "proposedFix": "Answer (a)-(d); implement (b) and (d) if the owner chooses Excel's behaviour or a wider grant."
+      }
+    },
+    {
+      "id": "BUG-0617",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "whatif-sheet-binding-and-overlap",
+        "severity": "high",
+        "message": "WHAT-IF RUNS ACTED ON THE WRONG SHEET OR OVERLAPPED: the Solver and Data Table dialogs always targeted sheet 0; an async run bound its sheet by index, so a tab move mid-run sent trials or the restore elsewhere; pressing Enter twice ran two Data Table / Goal Seek runs that overwrote the borrowed input cell; animation frames and Scenario Show/Summary could run between another run's trials; Goal Seek and Solver on a sheet deleted mid-run reported 'no solution'/NaN; Solver Restore wrote by sheet index; the Solver and Data Table dialogs could be closed mid-run.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Dialogs pass the active sheet; whatif_recalc::RunSheet binds a run to the stable sheet id and every trial, read-back and restore re-finds it; AppState.whatif_run is a single-flight claimed first by data tables, Goal Seek (and Cancel), Solver (and Restore) and both scenario commands, and refused (WHATIF_ANIMATION_LIVE) while an animation restore buffer is on file (a finished or orphaned animation no longer blocks); a deleted sheet returns WHATIF_SHEET_GONE; SolverResult carries sheet_id; the dialogs ignore Esc/X/Cancel while running and refresh the grid at the end; a refused Cancel or Restore keeps the dialog open. Tests in whatif_recalc_tests.rs, solver and dialog tests."
+      }
+    },
+    {
+      "id": "BUG-0618",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "whatif-manual-calculation",
+        "severity": "high",
+        "message": "WHAT-IF ROUTES MISHANDLED MANUAL CALCULATION: every trial recalculated whole sheets twice and formatted every formula into a discarded sink (quadratic, on the UI thread); Goal Seek and other read-back runs left unrelated stale cells stale where Excel recalculates the workbook at the end; Scenario Summary and transient animation frames freshened values the user had left stale; Scenario Show on a background sheet recalculated; animation Stop overwrote values the user made while paused; a background-sheet fallback freshened unrelated stale cells; a second Esc during Solver's final write left #LIMIT! in dependents.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Trials run the seeded cascade whatever the mode (cascade_whatever_the_mode; cascade_seeded_on_sheet for any sheet); a run ends with one Calculate Now pass under manual calculation (calculate_workbook_at_run_end), as Excel does; Scenario Summary uses RecalcMode::AsAnEdit; a background sheet is marked possibly stale instead of recalculated; animation journals formula values with their AST and Stop restores only cells still holding the last frame's value; Solver writes its answer through write_answer, which cannot be cancelled into #LIMIT!. Excel probed live. Tests: app/src-tauri/src/whatif_recalc_tests.rs::a_manual_mode_trial_evaluates_only_the_cells_that_read_its_input, app/src-tauri/src/whatif_recalc_tests.rs::goal_seek_under_manual_calculation_ends_with_the_whole_workbook_calculated, app/src-tauri/src/whatif_recalc_tests.rs::solver_under_manual_calculation_ends_calculated_when_kept_and_when_restored, app/src-tauri/src/whatif_recalc_tests.rs::a_manual_mode_scenario_summary_recalculates_nothing, app/src-tauri/src/whatif_recalc_tests.rs::a_manual_mode_animation_restores_stale_values_exactly, app/src-tauri/src/whatif_recalc_tests.rs::a_manual_mode_scenario_show_on_a_background_sheet_recalculates_nothing, app/src-tauri/src/whatif_recalc_tests.rs::a_background_sheet_trial_under_manual_recalculates_only_the_inputs_readers, app/src-tauri/src/whatif_recalc_tests.rs::a_paused_animations_stop_leaves_what_the_user_did_while_paused, app/src-tauri/src/whatif_recalc_tests.rs::a_second_esc_cannot_cut_solvers_answer_short, app/extensions/Solver/__tests__/solverDialogSheet.test.tsx::a second Esc during a run asks for no second stop."
+      }
+    },
+    {
+      "id": "BUG-0619",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "whatif-result-values",
+        "severity": "medium",
+        "message": "WHAT-IF RESULTS WERE WRITTEN WRONGLY: Data Table wrote error results as text 'Div0'/'Name' and booleans as text; Goal Seek 'not found' left x0*1.001 instead of the last trial; Goal Seek Cancel restored the original as a NUMBER (text or empty came back 0), left a Redo entry, popped its step before the write-back, and a failure on a non-numeric target dirtied the document with no undo step; animation frames used the caller's sheet index and any cells instead of the snapshot's.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "result_cell writes real Error/Boolean/Text cells; Goal Seek writes and reports the last probe; Goal Seek pushes one own undo step and Cancel (cancel_run) restores the cell and removes the step without a redo entry, only after the write-back succeeds; a non-numeric target is refused before any write and stays clean; frames copy the snapshot's sheet id and cell set and refuse cells outside it. Excel probed live. Tests: app/src-tauri/src/whatif_recalc_tests.rs::a_data_table_writes_errors_and_booleans_as_values_not_text, app/src-tauri/src/whatif_recalc_tests.rs::a_goal_seek_that_finds_nothing_leaves_its_last_trial, app/src-tauri/src/whatif_recalc_tests.rs::goal_seek_cancel_takes_the_run_back_and_leaves_nothing_to_redo, app/src-tauri/src/whatif_recalc_tests.rs::a_goal_seek_cancel_whose_write_back_fails_keeps_the_step, app/src-tauri/src/whatif_recalc_tests.rs::a_goal_seek_target_that_is_not_a_number_is_refused_before_anything_is_written, app/src-tauri/src/whatif_recalc_tests.rs::an_animation_frame_writes_the_snapshots_sheet_and_only_its_cells, app/extensions/GoalSeek/__tests__/goalSeekCancel.test.tsx::cancels the run by its own step id -- never an undo that leaves a redo -- and never retypes the original."
+      }
+    },
+    {
+      "id": "BUG-0620",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "calculation-state-pending",
+        "severity": "medium",
+        "message": "CALCULATION STATE REPORTED 'DONE' WHEN VALUES WERE STALE: leaving manual without recalculating left an AUTOMATIC workbook pending; an off-sheet undo under manual recalculated (or marked pending unconditionally) and missed whole-column/row and 3-D readers; a forward manual write read by =SUM(Sheet2!G:G), a qualified row or a 3-D span reported done; set_calculation_mode returned Err after applying, two in-flight switches could apply out of order, and a manual switch in the gap before a pass was followed by a full Calculate Now; opening a manual workbook while a script held manual flipped it automatic, and Open Application for Editing forgot the script's manual debt; the script interpreter's getCalculationState always said 'done'.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Leaving manual recalculates (recalculate_if_still_automatic, gated inside the pass, always Ok with the mode in effect); switches are serialised in the lib wrapper and ordered by ticket, the menu adopts the returned mode; off-sheet undo marks only sheets whose formulas read a restored cell (RestoredCells walker: qualified cells, ranges, whole lines, 3-D spans, names); qualified whole lines and every sheet of a 3-D span are cross-sheet dependency keys (WHOLE_LINE), so the forward mark asks them too; the AFTER_OPEN sweep forgets the debt only for a real File > Open, not a checkout; HostState carries calculation_state_impl into the interpreter. Excel probed live. Tests: app/src-tauri/src/commands/manual_calc_state_tests.rs::leaving_manual_for_automatic_recalculates_and_settles_the_state, app/src-tauri/src/calculation.rs::the_mode_command_recalculates_when_it_leaves_manual, app/src-tauri/src/calculation.rs::two_mode_switches_apply_in_request_order_whatever_order_they_get_the_lock, app/src-tauri/src/commands/manual_calc_state_tests.rs::an_undo_on_a_background_sheet_under_manual_recalculates_nothing_and_is_pending, app/src-tauri/src/commands/manual_calc_state_tests.rs::an_off_sheet_undo_under_manual_is_pending_when_another_sheet_reads_it_by_column_row_or_3d_span, app/src-tauri/src/commands/manual_calc_state_tests.rs::a_manual_write_read_by_another_sheets_column_row_or_3d_span_is_pending, app/src-tauri/src/commands/manual_calc_state_tests.rs::a_script_sees_the_hosts_calculation_state, app/src/core/lib/__tests__/calculationModeOrder.test.ts::sends the second switch only after the first has settled, app/extensions/CalculationOptions/__tests__/calculationModeMenuAdopts.test.ts::shows the mode the backend says is in effect, app/extensions/ScriptableObjects/__tests__/afterOpenReset.test.ts::checkout ({ path: '', source: 'checkout' }): calculation goes back to automatic, app/src/api/scriptHost/__tests__/hostResetOpenedCalcMode.test.ts::after an open, the script's manual debt is forgotten, not paid over the file's mode."
+      }
+    },
+    {
+      "id": "BUG-0621",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "calp-publish-across-documents",
+        "severity": "high",
+        "message": "AN ASYNC PUSH COULD CROSS DOCUMENTS: File > Open/New during calp_publish pushed one workbook and recorded the link (and audit row) in another; a manual-calculation edit between the pre-publish recalculation and assembly shipped stale values; calp_publish recalculated before gates that can refuse; a link re-pointed by a concurrent checkout still received the push; File > Open asked about unsaved changes only before the picker, so a push landing while the picker was open was discarded silently.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "FileState has a lock-free document epoch and a document pin: open_file/new_file move the epoch under an exclusive DocumentReplacement guard held across reset and restore; the push reads its epoch first, works under with_document_pinned, records the link only if the epoch is unchanged and the link still targets its application (PushLinkRecord), and refuses on a stale carrier (refuse_push_on_stale_carrier); all refusing gates (including an advisory preflight of core's workspace gates) run before recalculate_before_publish; File > Open re-checks isModified after the picker (pickFileToOpen / openAtPath) and asks again. Tests: calp_push_gate_tests and companions."
+      },
+      "notes": "A replaced workbook's push audit row now goes only to the session log; its durable home is open as BUG-0653."
+    },
+    {
+      "id": "BUG-0622",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "calp-shared-data-source-id",
+        "severity": "high",
+        "message": "TWO APPLICATIONS COULD SHARE ONE DATA-SOURCE ID: after BUG-0589, a NEW application published from a workbook subscribed to another filed the model under the source's id, so a subscriber to both minted two connections under one id and pivots, slicers and filters could read the other model; an open that connected neither model let the next refresh mint one under the shared id; Refresh All of an original and its re-keyed copy kept the copy's stale claim; the open path kept the first connection for a shared id.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Publish keeps an id only for a working copy pushing its own application (data_source_rekeys_for_target), otherwise files it under data_source_key_for_application and rewrites the whole carrier (rekey_carried_data_sources); subscribe, checkout, materialize and refresh refuse an id any other subscription claims (CALP_DATA_SOURCE_SHARED), reading live connections before any payload mints one (data_source_claim_carries); the refresh ledger keeps a dataSource row only while it is still carried or served; the open verifies every subscription and skips a shared id; reconnect_application_models_after_refresh_in re-asks after a refresh. Tests: app/src-tauri/src/calp_materialize_tests.rs::a_new_application_from_a_subscribed_workbook_files_its_model_under_its_own_key, app/src-tauri/src/calp_materialize_tests.rs::a_model_under_an_id_another_connection_serves_is_refused, app/src-tauri/src/calp_materialize_tests.rs::after_an_open_that_connected_neither_shared_model_no_refresh_mints_one, app/src-tauri/src/calp_materialize_tests.rs::opening_two_subscriptions_that_claim_one_data_source_id_connects_neither, app/src-tauri/src/calp_materialize_tests.rs::a_refresh_of_the_original_and_its_re_keyed_copy_together_drops_the_copys_stale_claim."
+      },
+      "notes": "Packages published before round 11 with a shared id are refused at subscribe and must be republished (no backward compatibility). Remaining (pre-existing): a refresh never removes a connection whose data source the new version dropped."
+    },
+    {
+      "id": "BUG-0623",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "custom-function-results-cache-lifecycle",
+        "severity": "high",
+        "message": "CUSTOM-FUNCTION ANSWERS OUTLIVED THEIR CODE OR THEIR NAME: an application update refused an unchanged composite on an earlier sheet that read a later installed sheet (and the save kept #NAME?); answers were never forgotten when the function's code changed (author edit, application update, JSON-view edit, an update failing after the library merge), and the old realm could re-file an old-code answer before the re-install; a hold was never released after a failed re-install, and overlapping installs released it early; one sheet could be starved by the 64 MB workbook ledger; a deleted library function, a seeded root call, or the previous workbook's library names stayed 'known', so IFERROR(...,0) stayed #NAME?; IFERROR around an add-in function saved a plausible 0 after open.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "installed_sheet_order settles installed sheets topologically; the library write itself diffs definitions, forgets changed answers and holds them until the page re-installs (calp doors, json_view set_script_json, write_script_record), released by library generation (installUnlessSuperseded on the serialized queue); CallMemoLedger evicts across sheets; known names come from the libraries plus the page's registry, reset on open; seeding no longer vouches for a name; add-in functions registered with formulas.registerFunction count as known. Tests: app/src-tauri/src/calp_materialize_tests.rs::an_update_judges_a_cell_after_the_installed_sheets_it_reads, app/src-tauri/src/calp_materialize_tests.rs::an_update_that_replaces_a_custom_functions_code_forgets_the_old_codes_answers, app/src-tauri/src/calp_materialize_tests.rs::an_answer_the_old_realm_serves_before_the_page_reinstalls_is_never_filed, app/src-tauri/src/bi/cube.rs::an_edited_custom_function_never_serves_its_old_codes_answer, app/src-tauri/src/bi/cube.rs::a_custom_function_the_library_dropped_is_an_ordinary_name_error_again, app/src-tauri/src/bi/cube.rs::an_add_ins_custom_function_stays_a_refusal_around_iferror_and_a_typo_does_not, app/src-tauri/src/bi/cube.rs::a_saved_root_call_of_a_function_nothing_defines_does_not_make_it_sticky, app/src-tauri/src/json_view.rs::a_library_edited_as_json_forgets_the_old_codes_answers, core/engine/src/cube.rs::a_redefined_custom_function_forgets_its_own_answers_only, core/engine/src/cube.rs::a_full_workbook_budget_never_starves_a_sheet_that_holds_little, core/engine/src/evaluator.rs::seeding_a_saved_root_call_files_its_answer_but_does_not_vouch_for_the_name, core/engine/src/evaluator.rs::a_held_custom_function_is_served_but_its_answer_is_never_filed, app/src/api/__tests__/customFunctionHoldRelease.test.ts::a hold whose refresh install failed is released by the next successful install, app/src/api/__tests__/customFunctionHoldRelease.test.ts::an install that read an older library than the one already installed is skipped, app/src/api/__tests__/customFunctionRegistryReport.test.ts::reports an add-in's registered function to the backend, and its removal."
+      },
+      "notes": "Remaining (Excel parity gap): Excel COMPUTES an add-in function on F9 and on save; Calcula keeps the sticky refusal there because a full pass runs no custom function."
+    },
+    {
+      "id": "BUG-0624",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "clipboard-snapshot-and-mode-endings",
+        "severity": "high",
+        "message": "COPY/CUT MODE AND ITS SNAPSHOT DIVERGED FROM EXCEL: a ribbon Sort, AutoFilter criteria, Group, Merge, F9, a calculation-mode change, a pivot Refresh, Data > Refresh Data and Delete Cells did not end the mode, so a later Paste moved or pasted the pre-change snapshot; above 100,000 cells the stale re-read was skipped (stale paste, untrue cut refusal); Paste Values pasted an old computed value after a recalculation or when the display text was unchanged; the re-read kept the old system-clipboard text, comments and validations; a failed system-clipboard write left the internal text ahead; Paste Special did not wait for a running re-read; a stale mark between settle and check refused a paste untruly; the settle was unbounded under a writer; a write landing during the paste's own awaits was pasted stale.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "AppEvents.DATA_COMMAND_APPLIED is announced by each command's one write path after success (sort, removeDuplicates, Text to Columns, filter doors, merge, calculateNow/Sheet, setCalculationMode, refreshPivotForUser, the data aftermath, Refresh Data); deletes end the mode; any change on a copied cell marks the snapshot stale and the re-read follows content, not area (sparse typed read, lazy above 100k), rebuilding text, comments and validations; writeToSystemClipboard reports success; settledInternalClipboard waits, bounded (3 reads per refresh), with an explicit snapshotReadFailed flag; the paste re-checks freshness right before its batch. Excel probed live (probe-copy/probe-endings). Tests: app/src/core/hooks/__tests__/clipboardFollowsSource.test.tsx::Remove Duplicates (the real @api removeDuplicates) ends a copy, app/src/core/hooks/__tests__/clipboardFollowsSource.test.tsx::the REAL deleteCellsRange (Delete Cells, shift up, another column) ends a copy, app/src/core/hooks/__tests__/clipboardRecalcAndEndings.test.tsx::copy B1 (=A1*2, 10); a script writes 7 into A1 and B1 recalculates to 14: the copy carries 14, app/src/core/hooks/__tests__/clipboardRecalcAndEndings.test.tsx::Calculate Now (F9) and Calculate Sheet (Shift+F9), a copy's and a cut's, app/src/core/hooks/__tests__/clipboardRecalcAndEndings.test.tsx::an AutoFilter turned on, its criteria applied, a column's or all criteria cleared, app/src/core/hooks/__tests__/clipboardRecalcAndEndings.test.tsx::Merge and Unmerge, app/extensions/Pivot/lib/__tests__/pivotUserRefresh.test.ts::announces DATA_COMMAND_APPLIED { command: 'refresh' } once, after the refresh, app/extensions/Collaboration/__tests__/refreshDataEndsClipboard.test.ts::with nothing to refresh: one DATA_COMMAND_APPLIED {command:'refresh'}."
+      },
+      "notes": "Open follow-up BUG-0657: a source under a continuous writer pastes the last frontend re-read, not a backend copy."
+    },
+    {
+      "id": "BUG-0625",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "insert-copied-cells-and-tiling",
+        "severity": "high",
+        "message": "INSERT AND PASTE DID NOT MATCH EXCEL WITH A COPY PENDING: Insert inserted blank cells where Excel does Insert Copied Cells; Paste never tiled a copy into a selection that is an exact multiple of it; a refused Insert Copied Cells rolled back the backend only, leaving the copy source, followers and screen shifted; a header right-click with copied rows said Insert and ended the copy; Paste Special tiled cell by cell (about 1M awaited IPCs for one cell into a column); the inserted room and the tiled paste could disagree; a move or paste past the sheet edge announced the full block.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "insertCopiedCells (@api/lib) inserts and pastes in one step with a savepoint; pasteTiles / pasteMayTile is one rule for plain Paste, Paste Special and the inserted room; a tiled paste is one updateCellsBatch plus one shiftFormulasBatch and one batched set_cell_style; takeBackRefusedMove announces the rollback (announceRolledBackRestore); the header menu shows Insert Copied Cells (GridContextMenuItem.replaces); moves and pastes past the edge are refused (MOVE_PAST_THE_EDGE / PASTE_PAST_THE_EDGE). Excel probed live. Tests: app/extensions/BuiltIn/InsertDeleteCells/__tests__/insertCopiedCells.test.ts::the room is the COPY's size at the selection's top-left: A1:B1 copied into F2 -> F2:G2, app/extensions/BuiltIn/InsertDeleteCells/__tests__/insertCopiedCells.test.ts::the room agrees with the paste: column A copied into C:G (5.2M cells, past the paste's cap) inserts ONE column; into C:D, two, app/src/core/hooks/__tests__/clipboardPasteTiles.test.tsx::tiles only when BOTH axes are exact multiples and the selection is larger, app/src/core/hooks/__tests__/clipboardPasteTiles.test.tsx::a copied formula is shifted PER TILE (B1 =A1*2 into D1:D3 -> =C1*2, =C2*2, =C3*2), app/extensions/BuiltIn/PasteSpecial/__tests__/pasteSpecialTiles.test.ts::a tiled Paste Special makes a BOUNDED number of backend calls, whatever the area, app/src/shell/registries/__tests__/gridInsertCopiedHeaderMenu.test.ts::a copy pending: both stand down for the item that replaces them (the extension's Insert Copied Cells), app/src/core/hooks/__tests__/clipboardMoveRelocation.test.tsx::a move is all or nothing, and nothing lands past the sheet's edge."
+      },
+      "notes": "Deliberate: above 5,000,000 cells (MAX_CLIPBOARD_CELLS) Calcula pastes once where Excel would tile."
+    },
+    {
+      "id": "BUG-0626",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "structural-follow-moves-review",
+        "severity": "high",
+        "message": "BUG-0614's followers mis-handled moves: the Undo of a Merge moved and permanently deleted bookmarks and watches the merge never moved; the Undo of a cut-paste deleted a bookmark added at the emptied source; a drag-move swallowed a relocation refusal, committed and still announced CELLS_MOVED (row/column drags too); moves announced from a joined step that was later rolled back, remembered joined moves were never released or were released globally; embedded forms did not follow a rollback or Undo of a line insert; a granted macro run's rollback announced no restore.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "One shared CELLS_MOVED announcer (core/lib/cellsMoved.ts) used by clipboard, drag and merge, announcing only kept steps; followers leave a returning item in place and set the stationary one aside; drag-move is all-or-nothing (markMovePoint / takeBackRefusedMove); remembered moves are tagged by undo transaction and released when their step closes; embedded forms follow through followStructuralEdits; host.ts showRolledBackRun calls announceRolledBackRestore; orphaned-delete memory is bounded (128)."
+      }
+    },
+    {
+      "id": "BUG-0627",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "protected-sheet-format-parity",
+        "severity": "high",
+        "message": "FORMATTING ON PROTECTED SHEETS DID NOT MATCH EXCEL: with Format Cells allowed Calcula refused every format on a LOCKED cell (Excel formats it and keeps it locked); a paste or Fill Down of a locked source locked unlocked input cells and ignored the Format Cells option (sheet batch, floating-grid batch, fill_range); sheet-route Paste Special Formats/No Borders painted part of a range before refusing; Cut + Paste dropped the moved format; a blank batch write with no style lost the cell's own format; Paste Special spoke where Excel is silent; Format Painter / Paste Formatting onto a floating grid committed a partial batch; several decisions were made holding no lock (checkArea, target batch, fill_range); the move claim was caller-asserted, so renderer code could land any style on an unlocked cell.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Formatting gates ask only the Format Cells option (host's for a floating grid); every write on a protected sheet keeps the cell's Locked flag (keep_cell_lock / keep_backing_lock); a refused option drops the carried style and a pasted blank keeps its own style; pastes list their exact cells and gate before any write (canEditCells list form, one setCellStyle checkArea); a move carries its style via CellUpdateInput.moved, now the SOURCE cell (MovedFrom) honoured only when that source shows the written style (honoured_move_claims, sheet route); formatting-only pastes that only the option refuses are silent; decisions are re-asked under the held guards (format_protection_under_guards); can_edit_cell is async and bounded. Excel probed live. Tests: app/src-tauri/src/commands/format_home_tests.rs::a_protected_sheet_that_allows_format_cells_formats_locked_cells_and_keeps_their_lock, app/src-tauri/src/commands/format_home_tests.rs::the_style_check_asks_the_whole_stroke_the_format_cells_option_and_writes_nothing, app/src-tauri/src/commands/protected_paste_format_tests.rs::protected_paste_with_format_cells_lands_the_format_and_keeps_the_lock, app/src-tauri/src/commands/protected_paste_format_tests.rs::protected_paste_without_format_cells_lands_the_value_and_drops_the_format, app/src-tauri/src/commands/protected_paste_format_tests.rs::protected_fill_down_obeys_format_cells_and_keeps_every_lock, app/src-tauri/src/commands/protected_move_format_tests.rs::protected_move_carries_the_format_without_format_cells_and_keeps_the_lock, app/src-tauri/src/commands/protected_move_format_tests.rs::a_move_claim_carries_a_format_only_from_a_source_that_holds_it, app/src-tauri/src/commands/protected_move_format_tests.rs::blank_write_without_a_style_keeps_the_cells_own_format, app/src-tauri/src/commands/cell_target_content_tests.rs::a_styled_paste_onto_a_grid_lands_the_values_and_obeys_the_hosts_format_cells_option, app/src-tauri/src/commands/cell_target_content_tests.rs::a_target_batch_re_asks_format_cells_and_the_hosts_protection_under_the_write_guards, app/extensions/BuiltIn/PasteSpecial/__tests__/pasteSpecialProtectedSheet.test.ts::No Borders onto B1:D1 with D1 LOCKED: refused whole, B1 and C1 untouched, no step, app/extensions/BuiltIn/FormatPainter/__tests__/formatPainterCellTarget.test.ts::a refused grid stroke (the host's protection) changes NO cell, opens no step, and says why."
+      },
+      "notes": "Open follow-ups: BUG-0654 (the floating-grid destination route still trusts the move claim unbound) and BUG-0655 (Paste Formatting onto a floating grid whose host refuses Format Cells still speaks). FormulaHidden travel is owner question (a) on BUG-0616."
+    },
+    {
+      "id": "BUG-0628",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "sheet-name-case-rule",
+        "severity": "high",
+        "message": "SHEET-NAME MATCHING USED THE WRONG CASE RULE: uniqueness refused names Excel accepts (Straße beside STRASSE) and other doors compared ASCII-only; about 20 frontend lookups used toLowerCase; resolve_named_range_coords matched ASCII-only and silently fell back to sheet 0 (a script read or wrote the wrong sheet); the lexer uppercased bare names with full Unicode (=Straße!A1 became STRASSE!A1) and later folded non-ASCII into ASCII (Kelvin sign); bare non-ASCII qualifiers in names and bindings stopped following inserts/deletes; the formula bar quoted non-ASCII names; the ref highlighter and A1->R1C1 conversion were ASCII/byte based; the load-time rename of a now-colliding pair moved the keeper's references, reached only cells and only logged; publish pivot-anchor maps mixed folds.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "One measured rule, identity::sheet_names_equal / sheet_name_key (core/identity/src/sheet_name_case.rs, 1,516 live-Excel case pairs, length-preserving), used by every backend door and by @api/sheetNames (table generated from the Rust table, with a drift test and a census ratchet); an unknown prefix is refused; the lexer folds per character without crossing into ASCII; shifter regexes use the lexer's letter class; bare-name rendering follows Excel's measured rule; the load rename uses SheetRenames exact_spelling mode across formulas, names, charts, CF/DV and pivots and shows one toast after the open. Excel probed live."
+      }
+    },
+    {
+      "id": "BUG-0629",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "defined-and-table-name-key",
+        "severity": "high",
+        "message": "DEFINED AND TABLE NAMES WERE KEYED WITH FULL to_uppercase: a defined name with ß became STRASSE while the lexer produced STRAẞE (#NAME?); table names likewise; push scope no longer recognised another application's ligature-spelled defined name as foreign; checkout collisions missed a held ligature name; object-binding analysis compared mismatched key sets; xlsx import deduped names Excel keeps apart.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "identity::defined_name_key / defined_names_equal (per-character fold plus the 59 measured ligature expansions) keys defined names, and tables::table_name_key (the same rule) keys tables, at every registry, lookup, push-scope, checkout, binding and xlsx-import site; link keys are compared as stored. Excel probed live. Tests: app/src-tauri/src/defined_name_key_tests.rs::a_formula_spelled_with_sharp_s_reads_the_name_excel_says_it_is, app/src-tauri/src/defined_name_key_tests.rs::names_excel_keeps_apart_stay_apart, core/identity/src/defined_name_case.rs::defined_names_follow_excels_measured_rule, core/identity/src/defined_name_case.rs::the_expansion_table_is_sorted_and_its_letters_are_folded, app/src-tauri/src/calp_push_scope.rs::another_applications_ligature_name_is_never_includable, app/src-tauri/src/calp_push_scope.rs::the_links_name_keys_are_compared_exactly_as_stored."
+      },
+      "notes": "The table/defined-name one-way gate is owner question (d) on BUG-0616."
+    },
+    {
+      "id": "BUG-0630",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "sheet-name-suffix-and-spaces",
+        "severity": "medium",
+        "message": "SHEET NAMES DIFFERED FROM EXCEL: a colliding 31-character application sheet got a 35-character name; unique_sheet_name trimmed the space a cut stem leaves; Copy Sheet of 'Data (2)' gave 'Data (2) (2)' (Excel: 'Data (3)'); leading/trailing spaces were trimmed on rename, load, DV list sources and Create PivotTable's new sheet; a script could create a spaces-only sheet but not address it.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "collision_sheet_name cuts the stem to 31 minus the suffix without trimming and is shared by copy and install doors; copy_number_suffix counts on from an existing (n); validate_sheet_name refuses only the empty name (other Excel rules kept) and sanitize keeps spaces; DV list sources and Create PivotTable take the name as written. Excel probed live. Tests: core/calp/src/pull.rs::a_collision_name_is_cut_to_excels_31_characters, app/src-tauri/src/sheet_names.rs::a_generated_copy_name_is_cut_like_excels, app/src-tauri/src/sheet_names.rs::copying_a_numbered_name_counts_on_like_excel, app/src-tauri/src/sheet_names.rs::only_the_empty_name_is_refused_and_spaces_are_kept_like_excel, app/src-tauri/src/sheet_names.rs::sanitizing_leaves_no_apostrophe_at_either_end_and_keeps_spaces, app/extensions/DataValidation/lib/__tests__/listSourceRef.test.ts::parseListSourceText: a sheet name with spaces is its own sheet, app/extensions/Pivot/components/__tests__/createPivotDialogCanvas.test.tsx::creates the new worksheet with the name exactly as typed, spaces kept, app/src/api/scriptHost/__tests__/sheetRefResolution.test.ts::addresses every name creation accepts, a name of spaces only included."
+      }
+    },
+    {
+      "id": "BUG-0631",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "name-and-table-edit-doors",
+        "severity": "medium",
+        "message": "NAME/TABLE EDIT DOORS SKIPPED THEIR RULES: the JSON view renamed a table without validity, collision checks or the formula rename, and its rename plus field replacement were two critical sections with no undo; rename_table built its DocumentEffect before 'Table name already exists'; the JSON view's notebook arm minted its effect before not-found and dropped sourcePackage; the CLI 'show name' swallowed the refusal reason; a script's named-range mirror kept stale values when the name's sheet was refused.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "set_table_json routes a rename through tables::rename_table_core (one critical section, effect after every refusal) inside one 'Edit table' undo transaction; set_notebook_json mirrors the script arm; the CLI prints the backend reason; a refused mirror posts an empty address and values. Tests: app/src-tauri/src/commands/structured_ref_tests.rs::a_json_view_rename_takes_the_rename_tables_gates_and_formula_rewrite, app/src-tauri/src/commands/structured_ref_tests.rs::a_json_view_table_edit_is_one_undo_step_and_keeps_its_identity, app/src-tauri/src/commands/structured_ref_tests.rs::a_refused_rename_leaves_the_document_clean, app/src-tauri/src/json_view.rs::a_distributed_notebook_edited_as_json_keeps_its_provenance, app/src-tauri/src/json_view.rs::an_unknown_or_renamed_notebook_is_refused_and_leaves_the_document_clean, app/extensions/CommandLine/__tests__/appCli.test.ts::show name passes the backend's refusal reason to the user, app/src/api/scriptHost/__tests__/objectsWave4.test.ts::a named-range mirror is cleared, not kept stale, when the name stops resolving."
+      }
+    },
+    {
+      "id": "BUG-0632",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "undo-record-atomicity",
+        "severity": "medium",
+        "message": "UNDO RECORDS COULD INTERLEAVE: concurrent one-line resizes could record steps in swapped order; relocate_named_ranges recorded a whole-registry snapshot after releasing the registry and without grid locks, so a concurrent name edit was undone with it; a typed value with sheets grouped was two undo steps (and its transaction stayed open across awaits, letting other writers join).",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Resizes hold grid from gate through record; relocate_named_ranges takes the name writers' order; delete_pivot_table's release-before-record is runtime-tested; update_cell takes group_sheets and update_cell_grouped writes all grouped sheets in one owned transaction. Excel probed live (one Ctrl+Z undoes every grouped sheet). Tests: app/src-tauri/src/commands/dimensions_batch_tests.rs::concurrent_resizes_of_one_column_record_their_steps_in_the_order_they_wrote, app/src-tauri/src/state_digest_lock_order_tests.rs::the_name_writers_hold_the_registry_until_their_undo_steps_are_recorded, app/src-tauri/src/state_digest_lock_order_tests.rs::deleting_a_pivot_never_holds_pivot_tables_while_it_waits_for_the_undo_stack, app/src-tauri/src/commands/cross_sheet_recalc_tests.rs::a_grouped_entry_in_one_transaction_is_one_undo_step_that_lands_on_the_edits_sheet, app/src-tauri/src/commands/cross_sheet_recalc_tests.rs::a_grouped_entry_is_one_call_that_closes_its_own_undo_step, app/src/core/hooks/__tests__/editGroupReplication.test.tsx::a grouped entry is ONE undo step, as Excel's is."
+      }
+    },
+    {
+      "id": "BUG-0633",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-export-unopenable-file",
+        "severity": "high",
+        "message": "THE .XLSX EXPORT WROTE FILES EXCEL REFUSES OR LOST THE SAVE: a text result 'NaN'/'Inf'/'Infinity' was written as a number; a static error cell with a hyperlink got a duplicate t= attribute; an internal or file hyperlink refused the whole save; a formula cell inside a spill footprint made Excel refuse the workbook; an array-constant defined name lost its braces; a tooltip over 255 characters dropped the link; an unwritable hyperlink was only a stderr warning.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Cached text results are typed explicitly; the hyperlink pass runs before the cell loop and every post-processing rewrite refuses rather than duplicate t=/vm=/cm=; excel_hyperlink_target maps internal and file targets; a blocked spill origin is written as Excel saves it (ref = origin, cached #SPILL!); library_formula preserves braces; screen tips are cut to 255 characters; save_xlsx_reporting_losses returns XlsxExportLosses with a plain sentence. Each case opened in live Excel 16 (every_cell_kind_exports_a_file_that_opens matrix)."
+      }
+    },
+    {
+      "id": "BUG-0634",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-formula-syntax-export",
+        "severity": "high",
+        "message": "MODERN FORMULA SYNTAX WAS EXPORTED AS TYPED, AND LIVE EXCEL REFUSED THE WORKBOOK OR SHOWED #NAME?: LAMBDA/LET parameters without _xlpm. (and the scanner then prefixing $A$1 columns, error literals and the second half of A:B); a built-in call beside a same-named parameter; bare C/R (Excel's R1C1 this-column/row); cell-shaped parameter names (A1, E5, LOG10); optional [y] parameters; Calcula's internal __INVOKE__ marker for inline LAMBDA calls; trim references (A1:.A5) and the spill operator (A1#); the this-row shorthand Table1[@Col]; implicit intersection @; column names holding #; row-range trims; a C/R after a trim dot; a LET name put in scope inside its own value; a function-named parameter called with an arity the built-in rejects; R1C1-shaped tokens (RC, R1C1, RC[-1]).",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "core/persistence/src/xlsx_formula_text.rs is one token grammar mirroring Calcula's lexer: _xlpm./_xlop./_xlnm. per Excel's scope rules, __INVOKE__ collapsed to lambda(args), _xlfn._TRO_* / ANCHORARRAY / SINGLE, [[#This Row],[X]] with '# re-escaped, dotted_column_range and row_trim, r1c1_reference writes the anchor-relative A1 text, and a formula Excel cannot hold (Unwritable::BuiltinArity) is written as its value and reported; the reader reverses each spelling. Excel 16's own saved text is the oracle: xlsx_formula_text::live_table drives every row through engine::Cell::new_formula -> SavedCell::from_cell -> save_xlsx and load_xlsx."
+      },
+      "notes": "Bare C/R exports are lossy by Excel's design (J:J cannot read back as the letter; rows marked round_trips=false). Open after round 20: BUG-0640..0645 (verify-pass findings), BUG-0646..0651 (parser/engine/export items the lanes reported)."
+    },
+    {
+      "id": "BUG-0635",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-export-fidelity",
+        "severity": "medium",
+        "message": "THE .XLSX ROUND TRIP LOST OR MISTYPED CONTENT: cached boolean/error/numeric-text results were typed str/0/number; a static error was written as text; a hidden column imported with 0px width; #SPILL!/#CALC!/#BLOCKED! became #VALUE! and #CIRCULAR! was not cached as 0; rich text was exported plain; a sheet-scoped name on a sheet with an apostrophe or a '!' was mis-scoped or dropped; styled cells exported the theme alias 'Body' as a font name; a styled empty linked cell lost its style; relative file and dotted-name links were mis-mapped and %20 was not decoded; the reader parsed sharedStrings twice, held the whole file and decompressed every sheet part again, and the writer re-deflated every part.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Writer post-processing types cached results and static errors (t=\"e\", rich-value vm for extended errors, #CIRCULAR! as 0), writes rich runs over the cell font, quotes scoped names and writes '!'-sheet local names via localSheetId, maps Body/Headings to the theme font, keeps the cell style on links, and rewrites only parts that need it; states Excel's calcFeatures extension; the reader skips 0-width hidden columns, reads <r> runs, decodes %20, skips _xlfn./_xlpm. compatibility names case-insensitively, places r-less <c> like Excel, and streams parts. Excel probed live. Tests: core/persistence/src/xlsx_writer.rs::a_formula_result_is_cached_with_excels_cell_type_and_read_back_as_that_type, core/persistence/src/xlsx_writer.rs::a_static_error_cell_is_written_as_excels_error_constant, core/persistence/src/xlsx_writer.rs::an_extended_error_round_trips_through_excels_rich_value_metadata, core/persistence/src/xlsx_writer.rs::a_hidden_line_with_no_size_of_its_own_unhides_at_the_standard, core/persistence/src/xlsx_writer.rs::rich_text_cells_export_excels_runs_and_read_back, core/persistence/src/xlsx_writer.rs::excels_own_rich_shared_strings_are_read_as_runs, core/persistence/src/xlsx_writer.rs::a_name_scoped_to_a_sheet_with_an_apostrophe_is_written_as_excel_does, core/persistence/src/xlsx_writer.rs::a_name_scoped_to_a_sheet_with_a_bang_is_written_as_excel_does, core/persistence/src/xlsx_writer.rs::theme_fonts_are_written_as_excels_theme_font_references, core/persistence/src/xlsx_writer.rs::a_styled_linked_cell_keeps_its_style_with_the_link_look, core/persistence/src/xlsx_writer.rs::hyperlink_targets_are_written_as_excel_saves_them_and_read_back, core/persistence/src/xlsx_writer.rs::a_link_target_with_a_space_reads_back_as_excel_shows_it, core/persistence/src/xlsx_writer.rs::excels_compatibility_names_are_not_imported, core/persistence/src/xlsx_writer.rs::an_unknown_error_in_a_cell_with_no_r_attribute_still_imports, core/persistence/src/xlsx_writer.rs::every_export_states_excels_calc_features, core/persistence/src/xlsx_writer.rs::every_cell_kind_exports_a_file_that_opens."
+      }
+    },
+    {
+      "id": "BUG-0636",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "let-bound-bare-column-range",
+        "severity": "medium",
+        "message": "A BARE COLUMN RANGE NAMED LIKE A LET/LAMBDA PARAMETER WAS READ AS COLUMNS: Excel reads B:B under LET(b,..) as the parameter's range (Calcula computed column B); once bound, the structural shift and the Fill/Copy+Paste relative shift rewrote b:b as C:C (reading column C), and the parser bound A:B under LET(b,..) by its SECOND half (#NAME? where Excel sums A:B).",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "parser::bind_parameter_column_ranges binds a bare, non-absolute L:L only when its FIRST half names a binder in scope (a LET name only in later values); Evaluator::eval_bound_name_range evaluates it, including an unbound C/R second half as Excel's R1C1 column/row; structure.rs hold_parameter_column_ranges / release_parameter_column_ranges wrap the structural shift and shift_formula_internal_with_tables (every fill and paste route). Excel probed live."
+      },
+      "notes": "Documented divergence: Excel's Fill Right of =LET(b,2,SUM(A:B)) shows SUM(B:C) and 1650; Calcula re-parses the shifted text (b:C, #VALUE!)."
+    },
+    {
+      "id": "BUG-0637",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "3d-span-dependency-edges",
+        "severity": "medium",
+        "message": "A 3-D REFERENCE MISSED SHEETS ADDED TO ITS SPAN: the cross-sheet map keyed only the span's end sheets (later every sheet, but only at registration), so a sheet moved, copied or inserted into Sheet1:Sheet3 never recalculated =SUM(Sheet1:Sheet3!K20), and a sheet moved out kept a stale edge.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "normalize_cross_sheet_refs keys every sheet of a span; sheets::reregister_3d_span_edges runs after move, copy, add and delete, and move/copy recalculate span readers. cross_sheet_recalc_tests a_sheet_moved_or_copied_into_a_3d_span_is_read_by_it_and_one_moved_out_is_not."
+      }
+    },
+    {
+      "id": "BUG-0638",
+      "status": "fixed",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "extension-schedule-expose-hardening",
+        "severity": "medium",
+        "message": "THE NEW schedule.expose DOOR (BUG-0616 item 3) HAD GAPS: withdrawing an older registration removed a newer one under the same name; publishing raised a 'schedule' consent prompt on every launch; an overwritten handler was never freed; a crafted workbook's scheduled-job row could fire an installed extension's published method.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "Registrations are owned (withdraw clears only its own; the latest SENT registration replaces and frees the old); ext.scheduleExpose is capability-free (creating the job already asks for schedule, and the declared ceiling is still enforced); scripting/scheduler.rs binds an extension job to its extension, import_jobs_for_workbook refuses a workbook row naming an extension, and sweep_due removes and audits any extension job not registered live this session. Tests: app/src/api/scriptHost/__tests__/extensionScheduledJobs.test.ts::withdrawing an OLDER registration leaves a NEWER one under the same name in place, app/src/api/scriptHost/__tests__/extensionScheduledJobs.test.ts::publishing asks for NO consent (the job does); an ungranted add-in can publish but not schedule, app/src/api/scriptHost/worker/__tests__/extensionScheduleExposeOverwrite.test.ts::frees the overwritten function at once, and the newer one stays callable, app/src-tauri/src/scripting/scheduler.rs::a_workbook_row_naming_an_extension_is_refused_on_load, app/src-tauri/src/scripting/scheduler.rs::an_extension_job_fires_only_if_the_extension_registered_it_this_session, app/src-tauri/src/scripting/scheduler.rs::an_extension_job_is_bound_to_that_extensions_own_mount, app/src-tauri/src/scripting/scheduler.rs::an_extension_job_is_never_written_even_if_a_workbook_script_shares_its_id."
+      }
+    },
+    {
+      "id": "BUG-0639",
+      "status": "fixed",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "load-warning-text-and-timing",
+        "severity": "low",
+        "message": "Open-time warnings were raw: the AutoFilter load warning showed the internal file name and serde errors, and the load-rename toast was emitted before the open finished.",
+        "digestDiffPaths": []
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-31",
+        "description": "persistence::autofilter_load_warning gives a plain sentence; warnings are collected and emitted once after the last fallible step. Tests: app/src-tauri/src/autofilter_recovery_tests.rs::the_autofilter_load_warning_is_in_plain_words, app/src-tauri/src/autofilter_recovery_tests.rs::load_warnings_are_emitted_only_after_the_open_succeeded."
+      }
+    },
+    {
+      "id": "BUG-0640",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-dotted-column-range-dollar",
+        "severity": "high",
+        "message": "XLSX EXPORT: A DOTTED COLUMN RANGE WITH $ ON EITHER HALF IS GARBLED AND EXCEL REFUSES THE WHOLE WORKBOOK: SUM(A:.$C) is written SUM(A:.$J:J), SUM($A:.C) as SUM($_xlfn._TRO_TRAILING(A:C)), $A.:.$C as $A.:.$J:J, LET(c,1,SUM(A:.$C)+c) as A:.$_xlpm.C; Excel saves _xlfn._TRO_TRAILING(A:$C) etc. (round 20 verify pass 2, live Excel 16).",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Accept an optional $ before either half in dotted_column_range (core/persistence/src/xlsx_formula_text.rs ~773-792, 1175-1197) and start the wrap at the $ token. Acceptance: add rows to the real-path table test xlsx_formula_text::live_table (core/persistence/src/xlsx_formula_text_live_table.rs) and re-run the live-Excel verifier harness in the programme scratchpad (rev18x/pass2: each formula typed into a fresh Excel 16 and saved, Calcula's single-formula export opened in Excel, Calcula's text patched into Excel's own workbook for values, load_xlsx for the reader)."
+      }
+    },
+    {
+      "id": "BUG-0641",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-unholdable-formulas-reach-file",
+        "severity": "high",
+        "message": "XLSX EXPORT: FORMULAS EXCEL CANNOT HOLD STILL REACH THE FILE, AND EXCEL REFUSES THE WHOLE WORKBOOK: LET(abs,abs(1,2),abs) (the arity check does not run while the name is pending in its own value), LET(ifs,LAMBDA(x,y,z,x),ifs(1,2,3)), and plain built-ins with a bad arity Calcula's parser stores: ABS(1,2), ROUND(1), PI(1), IF(), IFS(1,2,3), SWITCH(1), CHOOSE(1), SUMIFS(A1:A5,B1:B5); also a LET/LAMBDA declaring one name twice.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Run the arity check on EVERY built-in call (not only parameter-named ones), model IFS (even count) and SWITCH (at least 3) explicitly, mark duplicate LET/LAMBDA names unwritable; each such cell falls back to its value and is reported in XlsxExportLosses (xlsx_formula_text.rs ~622-657, 879-924). Acceptance: add rows to the real-path table test xlsx_formula_text::live_table (core/persistence/src/xlsx_formula_text_live_table.rs) and re-run the live-Excel verifier harness in the programme scratchpad (rev18x/pass2: each formula typed into a fresh Excel 16 and saved, Calcula's single-formula export opened in Excel, Calcula's text patched into Excel's own workbook for values, load_xlsx for the reader)."
+      },
+      "notes": "Related: BUG-0648, the parser accepts these formulas at entry where Excel refuses them."
+    },
+    {
+      "id": "BUG-0642",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-future-functions-and-eta",
+        "severity": "high",
+        "message": "XLSX EXPORT: TRIMRANGE, GROUPBY AND PIVOTBY GO OUT WITHOUT _xlfn. AND ETA-REDUCED FUNCTION ARGUMENTS WITHOUT _xleta.: SUM(TRIMRANGE(A1:C10)), ROWS(GROUPBY(A1:A5,B1:B5,SUM)), SUM(BYROW(A1:C2,SUM)) show #NAME?/#VALUE! in Excel where Excel's own file holds _xlfn.TRIMRANGE / _xleta.SUM; the reader keeps _xleta. on import.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Add TRIMRANGE, GROUPBY, PIVOTBY (and any other built-in newer than rust_xlsxwriter's table) to the _xlfn. escaping, write a bare built-in used as a function value as _xleta.NAME, and strip _xleta. in the reader's strip_future_function_prefixes (core/persistence/src/xlsx_reader.rs). Acceptance: add rows to the real-path table test xlsx_formula_text::live_table (core/persistence/src/xlsx_formula_text_live_table.rs) and re-run the live-Excel verifier harness in the programme scratchpad (rev18x/pass2: each formula typed into a fresh Excel 16 and saved, Calcula's single-formula export opened in Excel, Calcula's text patched into Excel's own workbook for values, load_xlsx for the reader)."
+      }
+    },
+    {
+      "id": "BUG-0643",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "structured-ref-second-special-item",
+        "severity": "high",
+        "message": "A SECOND SPECIAL ITEM IN A STRUCTURED REFERENCE IS STORED AS A COLUMN: ROWS(Table3[[#Headers],[#Data]]) is stored as ROWS(TABLE3[[#Headers],['#Data]]) and [[#Data],[#Totals]] as [[#Data],['#Totals]], so Calcula reads a column named '#Data' and the .xlsx export makes Excel show #REF! (Excel's value 10).",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "In the nested-specifier parser and core/engine/src/ast_render.rs (escape_column_name / render_table_specifier, ~800-839), recognise #All/#Data/#Headers/#Totals/#This Row in any position of a multi-item specifier and render them unescaped; add a render->parse fixed-point test for [[#Headers],[#Data]] and [[#Data],[#Totals]]. Acceptance: add rows to the real-path table test xlsx_formula_text::live_table (core/persistence/src/xlsx_formula_text_live_table.rs) and re-run the live-Excel verifier harness in the programme scratchpad (rev18x/pass2: each formula typed into a fresh Excel 16 and saved, Calcula's single-formula export opened in Excel, Calcula's text patched into Excel's own workbook for values, load_xlsx for the reader)."
+      }
+    },
+    {
+      "id": "BUG-0644",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-tables-not-native",
+        "severity": "high",
+        "message": "XLSX EXPORT WRITES NO NATIVE EXCEL TABLE: tables go only into Calcula's metadata sheet, so every structured reference in a real export shows #REF! in Excel 16 (=SUM(#REF!) for SUM(Table2[My Col])), and anything summing those cells shows #REF! too. The formula text itself is Excel's (proved by patching it into Excel's own workbook).",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Emit each SavedTable as a rust_xlsxwriter Table (xl/tables/tableN.xml) with its columns, keeping the metadata copy for the round trip; then re-run the structured-reference rows of xlsx_formula_text::live_table against a real export opened in Excel."
+      }
+    },
+    {
+      "id": "BUG-0645",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-formula-reader-and-name-residuals",
+        "severity": "medium",
+        "message": "XLSX FORMULA RESIDUALS FROM ROUND 20's VERIFY PASSES: (1) Excel's _xlnm. rule is broader than mark_cell_names: in a formula declaring a cell-shaped LET/LAMBDA name, Excel writes _xlnm. on every plain cell outside that name's scope (LAMBDA(A1,A1)(B1) is #NAME? in Excel, Calcula's file computes 10) -- an owner decision whether to follow Excel; (2) the reader leaves _TRO_* on a column range with $ or a sheet prefix, and on a trim with a parameter half (A1:._xlpm.A5), so the formula is lost or calls an unknown function; (3) the reader keeps ANCHORARRAY(_xlpm.A1) for a cell-shaped spill anchor; (4) the reader drops implicit intersection on legacy (no cm) formulas, so =@A1:A5 imports as a spilling A1:A5; (5) Calcula's own bare C/R export reads back as param:J:J; (6) a defined name with a sheetless cell reference (=A1, LAMBDA(x,SUM(A1:A5)*x)) makes Excel refuse the workbook; (7) a named-LAMBDA call is written without the dynamic-array flag (Excel shows =@Opt(1)).",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Per item: decide and pin (1); widen the reader's trim and ANCHORARRAY branches (xlsx_formula_text.rs ~1402-1462); keep @ / SINGLE on import when a <c> has no cm and the formula is array-valued (xlsx_reader.rs); qualify a defined name's sheetless references with its scope sheet as Excel's Name Manager does, or report the name as a loss; write named-LAMBDA calls through the dynamic-array path (cm=1). Acceptance: add rows to the real-path table test xlsx_formula_text::live_table (core/persistence/src/xlsx_formula_text_live_table.rs) and re-run the live-Excel verifier harness in the programme scratchpad (rev18x/pass2: each formula typed into a fresh Excel 16 and saved, Calcula's single-formula export opened in Excel, Calcula's text patched into Excel's own workbook for values, load_xlsx for the reader)."
+      }
+    },
+    {
+      "id": "BUG-0646",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "parser-rejects-excel-formulas",
+        "severity": "medium",
+        "message": "CALCULA's PARSER REJECTS FIVE FORMULAS EXCEL 16 ACCEPTS (engine::Cell::new_formula stores no formula): LET(a,B2,SUM(a:C3)) (550), LET(b,A3,SUM(A1:b)) (6), LET(a,SEQUENCE(3),SUM(a#)), LET(Col,1,SUM(Table1[Col]:Table1[Col])+Col) (21), LET(a,1,SUM(Sheet1!A1:Sheet1!A3)+a) (7).",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "In core/parser, allow a range with a name half and a cell half, a spill after a name, a range between two structured references, and a sheet-qualified second half; then add the rows to xlsx_formula_text::live_table (they are listed in its header and left out today)."
+      }
+    },
+    {
+      "id": "BUG-0647",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "parser-leading-row-trim-dot",
+        "severity": "medium",
+        "message": "THE LEXER DROPS A ROW RANGE's LEADING TRIM DOT: =SUM(1.:3) is stored as SUM(1:3) and =SUM(2.:.3) as SUM(2:.3) because read_number takes the dot into the number, so the leading trim is silently lost on entry (Excel keeps _TRO_LEADING(1:3) = 695, _TRO_ALL(2:3) = 1180). The export's row_trim already writes whatever dots the stored text keeps.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "In core/parser/src/lexer.rs read_number, do not take a '.' that is followed by ':' when the digits are a row (or emit a trim-dot token); add live_table rows for 1.:3 and 2.:.3."
+      }
+    },
+    {
+      "id": "BUG-0648",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "parser-accepts-bad-arity-shadowed-builtin",
+        "severity": "low",
+        "message": "Calcula's parser accepts LET(abs,LAMBDA(x,y,x+y),abs(1,2)), LET(pi,LAMBDA(x,x*2),pi(3)) and the like and evaluates the built-in with a refused arity; Excel 16 refuses to accept such a formula when typed. The export now writes the value and reports it.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "At parse time check a built-in call's argument count against its catalog arity (the builtin_arity the export uses), at least when the name is shadowed by a LET/LAMBDA parameter."
+      }
+    },
+    {
+      "id": "BUG-0649",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "lone-r1c1-c-or-r-operand-in-let",
+        "severity": "medium",
+        "message": "Inside a LET, a lone C or R operand that no binder names is R1C1's own column or row in Excel: =LET(a,1,a+C) in J5 is stored a+J:J and shows 0. Calcula reads C as an unbound name (presumably #NAME?; not run). The range case (a:C) is handled.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Treat an unbound bare C or R operand as the host cell's column or row via EvalContext current_col / current_row, with Excel's circular-reference handling since the reference contains the host cell."
+      }
+    },
+    {
+      "id": "BUG-0650",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "rows-columns-ignore-error-argument",
+        "severity": "medium",
+        "message": "fn_rows / fn_columns (core/engine/src/evaluator.rs ~9261) answer get_range_dimensions of the argument expression and never evaluate it, so an argument that evaluates to an error still gives a count: =LET(a,A1,ROWS(A:R)) gives 1 in Calcula and #NAME? in live Excel.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "When the argument is not a plain reference or array literal, evaluate it and propagate an EvalResult::Error; probe ROWS(1/0) and ROWS(#N/A) live first."
+      }
+    },
+    {
+      "id": "BUG-0651",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "xlsx-xlfn-in-string-disables-escaping",
+        "severity": "low",
+        "message": "PLAUSIBLE (from rust_xlsxwriter 0.79.4 formula.rs:768, not reproduced live): Formula::new copies a text unescaped whenever it contains '_xlfn.' anywhere, inside a string literal too, so =\"_xlfn.\"&SEQUENCE(2) would leave SEQUENCE without its prefix and Excel would show #NAME?.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Escape future functions ourselves, string-aware, or hide string literals from the library's check; add a live_table row."
+      }
+    },
+    {
+      "id": "BUG-0652",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "data-table-under-manual-computes-its-body",
+        "severity": "high",
+        "message": "UNDER MANUAL CALCULATION A DATA TABLE COMPUTES ITS BODY: Excel's Data Table leaves the body uncalculated (0 until F9) with CalculationState xlPending [LIVE, whatif5/probe1.ps1]; Calcula's data_table_one_var_impl / two_var_impl run every substitution and write the values whatever the mode. Root cause: Calcula writes literal results and has no live {=TABLE()} array formula that recalculates with the workbook (re-running the command is the only refresh).",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Write the table as a pending, live table (a TABLE() formula or a marker the full pass evaluates through the existing substitution code) and leave the body for F9 under manual calculation; feature-sized."
+      }
+    },
+    {
+      "id": "BUG-0653",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "replaced-workbook-push-audit-row",
+        "severity": "medium",
+        "message": "A PUSH WHOSE WORKBOOK WAS REPLACED (File > Open/New mid-push) WRITES ITS AUDIT ROW ONLY TO THE SESSION LOG ('AUDIT (session)', calp_commands.rs ~2514): no audit viewer shows it, while the workspace's signed version list records the version. CLAUDE.md's transparency goal says egress use survives reload. Round 15 rejected writing the row into the newly opened workbook.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Give rows that belong to no document a durable home: a machine-scoped append-only push/egress trail like extension_audit.rs under %LOCALAPPDATA%\\Calcula, one reader command, and an 'Application-level' category in the audit viewer; or the owner accepts the log line."
+      }
+    },
+    {
+      "id": "BUG-0654",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "floating-grid-move-claim-unbound",
+        "severity": "medium",
+        "message": "THE FLOATING-GRID DESTINATION ROUTE STILL TRUSTS THE MOVE CLAIM: cell_target.rs update_cells_batch_on_target reads CellUpdateInput.moved through is_move() (cell_target.rs:462) without honoured_move_claims, so renderer code can land any styleIndex on an unlocked backing cell of a protected host that refuses Format Cells. The sheet route binds the claim to the source cell's style since round 18.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Call commands::data::honoured_move_claims in update_cells_batch_on_target, as update_cells_batch_core does, and add a forged-claim test beside protected_move_format_tests."
+      }
+    },
+    {
+      "id": "BUG-0655",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "floating-grid-paste-formatting-host-lock",
+        "severity": "low",
+        "message": "On a floating grid whose HOST refuses Format Cells, a formatting-only Paste Formatting over unlocked host cells still raises the refusal, where Excel's sheet behaviour is silent (Calcula's sheet route is silent since round 16). The host cells have no one-call lock question: can_edit_cell reads the active sheet only (documented on writeTargetBatch).",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Decide whether a floating grid should follow the sheet rule; if so, give can_edit_cell's list form a target (or a host-cell lock read) so the formatting-only gate can tell 'only the option refuses' and stay silent."
+      }
+    },
+    {
+      "id": "BUG-0656",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "lock-objects-restore-paths",
+        "severity": "low",
+        "message": "Lock Objects is never asked by the undo/redo restore paths or the raw JSON object editor; a sheet_kinds restore that brings back a locked canvas runs no barrier (BUG-0443 remainder).",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Decide whether an undo may move a locked object (Excel has no analogue); if not, gate the object-family restores and json_view object arms on canvas_objects_locked_now under their stores."
+      }
+    },
+    {
+      "id": "BUG-0657",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "paste-under-continuous-writer",
+        "severity": "low",
+        "message": "Under a source written continuously (an animation, a fast scheduled job), Paste pastes the LAST frontend re-read made during the gesture, which may be milliseconds old; a writer that also makes every read fail or be replaced (a sheet reorder per read) still makes the paste refuse. Excel pastes the source's current values.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "A backend paste-from-source-address command would be exact, but it duplicates the paste pipeline (formula shift, styles, merges, tiling); keep unless a real workload hits it."
+      }
+    },
+    {
+      "id": "BUG-0658",
+      "status": "open",
+      "discovered": "2026-10-31",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "manual-mode-3d-move-recalculates",
+        "severity": "low",
+        "message": "Under manual calculation a sheet move/copy that changes a 3-D span recalculates the span's readers (as delete_sheet_impl already did); Excel's manual mode would presumably mark them pending instead. Not probed live.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Probe Excel; if it marks pending, have reregister_3d_span_edges' callers mark the readers' sheets stale under manual instead of recalculating."
+      }
+    },
+    {
+      "id": "BUG-0659",
+      "status": "open",
+      "discovered": "2026-10-30",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Bug-ledger fix programme rounds 9-20, 2026-10-30/31 (each fix round followed by adversarial code review; rounds 19-20 verified the .xlsx export against live Excel 16)"
+      },
+      "violation": {
+        "oracleId": "restricted-tier-format-bound",
+        "severity": "low",
+        "message": "PLAUSIBLE (round 10 review nit): BUG-0616 item 1 raised the restricted-tier per-call bound for non-line format rectangles from 100,000 to 4,000,000 cells with no per-minute limit, so a restricted script can issue many large format calls.",
+        "digestDiffPaths": []
+      },
+      "triage": {
+        "proposedFix": "Decide whether restricted-tier format/clear calls need a rate limit or a lower non-line bound; the line forms are cheap tiers."
       }
     }
   ]

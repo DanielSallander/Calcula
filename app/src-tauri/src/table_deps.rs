@@ -99,7 +99,7 @@ pub fn collect_table_names(ast: &Expression, out: &mut TableSet) {
             if table_name.is_empty() {
                 out.insert(BARE_TABLE_KEY.to_string());
             } else {
-                out.insert(table_name.to_uppercase());
+                out.insert(crate::tables::table_name_key(table_name));
             }
         }
         Expression::Literal(_)
@@ -179,7 +179,7 @@ fn reads_any(ast: &Expression, wanted: &TableSet) -> bool {
             if table_name.is_empty() {
                 wanted.contains(BARE_TABLE_KEY)
             } else {
-                wanted.contains(&table_name.to_uppercase())
+                wanted.contains(&crate::tables::table_name_key(table_name))
             }
         }
         Expression::Literal(_)
@@ -314,7 +314,7 @@ fn find_table<'a>(
     tables: &'a TableStorage,
     table_names: &TableNameRegistry,
 ) -> Option<&'a Table> {
-    let (sheet_index, table_id) = table_names.get(&name.to_uppercase())?;
+    let (sheet_index, table_id) = table_names.get(&crate::tables::table_name_key(name))?;
     tables.get(sheet_index)?.get(table_id)
 }
 
@@ -487,7 +487,7 @@ fn rename_col_walk(
             let applies = if table_name.is_empty() {
                 include_bare
             } else {
-                table_name.to_uppercase() == table_upper
+                crate::tables::table_name_key(table_name) == table_upper
             };
             if applies {
                 rename_spec_col(specifier, old_upper, new_name, changed);

@@ -47,7 +47,9 @@ pub type DependencyMap = FxHashMap<(u32, u32), CoordSet>;
 pub type StripeDependentsMap = FxHashMap<u32, CoordSet>;
 /// formula cell -> column/row indices it depends on (for cleanup).
 pub type StripeDependenciesMap = FxHashMap<(u32, u32), FxHashSet<u32>>;
-/// (sheet_name, row, col) -> dependent formula cells on other sheets.
+/// (sheet_name, row, col) -> dependent formula cells on other sheets. A row
+/// or col of `WHOLE_LINE` keys a whole column / row read by name
+/// (`Sheet2!G:G`); ask it through `cross_sheet_readers`, never `get` alone.
 pub type CrossSheetDependentsMap =
     FxHashMap<(String, u32, u32), FxHashSet<(usize, u32, u32)>>;
 /// formula cell (sheet_index, row, col) -> cross-sheet cells it depends on.
@@ -112,6 +114,7 @@ pub mod scenario_manager;
 pub mod animation_commands;
 pub mod data_tables;
 pub mod solver;
+pub(crate) mod whatif_recalc;
 pub mod theme_commands;
 pub mod tracing;
 pub mod evaluate_formula;
@@ -489,10 +492,11 @@ pub struct AppState {
     pub all_user_hidden_rows: document_effect::Persisted<Vec<HashSet<u32>>>,
     /// Per-sheet user-hidden columns storage (indexed by sheet index)
     pub all_user_hidden_cols: document_effect::Persisted<Vec<HashSet<u32>>>,
-    /// Default row height for rows without custom heights (pixels)
-    pub default_row_height: document_effect::Persisted<f64>,
-    /// Default column width for columns without custom widths (pixels)
-    pub default_column_width: document_effect::Persisted<f64>,
+    // The STANDARD row height and column width are PER SHEET, as in Excel:
+    // `engine::Grid::default_row_height` / `default_column_width`, inside
+    // `grids` (and the `grid` mirror), so a sheet's add, delete, move, copy
+    // and structural undo carry them with no parallel vector. They were two
+    // workbook-wide fields here (BUG-0352/0353).
     pub dependents: Mutex<DependencyMap>,
     pub dependencies: Mutex<DependencyMap>,
     /// Calculation mode: "automatic" or "manual"
@@ -617,7 +621,7 @@ pub struct AppState {
     /// Tables per sheet: sheet_index -> table_id -> Table
     /// PERSISTED (`workbook.tables` via `collect_tables_for_save`) -> `Persisted<T>`.
     pub tables: crate::document_effect::Persisted<tables::TableStorage>,
-    /// Table name registry: table_name (uppercase) -> (sheet_index, table_id)
+    /// Table name registry: `tables::table_name_key` -> (sheet_index, table_id)
     /// PERSISTED alongside `tables` (the name registry is rebuilt from it on load).
     pub table_names: crate::document_effect::Persisted<tables::TableNameRegistry>,
     /// Computed properties per sheet: sheet_index -> SheetComputedProperties
@@ -967,6 +971,15 @@ pub struct AppState {
     ///
     /// LOCK-FREE, deliberately: an atomic adds no edge to the lock order.
     pub sheet_structure_generation: std::sync::atomic::AtomicU64,
+    /// THE WHAT-IF SINGLE-FLIGHT: set while a Data Table, Goal Seek (or its
+    /// Cancel), Solver run or Solver Restore is writing trials into the grid
+    /// (`whatif_recalc::begin_whatif_run`). Those commands are `(async)`, so two
+    /// runs used to overlap: the second snapshotted the first's TRIAL value as
+    /// the "original" and restored it last, so the borrowed input cell kept a
+    /// trial value for good. Excel's what-if runs are modal; a second run here
+    /// is refused before any gate. Session-only and LOCK-FREE: an atomic adds
+    /// no edge to the lock order, and it is never saved.
+    pub whatif_run: std::sync::atomic::AtomicBool,
     /// Cells a CANCELLED recalculation never reached. `None` = the workbook is
     /// fully calculated. See `eval_budget::PendingRecalc` for why the remainder
     /// is recorded rather than rolled back.
@@ -1028,12 +1041,6 @@ pub fn create_app_state() -> AppState {
         user_hidden_cols: document_effect::Persisted::new(HashSet::new()),
         all_user_hidden_rows: document_effect::Persisted::new(vec![HashSet::new()]),
         all_user_hidden_cols: document_effect::Persisted::new(vec![HashSet::new()]),
-        // ONE definition of these, in `persistence` -- see
-        // DEFAULT_ROW_HEIGHT_PX. `new_file` used to re-type them as 24 / 100
-        // and File > New silently handed out a differently-scaled grid than
-        // app launch.
-        default_row_height: document_effect::Persisted::new(::persistence::DEFAULT_ROW_HEIGHT_PX),
-        default_column_width: document_effect::Persisted::new(::persistence::DEFAULT_COLUMN_WIDTH_PX),
         dependents: Mutex::new(DependencyMap::default()),
         dependencies: Mutex::new(DependencyMap::default()),
         calculation_mode: Mutex::new("automatic".to_string()),
@@ -1141,6 +1148,7 @@ pub fn create_app_state() -> AppState {
         model_writeback_floor: Mutex::new(chrono::Utc::now().to_rfc3339()),
         calc_cancel: engine::CancelToken::new(),
         sheet_structure_generation: std::sync::atomic::AtomicU64::new(0),
+        whatif_run: std::sync::atomic::AtomicBool::new(false),
         pending_recalc: document_effect::Persisted::new(None),
     };
 
@@ -1554,7 +1562,7 @@ pub fn resolve_spill_refs_in_ast(
                 // names rather than the one that happens to be active.
                 let anchor_sheet = match sheet {
                     Some(name) => {
-                        match sheet_names.iter().position(|s| s.eq_ignore_ascii_case(name)) {
+                        match sheet_names.iter().position(|s| identity::sheet_names_equal(s, name)) {
                             Some(idx) => idx,
                             // Unknown sheet: leave the ref alone (the fallback
                             // below returns the single cell), rather than
@@ -1685,6 +1693,103 @@ impl ExtractedRefs {
     }
 }
 
+/// The row (or column) coordinate of a `cross_sheet_cells` entry -- and so of a
+/// `CrossSheetDependentsMap` key -- that stands for a WHOLE column (or row) of
+/// the named sheet: `("Sheet2", WHOLE_LINE, 6)` is `Sheet2!G:G`,
+/// `("Sheet2", 8, WHOLE_LINE)` is `Sheet2!9:9`. No cell has that coordinate
+/// (Excel's grid ends at 1,048,576 rows and 16,384 columns), so a lookup of a
+/// real cell can never hit one by accident; [`cross_sheet_readers`] asks for
+/// them, and [`resolve_cross_sheet_ref`] tells a walk over the workbook what
+/// an entry reads.
+pub const WHOLE_LINE: u32 = u32::MAX;
+
+/// The name a 3D span's entries are keyed under in `cross_sheet_cells` before
+/// [`normalize_cross_sheet_refs`] expands it to the sheets it spans.
+pub fn sheet_span_key(start_sheet: &str, end_sheet: &str) -> String {
+    format!("{}:{}", start_sheet, end_sheet)
+}
+
+/// What one `cross_sheet_cells` entry reads on each sheet it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossSheetLine {
+    Cell(u32, u32),
+    Column(u32),
+    Row(u32),
+}
+
+/// The sheets (by index) a `cross_sheet_cells` entry's name stands for --
+/// one sheet, or every sheet of a `Start:End` span in sheet ORDER, as Excel
+/// reads a 3D reference -- and what it reads on each. A name no sheet has
+/// reads nothing; a span with one missing bookend reads the bookend that
+/// exists (it shows `#REF!` either way).
+pub fn resolve_cross_sheet_ref(
+    name: &str,
+    row: u32,
+    col: u32,
+    sheet_names: &[String],
+) -> (Vec<usize>, CrossSheetLine) {
+    let line = if row == WHOLE_LINE {
+        CrossSheetLine::Column(col)
+    } else if col == WHOLE_LINE {
+        CrossSheetLine::Row(row)
+    } else {
+        CrossSheetLine::Cell(row, col)
+    };
+    let position = |n: &str| sheet_names.iter().position(|s| identity::sheet_names_equal(s, n));
+    let sheets = match name.split_once(':') {
+        Some((start, end)) => {
+            if start == "*" || end == "*" {
+                (0..sheet_names.len()).collect()
+            } else {
+                match (position(start), position(end)) {
+                    (Some(a), Some(b)) => (a.min(b)..=a.max(b)).collect(),
+                    (Some(a), None) | (None, Some(a)) => vec![a],
+                    (None, None) => Vec::new(),
+                }
+            }
+        }
+        None => position(name).into_iter().collect(),
+    };
+    (sheets, line)
+}
+
+/// Every cell of `target` an entry reads, as `(row, col)`: the cell itself, or
+/// the cells the grid holds in that whole column or row. For a walk that wants
+/// edges between EXISTING cells (`build_workbook_plan`, the circularity
+/// detector) -- the dependency maps keep the `WHOLE_LINE` key instead, so a
+/// cell written into the column later is found too.
+/// A sheet index with no grid reads nothing.
+pub fn cross_sheet_line_cells(line: CrossSheetLine, target: Option<&Grid>) -> Vec<(u32, u32)> {
+    let Some(target) = target else { return Vec::new() };
+    match line {
+        CrossSheetLine::Cell(r, c) => vec![(r, c)],
+        CrossSheetLine::Column(c) => target.cells.keys().filter(|&&(_, cc)| cc == c).copied().collect(),
+        CrossSheetLine::Row(r) => target.cells.keys().filter(|&&(rr, _)| rr == r).copied().collect(),
+    }
+}
+
+/// The formula cells (on any sheet) that read `sheet_name!(row, col)` through
+/// the cross-sheet dependents map: by that cell, by its whole column or by its
+/// whole row (the `WHOLE_LINE` keys). `None` when nothing does. Every question
+/// "who on another sheet reads this cell?" asks this, never `map.get` alone --
+/// a bare `get` cannot see `=SUM(Sheet2!G:G)`.
+pub fn cross_sheet_readers(
+    map: &CrossSheetDependentsMap,
+    sheet_name: &str,
+    row: u32,
+    col: u32,
+) -> Option<FxHashSet<(usize, u32, u32)>> {
+    let mut readers: Option<FxHashSet<(usize, u32, u32)>> = None;
+    for key in [(row, col), (WHOLE_LINE, col), (row, WHOLE_LINE)] {
+        if let Some(found) = map.get(&(sheet_name.to_string(), key.0, key.1)) {
+            if !found.is_empty() {
+                readers.get_or_insert_with(FxHashSet::default).extend(found.iter().copied());
+            }
+        }
+    }
+    readers
+}
+
 pub fn extract_references(expr: &ParserExpr, grid: &Grid) -> CoordSet {
     let refs = extract_all_references(expr, grid);
     refs.cells
@@ -1768,12 +1873,33 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
                 extract_references_recursive(end, grid, refs);
             }
         }
+        // A QUALIFIED whole column (`Sheet2!G:G`) is a read of THAT sheet's
+        // column: one `cross_sheet_cells` entry per column with the row set to
+        // `WHOLE_LINE` (see `CrossSheetLine`). It used to land in the formula's
+        // OWN sheet's column set and pick up the own grid's cells, so an edit
+        // of Sheet2!G5 never reached `=SUM(Sheet2!G:G)` on Sheet1 while an edit
+        // of Sheet1!G10 did -- and `G1 = A1+1` beside `A1 = SUM(Sheet2!G:G)`
+        // read as a circular reference (calcref, round 18).
+        ParserExpr::ColumnRef { sheet: Some(sheet_name), start_col, end_col, .. } => {
+            let sc = col_letter_to_index(start_col);
+            let ec = col_letter_to_index(end_col);
+            for col in sc.min(ec)..=sc.max(ec) {
+                refs.cross_sheet_cells.insert((sheet_name.clone(), WHOLE_LINE, col));
+            }
+        }
+        ParserExpr::RowRef { sheet: Some(sheet_name), start_row, end_row, .. } => {
+            let sr = start_row.saturating_sub(1);
+            let er = end_row.saturating_sub(1);
+            for row in sr.min(er)..=sr.max(er) {
+                refs.cross_sheet_cells.insert((sheet_name.clone(), row, WHOLE_LINE));
+            }
+        }
         ParserExpr::ColumnRef { start_col, end_col, .. } => {
             let sc = col_letter_to_index(start_col);
             let ec = col_letter_to_index(end_col);
             let min_col = sc.min(ec);
             let max_col = sc.max(ec);
-            
+
             for col in min_col..=max_col {
                 refs.columns.insert(col);
             }
@@ -1810,15 +1936,31 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
                 extract_references_recursive(arg, grid, refs);
             }
         }
-        // 3D cross-sheet reference: tag inner cells with each bookend sheet
+        // 3D cross-sheet reference: every sheet of the SPAN, by sheet order, is
+        // read -- not only the two bookends. The entries are keyed by the span
+        // name `Start:End` (`:` cannot occur in a sheet name), which
+        // `normalize_cross_sheet_refs` and `resolve_cross_sheet_ref` expand
+        // against the workbook's sheet order; extraction sees one grid and no
+        // sheet list. Only the inner reference's COORDINATES are taken: a
+        // whole column or row inside the span is a `WHOLE_LINE` entry, never
+        // this grid's cells in that column (calcref, round 18).
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            // Extract the inner reference's cells (without sheet context)
+            let span = sheet_span_key(start_sheet, end_sheet);
             let mut inner_refs = ExtractedRefs::new();
             extract_references_recursive(reference, grid, &mut inner_refs);
-            // Tag each cell with both bookend sheets as cross-sheet dependencies
-            for (row, col) in &inner_refs.cells {
-                refs.cross_sheet_cells.insert((start_sheet.clone(), *row, *col));
-                refs.cross_sheet_cells.insert((end_sheet.clone(), *row, *col));
+            match reference.as_ref() {
+                ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. } => {}
+                _ => {
+                    for (row, col) in &inner_refs.cells {
+                        refs.cross_sheet_cells.insert((span.clone(), *row, *col));
+                    }
+                }
+            }
+            for col in &inner_refs.columns {
+                refs.cross_sheet_cells.insert((span.clone(), WHOLE_LINE, *col));
+            }
+            for row in &inner_refs.rows {
+                refs.cross_sheet_cells.insert((span.clone(), *row, WHOLE_LINE));
             }
         }
         // NamedRef nodes should be resolved before reference extraction.
@@ -1879,7 +2021,7 @@ pub fn resolve_names_in_ast(
 ) -> ParserExpr {
     match ast {
         ParserExpr::NamedRef { name, .. } => {
-            let key = name.to_uppercase();
+            let key = crate::name_resolution::name_key(name);
 
             // Circular reference detection
             if visited.contains(&key) {
@@ -1890,7 +2032,7 @@ pub fn resolve_names_in_ast(
             let nr = named_ranges
                 .values()
                 .find(|nr| {
-                    let nr_key = nr.name.to_uppercase();
+                    let nr_key = crate::name_resolution::name_key(&nr.name);
                     if nr_key != key {
                         return false;
                     }
@@ -1900,7 +2042,7 @@ pub fn resolve_names_in_ast(
                 .or_else(|| {
                     // Fall back to workbook-scoped
                     named_ranges.values().find(|nr| {
-                        let nr_key = nr.name.to_uppercase();
+                        let nr_key = crate::name_resolution::name_key(&nr.name);
                         nr_key == key && nr.sheet_index.is_none()
                     })
                 });
@@ -1956,7 +2098,7 @@ pub fn resolve_names_in_ast(
                     let mut param_names: Vec<String> = Vec::new();
                     for p_arg in &args[..args.len() - 1] {
                         if let ParserExpr::NamedRef { name, .. } = p_arg {
-                            param_names.push(name.to_uppercase());
+                            param_names.push(identity::sheet_name_key(name));
                         }
                     }
                     let mut resolved_args: Vec<ParserExpr> = Vec::with_capacity(args.len());
@@ -1982,7 +2124,7 @@ pub fn resolve_names_in_ast(
                     let mut let_names: Vec<String> = Vec::new();
                     for i in 0..pair_count {
                         if let ParserExpr::NamedRef { name, .. } = &args[i * 2] {
-                            let_names.push(name.to_uppercase());
+                            let_names.push(identity::sheet_name_key(name));
                         }
                     }
                     let mut resolved_args: Vec<ParserExpr> = Vec::with_capacity(args.len());
@@ -2010,16 +2152,16 @@ pub fn resolve_names_in_ast(
                     // A Calcula-only builtin (LPAD) yields to a defined name of
                     // its own name too (`BuiltinFunction::user_definable_name`).
                     if let Some(custom_name) = func.user_definable_name() {
-                        let key = custom_name.to_uppercase();
+                        let key = crate::name_resolution::name_key(custom_name);
                         let nr = named_ranges
                             .values()
                             .find(|nr| {
-                                let nr_key = nr.name.to_uppercase();
+                                let nr_key = crate::name_resolution::name_key(&nr.name);
                                 nr_key == key && nr.sheet_index == Some(current_sheet_index)
                             })
                             .or_else(|| {
                                 named_ranges.values().find(|nr| {
-                                    let nr_key = nr.name.to_uppercase();
+                                    let nr_key = crate::name_resolution::name_key(&nr.name);
                                     nr_key == key && nr.sheet_index.is_none()
                                 })
                             });
@@ -2106,7 +2248,8 @@ pub fn resolve_names_in_ast(
 }
 
 /// Like `resolve_names_in_ast`, but skips resolution for NamedRef nodes
-/// whose uppercased name is in the `shadows` set. Used for LAMBDA/LET parameters
+/// whose per-character key (`identity::sheet_name_key`, the rule LET and LAMBDA
+/// names follow) is in the `shadows` set. Used for LAMBDA/LET parameters
 /// which should NOT be resolved as global named ranges.
 fn resolve_names_in_ast_with_shadows(
     ast: &ParserExpr,
@@ -2117,7 +2260,7 @@ fn resolve_names_in_ast_with_shadows(
 ) -> ParserExpr {
     match ast {
         ParserExpr::NamedRef { name, .. } => {
-            let key = name.to_uppercase();
+            let key = identity::sheet_name_key(name);
             // If the name is shadowed by a LAMBDA/LET param, keep it as NamedRef
             if shadows.iter().any(|s| s == &key) {
                 return ast.clone();
@@ -2144,7 +2287,7 @@ fn resolve_names_in_ast_with_shadows(
                     let mut inner_shadows: Vec<String> = shadows.to_vec();
                     for p_arg in &args[..args.len() - 1] {
                         if let ParserExpr::NamedRef { name, .. } = p_arg {
-                            inner_shadows.push(name.to_uppercase());
+                            inner_shadows.push(identity::sheet_name_key(name));
                         }
                     }
                     let mut resolved_args: Vec<ParserExpr> = Vec::with_capacity(args.len());
@@ -2161,7 +2304,7 @@ fn resolve_names_in_ast_with_shadows(
                     let mut inner_shadows: Vec<String> = shadows.to_vec();
                     for i in 0..pair_count {
                         if let ParserExpr::NamedRef { name, .. } = &args[i * 2] {
-                            inner_shadows.push(name.to_uppercase());
+                            inner_shadows.push(identity::sheet_name_key(name));
                         }
                     }
                     let mut resolved_args: Vec<ParserExpr> = Vec::with_capacity(args.len());
@@ -2180,18 +2323,18 @@ fn resolve_names_in_ast_with_shadows(
                     // Check if a Custom function name is actually a named range
                     // (e.g., =testing(5,9) where "testing" is a named LAMBDA).
                     if let Some(custom_name) = func.user_definable_name() {
-                        let key = custom_name.to_uppercase();
+                        let key = crate::name_resolution::name_key(custom_name);
                         // Don't resolve if shadowed by a LAMBDA/LET parameter
-                        if !shadows.iter().any(|s| s == &key) {
+                        if !shadows.contains(&identity::sheet_name_key(custom_name)) {
                             let nr = named_ranges
                                 .values()
                                 .find(|nr| {
-                                    let nr_key = nr.name.to_uppercase();
+                                    let nr_key = crate::name_resolution::name_key(&nr.name);
                                     nr_key == key && nr.sheet_index == Some(current_sheet_index)
                                 })
                                 .or_else(|| {
                                     named_ranges.values().find(|nr| {
-                                        let nr_key = nr.name.to_uppercase();
+                                        let nr_key = crate::name_resolution::name_key(&nr.name);
                                         nr_key == key && nr.sheet_index.is_none()
                                     })
                                 });
@@ -2654,7 +2797,7 @@ fn rename_walk(
     let rec = |e: &ParserExpr, changed: &mut bool| rename_walk(e, old_upper, new_name, changed);
     match ast {
         ParserExpr::TableRef { table_name, specifier, ref_site_id } => {
-            if !table_name.is_empty() && table_name.to_uppercase() == old_upper {
+            if !table_name.is_empty() && crate::tables::table_name_key(table_name) == old_upper {
                 *changed = true;
                 ParserExpr::TableRef {
                     table_name: new_name.to_string(),
@@ -2824,7 +2967,7 @@ fn find_table_by_name<'a>(
     tables: &'a tables::TableStorage,
     table_names: &tables::TableNameRegistry,
 ) -> Option<(&'a tables::Table, usize)> {
-    let key = name.to_uppercase();
+    let key = crate::tables::table_name_key(name);
     let (sheet_index, table_id) = table_names.get(&key)?;
     Some((tables.get(sheet_index)?.get(table_id)?, *sheet_index))
 }
@@ -3267,9 +3410,9 @@ fn repair_3d_delete_recursive(
 ) -> (ParserExpr, bool) {
     match ast {
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            let del_upper = deleted_name.to_uppercase();
-            let start_is_deleted = start_sheet.to_uppercase() == del_upper;
-            let end_is_deleted = end_sheet.to_uppercase() == del_upper;
+            let del_upper = identity::sheet_name_key(deleted_name);
+            let start_is_deleted = identity::sheet_name_key(start_sheet) == del_upper;
+            let end_is_deleted = identity::sheet_name_key(end_sheet) == del_upper;
 
             if start_is_deleted && end_is_deleted {
                 // Both bookends are the deleted sheet — #REF!
@@ -3286,10 +3429,10 @@ fn repair_3d_delete_recursive(
             // keeps its own text: re-spelling it would rewrite it on every
             // delete (`unchanged_or`).
             let kept = |name: &String| -> String {
-                let upper = name.to_uppercase();
+                let upper = identity::sheet_name_key(name);
                 sheet_names_after
                     .iter()
-                    .find(|n| n.to_uppercase() == upper)
+                    .find(|n| identity::sheet_name_key(n) == upper)
                     .cloned()
                     .unwrap_or_else(|| name.clone())
             };
@@ -3467,7 +3610,7 @@ fn repair_3d_delete_recursive(
 fn names_deleted_sheet(sheet: &Option<String>, deleted_name: &str) -> bool {
     sheet
         .as_ref()
-        .is_some_and(|s| s.to_uppercase() == deleted_name.to_uppercase())
+        .is_some_and(|s| identity::sheet_names_equal(s, deleted_name))
 }
 
 /// The sheet a 3D reference's DELETED endpoint moves to: its neighbour inside
@@ -3490,8 +3633,8 @@ fn find_adjacent_sheet(
     sheet_names_after: &[String],
 ) -> Option<String> {
     let deleted_index = deleted_index?;
-    let other_upper = other_bookend.to_uppercase();
-    let other_after = sheet_names_after.iter().position(|s| s.to_uppercase() == other_upper)?;
+    let other_upper = identity::sheet_name_key(other_bookend);
+    let other_after = sheet_names_after.iter().position(|s| identity::sheet_name_key(s) == other_upper)?;
     // Where the surviving endpoint stood BEFORE the delete.
     let other_before = if other_after >= deleted_index { other_after + 1 } else { other_after };
     let neighbour = if other_before > deleted_index {
@@ -3520,15 +3663,15 @@ pub fn repair_3d_refs_on_rename(formula: &str, old_name: &str, new_name: &str) -
 
 /// Recursively walks a parser AST and updates Sheet3DRef bookend names.
 fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) -> ParserExpr {
-    let old_upper = old_name.to_uppercase();
+    let old_upper = identity::sheet_name_key(old_name);
     match ast {
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            let new_start = if start_sheet.to_uppercase() == old_upper {
+            let new_start = if identity::sheet_name_key(start_sheet) == old_upper {
                 new_name.to_string()
             } else {
                 start_sheet.clone()
             };
-            let new_end = if end_sheet.to_uppercase() == old_upper {
+            let new_end = if identity::sheet_name_key(end_sheet) == old_upper {
                 new_name.to_string()
             } else {
                 end_sheet.clone()
@@ -3542,7 +3685,7 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
         }
         // Also update regular cross-sheet refs (CellRef, Range, ColumnRef, RowRef with sheet=Some)
         ParserExpr::CellRef { sheet: Some(s), col, row, col_absolute, row_absolute, .. } => {
-            let new_sheet = if s.to_uppercase() == old_upper {
+            let new_sheet = if identity::sheet_name_key(s) == old_upper {
                 new_name.to_string()
             } else {
                 s.clone()
@@ -3557,7 +3700,7 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
             }
         }
         ParserExpr::Range { sheet: Some(s), start, end, .. } => {
-            let new_sheet = if s.to_uppercase() == old_upper {
+            let new_sheet = if identity::sheet_name_key(s) == old_upper {
                 new_name.to_string()
             } else {
                 s.clone()
@@ -3570,7 +3713,7 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
             }
         }
         ParserExpr::ColumnRef { sheet: Some(s), start_col, end_col, start_absolute, end_absolute, .. } => {
-            let new_sheet = if s.to_uppercase() == old_upper {
+            let new_sheet = if identity::sheet_name_key(s) == old_upper {
                 new_name.to_string()
             } else {
                 s.clone()
@@ -3585,7 +3728,7 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
             }
         }
         ParserExpr::RowRef { sheet: Some(s), start_row, end_row, start_absolute, end_absolute, .. } => {
-            let new_sheet = if s.to_uppercase() == old_upper {
+            let new_sheet = if identity::sheet_name_key(s) == old_upper {
                 new_name.to_string()
             } else {
                 s.clone()
@@ -4479,17 +4622,26 @@ pub fn normalize_cross_sheet_refs(
     parsed_refs: &FxHashSet<(String, u32, u32)>,
     sheet_names: &[String],
 ) -> FxHashSet<(String, u32, u32)> {
-    parsed_refs
-        .iter()
-        .map(|(parsed_sheet_name, r, c)| {
-            let canonical = sheet_names
-                .iter()
-                .find(|name| name.eq_ignore_ascii_case(parsed_sheet_name))
-                .cloned()
-                .unwrap_or_else(|| parsed_sheet_name.clone());
-            (canonical, *r, *c)
-        })
-        .collect()
+    let mut out = FxHashSet::default();
+    for (parsed_sheet_name, r, c) in parsed_refs {
+        // A 3D span's entries (`Start:End`, see `sheet_span_key`) become one
+        // key per sheet the span covers, by sheet order: an edit of the MIDDLE
+        // sheet of `=SUM(Sheet1:Sheet3!K20)` is an edit the formula reads.
+        if parsed_sheet_name.contains(':') {
+            let (sheets, _) = resolve_cross_sheet_ref(parsed_sheet_name, *r, *c, sheet_names);
+            for index in sheets {
+                out.insert((sheet_names[index].clone(), *r, *c));
+            }
+            continue;
+        }
+        let canonical = sheet_names
+            .iter()
+            .find(|name| identity::sheet_names_equal(name, parsed_sheet_name))
+            .cloned()
+            .unwrap_or_else(|| parsed_sheet_name.clone());
+        out.insert((canonical, *r, *c));
+    }
+    out
 }
 
 pub fn update_cross_sheet_dependencies(
@@ -5760,6 +5912,7 @@ pub fn run() {
             bi::bi_save_all_caches,
             bi::cube::cube_prefetch,
             bi::cube::cube_prefetch_all,
+            bi::cube::note_custom_function_registry,
             bi::cube::cube_udf_value,
             bi::cube::cube_udf_kpi,
             bi::cube::cube_udf_members,

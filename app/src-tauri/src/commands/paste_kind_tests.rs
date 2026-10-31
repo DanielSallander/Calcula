@@ -85,6 +85,7 @@ fn update(row: u32, col: u32, value: &str, invariant: bool, pasted: bool) -> Cel
         style_index: None,
         invariant: invariant.then_some(true),
         pasted: pasted.then_some(true),
+        moved: None,
     }
 }
 

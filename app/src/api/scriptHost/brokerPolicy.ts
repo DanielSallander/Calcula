@@ -30,6 +30,7 @@
 import { ALLOWLIST, type CapabilityId, type MethodClass, type MethodPolicy } from "./allowlist";
 import {
   explicitRunAdmits,
+  explicitRunArgsRefusal,
   explicitRunRefusalMessage,
   explicitRunRestrictedRefusal,
 } from "./explicitRunGrant";
@@ -146,6 +147,18 @@ export function decidePolicy(
           identity.explicitRun === undefined
             ? `${method} requires unlocked access; this script is restricted`
             : explicitRunRefusalMessage(method),
+        policy,
+      };
+    }
+    // Admitted BY THE GRANT: its arguments must stay within cell access too
+    // (a clear of contents, never of formats -- BUG-0616 #2).
+    const argsRefusal = explicitRunArgsRefusal(method, args);
+    if (argsRefusal !== null) {
+      return {
+        admitted: false,
+        class: policy.class,
+        code: "PermissionDenied",
+        message: argsRefusal,
         policy,
       };
     }

@@ -378,15 +378,15 @@ describe("range copy/paste never touches the user's clipboard", () => {
   });
 
   it("offers all/values/formulas and REFUSES a formats-only paste", () => {
-    // "formats" is absent on evidence, not preference: there is no batched style
-    // write, and set_cell_style (commands/styles.rs) only acts `if let
-    // Some(cell)` — so a formats-only paste would report success while doing
-    // nothing at all for every blank destination cell.
+    // "formats" is absent because the script paste has no formats-only path:
+    // pasteScriptClipboard writes a value or formula for every destination cell
+    // and carries the style only beside it (mode "all"). The original reason
+    // (set_cell_style skipped a blank cell) is gone -- it now creates the cell
+    // carrying the style (commands/styles.rs) -- so the mode is buildable, but
+    // until it is built the validator must refuse it rather than accept a mode
+    // that would report success while changing nothing.
     expect([...PASTE_MODES].sort()).toEqual(["all", "formulas", "values"]);
     expect(vPasteRange([0, 0, { mode: "formats" }])).not.toBe(true);
-    const styles = readRepo("app/src-tauri/src/commands/styles.rs");
-    const setStyle = styles.slice(styles.indexOf("pub fn set_cell_style"));
-    expect(setStyle).toContain("if let Some(cell) = grid.get_cell(row, col)");
   });
 
   it("validates the paste options it does accept", () => {

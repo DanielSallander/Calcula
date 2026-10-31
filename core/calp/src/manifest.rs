@@ -445,6 +445,14 @@ pub struct PublishedSheetMetadata {
     /// empty worksheet with its objects floating over cells.
     #[serde(default, skip_serializing_if = "persistence::SheetKind::is_worksheet")]
     pub kind: persistence::SheetKind,
+    /// The sheet's own STANDARD row height / column width (Excel keeps one per
+    /// sheet). Carried so a report opens at the row height its author chose
+    /// with Select All + Row Height; per sheet, so it re-sizes nothing of the
+    /// subscriber's own sheets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_row_height: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_column_width: Option<f64>,
 }
 
 fn default_view_mode() -> String {
@@ -498,6 +506,8 @@ impl Default for PublishedSheetMetadata {
             view_mode: default_view_mode(),
             display_headings: true,
             kind: persistence::SheetKind::Worksheet,
+            default_row_height: None,
+            default_column_width: None,
         }
     }
 }
@@ -527,6 +537,8 @@ impl PublishedSheetMetadata {
             view_mode: sheet.view_mode.clone(),
             display_headings: sheet.display_headings,
             kind: sheet.kind.clone(),
+            default_row_height: sheet.default_row_height,
+            default_column_width: sheet.default_column_width,
         }
     }
 

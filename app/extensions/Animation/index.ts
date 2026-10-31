@@ -22,9 +22,10 @@ import {
 import { onAppEvent, AppEvents } from "@api/events";
 import { ICON_SIZE_MD } from "@api/layout";
 import { RibbonIcon } from "@api/ribbonIcons";
-import { animationBackend } from "./lib/animationBackend";
+import { animationBackend, releaseOrphanedBuffers } from "./lib/animationBackend";
 import { playbackEngine } from "./lib/animationEngine";
-import { loadAnimations, resetAnimations } from "./lib/animationStore";
+import { applyStructuralStepToAnimations, loadAnimations, resetAnimations } from "./lib/animationStore";
+import { followStructuralEdits } from "@api/structuralFollow";
 import {
   SavedAnimationsSection,
   DriverSection,
@@ -47,6 +48,12 @@ function activate(context: ExtensionContext): void {
   // Bind the gated backend door so lib/store code reaches the anim_* commands
   // through the same capability check as ctx.invokeBackend (A3).
   animationBackend.set(context.invokeBackend);
+  // A reload mid-playback leaves the previous page's restore buffer on file
+  // with no clock left to press Stop, and every what-if command refused for
+  // the rest of the session: put those cells back now.
+  void releaseOrphanedBuffers().then((released) => {
+    if (released > 0) window.dispatchEvent(new CustomEvent("grid:refresh"));
+  });
 
   // Timeline panel: four @api/layout sections — the reference DUAL-SURFACE
   // panel. In the sidebar they stack vertically; in the ribbon each fills its
@@ -133,6 +140,16 @@ function activate(context: ExtensionContext): void {
   const onAnimationRefresh = (): void => void loadAnimations();
   window.addEventListener("animation:refresh", onAnimationRefresh);
   cleanupFns.push(() => window.removeEventListener("animation:refresh", onAnimationRefresh));
+
+  // A saved animation's driver cell follows inserted and deleted rows and
+  // columns on every sheet, and their undo and redo (BUG-0614).
+  cleanupFns.push(
+    followStructuralEdits((step) => {
+      void applyStructuralStepToAnimations(step).catch((err: unknown) => {
+        console.error("[Animation] structural follow failed:", err);
+      });
+    }),
+  );
 
   // Transient guarantee: never let an animated frame be saved or leak across a
   // sheet/file change — force-stop (which restores the model) on these events.

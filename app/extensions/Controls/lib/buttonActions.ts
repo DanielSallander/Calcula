@@ -30,6 +30,7 @@ import { goBackSheet } from "@api/sheetHistory";
 import { clearSlicersOnSheet } from "@api/slicerClearService";
 import { showToast } from "@api/notifications";
 import type { ButtonAction } from "@api/buttonControlService";
+import { findBySheetName } from "@api/sheetNames";
 import { getFloatingControl } from "./floatingStore";
 
 export { buttonActionOfControl } from "./buttonActionOfControl";
@@ -58,8 +59,7 @@ export function resolveNavigateTarget(
   }
   const exact = sheets.find((s) => s.name === action.sheetName);
   if (exact) return exact;
-  const folded = action.sheetName.toLocaleLowerCase();
-  return sheets.find((s) => s.name.toLocaleLowerCase() === folded) ?? null;
+  return findBySheetName(sheets, action.sheetName, (s) => s.name) ?? null;
 }
 
 /**

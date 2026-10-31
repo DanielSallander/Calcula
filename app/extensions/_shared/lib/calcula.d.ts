@@ -403,10 +403,16 @@ declare namespace Calcula {
   // --------------------------------------------------------------------------
 
   /**
-   * Get the current calculation state.
-   * @returns "done" (calculation is synchronous in the current version)
+   * Get the calculation state as it was when the script started (Excel's
+   * `Application.CalculationState`).
+   * @returns "done" when every formula's value is current, or "pending" when
+   *   some formula may hold a value it has not been recalculated for -- a
+   *   cancelled recalculation, an edit of a precedent under manual
+   *   calculation, or a workbook saved or reopened that way (the status bar
+   *   then says "Calculate"; F9 settles it). The script's own writes do not
+   *   change the answer within the run.
    */
-  function getCalculationState(): string;
+  function getCalculationState(): "done" | "pending";
 
   /**
    * Get iterative-calculation settings.

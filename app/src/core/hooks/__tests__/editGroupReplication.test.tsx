@@ -5,9 +5,9 @@
 //          a replication that did not reach every requested sheet is said out
 //          loud. Driven through the REAL useEditing hook, the real reducer, the
 //          real sheet-grouping store and Core's real point-mode switch, against
-//          a fake backend whose `update_cell_on_sheets` skips its own ACTIVE
+//          a fake backend whose grouped `update_cell` skips its own ACTIVE
 //          sheet and answers the sheets it actually wrote, as the Rust one does
-//          (commands/data.rs).
+//          (commands/data.rs `update_cell_grouped`).
 // CONTEXT: Review F2-group-replication-excludes-pointed-sheet. After a point-mode
 //          commit the replication excluded the closure's sheet context -- the
 //          sheet the user POINTED at -- instead of the edit's own sheet. With
@@ -24,10 +24,26 @@ const backend = vi.hoisted(() => {
     sheets: [] as Array<{ id: string; name: string }>,
     active: 0,
     writes: [] as Array<{ sheet: string; value: string }>,
+    /**
+     * The undo history as Rust keeps it: ONE open slot that update_cell and
+     * update_cell_on_sheets JOIN when it is open, and otherwise each records a
+     * step of its own (commands/data.rs, core/engine/src/undo.rs). `log` is the
+     * order of every write and transaction call.
+     */
+    open: null as null | { ticket: number; sheets: string[] },
+    steps: [] as string[][],
+    log: [] as string[],
+    nextTicket: 1,
+    record(sheets: string[]) {
+      if (b.open) b.open.sheets.push(...sheets);
+      else b.steps.push(sheets);
+    },
     /** Every sheet list the replication was asked for. */
     replications: [] as number[][],
     /** Sheets the replication silently does not write (a backend skip the frontend must not miss). */
     skip: new Set<number>(),
+    /** A refusal of the whole replication (a grouped sheet protects the cell). */
+    refuse: null as string | null,
     list() {
       return {
         sheets: b.sheets.map((s, index) => ({ index, name: s.name, sheetId: s.id, visibility: "visible" as const })),
@@ -47,12 +63,35 @@ vi.mock("../../lib/tauri-api", () => ({
     backend.active = index;
     return backend.list();
   }),
-  updateCell: vi.fn(async (row: number, col: number, value: string) => {
-    backend.writes.push({ sheet: backend.sheets[backend.active].name, value });
-    return { cells: [{ row, col, display: value, formula: value.startsWith("=") ? value : null }] };
+  // Rust's `update_cell`: with `groupSheets` it is `update_cell_grouped` --
+  // the edit's own sheet, then the other grouped sheets (its ACTIVE sheet
+  // skipped, the answer the sheets it actually wrote), in ONE undo step the
+  // call opens and closes itself; a refused replication (`backend.refuse`)
+  // leaves the own sheet written and is answered in `groupError`.
+  updateCell: vi.fn(async (row: number, col: number, value: string, groupSheets?: number[]) => {
+    const own = backend.sheets[backend.active].name;
+    backend.writes.push({ sheet: own, value });
+    backend.log.push("update_cell");
+    const cells = [{ row, col, display: value, formula: value.startsWith("=") ? value : null }];
+    if (!groupSheets || groupSheets.length === 0) {
+      backend.record([own]);
+      return { cells };
+    }
+    backend.replications.push([...groupSheets]);
+    if (backend.refuse) {
+      backend.record([own]);
+      return { cells, groupError: backend.refuse };
+    }
+    const wrote: number[] = [];
+    for (const index of groupSheets) {
+      if (index === backend.active || backend.skip.has(index)) continue;
+      backend.writes.push({ sheet: backend.sheets[index].name, value });
+      wrote.push(index);
+    }
+    backend.record([own, ...wrote.map((i) => backend.sheets[i].name)]);
+    return { cells, groupWritten: wrote };
   }),
-  // Rust's `update_cell_on_sheets`: the ACTIVE sheet is skipped (`update_cell`
-  // wrote it), and the answer is the sheets it actually wrote.
+  // The separate replication door the entry no longer uses (scripts still do).
   updateCellOnSheets: vi.fn(async (indices: number[], _row: number, _col: number, value: string) => {
     backend.replications.push([...indices]);
     const wrote: number[] = [];
@@ -61,7 +100,26 @@ vi.mock("../../lib/tauri-api", () => ({
       backend.writes.push({ sheet: backend.sheets[index].name, value });
       wrote.push(index);
     }
+    if (wrote.length > 0) backend.record(wrote.map((i) => backend.sheets[i].name));
+    backend.log.push("update_cell_on_sheets");
     return wrote;
+  }),
+  beginUndoTransaction: vi.fn(async () => {
+    backend.log.push("begin");
+    if (backend.open) return null;
+    backend.open = { ticket: backend.nextTicket++, sheets: [] };
+    return backend.open.ticket;
+  }),
+  commitUndoTransaction: vi.fn(async (ticket?: number | null) => {
+    backend.log.push(`commit:${ticket ?? "bare"}`);
+    if (backend.open && (ticket == null || ticket === backend.open.ticket)) {
+      if (backend.open.sheets.length > 0) backend.steps.push(backend.open.sheets);
+      backend.open = null;
+    }
+  }),
+  cancelUndoTransaction: vi.fn(async () => {
+    backend.log.push("cancel");
+    backend.open = null;
   }),
 }));
 
@@ -165,6 +223,11 @@ beforeEach(() => {
   backend.writes = [];
   backend.replications = [];
   backend.skip = new Set();
+  backend.refuse = null;
+  backend.open = null;
+  backend.steps = [];
+  backend.log = [];
+  backend.nextTicket = 1;
   dialogs.alerts = [];
   __resetExternalEditForTests();
   setGlobalIsEditing(false);
@@ -257,5 +320,57 @@ describe("F2: a replication that did not reach every grouped sheet is said out l
     expect(dialogs.alerts[0]).toContain("The edit was applied to this sheet but NOT to the other grouped sheets.");
     expect(dialogs.alerts[0]).toContain("1 of the 2 other grouped sheets did not receive it.");
     quiet.mockRestore();
+  });
+});
+
+// Round 17 (whatif4's NEW-grouped-edit-two-undo-steps). Excel [LIVE, whatif4
+// round 16, Excel 16 + SendKeys on a visible instance]: a value typed with
+// sheets grouped is ONE undo step -- one Ctrl+Z undoes every grouped sheet and
+// lands on the sheet active at the entry. update_cell and update_cell_on_sheets
+// each recorded their own step, so it took two, the first moving to the OTHER
+// sheet. Round 19 (misc19): the step is now ONE backend call
+// (`update_cell_grouped`), because a transaction held open across the awaits
+// between the two doors took in any other writer's step. The backend half is
+// pinned by cross_sheet_recalc_tests::
+// a_grouped_entry_is_one_call_that_closes_its_own_undo_step.
+describe("a grouped entry is ONE undo step, as Excel's is", () => {
+  it("Sheet1+Sheet2+Sheet3 grouped, 7 typed on Sheet1: ONE backend call, one step holding every sheet, the edit's own first", async () => {
+    setSelectedSheetIndices([0, 1, 2]);
+    await mountOn(0);
+    await openEdit("7");
+
+    await commit();
+    expect(backend.steps, "a grouped entry was more than one undo step").toEqual([["Sheet1", "Sheet2", "Sheet3"]]);
+    expect(
+      backend.log,
+      "the grouped entry held a frontend transaction open across awaits (another writer could join it)",
+    ).toEqual(["update_cell"]);
+    expect(backend.open, "the grouped entry's transaction was left open").toBeNull();
+  });
+
+  it("a replication the backend refuses: the edit's own sheet stays one step, and the refusal is said", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    backend.refuse = "Sheet2 protects this cell";
+    setSelectedSheetIndices([0, 1]);
+    await mountOn(0);
+    await openEdit("7");
+
+    const result = await commit();
+    expect(result).toMatchObject({ success: true });
+    expect(backend.steps).toEqual([["Sheet1"]]);
+    expect(backend.open, "a refused replication left the transaction open").toBeNull();
+    expect(dialogs.alerts, "a refused replication was swallowed").toHaveLength(1);
+    expect(dialogs.alerts[0]).toContain("Sheet2 protects this cell");
+    quiet.mockRestore();
+  });
+
+  it("control: with no other sheet grouped, no transaction is opened", async () => {
+    setSelectedSheetIndices([0]);
+    await mountOn(0);
+    await openEdit("7");
+
+    await commit();
+    expect(backend.log).toEqual(["update_cell"]);
+    expect(backend.steps).toEqual([["Sheet1"]]);
   });
 });

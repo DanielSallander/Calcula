@@ -41,7 +41,18 @@
 import { CommandRegistry, CoreCommands } from "@api/commands";
 import { alertAsync, confirmAsync } from "@api/dialogs";
 import { getGridStateSnapshot, refreshGridData } from "@api/grid";
-import { insertCellsRange, deleteCellsRange, type CellShiftResult } from "@api/lib";
+import {
+  insertCellsRange,
+  deleteCellsRange,
+  insertCopiedCells,
+  insertCopiedCellsLabel,
+  pendingCopyOfSheetCells,
+  PASTE_ONCE,
+  pasteTiles,
+  type CellShiftResult,
+  type ClipboardData,
+  type InsertCopiedCellsRequest,
+} from "@api/lib";
 import { cellTargetFor, resolveCellTarget } from "@api/cellTarget";
 import { DEFAULT_GRID_CONFIG, type GridConfig, type Selection } from "@api/types";
 
@@ -184,6 +195,8 @@ export function shiftLabel(mode: CellShiftMode): string {
 export interface CellShiftPlace {
   selection: Selection;
   size: { totalRows: number; totalCols: number };
+  /** The selection is an OBJECT's cells (a floating grid's), not the sheet's. */
+  onObject?: boolean;
 }
 
 /**
@@ -201,7 +214,7 @@ export function resolveShiftPlace(mode: CellShiftMode): CellShiftPlace | null {
     return null;
   }
   if (t.kind === "object") {
-    return { selection: t.selection, size: { totalRows: t.bounds.rows, totalCols: t.bounds.cols } };
+    return { selection: t.selection, size: { totalRows: t.bounds.rows, totalCols: t.bounds.cols }, onObject: true };
   }
   const selection = currentSelection();
   return selection ? { selection, size: sheetSize() } : null;
@@ -273,15 +286,189 @@ export async function runChoice(
   }
 }
 
+// ============================================================================
+// INSERT COPIED CELLS -- Insert while a COPY is pending
+// ============================================================================
+//
+// Live Excel 16 [2026-10-30, clip4/probe-insert.ps1 and probe-insert2.ps1,
+// fresh visible instances, Home > Insert > Cells... and Ctrl+Plus]: with a
+// copy pending the Cells... row reads "Insert Copied Cells..." and Insert
+// makes room for the COPIED block and pastes it there, as one undo step, the
+// copy staying pending:
+//   - its dialog ("Insert") offers Shift cells right / Shift cells down only;
+//   - the room is the copy's size at the selection's top-left (A1:B1 copied
+//     into F2 -> F2:G2; F6:F7 copied into F2:F4 -> F2:F3) -- or the whole
+//     selection when it is an exact multiple of the copy, which the copy then
+//     fills TILED, as a Paste tiles (@api/lib `pasteTiles`) [LIVE round 13,
+//     clip5/probe-insert-tile.ps1: F6 into F2:F3 -> f6 twice; F6:F7 into
+//     F2:F5 -> f6,f7,f6,f7; rows 6:7 into rows 2:5 -> the pair twice; rows 2:4
+//     -> once];
+//   - whole rows (columns) selected with whole rows (columns) copied: the
+//     copied lines are inserted there, no dialog ("Insert Copied Cells");
+//   - whole rows (columns) selected with a block of cells copied, or the other
+//     way about: refused, "This selection isn't valid...", nothing changes.
+// A cut pending is Excel's "Insert Cut Cells", which is not modelled: Insert
+// then runs as it does without a clipboard and ends the cut.
+
+/** The Insert dialog's choices while a copy is pending (Excel's "Insert" over a copy). */
+export const INSERT_COPIED_CHOICES = ["right", "down"] as const;
+
+/** Excel's words when the copied block cannot be inserted in the selection's shape [LIVE]. */
+export const COPY_AREA_MISMATCH =
+  "This selection isn't valid.\n\nMake sure the copy and paste areas don't overlap unless they are the same size and shape.";
+
+/** What Insert does with a copy pending: insert the copied lines, ask the shift for a block, or refuse. */
+export type InsertCopiedPlan =
+  | { kind: "refused"; message: string }
+  | { kind: "lines"; request: Extract<InsertCopiedCellsRequest, { kind: "rows" | "columns" }> }
+  | { kind: "cells"; rect: CellRect };
+
+/** The copy's own shape: whole rows, whole columns, or a block of `rows` x `cols` cells. */
+function copiedShape(
+  clip: ClipboardData,
+  size: { totalRows: number; totalCols: number },
+): { lines: "rows" | "columns" | null; rows: number; cols: number } {
+  const src = selectionRect(clip.sourceSelection);
+  const rows = clip.cells.length > 0 ? clip.cells.length : src.endRow - src.startRow + 1;
+  const cols = src.endCol - src.startCol + 1;
+  if (clip.sourceSelection.type === "rows" || (src.startCol <= 0 && src.endCol >= size.totalCols - 1)) {
+    return { lines: "rows", rows, cols };
+  }
+  if (clip.sourceSelection.type === "columns" || (src.startRow <= 0 && src.endRow >= size.totalRows - 1)) {
+    return { lines: "columns", rows, cols };
+  }
+  return { lines: null, rows, cols };
+}
+
+/**
+ * Excel's rules for Insert over `selection` with `clip` copied (see above).
+ * `forced`: a named "entireRow" / "entireColumn" (a script's INSERT_CELLS
+ * `{ shift }`), which inserts lines whatever the selection's shape.
+ */
+export function planInsertCopied(
+  clip: ClipboardData,
+  selection: Selection,
+  size: { totalRows: number; totalCols: number },
+  forced?: "entireRow" | "entireColumn",
+): InsertCopiedPlan {
+  if (selection.additionalRanges && selection.additionalRanges.length > 0) {
+    return { kind: "refused", message: MULTIPLE_SELECTIONS };
+  }
+  const shape = copiedShape(clip, size);
+  const line = forced ?? wholeLineChoice(selection, size);
+  const rect = selectionRect(selection);
+  if (line === "entireRow") {
+    if (shape.lines !== "rows") return { kind: "refused", message: COPY_AREA_MISMATCH };
+    // Selected rows that are a multiple of the copied rows take it tiled --
+    // asked over the area the copy's own paste then fills (the selected rows x
+    // the copied width), so the room and the paste apply the SAME cap: a room
+    // the paste would fill only once is made only once (round 15, rev13B).
+    const tiles = forced ? PASTE_ONCE : pasteTiles(shape.rows, shape.cols, { ...rect, startCol: 0, endCol: shape.cols - 1 });
+    return { kind: "lines", request: { kind: "rows", start: rect.startRow, count: shape.rows * tiles.rows } };
+  }
+  if (line === "entireColumn") {
+    if (shape.lines !== "columns") return { kind: "refused", message: COPY_AREA_MISMATCH };
+    const tiles = forced ? PASTE_ONCE : pasteTiles(shape.rows, shape.cols, { ...rect, startRow: 0, endRow: shape.rows - 1 });
+    return { kind: "lines", request: { kind: "columns", start: rect.startCol, count: shape.cols * tiles.cols } };
+  }
+  if (shape.lines !== null) return { kind: "refused", message: COPY_AREA_MISMATCH };
+  // The copy's size, or the whole selection when that is a multiple of it.
+  const tiles = pasteTiles(shape.rows, shape.cols, rect);
+  const room: CellRect = {
+    startRow: rect.startRow,
+    startCol: rect.startCol,
+    endRow: rect.startRow + shape.rows * tiles.rows - 1,
+    endCol: rect.startCol + shape.cols * tiles.cols - 1,
+  };
+  if (room.endRow > size.totalRows - 1 || room.endCol > size.totalCols - 1) {
+    return { kind: "refused", message: COPY_AREA_MISMATCH };
+  }
+  return { kind: "cells", rect: room };
+}
+
+/**
+ * The right-click menu's Insert item with a copy pending, as Excel's menus
+ * word it [LIVE 2026-10-30, clip6/probe-menu.ps1: Shift+F10 on a fresh visible
+ * Excel 16, the open menu read through UI Automation]: on a ROW or COLUMN
+ * header "Insert Copied Cells" (row 6 or F6 copied, row 2 selected; column F
+ * or row 6 copied, column B selected), on cells "Insert Copied Cells..." for a
+ * copied block (F6 copied, B2 selected: the dialog follows) and "Insert
+ * Copied Cells" for copied whole lines (row 6 copied, B2 selected). Null with
+ * no copy pending: the menus keep their own words (Insert... / Insert Row /
+ * Insert Column).
+ */
+export function insertCopiedMenuLabel(selection: { type?: string } | null | undefined): string | null {
+  const clip = pendingCopyOfSheetCells();
+  if (!clip) return null;
+  const onLines = selection?.type === "rows" || selection?.type === "columns";
+  const copiedLines = copiedShape(clip, sheetSize()).lines !== null;
+  return insertCopiedCellsLabel(onLines || copiedLines);
+}
+
+/** The copy Insert would insert: a pending COPY of sheet cells, on the sheet (never a floating grid's selection). */
+export function copyToInsert(place: CellShiftPlace): ClipboardData | null {
+  if (place.onObject) return null;
+  return pendingCopyOfSheetCells();
+}
+
+/** Run Insert Copied Cells (one undo step); every refusal reaches the user, and the grid is refreshed after. */
+export async function runInsertCopied(request: InsertCopiedCellsRequest): Promise<void> {
+  const result = await insertCopiedCells(request);
+  if (result.inserted) {
+    refreshGridData();
+    return;
+  }
+  if (result.message) await alertAsync(result.message);
+}
+
+/**
+ * Insert with a copy pending, over `place` (see INSERT COPIED CELLS). A block
+ * of cells needs a shift: `shift` when it is known, else `askShift` decides
+ * (the dialog; null = no dialog, the shape rule).
+ */
+export async function runInsertCopiedPlan(
+  clip: ClipboardData,
+  place: CellShiftPlace,
+  shift: "right" | "down" | null,
+  forced?: "entireRow" | "entireColumn",
+  askShift?: (run: (shift: "right" | "down") => Promise<void>) => void,
+): Promise<void> {
+  const plan = planInsertCopied(clip, place.selection, place.size, forced);
+  if (plan.kind === "refused") {
+    await alertAsync(plan.message);
+    return;
+  }
+  if (plan.kind === "lines") {
+    await runInsertCopied(plan.request);
+    return;
+  }
+  const run = (s: "right" | "down"): Promise<void> => runInsertCopied({ kind: "cells", ...plan.rect, shift: s });
+  if (shift) {
+    await run(shift);
+    return;
+  }
+  if (askShift) {
+    askShift(run);
+    return;
+  }
+  await run(shapeShift("insert", plan.rect) as "right" | "down");
+}
+
 /**
  * INSERT / DELETE: the split buttons' main halves and Ctrl+Plus / Ctrl+Minus.
  * Whole rows -> rows, whole columns -> columns, otherwise cells shifted the
- * way Excel's shape rule says.
+ * way Excel's shape rule says. With a COPY pending, Insert is Insert Copied
+ * Cells (the shift by the same shape rule, no dialog).
  */
 export async function runMainHalf(mode: CellShiftMode): Promise<void> {
   const place = resolveShiftPlace(mode);
   if (!place) return;
   const { selection, size } = place;
+  const copied = mode === "insert" ? copyToInsert(place) : null;
+  if (copied) {
+    await runInsertCopiedPlan(copied, place, null);
+    return;
+  }
   const line = wholeLineChoice(selection, size);
   if (line) {
     await runChoice(mode, selection, line, size);

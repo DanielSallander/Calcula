@@ -1120,8 +1120,6 @@ mod tests {
             ("row_heights", "DimensionData, active sheet"),
             ("all_column_widths", "DimensionData, background sheets"),
             ("all_row_heights", "DimensionData, background sheets"),
-            ("default_row_height", "workbook.default_row_height"),
-            ("default_column_width", "workbook.default_column_width"),
             ("merged_regions", "Sheet::merged_regions, active sheet"),
             ("all_merged_regions", "Sheet::merged_regions, background sheets"),
             ("user_hidden_rows", "Sheet::user_hidden_rows -- a third hidden-ness AUTHORITY with nowhere else to live"),
@@ -1249,7 +1247,13 @@ mod tests {
         out
     }
 
-    /// The published 111 / 66 / 42 / 3 split, pinned. (110 / 66 / 42 / 2 until
+    /// The published 110 / 64 / 42 / 4 split, pinned. (109 / 64 / 42 / 3 until
+    /// round 13 added `whatif_run`, an `AtomicBool` -- neither wrapper,
+    /// genuinely lock-free -- the single-flight that keeps two what-if runs from
+    /// overlapping; 111 / 66 / 42 / 3 until
+    /// round 10 moved the standard row height and column width onto each sheet
+    /// (`engine::Grid`, BUG-0352/0353) and dropped the two workbook-wide
+    /// `Persisted<f64>` fields; 110 / 66 / 42 / 2 until
     /// F1 review round 7 added `sheet_structure_generation`, an `AtomicU64` --
     /// neither wrapper, genuinely lock-free -- that every sheet renumbering
     /// bumps so a save, AutoRecover or publish snapshot can tell it read across
@@ -1287,17 +1291,19 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
 
-        assert_eq!(decls.len(), 111, "AppState field count changed");
-        assert_eq!(persisted.len(), 66, "Persisted<T> count changed");
+        assert_eq!(decls.len(), 110, "AppState field count changed");
+        assert_eq!(persisted.len(), 64, "Persisted<T> count changed");
         assert_eq!(bare.len(), 42, "bare Mutex/RwLock count changed");
         assert_eq!(
             neither,
-            ["undo_stack", "calc_cancel", "sheet_structure_generation"],
-            "exactly three fields carry neither wrapper: `undo_stack` is `UndoHistory`, \
+            ["undo_stack", "calc_cancel", "sheet_structure_generation", "whatif_run"],
+            "exactly four fields carry neither wrapper: `undo_stack` is `UndoHistory`, \
              which holds its OWN Mutex (do not read this as unlocked and add one), \
-             `calc_cancel` is `CancelToken(Arc<AtomicBool>)`, genuinely lock-free, and \
+             `calc_cancel` is `CancelToken(Arc<AtomicBool>)`, genuinely lock-free, \
              `sheet_structure_generation` is an `AtomicU64` that adds no edge to the lock \
-             order on purpose (do not wrap it in a Mutex: it is bumped under sheet locks)"
+             order on purpose (do not wrap it in a Mutex: it is bumped under sheet locks), \
+             and `whatif_run` is the what-if single-flight `AtomicBool`, taken before any \
+             lock and never waited on"
         );
         assert_eq!(
             persisted.len() + bare.len() + neither.len(),

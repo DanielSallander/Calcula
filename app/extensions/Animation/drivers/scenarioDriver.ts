@@ -107,7 +107,10 @@ export function createScenarioDriver(spec: ScenarioSpec): Driver {
 
     async snapshot(): Promise<void> {
       const data = await ensureLoaded();
-      await animSnapshot(token, spec.sheetIndex, data.union);
+      // Refused while a what-if run is going: no buffer, so no frame -- fail
+      // here, and the clock stops and says why.
+      const res = await animSnapshot(token, spec.sheetIndex, data.union);
+      if (!res.success) throw new Error(res.error ?? "The animation could not start.");
     },
 
     async applyFrame(t: number): Promise<void> {

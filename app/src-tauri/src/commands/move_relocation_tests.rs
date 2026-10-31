@@ -62,6 +62,7 @@ fn batch(wb: &Workbook, writes: &[(u32, u32, String)]) {
             style_index: None,
             invariant: Some(true),
             pasted: None,
+            moved: None,
         })
         .collect();
     update_cells_batch_core(
@@ -138,7 +139,7 @@ fn refers_to(wb: &Workbook, name: &str) -> String {
         .named_ranges
         .read()
         .unwrap()
-        .get(&name.to_uppercase())
+        .get(&identity::defined_name_key(name))
         .map(|n| n.refers_to.clone())
         .unwrap_or_default()
 }

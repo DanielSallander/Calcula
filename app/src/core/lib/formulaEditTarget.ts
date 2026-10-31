@@ -656,23 +656,63 @@ export function isFormulaBarElement(el: unknown): boolean {
  * lexer reads it as ONE plain identifier. Rule for rule the backend's own
  * `is_bare_sheet_name` (core/engine/src/ast_render.rs), which its
  * render-then-parse test pins for every reference shape:
- *   - an ASCII letter or `_` first (a leading digit lexes as a number);
- *   - then ASCII letters, digits and `_`, and a `.` only when one of those
+ *   - a LETTER or `_` first -- the lexer's letter class, any Unicode
+ *     alphabetic character (a leading digit lexes as a number);
+ *   - then letters, ASCII digits and `_`, and a `.` only when one of those
  *     follows it (a trailing dot is the trim-reference operator);
- *   - never `TRUE` / `FALSE` in any case (they lex as BOOLEAN literals).
- * A reference-SHAPED name (`A1`, `Sheet1`) is bare: the `!` after it is what
- * tells the lexer it is a sheet.
+ *   - never `TRUE` / `FALSE` in any case (they lex as BOOLEAN literals);
+ *   - and, as Excel writes them [LIVE, 2026-10-31], never a name that IS a
+ *     cell address in range (`A1`, `Q1`, `XFD1048576`; `XFE1` and `A0` are
+ *     bare) or that STARTS with an R1C1 reference (`R`, `C`, `RC`, `R2`,
+ *     `R1x`, `RC1x`; `Rx`, `RCx`, `R0`, `R1.x` are bare).
+ * So `Översikt` is bare, as Excel writes `=Översikt!A1`.
  */
 export function isBareSheetName(name: string): boolean {
-  if (!/^[A-Za-z_]/.test(name)) return false;
-  for (let i = 0; i < name.length; i++) {
-    const c = name[i];
-    if (/[A-Za-z0-9_]/.test(c)) continue;
-    if (c === "." && i + 1 < name.length && /[A-Za-z0-9_]/.test(name[i + 1])) continue;
+  const chars = Array.from(name);
+  const letter = (c: string): boolean => /^[A-Za-z_]$/.test(c) || (c > "\u007f" && /^\p{Alphabetic}$/u.test(c));
+  const nameChar = (c: string): boolean => letter(c) || /^[0-9]$/.test(c);
+  if (chars.length === 0 || !letter(chars[0])) return false;
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    if (nameChar(c)) continue;
+    if (c === "." && i + 1 < chars.length && nameChar(chars[i + 1])) continue;
     return false;
   }
   const upper = name.toUpperCase();
-  return upper !== "TRUE" && upper !== "FALSE";
+  if (upper === "TRUE" || upper === "FALSE") return false;
+  return !isA1CellShaped(name) && !startsWithR1C1Reference(name);
+}
+
+/** `name` is exactly an A1 address on the sheet (A..XFD, rows 1..1048576). */
+function isA1CellShaped(name: string): boolean {
+  const m = /^([A-Za-z]{1,3})([0-9]+)$/.exec(name);
+  if (!m) return false;
+  let col = 0;
+  for (const ch of m[1].toUpperCase()) col = col * 26 + (ch.charCodeAt(0) - 64);
+  const row = Number(m[2]);
+  return col <= 16384 && row >= 1 && row <= 1048576;
+}
+
+/**
+ * `name` begins with an R1C1 reference: `R`, `C`, `RC` alone, or `R<n>`,
+ * `C<n>`, `R<n>C`, `RC<n>`, `R<n>C<m>` followed by anything but `.` (row
+ * 1..1048576, any positive column) -- the backend's
+ * `starts_with_r1c1_reference`.
+ */
+function startsWithR1C1Reference(name: string): boolean {
+  const upper = name.replace(/[a-z]/g, (c) => c.toUpperCase());
+  if (upper === "R" || upper === "C" || upper === "RC") return true;
+  const m = /^(?:R([0-9]*))?(?:C([0-9]*))?/.exec(upper);
+  if (!m || m[0] === "") return false;
+  const row = m[1];
+  const col = m[2];
+  if (row) {
+    const n = Number(row);
+    if (n < 1 || n > 1048576) return false;
+  }
+  if (col && Number(col) === 0) return false;
+  if (!row && !col) return false;
+  return upper[m[0].length] !== ".";
 }
 
 /**

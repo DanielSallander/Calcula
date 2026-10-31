@@ -927,6 +927,23 @@ pub(crate) fn ensure_insert_fits(grid: &engine::Grid, band: &BandEdit) -> Result
     Ok(())
 }
 
+/// Insert / Delete Cells as a COORDINATE change: a row-wise shift (down / up)
+/// is a row insert (delete) of the range's rows confined to the band of its
+/// columns, a column-wise shift (right / left) a column insert (delete) of
+/// its columns confined to the band of its rows. What the frontend stores
+/// whose coordinates the backend never holds follow (`@api/structuralFollow`).
+pub(crate) fn band_delta(sheet_index: usize, r0: u32, c0: u32, r1: u32, c1: u32, shift: CellShift) -> crate::api_types::StructuralDelta {
+    use crate::api_types::{DeltaBand, StructuralDelta as D};
+    let rows = Some(DeltaBand { start: r0, end: r1 });
+    let cols = Some(DeltaBand { start: c0, end: c1 });
+    match shift {
+        CellShift::Down => D::RowInsert { sheet_index, at: r0, count: r1 - r0 + 1, band: cols },
+        CellShift::Up => D::RowDelete { sheet_index, at: r0, count: r1 - r0 + 1, band: cols },
+        CellShift::Right => D::ColInsert { sheet_index, at: c0, count: c1 - c0 + 1, band: rows },
+        CellShift::Left => D::ColDelete { sheet_index, at: c0, count: c1 - c0 + 1, band: rows },
+    }
+}
+
 // ============================================================================
 // The commands
 // ============================================================================
@@ -1047,7 +1064,7 @@ pub(crate) fn shift_cells_impl(
             (false, false) => delete_columns_impl(state, file_state, pivot_state, user_files_state, pane_control_state, ribbon_filter_state, slicer_state, timeline_state, c0, c1 - c0 + 1, None),
         };
         applied?;
-        return Ok(CellShiftResult { applied: true, confirm: None, whole_lines: true });
+        return Ok(CellShiftResult { applied: true, confirm: None, whole_lines: true, delta: None });
     }
 
     // ------------------------------------------------------------------
@@ -1173,7 +1190,7 @@ pub(crate) fn shift_cells_impl(
             .collect()
     };
     if !unmerge_cut_merges && merge_plans.iter().any(|(_, p)| *p == MergePlan::Cut) {
-        return Ok(CellShiftResult { applied: false, confirm: Some(UNMERGE_QUESTION.to_string()), whole_lines: false });
+        return Ok(CellShiftResult { applied: false, confirm: Some(UNMERGE_QUESTION.to_string()), whole_lines: false, delta: None });
     }
 
     // Push-off (rule 2): the one room rule every insert path shares.
@@ -1198,6 +1215,11 @@ pub(crate) fn shift_cells_impl(
 
     let owned_txn = undo_stack.begin_owned_transaction(description.to_string());
     undo_stack.record_snapshot(snapshot);
+    // WHERE the cells moved, as coordinates (`band_delta`): the step records
+    // it for its Undo / Redo, and the result hands it to the frontend's
+    // followers (CellShiftResult::delta).
+    let delta = band_delta(active_sheet, r0, c0, r1, c1, shift);
+    crate::undo_commands::record_structural_delta(&mut undo_stack, &delta);
     // The snapshot restores a spill's cells but not the maps that say which
     // origin owns them; without this an undo turned a moved spill into
     // `#SPILL!` (measured). No `?` from here to the commit below: an early
@@ -1422,7 +1444,7 @@ pub(crate) fn shift_cells_impl(
         &mut recalculated,
     );
 
-    Ok(CellShiftResult { applied: true, confirm: None, whole_lines: false })
+    Ok(CellShiftResult { applied: true, confirm: None, whole_lines: false, delta: Some(delta) })
 }
 
 /// The readers of the cells a band edit changed (the band from `at` to the
@@ -1468,8 +1490,17 @@ fn readers_of_band(
     let mut sheets: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     if let Ok(cross) = state.cross_sheet_dependents.lock() {
         for ((name, r, c), deps) in cross.iter() {
-            if name.eq_ignore_ascii_case(edited_sheet_name) && inside(*r, *c) {
+            // A whole column or row read by name (`Sheet2!G:G`, `Sheet2!9:9`)
+            // keys `WHOLE_LINE`; a qualified line on the edited sheet itself
+            // (`=SUM(Sheet1!G:G)` on Sheet1) is a same-sheet reader (calcref).
+            let hit = match (*r == crate::WHOLE_LINE, *c == crate::WHOLE_LINE) {
+                (true, _) => *c >= area.start_col && *c <= area.end_col,
+                (_, true) => *r >= area.start_row && *r <= area.end_row,
+                _ => inside(*r, *c),
+            };
+            if identity::sheet_names_equal(&name, &edited_sheet_name) && hit {
                 sheets.extend(deps.iter().map(|&(s, _, _)| s).filter(|&s| s != active_sheet));
+                readers.extend(deps.iter().filter(|&&(s, _, _)| s == active_sheet).map(|&(_, r, c)| (r, c)));
             }
         }
     }

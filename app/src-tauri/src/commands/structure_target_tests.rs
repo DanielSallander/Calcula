@@ -405,6 +405,7 @@ fn hiding_on_a_target_writes_the_object_set_and_lock_objects_refuses_it() {
     crate::sheets::set_canvas_layout_inner(
         &wb.state,
         &wb.file,
+        crate::sheets::ObjectFamilyStores::none_for_test(),
         Some(canvas),
         &crate::api_types::CanvasLayoutPatch { objects_locked: Some(true), ..Default::default() },
     )

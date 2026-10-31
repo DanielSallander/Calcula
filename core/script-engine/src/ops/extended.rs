@@ -384,10 +384,14 @@ pub fn register_extended_ops<'js>(
     // Calculation
     // ========================================================================
 
-    // getCalculationState() -> "done" (stub, always returns done)
+    // getCalculationState() -> "done" | "pending": the host's answer
+    // (`calculation_state_impl`), carried in on HostState when the run starts
+    // -- Excel's Application.CalculationState. It was a stub that answered
+    // "done" whatever the workbook held.
     {
+        let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> String {
-            "done".to_string()
+            sc.borrow().host.calculation_state.clone()
         })
         .map_err(|e| format!("Failed to create getCalculationState: {}", e))?;
         calcula

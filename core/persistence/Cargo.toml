@@ -6,6 +6,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 engine = { path = "../engine" }
+# The formula lexer's own tables (its error literals) for the xlsx export's
+# LET / LAMBDA parameter scan, and its Lexer for the scan's drift test
+# (`xlsx_formula_text.rs`). Already in the graph through `engine`.
+parser = { path = "../parser" }
 identity = { path = "../identity" }
 rust_xlsxwriter = "0.79"
 calamine = "0.26"

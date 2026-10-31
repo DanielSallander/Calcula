@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/DataTables/components/DataTableDialog.tsx
 // PURPOSE: Data Table dialog - one-variable and two-variable What-If data tables.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
@@ -9,6 +9,7 @@ import {
   dataTableTwoVar,
   columnToLetter,
 } from "@api";
+import { getActiveSheet } from "@api/lib";
 
 // ============================================================================
 // Styles
@@ -160,6 +161,13 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
   const [colInputRef, setColInputRef] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // A run in flight, set SYNCHRONOUSLY before the first await. Excel's Data
+  // Table is modal: while it runs, a second OK (Enter pressed again -- only the
+  // button was disabled), Esc, Cancel, X and a click outside do nothing. A
+  // second run used to start beside the first and leave the input cell at one
+  // of the first run's trial values; Esc closed the dialog under the running
+  // table, so its results were never repainted.
+  const runningRef = useRef(false);
 
   const sel = data as Record<string, unknown> | undefined;
   const startRow = (sel?.activeRow as number) ?? 0;
@@ -172,7 +180,7 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        if (!runningRef.current) onClose();
       }
       if (e.key === "Enter") {
         e.stopPropagation();
@@ -185,6 +193,7 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
 
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent) => {
+      if (runningRef.current) return;
       if (dialogRef.current && !dialogRef.current.contains(e.target as Node)) {
         onClose();
       }
@@ -192,7 +201,12 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
     [onClose],
   );
 
+  const handleCancel = useCallback(() => {
+    if (!runningRef.current) onClose();
+  }, [onClose]);
+
   const handleOk = useCallback(async () => {
+    if (runningRef.current) return;
     setValidationError(null);
 
     const hasRowInput = rowInputRef.trim().length > 0;
@@ -228,13 +242,21 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
       }
     }
 
+    runningRef.current = true;
     setIsLoading(true);
+    let ran = false;
 
     try {
+      // The table is on the ACTIVE sheet, as in Excel: the range and the input
+      // cells are addresses on it. This sent sheet 0 whatever sheet was
+      // active, so a table selected on Sheet3 was computed, written and
+      // restored on Sheet1 -- and the protection check looked at Sheet1.
+      const sheetIndex = await getActiveSheet();
+      ran = true;
       if (hasRowInput && hasColInput) {
         // Two-variable data table
         const result = await dataTableTwoVar({
-          sheetIndex: 0,
+          sheetIndex,
           startRow,
           startCol,
           endRow,
@@ -253,7 +275,7 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
       } else {
         // One-variable data table
         const result = await dataTableOneVar({
-          sheetIndex: 0,
+          sheetIndex,
           startRow,
           startCol,
           endRow,
@@ -271,11 +293,16 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
         }
       }
 
+      runningRef.current = false;
       window.dispatchEvent(new CustomEvent("grid:refresh"));
       onClose();
     } catch (err) {
       setValidationError(`Data table calculation failed: ${err}`);
     } finally {
+      // A run that ended in an error may still have written (and restored)
+      // cells: repaint them too.
+      if (ran && runningRef.current) window.dispatchEvent(new CustomEvent("grid:refresh"));
+      runningRef.current = false;
       setIsLoading(false);
     }
   }, [rowInputRef, colInputRef, startRow, startCol, endRow, endCol, onClose]);
@@ -290,7 +317,7 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
       <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
         <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Data Table</span>
-          <button style={styles.closeBtn} onClick={onClose}>
+          <button style={styles.closeBtn} onClick={handleCancel} disabled={isLoading}>
             X
           </button>
         </div>
@@ -338,7 +365,7 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
         </div>
 
         <div style={styles.footer}>
-          <button style={styles.btn} onClick={onClose}>
+          <button style={styles.btn} onClick={handleCancel} disabled={isLoading}>
             Cancel
           </button>
           <button

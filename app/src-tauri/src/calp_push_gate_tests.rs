@@ -446,3 +446,421 @@ fn the_unrecorded_link_gate_runs_before_the_assembly() {
     let assembly = publish.find("assemble_publish_workbook(").expect("the assembly moved");
     assert!(gate < assembly, "the gate runs before the carrier is assembled");
 }
+
+/// rev11A: a push the WORKSPACE is bound to refuse -- a stale base, a version
+/// not above the head, one already published, a create over an existing
+/// application or an update of a missing one -- is refused BEFORE the
+/// recalculation before publishing, so it never runs a full workbook pass on
+/// a manual-calculation author's workbook. Each refusal is core's own text
+/// (`CalpError`); core asks every one again under the workspace lock.
+///
+/// SABOTAGE: make `preflight_workspace_gates` return `Ok(())` at once -- every
+/// refusal below comes back Ok.
+#[test]
+fn the_workspace_gates_refuse_before_the_recalculation_with_cores_own_text() {
+    use calp::{PushMode, SemVer};
+    let prof = tempfile::TempDir::new().unwrap();
+    let mut wb = persistence::Workbook::default();
+    wb.sheets = vec![persistence::Sheet::new("Sheet1".to_string())];
+    let reg = calp::MemoryWorkspace::new();
+    publish_with(&reg, &wb, SemVer::new(1, 0, 0), Vec::new(), prof.path());
+    let gates = |mode: PushMode, version: SemVer| {
+        crate::calp_commands::preflight_workspace_gates(&reg, "sales", &mode, &version)
+    };
+    let update = |base: SemVer| PushMode::Update { expected_base: base };
+
+    // POSITIVE CONTROL: the next version on the current head passes.
+    gates(update(SemVer::new(1, 0, 0)), SemVer::new(1, 0, 1)).expect("a push the workspace accepts passes");
+    // A create into an empty name passes too.
+    crate::calp_commands::preflight_workspace_gates(&reg, "other", &PushMode::CreateNew, &SemVer::new(1, 0, 0))
+        .expect("a new application passes");
+
+    let stale = gates(update(SemVer::new(0, 9, 0)), SemVer::new(1, 0, 1)).unwrap_err();
+    assert!(stale.contains("you started from v0.9.0") && stale.contains("now at v1.0.0"), "{stale}");
+    let not_greater = gates(update(SemVer::new(1, 0, 0)), SemVer::new(1, 0, 0)).unwrap_err();
+    assert!(not_greater.contains("Use v1.0.1 or higher"), "{not_greater}");
+    let exists = gates(PushMode::CreateNew, SemVer::new(2, 0, 0)).unwrap_err();
+    assert_eq!(exists, calp::CalpError::ApplicationAlreadyExists("sales".to_string()).to_string());
+    let missing = crate::calp_commands::preflight_workspace_gates(
+        &reg,
+        "other",
+        &update(SemVer::new(1, 0, 0)),
+        &SemVer::new(1, 0, 1),
+    )
+    .unwrap_err();
+    assert_eq!(missing, calp::CalpError::ApplicationNotFound("other".to_string()).to_string());
+}
+
+// ---------------------------------------------------------------------------
+// rev13A: an (async) push that outlives its workbook (File > Open / New)
+// ---------------------------------------------------------------------------
+
+/// The two steps `open_file` and `new_file` run to replace the workbook, in
+/// their order: the epoch moves, then every document-scoped store is reset.
+/// Then the opened workbook's OWN link is restored, as `open_file` restores
+/// it from the file.
+fn open_another_workbook(
+    state: &crate::AppState,
+    file: &crate::persistence::FileState,
+    its_link: Option<calp::WorkingCopyLink>,
+) {
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    file.note_document_replaced();
+    crate::persistence::reset_document_scoped_stores(
+        state,
+        &crate::persistence::UserFilesState::default(),
+        &crate::slicer::SlicerState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::scripting::types::ScriptState::new(),
+        &crate::pivot::types::PivotState::new(),
+        &crate::bi::types::BiState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        &load,
+    )
+    .expect("the reset succeeds");
+    *state.working_copy_link.write(&load).unwrap() = its_link;
+}
+
+fn record(state: &crate::AppState, file: &crate::persistence::FileState, epoch: u64) -> bool {
+    record_as(state, file, epoch) == crate::calp_commands::PushLinkRecord::Recorded
+}
+
+/// A push of application `x-app` landing in this workbook's link.
+fn record_as(
+    state: &crate::AppState,
+    file: &crate::persistence::FileState,
+    epoch: u64,
+) -> crate::calp_commands::PushLinkRecord {
+    crate::calp_commands::record_push_in_working_copy_link(
+        state,
+        file,
+        epoch,
+        r"\\server\reports",
+        "x-app",
+        "report",
+        "1.1.0",
+        "2026-10-31T10:00:00Z",
+        Vec::new(),
+        calp::WorkingCopyContent::default(),
+    )
+    .expect("the link write does not fail")
+}
+
+/// rev13A (MAJOR): `calp_publish` is `(async)`, so a File > Open landing
+/// mid-push used to let the push record ITS version in the NEWLY opened
+/// workbook's link -- making B a working copy of X, or moving app Y's base to
+/// X's version -- and dirty B. And an open landing before the assembly let
+/// the carrier be built from B after the gates judged A. The push now reads
+/// the document epoch at entry: the shipped carrier is refused once it moved,
+/// and the link write (asked under the link's lock) records nothing.
+///
+/// SABOTAGE: make `FileState::document_replaced_since` return `false` -- the
+/// refusal and the "records nothing" assertions fail.
+#[test]
+fn a_push_that_outlives_its_workbook_ships_nothing_from_and_records_nothing_in_the_next_one() {
+    let state = crate::create_app_state();
+    let file = crate::persistence::FileState::default();
+
+    // Positive control: nothing replaced the workbook, the push records.
+    let epoch = file.document_epoch();
+    crate::calp_commands::refuse_push_if_document_replaced(&file, epoch).expect("the same workbook ships");
+    assert!(record(&state, &file, epoch), "a push from the workbook on screen is recorded");
+    assert_eq!(state.working_copy_link.read().unwrap().as_ref().unwrap().base_version, "1.1.0");
+    assert!(file.is_dirty(), "recording the push is saved state");
+
+    // The push starts on A, and B (a working copy of app Y at 2.0.0) is opened
+    // before the assembly or before the link write.
+    let epoch = file.document_epoch();
+    let b_link = calp::WorkingCopyLink::new(
+        r"\\server\reports",
+        "y-app",
+        "report",
+        "2.0.0",
+        "2026-10-01T00:00:00Z",
+        Vec::new(),
+    );
+    open_another_workbook(&state, &file, Some(b_link));
+    crate::document_effect::mark_saved(&file);
+    assert!(!file.is_dirty(), "the premise: B opened clean");
+
+    let refused = crate::calp_commands::refuse_push_if_document_replaced(&file, epoch)
+        .expect_err("a carrier assembled across File > Open was shipped");
+    assert!(refused.starts_with("CALP_PUSH_DOCUMENT_REPLACED"), "{refused}");
+    assert!(refused.contains("Nothing was published"), "{refused}");
+
+    assert!(!record(&state, &file, epoch), "the push was recorded in the workbook opened after it started");
+    let link = state.working_copy_link.read().unwrap().clone().expect("B's own link survives");
+    assert_eq!(link.package_name, "y-app", "B became a working copy of the pushed application");
+    assert_eq!(link.base_version, "2.0.0", "B's base moved to the pushed application's version");
+    assert!(!file.is_dirty(), "the push dirtied the workbook it did not come from");
+}
+
+/// rev15B: THE SAME PUSH, WITH NO OPEN -- the link re-pointed by
+/// Collaboration > Open Application for Editing of ANOTHER application Y while
+/// the push of X ran (the Publish dialog is non-modal; `calp_checkout` writes
+/// the link and does not move the epoch). The push recorded X's version and
+/// X's published sheets on Y's link, so Y's working copy named a base Y never
+/// had. The link's target is now asked under the same lock as the epoch.
+///
+/// SABOTAGE: drop the `targets(..)` check in
+/// `record_push_in_working_copy_link` -- fails at "RE-POINTED".
+#[test]
+fn a_push_records_nothing_on_a_link_a_checkout_re_pointed_at_another_application() {
+    use crate::calp_commands::PushLinkRecord;
+    let state = crate::create_app_state();
+    let file = crate::persistence::FileState::default();
+    let epoch = file.document_epoch();
+    // The push of x-app started on an unlinked workbook (CreateNew); the
+    // checkout of y-app lands mid-push, as `calp_checkout` writes it.
+    let y_link = calp::WorkingCopyLink::new(
+        r"\\server\reports",
+        "y-app",
+        "report",
+        "2.0.0",
+        "2026-10-01T00:00:00Z",
+        vec![calp::WorkingCopySheetRef { sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()), name: "Y".to_string() }],
+    );
+    let load = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    *state.working_copy_link.write(&load).unwrap() = Some(y_link.clone());
+
+    assert_eq!(
+        record_as(&state, &file, epoch),
+        PushLinkRecord::LinkRepointed { now_targets: "y-app".to_string() },
+        "RE-POINTED: the push of x-app was recorded on y-app's working-copy link"
+    );
+    let link = state.working_copy_link.read().unwrap().clone().expect("Y's link survives");
+    assert_eq!(link, y_link, "y-app's link was changed by a push of x-app");
+    assert!(!file.is_dirty(), "a push that recorded nothing dirtied the workbook");
+
+    // Positive control: the link names x-app (the workspace spelled with a
+    // trailing separator, the same share) -- the push records.
+    let mut x_link = y_link;
+    x_link.package_name = "x-app".to_string();
+    x_link.registry_url = r"\\server\reports\".to_string();
+    *state.working_copy_link.write(&load).unwrap() = Some(x_link);
+    assert_eq!(record_as(&state, &file, epoch), PushLinkRecord::Recorded);
+    assert_eq!(state.working_copy_link.read().unwrap().as_ref().unwrap().base_version, "1.1.0");
+}
+
+/// The wiring a unit test cannot drive (both need Tauri `State`): `open_file`
+/// and `new_file` move the epoch BEFORE they reset a store, and `calp_publish`
+/// reads it before its first gate, asks it after the shipped carrier's
+/// assembly (before core publish) and hands it to the link write.
+///
+/// SABOTAGE: delete `let _replacing = file_state.begin_document_replacement();` from `open_file`.
+#[test]
+fn file_open_and_new_move_the_epoch_and_the_push_checks_it() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let code = |rel: &str| -> String {
+        std::fs::read_to_string(root.join(rel))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let body = |src: &str, signature: &str| -> String {
+        let at = src.find(signature).unwrap_or_else(|| panic!("`{signature}` moved"));
+        let rest = &src[at..];
+        rest[..rest.find("\n}").unwrap()].to_string()
+    };
+    let persistence = code("src/persistence.rs");
+    for door in ["pub fn open_file(", "pub fn new_file("] {
+        let b = body(&persistence, door);
+        let bump = b.find("let _replacing = file_state.begin_document_replacement();").unwrap_or_else(|| panic!("`{door}..` no longer moves the document epoch"));
+        let reset = b.find("reset_document_scoped_stores(").expect("the reset moved");
+        assert!(bump < reset, "`{door}..` resets a store before it moves the document epoch");
+    }
+    let calp = code("src/calp_commands.rs");
+    let publish = body(&calp, "pub fn calp_publish(");
+    let read = publish
+        .find("let document_epoch = file_state.settled_document_epoch();")
+        .expect("the push no longer reads the SETTLED epoch (under the document pin)");
+    let first_gate = publish.find("parse_push_mode(").expect("the first gate moved");
+    assert!(read < first_gate, "the epoch is read after a gate judged the workbook");
+    let assembled = publish.rfind("assemble_publish_workbook(").expect("the shipped assembly moved");
+    let asked = publish.find("refuse_push_if_document_replaced(&file_state, document_epoch)?;").expect("the carrier is no longer checked");
+    let stale = publish.find("refuse_push_on_stale_carrier(&assembly.workbook)?;").expect("the carrier's calculation is no longer checked");
+    let core = publish.find("calp::publish::publish(").expect("core publish moved");
+    assert!(assembled < asked && asked < core, "the epoch is not asked between the shipped assembly and core publish");
+    assert!(assembled < stale && stale < core, "the calculation is not asked between the shipped assembly and core publish");
+    let link = publish.find("record_push_in_working_copy_link(").expect("the link write moved");
+    assert!(publish[link..].contains("document_epoch,"), "the link write is not handed the epoch");
+    assert!(!publish.contains("working_copy_link.write("), "calp_publish writes the link around the epoch check");
+}
+
+/// calpref2 (pubepoch residual 1): the push's recalculation before publishing
+/// MUTATES the live document, so a File > Open that landed during it let the
+/// pass run over the newly opened workbook -- under manual calculation that
+/// changed its stale values, though the push was then refused. The pass now
+/// runs with the document PINNED to the push's epoch: an open waits for it
+/// before it moves the epoch (and so before it resets a store), and a pinned
+/// work that starts after the move never runs. (That the pass itself refuses
+/// after an open, with nothing recalculated, is
+/// `manual_calc_state_tests::a_push_whose_workbook_was_replaced_recalculates_nothing`.)
+///
+/// SABOTAGE: drop the exclusive pin from `FileState::note_document_replaced`
+/// -- the open moves the epoch under the pinned work.
+#[test]
+fn file_open_waits_for_a_pinned_recalculation_and_a_pin_after_it_never_runs() {
+    let file = std::sync::Arc::new(crate::persistence::FileState::default());
+    let epoch = file.document_epoch();
+    let (opener, moved_under_the_pin) = file
+        .with_document_pinned(epoch, || {
+            let f = std::sync::Arc::clone(&file);
+            let opener = std::thread::spawn(move || f.note_document_replaced());
+            // Ample time for an unblocked open to move the epoch.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            (opener, file.document_replaced_since(epoch))
+        })
+        .expect("the pin runs its work on the document of its own epoch");
+    assert!(
+        !moved_under_the_pin,
+        "File > Open replaced the workbook while the push's recalculation was pinned to it"
+    );
+    opener.join().expect("the open finishes once the pin is released");
+    assert!(file.document_replaced_since(epoch), "the open moved the epoch after the pinned work");
+    assert!(
+        file.with_document_pinned(epoch, || ()).is_none(),
+        "a work pinned to the replaced workbook's epoch ran over the next one"
+    );
+
+    // The wiring: the push's pass is handed the entry epoch.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let calp = std::fs::read_to_string(root.join("src/calp_commands.rs")).unwrap();
+    let body = |signature: &str| -> String {
+        let at = calp.find(signature).unwrap_or_else(|| panic!("`{signature}` moved"));
+        let rest = &calp[at..];
+        rest[..rest.find("\n}").unwrap()]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let publish = body("pub fn calp_publish(");
+    let call = &publish[publish.find("recalculate_before_publish(").expect("the push no longer recalculates")..];
+    assert!(
+        call[..call.find(")?;").unwrap()].contains("document_epoch,"),
+        "the recalculation before publishing is not handed the push's epoch"
+    );
+    assert!(
+        body("pub(crate) fn recalculate_before_publish(").contains("with_document_pinned(epoch,"),
+        "the recalculation before publishing no longer pins the document"
+    );
+}
+
+/// Round 18 (rev16B minor): File > Open moved the epoch under the exclusive
+/// pin and RELEASED it at once, before resetting and restoring a single store.
+/// A push that read its entry epoch then got the NEW epoch while the open was
+/// still restoring, and its pinned pass ran over a half-restored workbook. The
+/// replacement now holds the pin until it is done
+/// (`begin_document_replacement`), and the push reads its entry epoch under the
+/// shared pin (`settled_document_epoch`): both wait for the whole replacement.
+///
+/// SABOTAGE: read `settled_document_epoch` without the pin (a bare
+/// `self.document_epoch()`) -- fails at "MID-REPLACEMENT".
+#[test]
+fn a_push_entry_epoch_and_a_pinned_work_wait_for_the_whole_replacement() {
+    let file = std::sync::Arc::new(crate::persistence::FileState::default());
+    let before = file.document_epoch();
+    let replacing = file.begin_document_replacement();
+    // The open is now "restoring": the epoch has moved, the pin is exclusive.
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    let (pinned_tx, pinned_rx) = std::sync::mpsc::channel();
+    let reader = {
+        let f = std::sync::Arc::clone(&file);
+        std::thread::spawn(move || {
+            // The entry read is reported the moment it answers...
+            let epoch = f.settled_document_epoch();
+            read_tx.send(epoch).unwrap();
+            // ...and the pinned work separately.
+            pinned_tx.send(f.with_document_pinned(epoch, || ()).is_some()).unwrap();
+        })
+    };
+    // Ample time for an unblocked reader to answer.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(
+        read_rx.try_recv().is_err(),
+        "the push read its entry epoch MID-REPLACEMENT (the open had not finished restoring)"
+    );
+    assert!(pinned_rx.try_recv().is_err(), "a pinned work ran MID-REPLACEMENT");
+    drop(replacing);
+    let epoch = read_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the read answers once the open is done");
+    let ran = pinned_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the pinned work finishes");
+    reader.join().unwrap();
+    assert_eq!(epoch, before + 1, "after the replacement the settled epoch is the opened workbook's");
+    assert!(ran, "a work pinned to the settled epoch runs once the replacement is done");
+}
+
+/// calpref2 (pubepoch residual 2): the audit row of a push that LANDED after
+/// File > Open replaced its workbook was written into the trail of the
+/// workbook now on screen (flagged `pushedFromReplacedWorkbook`) -- a trail
+/// that is saved INSIDE that workbook, which never pushed. The row now goes
+/// to the session log when the epoch moved, and to the pushing workbook's
+/// trail otherwise.
+///
+/// SABOTAGE: make `record_push_audit_row` write the row whatever the epoch --
+/// B's trail holds A's push.
+#[test]
+fn the_audit_row_of_a_push_whose_workbook_was_replaced_never_lands_in_the_next_workbook() {
+    let state = crate::create_app_state();
+    let file = crate::persistence::FileState::default();
+    let row = |epoch: u64| {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("package".to_string(), serde_json::json!("x-app"));
+        extra.insert("version".to_string(), serde_json::json!("1.1.0"));
+        crate::calp_commands::record_push_audit_row(
+            &state,
+            &file,
+            epoch,
+            "Published x-app v1.1.0 (1 sheets)",
+            "author",
+            "2026-10-31T10:00:00Z",
+            extra,
+        )
+    };
+    let published = |state: &crate::AppState| {
+        state
+            .audit_log
+            .read()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| matches!(e.event, calp::audit::AuditEvent::Published))
+            .count()
+    };
+
+    // Positive control: the workbook that pushed records its push.
+    assert!(row(file.document_epoch()), "the pushing workbook's trail refused the row");
+    assert_eq!(published(&state), 1, "a push from the workbook on screen is audited in it");
+
+    // The push starts on A; B is opened before the row is written.
+    let epoch = file.document_epoch();
+    open_another_workbook(&state, &file, None);
+    assert_eq!(published(&state), 0, "the premise: B's trail starts empty");
+    assert!(!row(epoch), "the row was reported as recorded in a workbook");
+    assert_eq!(
+        published(&state),
+        0,
+        "the push's audit row landed in the trail of the workbook opened after it started"
+    );
+
+    // ...and calp_publish writes its row only through the helper.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let calp = std::fs::read_to_string(root.join("src/calp_commands.rs")).unwrap();
+    let at = calp.find("pub fn calp_publish(").expect("calp_publish moved");
+    let rest = &calp[at..];
+    let publish: String = rest[..rest.find("\n}").unwrap()]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!publish.contains("audit_log.write("), "calp_publish writes its audit row around the epoch check");
+    let call = &publish[publish.find("record_push_audit_row(").expect("the push's audit row moved")..];
+    assert!(call[..call.find(");").unwrap()].contains("document_epoch,"), "the audit row is not handed the epoch");
+}

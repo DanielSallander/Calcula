@@ -32,6 +32,7 @@ import type { RangeRef } from "./a1";
 import type { AppCliSession } from "./appSession";
 import { resumeRunBatchAfterHistoryEnded } from "./appSession";
 import { macroOriginPhrase, macroProvenanceNotice } from "./macroProvenance";
+import { findBySheetName } from "@api/sheetNames";
 
 // ---------------------------------------------------------------------------
 // Option schemas (one table per kind + one per kindless verb) — these drive
@@ -430,13 +431,13 @@ export function previewAppWrite(cmd: GenericCommand, _session: AppCliSession): W
 // Execution
 // ---------------------------------------------------------------------------
 
-/** Live re-read of the sheet list, then resolve one sheet by name (ci).
+/** Live re-read of the sheet list, then resolve one sheet by name (Excel's case rule).
  *  Destructive operations NEVER trust the session cache for this. */
 async function requireSheet(s: AppCliSession, name: string, line: number): Promise<SheetInfo> {
   const res = await s.gateway.getSheets();
   s.sheets = res.sheets;
   s.activeSheetIndex = res.activeIndex;
-  const match = res.sheets.find((sh) => sh.name.toLowerCase() === name.toLowerCase());
+  const match = findBySheetName(res.sheets, name, (sh) => sh.name);
   if (!match) fail(`No sheet named '${name}'`, line);
   return match;
 }
@@ -652,8 +653,11 @@ async function runGoto(cmd: GenericCommand, s: AppCliSession, io: CliIo): Promis
   let coords;
   try {
     coords = await s.gateway.resolveNamedRangeCoords(name);
-  } catch {
-    fail(`'${name}' is not a cell reference or a known named range`, cmd.line);
+  } catch (e) {
+    // The backend says why: no such name, not a range, or a sheet that is
+    // not in the workbook (refused, never re-aimed at another sheet).
+    const why = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+    fail(`'${name}' is not a cell reference or a known named range${why ? ` -- ${why}` : ""}`, cmd.line);
   }
   if (coords.sheetIndex !== s.activeSheetIndex) {
     const res = await s.gateway.setActiveSheet(coords.sheetIndex);

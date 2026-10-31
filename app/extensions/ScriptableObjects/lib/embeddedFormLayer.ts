@@ -128,7 +128,8 @@ import {
   type GridRegion,
   type OverlayRenderContext,
 } from "@api";
-import type { StructuralEditElsewhereEdit, StructuralEditElsewherePayload } from "@api/events";
+import { followStructuralEdits, shiftCellByEdit, type StructuralLineEdit } from "@api/structuralFollow";
+import { getGridStateSnapshot } from "@api/grid";
 // The subpath, not the barrel: this is Core's own pointer rule and a test that
 // doubles `@api` must still be measuring the REAL one, the same way M3b's shim
 // reaches it.
@@ -137,17 +138,35 @@ import { claimPointer, releasePointerClaim } from "@api/pointerClaims";
 // that doubles `@api` must still see the real one.
 import { onPointModeViewChanged } from "@api/gridOverlays";
 import {
+  getEmbeddedFormPlacement,
   listEmbeddedFormPlacementsForSheet,
   orphanEmbeddedFormsForSheet,
+  setEmbeddedFormGeometry,
   shiftEmbeddedFormPlacements,
-  structuralAnchorShift,
-  type StructuralEditKind,
 } from "@api/scriptHost/embeddedFormPlacements";
 import { ScriptEmbeddedFormView } from "../components/scriptEmbed";
 import type { EmbeddedFormSurfaceView, ScriptEmbedHostDeps } from "./scriptEmbedHost";
 
 /** The grid-overlay region type these surfaces occupy. */
 export const EMBEDDED_FORM_REGION_TYPE = "script-embedded-form";
+
+/**
+ * How many orphaning deletes the layer remembers for their Undo (newest kept):
+ * above the undo history's 100 steps, so every delete Ctrl+Z can still reach
+ * is remembered, and bounded, so one never undone is not kept for the session.
+ */
+export const ORPHANED_DELETES_KEPT = 128;
+
+/** Set `key` as the NEWEST entry of `map`, dropping the oldest past `limit`. */
+export function rememberNewest<K, V>(map: Map<K, V>, key: K, value: V, limit: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > limit) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
+}
 
 /**
  * The dashed outline Design Mode paints around a claimed box (M3b's idiom),
@@ -499,9 +518,9 @@ export function installEmbeddedFormLayer(hostBridge: {
   // ---- One queue for everything that asks the app which sheet it is on ------
   // Serialized, like the Controls store's: these handlers await an IPC answer,
   // and two rapid events would otherwise apply their conclusions out of order.
-  // Sheet switches share the queue with structural edits rather than running
-  // beside them, so a switch can never republish the region set in the middle
-  // of a shift and put half-moved anchors on screen.
+  // (Structural edits are no longer on it: they are applied synchronously, in
+  // the order heard, through @api/structuralFollow -- below -- so a shift is
+  // whole before any queued switch republishes the region set.)
   let serialQueue: Promise<void> = Promise.resolve();
 
   /**
@@ -531,73 +550,76 @@ export function installEmbeddedFormLayer(hostBridge: {
   };
 
   // ---- Structural edits: geometry moves, identity does not ------------------
-  const onStructuralEdit = (kind: StructuralEditKind) => (detail: unknown): void => {
-    const d = (detail ?? {}) as { startRow?: number; startCol?: number; count?: number };
-    const at = kind.startsWith("row") ? d.startRow : d.startCol;
-    const count = d.count;
-    if (at === undefined || count === undefined) return;
-    serialQueue = serialQueue
-      .then(async () => {
-        const sheetIndex = await hostBridge.activeSheetIndex();
-        // The placement store decides what a deleted anchor means (an ORPHAN,
-        // never a deletion) — see embeddedFormPlacements.ts. This only supplies
-        // the mapping and repaints.
-        if (shiftEmbeddedFormPlacements(sheetIndex, structuralAnchorShift(kind, at, count))) {
-          syncRegions();
-          emitAppEvent(AppEvents.GRID_REFRESH);
-        }
-      })
-      .catch((err) => {
-        console.error("[ScriptableObjects] embedded-form structural shift failed:", err);
-      });
-  };
-
-  /**
-   * An insert/delete on a sheet the user is NOT looking at -- a script's or the
-   * command line's `sheetIndex` -- announces STRUCTURAL_EDIT_ELSEWHERE instead
-   * of the four events above, so without this a form placed on that sheet kept
-   * its OLD anchor: it came up over the wrong cells when the user switched
-   * there, and its cell bindings followed. Nothing else can put it right: the
-   * placements are this session's own state, which the backend never sees, so
-   * a re-read would read nothing. The announcement lists every edit in order
-   * (`StructuralEditElsewherePayload.edits`), and each is the same shift as the
-   * on-screen path, on the sheet it names. A floating grid's own lines (sheet
-   * null) anchor no form. Queued behind the on-screen shifts, so the two are
-   * applied in the order they were heard.
-   */
-  const onStructuralEditElsewhere = (detail: unknown): void => {
-    const edits = (detail as Partial<StructuralEditElsewherePayload> | null)?.edits;
-    if (!Array.isArray(edits)) return;
-    const onSheets = edits.filter(
-      (e): e is StructuralEditElsewhereEdit & { sheetIndex: number } => typeof e?.sheetIndex === "number",
-    );
-    if (onSheets.length === 0) return;
-    serialQueue = serialQueue
-      .then(() => {
-        let changed = false;
-        for (const e of onSheets) {
-          if (shiftEmbeddedFormPlacements(e.sheetIndex, structuralAnchorShift(e.kind, e.at, e.count))) changed = true;
-        }
-        if (changed) {
-          syncRegions();
-          emitAppEvent(AppEvents.GRID_REFRESH);
-        }
-      })
-      .catch((err) => {
-        console.error("[ScriptableObjects] embedded-form off-sheet shift failed:", err);
-      });
+  // Through the ONE follower every coordinate store uses (@api/structuralFollow):
+  // a row / column insert or delete on the sheet on screen, on any other sheet
+  // (STRUCTURAL_EDIT_ELSEWHERE -- a script's or the command line's
+  // `sheetIndex`), an Insert / Delete Cells band, AND the Undo / Redo of each
+  // and a gesture's take-back to its savepoint ('rollback', Insert Copied
+  // Cells whose paste was refused). Until round 16 this layer heard only the
+  // forward edits, so a form anchored below an inserted row stayed one row
+  // low after Ctrl+Z (or the take-back) put the row back out (rev14A). Excel's
+  // own shapes follow an inserted row's Undo the same way. Moved CELLS are
+  // not followed: a form sits over the grid like a shape, and Excel's shapes
+  // stay put under a Cut + Paste of the cells beneath them.
+  //
+  // A delete that takes the anchor ORPHANS the placement (never deletes it --
+  // see embeddedFormPlacements.ts); that delete's Undo puts it back on its
+  // cell, as Excel's Undo of a row delete brings back the shape it removed.
+  // The journal `seq` is what ties the two together.
+  // BOUNDED (round 18, rev16B nit): a delete that is never undone left its
+  // entry for the session. The oldest entries go past ORPHANED_DELETES_KEPT --
+  // more than the undo history holds (100 steps), so no delete that Ctrl+Z
+  // can still reach is forgotten -- and a replaced document (File > Open /
+  // New, whose undo history is gone) forgets them all.
+  const orphanedBySeq = new Map<number, Array<{ id: string; anchorRow: number; anchorCol: number }>>();
+  const rememberOrphaned = (seq: number, orphaned: Array<{ id: string; anchorRow: number; anchorCol: number }>): void =>
+    rememberNewest(orphanedBySeq, seq, orphaned, ORPHANED_DELETES_KEPT);
+  const followLineEdit = (edit: StructuralLineEdit, seq: number, cause: "edit" | "undo" | "redo"): boolean => {
+    const before = listEmbeddedFormPlacementsForSheet(edit.sheetIndex).filter((p) => !p.orphaned);
+    // The placement store decides what a deleted anchor means; this only
+    // supplies the mapping.
+    let changed = shiftEmbeddedFormPlacements(edit.sheetIndex, (row, col) => shiftCellByEdit(edit, row, col));
+    const orphaned = before
+      .filter((p) => getEmbeddedFormPlacement(p.id)?.orphaned === true)
+      .map((p) => ({ id: p.id, anchorRow: p.anchorRow, anchorCol: p.anchorCol }));
+    if (orphaned.length > 0) rememberOrphaned(seq, orphaned);
+    if (cause === "undo") {
+      // The edit this Undo reverses took these anchors: the lines are back, so
+      // the forms are too, on the cells they were on.
+      const taken = orphanedBySeq.get(seq) ?? [];
+      if (orphaned.length === 0) orphanedBySeq.delete(seq);
+      for (const t of taken) {
+        const p = getEmbeddedFormPlacement(t.id);
+        if (p === null || !p.orphaned || p.sheetIndex !== edit.sheetIndex) continue;
+        setEmbeddedFormGeometry(t.id, { anchorRow: t.anchorRow, anchorCol: t.anchorCol });
+        changed = true;
+      }
+    }
+    return changed;
   };
 
   const offs: Array<() => void> = [];
-  for (const [event, kind] of [
-    [AppEvents.ROWS_INSERTED, "rowInsert"],
-    [AppEvents.ROWS_DELETED, "rowDelete"],
-    [AppEvents.COLUMNS_INSERTED, "colInsert"],
-    [AppEvents.COLUMNS_DELETED, "colDelete"],
-  ] as const) {
-    offs.push(onAppEvent(event, onStructuralEdit(kind)));
-  }
-  offs.push(onAppEvent(AppEvents.STRUCTURAL_EDIT_ELSEWHERE, onStructuralEditElsewhere));
+  offs.push(
+    followStructuralEdits(
+      (step) => {
+        if (disposed) return;
+        if (followLineEdit(step.edit, step.seq, step.cause)) {
+          syncRegions();
+          emitAppEvent(AppEvents.GRID_REFRESH);
+        }
+      },
+      {
+        subscribe: (eventName, callback) => onAppEvent(eventName, callback),
+        // The sheet on screen when an on-screen edit is heard: the grid's own
+        // state, as every follower reads it; before the grid has one, the
+        // sheet this layer adopted (`adoptActiveSheet`).
+        activeSheet: () => {
+          const index = getGridStateSnapshot()?.sheetContext?.activeSheetIndex;
+          return typeof index === "number" ? index : activeSheet;
+        },
+      },
+    ),
+  );
   offs.push(
     onAppEvent(AppEvents.SHEET_CHANGED, (detail) => {
       const d = (detail ?? {}) as { sheetIndex?: number };
@@ -628,6 +650,9 @@ export function installEmbeddedFormLayer(hostBridge: {
       }
     }),
   );
+  // A replaced document has no undo history to take a delete back with.
+  offs.push(onAppEvent(AppEvents.AFTER_OPEN, () => orphanedBySeq.clear()));
+  offs.push(onAppEvent(AppEvents.AFTER_NEW, () => orphanedBySeq.clear()));
   offs.push(
     onAppEvent(AppEvents.SHEET_DELETED, (detail) => {
       const d = (detail ?? {}) as { sheetIndex?: number };

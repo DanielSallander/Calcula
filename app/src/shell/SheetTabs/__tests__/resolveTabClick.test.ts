@@ -11,7 +11,7 @@
 //          drives those through the mounted strip.
 
 import { describe, it, expect } from "vitest";
-import { resolveTabClick, type TabClickInput } from "../resolveTabClick";
+import { resolveTabClick, plainClickKeepsGroup, shiftClickGroup, type GroupTab, type TabClickInput } from "../resolveTabClick";
 
 /** Sheet 0 is a worksheet, sheet 2 a canvas; the grid shows sheet 0. */
 function click(over: Partial<TabClickInput> = {}): TabClickInput {
@@ -105,5 +105,38 @@ describe("resolveTabClick", () => {
     expect(resolveTabClick(click({ index: 2, activeIndex: 0, targetIsCanvas: true, session: parked }))).toBe("ignore");
     // No session: a canvas is never a reference target in formula mode.
     expect(resolveTabClick(click({ index: 2, targetIsCanvas: true, coreFormulaMode: true }))).toBe("ignore");
+  });
+});
+
+// BUG-0616 item 6, Excel 16 [LIVE] -- resolveTabClick.ts SHEET GROUP CLICKS.
+describe("Shift outside formula mode, and the group rules", () => {
+  const tabs = (n: number, over: Record<number, Partial<GroupTab>> = {}): GroupTab[] =>
+    Array.from({ length: n }, (_, index) => ({ index, visible: true, isCanvas: false, ...over[index] }));
+
+  it("Shift outside formula mode selects a range of sheets -- on the active tab too; never from or to a canvas", () => {
+    expect(resolveTabClick(click({ shiftKey: true }))).toBe("groupRange");
+    expect(resolveTabClick(click({ shiftKey: true, index: 0 }))).toBe("groupRange");
+    expect(resolveTabClick(click({ shiftKey: true, index: 2, targetIsCanvas: true }))).toBe("ignore");
+    expect(resolveTabClick(click({ shiftKey: true, activeIsCanvas: true }))).toBe("ignore");
+  });
+
+  it("a member click keeps a group that leaves a visible tab out, and ends one that covers every visible tab", () => {
+    expect(plainClickKeepsGroup([0, 2], 2, tabs(4))).toBe(true);
+    expect(plainClickKeepsGroup([0, 1, 2, 3], 2, tabs(4))).toBe(false);
+    // The left-out tab is hidden: every VISIBLE tab is grouped.
+    expect(plainClickKeepsGroup([0, 1, 2], 2, tabs(4, { 3: { visible: false } }))).toBe(false);
+    // A canvas tab is a tab outside the group (it can be clicked).
+    expect(plainClickKeepsGroup([0, 1, 2], 2, tabs(4, { 3: { isCanvas: true } }))).toBe(true);
+    // Not a member, or no group: the click ends it.
+    expect(plainClickKeepsGroup([0, 2], 1, tabs(4))).toBe(false);
+    expect(plainClickKeepsGroup([], 1, tabs(4))).toBe(false);
+  });
+
+  it("Shift+click's range runs from the active sheet to the clicked one over visible worksheets", () => {
+    expect(shiftClickGroup(0, 2, tabs(4))).toEqual([0, 1, 2]);
+    expect(shiftClickGroup(3, 1, tabs(4))).toEqual([1, 2, 3]);
+    expect(shiftClickGroup(0, 2, tabs(4, { 1: { visible: false } }))).toEqual([0, 2]);
+    expect(shiftClickGroup(0, 3, tabs(4, { 2: { isCanvas: true } }))).toEqual([0, 1, 3]);
+    expect(shiftClickGroup(1, 1, tabs(4))).toEqual([1]);
   });
 });

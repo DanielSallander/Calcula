@@ -6,6 +6,8 @@
 import {
   newFile,
   openFile,
+  pickFileToOpen,
+  openFileAtPath,
   saveFile,
   saveFileAs,
   isFileModified,
@@ -41,6 +43,16 @@ export const workbook = {
 
   /** Opens a file dialog to load a spreadsheet (handles encrypted files). */
   open: openFile,
+
+  /**
+   * The Open picker alone: the chosen path, or null when cancelled. Opens
+   * nothing -- pair it with `openAtPath` to ask something between the two
+   * (File > Open re-checks unsaved changes there).
+   */
+  pickFileToOpen,
+
+  /** Load a workbook from a known path, no picker (handles encrypted files). */
+  openAtPath: openFileAtPath,
 
   /** Saves the current workbook. Pass a password to encrypt. */
   save: saveFile,

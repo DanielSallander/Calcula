@@ -661,6 +661,21 @@ pub fn get_comment_indicators_in_range(
     end_row: u32,
     end_col: u32,
 ) -> Vec<CommentIndicator> {
+    comment_indicators_in_range(&state, start_row, start_col, end_row, end_col)
+}
+
+/// The body of [`get_comment_indicators_in_range`]. The rectangle is
+/// NORMALISED first (BUG-0373), as `get_hyperlinks_in_range` does: a
+/// selection drawn upward or leftward names the same cells.
+pub(crate) fn comment_indicators_in_range(
+    state: &AppState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Vec<CommentIndicator> {
+    let (min_row, max_row) = (start_row.min(end_row), start_row.max(end_row));
+    let (min_col, max_col) = (start_col.min(end_col), start_col.max(end_col));
     let active_sheet = *state.active_sheet.read().unwrap();
     let comments = state.comments.read().unwrap();
 
@@ -670,8 +685,8 @@ pub fn get_comment_indicators_in_range(
             sheet_comments
                 .values()
                 .filter(|c| {
-                    c.row >= start_row && c.row <= end_row &&
-                    c.col >= start_col && c.col <= end_col
+                    c.row >= min_row && c.row <= max_row &&
+                    c.col >= min_col && c.col <= max_col
                 })
                 .map(|c| CommentIndicator {
                     row: c.row,

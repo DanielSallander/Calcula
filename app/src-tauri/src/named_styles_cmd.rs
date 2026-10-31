@@ -173,10 +173,15 @@ pub(crate) fn apply_named_style_impl(
         Some(target) => Some(crate::cell_target::resolve_cell_target(state, target)?),
         None => None,
     };
-    // Sheet protection. Applying a named style rewrites the target cells'
-    // style_index wholesale, so once `CellStyle.locked` is authoritative this is
-    // an unlock vector too — the built-in "Normal" style carries locked:true,
-    // and any user-defined style could carry locked:false.
+    // Sheet protection: the Format Cells option only (the HOST's for a cell
+    // target), as every style command asks it. Excel applies a cell style to a
+    // LOCKED cell when Format Cells is allowed and keeps the cell's Locked flag
+    // [LIVE, Excel 16 COM, 2026-10-30: Range.Style = "Good" on a locked and on
+    // an unlocked cell, each keeps its flag]. Applying a named style rewrites
+    // the style_index wholesale -- the built-in "Normal" carries locked:true,
+    // a user style may carry locked:false -- so on a protected sheet each cell
+    // keeps the Locked flag it had (`keep_cell_lock`, below), which keeps this
+    // from being an unlock vector.
     match &resolved {
         Some(t) => {
             let bounds = (
@@ -187,17 +192,11 @@ pub(crate) fn apply_named_style_impl(
             );
             if let (Some(r0), Some(c0), Some(r1), Some(c1)) = bounds {
                 crate::cell_target::ensure_in_extent(t, r0, c0, r1, c1)?;
-                crate::cell_target::gate_target_cells(state, t, (r0, c0, r1, c1), "formatCells", "apply a named style")?;
             }
+            crate::cell_target::gate_host_action(state, t.host_index, t.backing_index, "formatCells", "apply a named style")?;
         }
         None => {
             let active_sheet = *state.active_sheet.read().unwrap();
-            crate::protection::check_sheet_protection_cells(
-                state,
-                active_sheet,
-                rows.iter().flat_map(|r| cols.iter().map(move |c| (*r, *c))),
-            )?;
-            // Second protection axis, same as apply_formatting.
             crate::protection::check_sheet_action(state, active_sheet, "formatCells", "apply a named style")?;
         }
     }
@@ -229,10 +228,19 @@ pub(crate) fn apply_named_style_impl(
     if sheet != active_sheet && sheet >= grids.len() {
         return Err("Floating range backing sheet is missing".to_string());
     }
+    let styles = state.style_registry.lock_pending().unwrap();
+    // The option asked again under the guards the write uses, and whether the
+    // sheet written is protected (then every cell keeps its Locked flag).
+    let protected = crate::commands::styles::format_protection_under_guards(
+        state,
+        resolved.as_ref(),
+        sheet,
+        "apply a named style",
+    )?;
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let mut grid = grid.authorize(&effect);
     let mut grids = grids.authorize(&effect);
-    let mut styles = state.style_registry.write(&effect).unwrap();
+    let mut styles = styles.authorize(&effect);
     let mut undo_stack = state.undo_stack.lock().unwrap();
     // The written sheet's merges: the active mirror, or the backing sheet's set.
     let merged_regions: Vec<crate::api_types::MergedRegion> = if sheet == active_sheet {
@@ -294,6 +302,18 @@ pub(crate) fn apply_named_style_impl(
             } else {
                 style_index
             };
+            // A protected sheet: the cell keeps the Locked flag it had.
+            if protected {
+                let locked = crate::protection::cell_is_locked(grid, &styles, row, col);
+                updated_cell.style_index = crate::commands::styles::keep_cell_lock(
+                    &mut styles,
+                    grid,
+                    row,
+                    col,
+                    updated_cell.style_index,
+                    locked,
+                );
+            }
             grid.set_cell(row, col, updated_cell.clone());
 
             if let Some(m) = mirror.as_deref_mut() {

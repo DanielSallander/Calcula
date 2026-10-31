@@ -49,7 +49,7 @@ pub fn pull_dev(
         // Pull selected sheets by name
         for name in sheet_names {
             let sheet = workbook.sheets.iter()
-                .find(|s| s.name.eq_ignore_ascii_case(name))
+                .find(|s| identity::sheet_names_equal(&s.name, name))
                 .ok_or_else(|| CalpError::SheetNotFound(name.clone()))?;
             if pulled_sheets.iter().any(|p: &DevPulledSheet| p.source_sheet_id == sheet.id) {
                 continue; // named twice (a refresh re-requests every tracked sheet)

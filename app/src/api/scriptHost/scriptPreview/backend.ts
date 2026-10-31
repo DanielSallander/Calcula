@@ -53,6 +53,7 @@ import {
   type PreviewCell,
 } from "./grid";
 import type { FormSpec } from "../scriptFormSpec";
+import { indexOfSheetName, sheetNamesEqual } from "../../sheetNames";
 
 /** A member the real surface has but this backend does not serve. */
 export class PreviewGapError extends Error {
@@ -266,7 +267,9 @@ function assertPreviewSheet(state: PreviewBackendState, method: string, sheet: u
   }
   if (sheet === undefined || sheet === null) return;
   if (sheet === state.activeSheet) return;
-  if (sheet === state.sheetNames[state.activeSheet]) return;
+  // By Excel's sheet-name case rule, as the product's broker resolves a name
+  // (exact, then the one name equal to it ignoring case): `sheet1` IS `Sheet1`.
+  if (typeof sheet === "string" && sheetNamesEqual(sheet, state.sheetNames[state.activeSheet])) return;
   throw new PreviewGapError(`${method} with a sheet argument (${JSON.stringify(sheet)})`);
 }
 
@@ -715,7 +718,12 @@ export function respond(state: PreviewBackendState, method: string, args: unknow
       // UNPREVIEWABLE — so a canvas vs. a worksheet changes no answer here.
       const [name] = args as [string | undefined];
       const sheetName = name ?? `Sheet${state.sheetNames.length + 1}`;
-      if (state.sheetNames.includes(sheetName)) throw new Error(`A sheet named "${sheetName}" already exists`);
+      // The product refuses `SHEET1` beside `Sheet1` (Excel's case rule, Rust's
+      // `identity::sheet_names_equal`), so an exact `includes` let the preview
+      // report success for an add the real run throws on.
+      if (indexOfSheetName(state.sheetNames, sheetName) >= 0) {
+        throw new Error(`A sheet named "${sheetName}" already exists`);
+      }
       state.sheetNames.push(sheetName);
       // The product ACTIVATES the new sheet; later unqualified grid calls gap
       // rather than silently landing on the preview grid. See the state field.

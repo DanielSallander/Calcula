@@ -8,12 +8,13 @@ import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dimensions";
 import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
+import { sheetNamesEqual } from "../../../../api/sheetNames";
 
 /**
  * Check if a reference should be drawn on the current sheet.
  * A reference is drawn if:
  * - It has no sheet name AND we're on the formula's source sheet
- * - It has a sheet name that matches the current sheet (case-insensitive)
+ * - It has a sheet name that matches the current sheet (Excel's sheet-name case rule)
  */
 function shouldDrawReference(
   refSheetName: string | undefined,
@@ -24,11 +25,11 @@ function shouldDrawReference(
     // Reference has no sheet prefix - it refers to the formula's source sheet
     // Only draw if we're viewing the source sheet
     if (!currentSheetName || !formulaSourceSheetName) return true;
-    return currentSheetName.toLowerCase() === formulaSourceSheetName.toLowerCase();
+    return sheetNamesEqual(currentSheetName, formulaSourceSheetName);
   }
   // Reference has a sheet prefix - draw if it matches current sheet
   if (!currentSheetName) return true;
-  return refSheetName.toLowerCase() === currentSheetName.toLowerCase();
+  return sheetNamesEqual(refSheetName, currentSheetName);
 }
 
 /**

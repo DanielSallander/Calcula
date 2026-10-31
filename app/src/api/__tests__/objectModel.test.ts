@@ -61,6 +61,21 @@ describe("Workbook (C3 object model)", () => {
     expect(await wb.sheet("Nope")).toBeNull();
     expect(await wb.sheet(99)).toBeNull();
   });
+
+  it("sheet(name) finds a sheet by Excel's case rule, as Worksheets(\"data\") does", async () => {
+    vi.mocked(getSheets).mockResolvedValue({
+      sheets: [
+        { index: 0, name: "Data", visibility: "visible" as const },
+        { index: 1, name: "Ärende", visibility: "visible" as const },
+        { index: 2, name: "Straße", visibility: "visible" as const },
+      ],
+      activeIndex: 0,
+    });
+    expect((await wb.sheet("DATA"))?.index).toBe(0);
+    expect((await wb.sheet("äRENDE"))?.name).toBe("Ärende");
+    // No expansion: `STRASSE` is a different name from `Straße`.
+    expect(await wb.sheet("STRASSE")).toBeNull();
+  });
 });
 
 describe("Sheet (C3 object model)", () => {

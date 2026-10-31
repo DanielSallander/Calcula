@@ -56,23 +56,19 @@ pub(crate) fn save_chart_core(
     check_entry_spec_formatting(&entry.spec_json)?;
     // LOCK OBJECTS: an upsert over an EXISTING chart that moves or resizes it
     // is refused on a locked page, like `update_chart` (an insert -- no prior
-    // entry -- is never a move). Resolved under a read guard, before the effect.
-    let prior = state
-        .charts
-        .read()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .find(|c| c.id == entry.id)
-        .cloned();
-    if let Some(prior) = &prior {
-        if chart_moves(prior, &entry) {
-            crate::sheets::ensure_canvas_objects_unlocked(state, prior.sheet_index, "move or resize a chart")?;
-        }
-    }
-    // Gate passed; an upsert always commits.
-    let effect = DocumentEffect::mutates(file_state);
+    // entry -- is never a move). Decided and written under ONE hold of the
+    // store, before the effect (BUG-0443: a toggle landing between a check
+    // and the write must not let the move through).
     let previous = {
-        let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
+        let pending = state.charts.lock_pending().map_err(|e| e.to_string())?;
+        if let Some(prior) = pending.iter().find(|c| c.id == entry.id) {
+            if chart_moves(prior, &entry) {
+                crate::sheets::ensure_canvas_objects_unlocked(state, prior.sheet_index, "move or resize a chart")?;
+            }
+        }
+        // Gate passed; an upsert always commits.
+        let effect = DocumentEffect::mutates(file_state);
+        let mut charts = pending.authorize(&effect);
         let previous = charts.iter().find(|c| c.id == entry.id).cloned();
         // Replace if already exists (upsert), otherwise push
         if let Some(existing) = charts.iter_mut().find(|c| c.id == entry.id) {
@@ -152,30 +148,14 @@ pub(crate) fn update_chart_against(
     // the effect, so a bad value -- or a second spelling of the title text,
     // colour or size inside the container -- leaves the document clean.
     check_entry_spec_formatting(&entry.spec_json)?;
-    // RESOLVE FIRST, THEN DECIDE, THEN MUTATE.
-    // `DocumentEffect::mutates` sets the dirty flag in its constructor, and
-    // `Persisted::write` will not hand out a mutable guard without one -- so the
-    // "does this chart exist?" question has to be answered under a READ guard, before
-    // the decision. That ordering is the point: a missing id returns Err having
-    // touched nothing and having left the document exactly as clean as it was.
-    let previous = {
-        let charts = state.charts.read().map_err(|e| e.to_string())?;
-        charts
-            .iter()
-            .find(|c| c.id == entry.id)
-            .cloned()
-            .ok_or_else(|| format!("Chart with id {} not found", entry.id))?
-    };
-    // LOCK OBJECTS (CanvasLayout::objects_locked): a write that MOVES or
-    // RESIZES the chart -- or takes it to another sheet -- is refused on a
-    // locked page, before the effect. One that keeps its placement (a title,
-    // a colour, a new data range) is formatting and goes through.
-    if chart_moves(&previous, &entry) {
-        crate::sheets::ensure_canvas_objects_unlocked(state, previous.sheet_index, "move or resize a chart")?;
-    }
-    // THE BASE CHECK AND THE WRITE IN ONE CRITICAL SECTION: a rewrite that
-    // lands between a check and a later lock would be overwritten all the
-    // same. The record put on the undo stack is the one actually replaced.
+    // RESOLVE FIRST, THEN DECIDE, THEN MUTATE -- the existence check, the base
+    // check, the Lock Objects decision and the write in ONE critical section
+    // of the store (`lock_pending`). `DocumentEffect::mutates` sets the dirty
+    // flag in its constructor, so it is minted only after every refusal: a
+    // missing id returns Err having left the document exactly as clean as it
+    // was. A rewrite that lands between a check and a later lock would be
+    // overwritten all the same; the record put on the undo stack is the one
+    // actually replaced.
     let previous = {
         let pending = state.charts.lock_pending().map_err(|e| e.to_string())?;
         let slot = pending
@@ -191,6 +171,14 @@ pub(crate) fn update_chart_against(
                     entry.id
                 ));
             }
+        }
+        // LOCK OBJECTS (CanvasLayout::objects_locked): a write that MOVES or
+        // RESIZES the chart -- or takes it to another sheet -- is refused on a
+        // locked page, before the effect. One that keeps its placement (a
+        // title, a colour, a new data range) is formatting and goes through.
+        // Asked HERE, holding the store the write lands in (BUG-0443).
+        if chart_moves(&pending[slot], &entry) {
+            crate::sheets::ensure_canvas_objects_unlocked(state, pending[slot].sheet_index, "move or resize a chart")?;
         }
         let previous = pending[slot].clone();
         let effect = DocumentEffect::mutates(file_state);

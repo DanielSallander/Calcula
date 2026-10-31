@@ -67,28 +67,33 @@ fn pivot_write<'a>(
     Ok((effect, guard))
 }
 
-/// [`pivot_write`] for a command that edits the DEFINITION ONLY and never
+/// The store guard for a command that edits the DEFINITION ONLY and never
 /// writes the grid (`update_pivot_properties`), so a pivot stranded on a
 /// canvas can still be renamed. The census in `canvas_sheet_tests` pins it to
 /// that one caller.
+///
+/// It hands back a PENDING guard, not an effect (BUG-0477): the existence
+/// refusal runs under the guard itself, and the caller compares the request
+/// with the definition under the same guard, minting `DocumentEffect::mutates`
+/// and authorizing only when something actually changes -- so a no-op request
+/// (the same frame or name again) writes nothing and leaves the document
+/// clean, with no window between the decision and the write. (The same STYLE
+/// again writes nothing but dirties, as Excel does; see the caller.)
 fn pivot_write_definition_only<'a>(
     pivot_state: &'a PivotState,
-    file_state: &crate::persistence::FileState,
     pivot_id: PivotId,
 ) -> Result<
-    (
-        crate::document_effect::DocumentEffect,
-        crate::document_effect::WriteGuard<'a, std::collections::HashMap<PivotId, (PivotDefinition, PivotCache)>>,
-    ),
+    crate::document_effect::PendingGuard<'a, std::collections::HashMap<PivotId, (PivotDefinition, PivotCache)>>,
     String,
 > {
-    ensure_pivot_exists(pivot_state, pivot_id)?;
-    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let guard = pivot_state
         .pivot_tables
-        .write(&effect)
+        .lock_pending()
         .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
-    Ok((effect, guard))
+    if !guard.contains_key(&pivot_id) {
+        return Err(format!("Pivot table {} not found", pivot_id));
+    }
+    Ok(guard)
 }
 
 /// The "does this pivot exist?" refusal every pivot mutation starts with, under
@@ -1849,17 +1854,20 @@ pub fn get_pivot_cell_window(
     })
 }
 
-/// Deletes a pivot table
-#[tauri::command]
+/// Deletes a pivot table -- the BODY of the `delete_pivot_table` command,
+/// over plain references so the unit tier can run it (the lock-order test
+/// `deleting_a_pivot_never_holds_pivot_tables_while_it_waits_for_the_undo_stack`).
+/// The `#[tauri::command]` of the same name is the one-line wrapper in
+/// `pivot/mod.rs`, which shadows this function's glob re-export there.
 pub fn delete_pivot_table(
-    state: State<AppState>,
-    file_state: State<'_, crate::persistence::FileState>,
-    pivot_state: State<'_, PivotState>,
-    user_files_state: State<'_, crate::persistence::UserFilesState>,
-    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
-    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
-    slicer_state: State<'_, crate::slicer::SlicerState>,
-    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     pivot_id: PivotId,
 ) -> Result<(), String> {
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
@@ -4290,6 +4298,25 @@ pub fn update_pivot_properties(
     update_pivot_properties_core(&state, &file_state, &pivot_state, request)
 }
 
+/// The [`PivotTableInfo`] `update_pivot_properties` answers with.
+fn pivot_properties_info(definition: &PivotDefinition, pivot_id: PivotId) -> PivotTableInfo {
+    PivotTableInfo {
+        id: definition.id,
+        name: definition.name.clone().unwrap_or_else(|| format!("PivotTable{}", pivot_id)),
+        source_range: definition
+            .source_range_display
+            .clone()
+            .unwrap_or_else(|| format_range(definition.source_start, definition.source_end)),
+        destination: format_cell(definition.destination),
+        allow_multiple_filters_per_field: definition.allow_multiple_filters_per_field,
+        enable_data_value_editing: definition.enable_data_value_editing,
+        refresh_on_open: definition.refresh_on_open,
+        use_custom_sort_lists: definition.use_custom_sort_lists,
+        has_headers: definition.source_has_headers,
+        source_table_name: definition.source_table_name.clone(),
+    }
+}
+
 /// [`update_pivot_properties`] over plain references, for the unit tier.
 pub(crate) fn update_pivot_properties_core(
     state: &AppState,
@@ -4328,17 +4355,6 @@ pub(crate) fn update_pivot_properties_core(
             }
             let frame: pivot_engine::CanvasFrame = config.into();
             frame.validate()?;
-            // LOCK OBJECTS on the box's page: a frame that MOVES or RESIZES
-            // the box is refused before the effect. Freezing its headers and
-            // its visual container (D-FORMAT) are formatting and go through.
-            // `pivot_tables` was released above, so resolving the destination
-            // sheet here takes no pivot lock.
-            if let Some(old) = &before.canvas_frame {
-                if old.geometry_differs(&frame) {
-                    let sheet = crate::pivot::operations::resolve_dest_sheet_index(state, before);
-                    crate::sheets::ensure_canvas_objects_unlocked(state, sheet, "move or resize a PivotTable box")?;
-                }
-            }
             Some(frame)
         }
         _ => None,
@@ -4353,7 +4369,59 @@ pub(crate) fn update_pivot_properties_core(
         }
     };
 
-    let (effect, mut pivot_tables) = pivot_write_definition_only(pivot_state, file_state, request.pivot_id)?;
+    // The box's page, resolved while `pivot_tables` is released (it takes the
+    // sheet-name lock), for the Lock Objects decision under the store below.
+    let frame_page: Option<usize> = match (&new_frame, before.as_ref()) {
+        (Some(_), Some(before)) => Some(crate::pivot::operations::resolve_dest_sheet_index(state, before)),
+        _ => None,
+    };
+
+    let pending = pivot_write_definition_only(pivot_state, request.pivot_id)?;
+
+    // LOCK OBJECTS on the box's page: a frame that MOVES or RESIZES the box is
+    // refused before the effect. Freezing its headers and its visual container
+    // (D-FORMAT) are formatting and go through. Decided against the frame this
+    // hold writes over, holding the store (BUG-0443), so a toggle cannot slip
+    // between the decision and the write.
+    if let (Some(frame), Some(page)) = (new_frame.as_ref(), frame_page) {
+        let stored = pending.get(&request.pivot_id).and_then(|(def, _)| def.canvas_frame.as_ref());
+        if stored.is_some_and(|old| old.geometry_differs(frame)) {
+            crate::sheets::ensure_canvas_objects_unlocked(state, page, "move or resize a PivotTable box")?;
+        }
+    }
+
+    // A NO-OP writes nothing and records no undo step (BUG-0477): every field
+    // the request carries is compared with the definition under the pending
+    // guard the write keeps. Whether a no-op DIRTIES follows Excel, measured
+    // property by property [LIVE, Excel 16 COM, round 11]: assigning a pivot
+    // its SAME TableStyle2 sets Workbook.Saved = False, while its same Name or
+    // the same ShowDrillIndicators / ShowTableStyle* flag leaves it True. So a
+    // no-op that carries a STYLE dirties; a no-op name, flag, canvas frame (no
+    // Excel analogue) or empty request stays clean.
+    let current = &pending
+        .get(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?
+        .0;
+    let changes = request.name.as_ref().is_some_and(|n| current.name.as_deref() != Some(n.as_str()))
+        || new_frame.as_ref().is_some_and(|f| current.canvas_frame.as_ref() != Some(f))
+        || new_style.as_ref().is_some_and(|s| &current.style != s)
+        || request.allow_multiple_filters_per_field.is_some_and(|v| v != current.allow_multiple_filters_per_field)
+        || request.enable_data_value_editing.is_some_and(|v| v != current.enable_data_value_editing)
+        || request.refresh_on_open.is_some_and(|v| v != current.refresh_on_open)
+        || request.use_custom_sort_lists.is_some_and(|v| v != current.use_custom_sort_lists);
+    if !changes {
+        if new_style.is_some() {
+            // Every refusal ran above; Excel dirties a re-applied style.
+            let _effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        }
+        return Ok(pivot_properties_info(current, request.pivot_id));
+    }
+    // The undo snapshot is the definition as it is NOW, under the guard the
+    // write keeps (the earlier read was for the refusals only).
+    let before = before.map(|_| current.clone());
+
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut pivot_tables = pending.authorize(&effect);
     let (definition, _) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4382,22 +4450,7 @@ pub(crate) fn update_pivot_properties_core(
         definition.use_custom_sort_lists = v;
     }
 
-    let source_range = definition.source_range_display.clone()
-        .unwrap_or_else(|| format_range(definition.source_start, definition.source_end));
-    let destination = format_cell(definition.destination);
-
-    let info = PivotTableInfo {
-        id: definition.id,
-        name: definition.name.clone().unwrap_or_else(|| format!("PivotTable{}", request.pivot_id)),
-        source_range,
-        destination,
-        allow_multiple_filters_per_field: definition.allow_multiple_filters_per_field,
-        enable_data_value_editing: definition.enable_data_value_editing,
-        refresh_on_open: definition.refresh_on_open,
-        use_custom_sort_lists: definition.use_custom_sort_lists,
-        has_headers: definition.source_has_headers,
-        source_table_name: definition.source_table_name.clone(),
-    };
+    let info = pivot_properties_info(definition, request.pivot_id);
     drop(pivot_tables);
 
     // THE HIDDEN GRID FOLLOWS THE STYLE (ruling R3, WP-C S10b). A style change
@@ -4528,10 +4581,7 @@ pub(crate) fn change_source_sheet_index(
     current_source: Option<&str>,
     active: usize,
 ) -> Result<usize, String> {
-    let find = |name: &str| {
-        let wanted = name.to_lowercase();
-        sheet_names.iter().position(|s| s.to_lowercase() == wanted)
-    };
+    let find = |name: &str| sheet_names.iter().position(|s| identity::sheet_names_equal(s, name));
     if let Some(bang) = typed_range.rfind('!') {
         let raw = typed_range[..bang].trim();
         let name = match raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
@@ -4581,7 +4631,7 @@ pub(crate) fn change_source_table(state: &AppState, typed: &str) -> Option<Chang
     if wanted.is_empty() || wanted.contains(':') || wanted.contains('!') {
         return None;
     }
-    let (sheet, table_id) = state.table_names.read().ok()?.get(&wanted.to_uppercase()).cloned()?;
+    let (sheet, table_id) = state.table_names.read().ok()?.get(&crate::tables::table_name_key(wanted)).cloned()?;
     let tables = state.tables.read().ok()?;
     let table = tables.get(&sheet)?.get(&table_id)?;
     Some(ChangeSourceTable {
@@ -5630,20 +5680,56 @@ pub(crate) fn set_pivot_number_format_core(
         request.number_format
     );
 
-    let (effect, mut pivot_tables) = pivot_write(state, pivot_state, file_state, request.pivot_id)?;
+    // EVERY REFUSAL BEFORE THE EFFECT (BUG-0488): the pivot must exist and its
+    // destination be the right kind (each under a read guard it releases),
+    // then -- under the PENDING store guard the write keeps, so nothing can
+    // change between the decision and the write -- the value-field index is
+    // range-checked. A request that changes nothing (the format the field
+    // already has, already the user's) is answered with the current view and
+    // records no undo step, but DIRTIES the document, as Excel does [LIVE,
+    // Excel 16 COM, round 11: assigning a data field its SAME NumberFormat
+    // sets Workbook.Saved = False]. A refusal still leaves it clean.
+    ensure_pivot_exists(pivot_state, request.pivot_id)?;
+    ensure_pivot_destination_writable(state, pivot_state, request.pivot_id)?;
+    let pending = pivot_state
+        .pivot_tables
+        .lock_pending()
+        .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+    let new_format = if request.number_format.is_empty() { None } else { Some(request.number_format.clone()) };
+    let unchanged = {
+        let (definition, _) = pending
+            .get(&request.pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+        let field = definition.value_fields.get(request.value_field_index).ok_or_else(|| {
+            format!("Value field index {} out of range", request.value_field_index)
+        })?;
+        field.number_format == new_format && !field.number_format_from_model
+    };
+
+    if unchanged {
+        // Every refusal ran above; Excel dirties a re-applied number format.
+        let _effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let (definition, cache) = pending
+            .get(&request.pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+        let definition = definition.clone();
+        let mut cache = cache.clone();
+        drop(pending);
+        let view = safe_calculate_pivot(&definition, &mut cache);
+        return Ok(view_to_response(&view, &definition, &mut cache, &display_locale));
+    }
+
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut pivot_tables = pending.authorize(&effect);
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
 
-    if request.value_field_index >= definition.value_fields.len() {
-        return Err(format!(
-            "Value field index {} out of range",
-            request.value_field_index
-        ));
-    }
+    // The definition as it was: the undo step below puts it back.
+    let old_definition = definition.clone();
 
     let field = &mut definition.value_fields[request.value_field_index];
-    field.number_format = if request.number_format.is_empty() { None } else { Some(request.number_format) };
+    field.number_format = new_format;
     field.number_format_from_model = false;
 
     definition.bump_version();
@@ -5659,8 +5745,25 @@ pub(crate) fn set_pivot_number_format_core(
     drop(pivot_tables);
     let dest_sheet_idx = dest_ref.resolve(state);
 
-    response.overwritten_cell_count = count_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+    // The cells the write is about to overwrite are SAVED, not merely counted,
+    // so the undo step can put them back (a format change keeps the extent,
+    // so this is normally empty).
+    let saved_cells = save_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+    response.overwritten_cell_count = saved_cells.len() as u32;
     finalize_pivot_update(state, &effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(recalc))?;
+
+    // ONE undoable step, recorded after the write succeeded (the shape
+    // `update_pivot_fields` uses): Ctrl+Z puts the field's format back.
+    response.overwrite_token = record_pivot_definition_undo(
+        state,
+        pivot_id,
+        old_definition,
+        saved_cells,
+        dest_sheet_idx,
+        Vec::new(),
+        None,
+        "PivotTable number format",
+    );
 
     Ok(response)
 }
@@ -8851,12 +8954,18 @@ pub async fn create_pivot_from_bi_model(
 
     // Extract model metadata from the connection's engine (reads the in-memory
     // model; no DB connection required, so this works offline).
-    let (model_tables, measures, hierarchies, calc_groups, perspectives, cultures) = {
-        let engine_arc = {
+    // `data_source_key`: the connection's STABLE key (its application
+    // data-source id, else its own id), which the pivot's metadata names so a
+    // save, a reopen and a published package all re-bind it (BUG-0589).
+    let (data_source_key, (model_tables, measures, hierarchies, calc_groups, perspectives, cultures)) = {
+        let (engine_arc, data_source_key) = {
             let connections = bi_state.connections.lock().unwrap();
             let conn = connections.get(&connection_id)
                 .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-            conn.engine.clone().ok_or("No BI model loaded.")?
+            (
+                conn.engine.clone().ok_or("No BI model loaded.")?,
+                crate::calp_commands::published_data_source_id(conn),
+            )
         };
         let mut engine = engine_arc.lock().await;
         // Sync the connection's active RLS role onto the engine so the OLS
@@ -8879,7 +8988,7 @@ pub async fn create_pivot_from_bi_model(
         for h in &result.2 {
             log_info!("PIVOT", "  hierarchy: {} (table={}, {} levels)", h.name, h.table, h.levels.len());
         }
-        result
+        (data_source_key, result)
     };
 
     // Connect + bind only when the model's tables aren't already cache-warm.
@@ -9045,9 +9154,11 @@ pub async fn create_pivot_from_bi_model(
     // Store BI metadata
     let bi_meta = BiPivotMetadata {
         connection_id,
-        // On the authoring machine the live connection UUID is the package
-        // data source id used at publish time.
-        data_source_id: Some(connection_id.to_string()),
+        // The connection's stable key -- the id a package files its data
+        // source under (`published_data_source_id`): the live uuid only for a
+        // model authored here, the application's data-source id for one a
+        // subscribe or a checkout minted (BUG-0589).
+        data_source_id: Some(data_source_key),
         model_tables,
         measures,
         hierarchies,
@@ -12262,9 +12373,13 @@ mod drill_lock_order_tests {
             .expect("the report filter pages");
 
         created.sort();
+        // Round 15: sheet names keep leading/trailing spaces, as Excel's do, so
+        // `' 'x` cleans to the LEGAL ` 'x` (the leading apostrophe goes, the
+        // space it uncovered stays). The point of the test is unchanged: the
+        // value gets a page, never silently nothing.
         assert_eq!(
             created,
-            vec!["West".to_string(), "x".to_string()],
+            vec![" 'x".to_string(), "West".to_string()],
             "a filter value got no page and no error; sheets {:?}",
             names(&fx.state)
         );

@@ -34,6 +34,7 @@ import { getGridRegions } from "../api/gridOverlays";
 import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
 import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/collaboration";
 import { bridgeDirtyStateAnnouncement } from "./dirtyStateBridge";
+import { bridgeLoadWarnings } from "./loadWarningsBridge";
 import { bridgeSheetDisplayFlagsAnnouncement } from "./sheetDisplayFlagsBridge";
 import { bridgeCanvasLayoutAnnouncement } from "./canvasLayoutBridge";
 import { installObjectBindingsBridge } from "../api/objectBindings";
@@ -620,6 +621,11 @@ export function bootstrapShell(): void {
   // Layout.tsx already re-titles on DIRTY_STATE_CHANGED; see
   // shell/dirtyStateBridge.ts for why the backend side is ONE event.
   void bridgeDirtyStateAnnouncement();
+
+  // 2f2: what `open_file` had to change or drop while loading (a sheet renamed
+  // because its name clashed by Excel's rule, an unreadable filter entry),
+  // told once without blocking the open. See shell/loadWarningsBridge.ts.
+  void bridgeLoadWarnings();
 
   // 2g: bridge the backend's per-sheet DISPLAY FLAGS announcement, so the
   // renderer follows the authority when the authority is moved by something

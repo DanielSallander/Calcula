@@ -177,8 +177,11 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // three cross-filter rows on UnlockedAPI, `api.getCrossFilters`,
     // `api.setCrossFilter` and `api.clearCrossFilters`, one declaration each
     // (`interactions` on the canvas layout types is a data shape, not a chain).
-    expect(chains.size).toBe(737);
-    expect(entries.length).toBe(794);
+    // 2026-10-31 (round 15, NEW-recorder-select-all): 737 -> 739 chains and
+    // 794 -> 796 entries -- the run-based resize rows on UnlockedAPI,
+    // `api.setRowHeights` and `api.setColumnWidths`, one declaration each.
+    expect(chains.size).toBe(739);
+    expect(entries.length).toBe(796);
     expect(entries.length).toBeGreaterThan(chains.size);
 
     const policyPairs = new Set(
@@ -203,7 +206,9 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // ScriptTargetObjectHandle (the unlocked door) -- 18 + 8 + 1 + 8.
     // 2026-10-17 (P4 S12): 995 -> 998, the three cross-filter members above,
     // each probed under exactly one interface (UnlockedAPI).
-    expect(policyPairs.size).toBe(998);
+    // 2026-10-31 (round 15): 998 -> 1000, api.setRowHeights and
+    // api.setColumnWidths, each probed under exactly one interface (UnlockedAPI).
+    expect(policyPairs.size).toBe(1000);
     expect(entries.length).toBeLessThan(policyPairs.size);
 
     // TOTALITY, which is what makes `entryFor`'s exact match total: every

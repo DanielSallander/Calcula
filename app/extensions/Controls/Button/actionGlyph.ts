@@ -14,6 +14,7 @@
 //          font glyph, so nothing depends on the font having an arrow.
 
 import type { ButtonAction } from "@api/buttonControlService";
+import { sheetNamesEqual } from "@api/sheetNames";
 
 /** The pictured actions; navigation is a caption only (a navigator's tabs). */
 export type ButtonActionGlyph = "back" | "clearSlicers";
@@ -42,7 +43,7 @@ export function isCurrentPageButton(
   if (!action || action.kind !== "navigate") return false;
   if (action.sheetId && active.sheetId) return action.sheetId === active.sheetId;
   if (!active.sheetName) return false;
-  return action.sheetName.toLocaleLowerCase() === active.sheetName.toLocaleLowerCase();
+  return sheetNamesEqual(action.sheetName, active.sheetName);
 }
 
 /** The glyph's side and its gap to the caption, for a caption font size. */

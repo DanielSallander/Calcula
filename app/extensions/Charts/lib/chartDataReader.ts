@@ -1011,6 +1011,30 @@ export async function autoDetectSeries(
 }
 
 /**
+ * The header text of every axis of a range -- the header ROW's cells for
+ * series in columns, the header COLUMN's for series in rows -- as the display
+ * text the series detection names a series by (`detectColumnSeries`). "" where
+ * the header cell is empty. Reads only that one row or column, from the
+ * range's own sheet (id-first).
+ *
+ * BUG-0448: the chart dialog's series list named every series by its column
+ * letter (B, C, D) while the legend said Q1, Q2, Q3; with this it names them
+ * as the chart will, as Excel's Select Data dialog does.
+ */
+export async function readRangeHeaderLabels(
+  dataRange: DataRangeRef,
+  orientation: SeriesOrientation,
+): Promise<string[]> {
+  const ref = await resolveRangeRefSheet(dataRange);
+  const header: DataRangeRef =
+    orientation === "columns" ? { ...ref, endRow: ref.startRow } : { ...ref, endCol: ref.startCol };
+  const { display } = await readRangeGrid(header);
+  return orientation === "columns"
+    ? (display[0] ?? []).map((t) => t ?? "")
+    : display.map((row) => row[0] ?? "");
+}
+
+/**
  * Re-derive series definitions for a specific orientation.
  * Used when switching between rows and columns orientation on an existing chart.
  * Reads the range's own sheet (id-first).

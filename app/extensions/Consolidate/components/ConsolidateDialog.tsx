@@ -15,6 +15,7 @@ import type { ConsolidationFunction } from "@api";
 import { CONSOLIDATION_FUNCTIONS } from "../types";
 import type { SourceRangeEntry } from "../types";
 import { consolidateAsOneStep } from "../lib/consolidateAsOneStep";
+import { findBySheetName } from "@api/sheetNames";
 
 // ============================================================================
 // Styles (CSS variables from app theme)
@@ -235,10 +236,8 @@ function parseRangeReference(
     sheetName = sheetName.substring(1, sheetName.length - 1);
   }
 
-  // Find sheet by name (case-insensitive)
-  const sheet = sheets.find(
-    (s) => s.name.toLowerCase() === sheetName.toLowerCase(),
-  );
+  // Find sheet by name (Excel's sheet-name case rule)
+  const sheet = findBySheetName(sheets, sheetName, (s) => s.name);
   if (!sheet) return null;
 
   // Parse range part: "A1:D10" or "$A$1:$D$10"

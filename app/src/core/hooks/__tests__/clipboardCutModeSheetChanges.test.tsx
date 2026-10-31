@@ -1,10 +1,14 @@
 //! FILENAME: app/src/core/hooks/__tests__/clipboardCutModeSheetChanges.test.tsx
-// PURPOSE: A sheet RENAMED or DELETED between Cut and Paste ends cut mode, so
-//          the paste never writes the cut's formula TEXT naming a sheet that
-//          no longer answers to that name; adding, moving, copying or hiding a
+// PURPOSE: What a sheet change between Cut (or Copy) and Paste does, as Excel
+//          does it: a RENAME keeps the mode and the paste spells the new name
+//          (the snapshot is read again from its source); a sheet DELETED, MOVED
+//          or COPIED ends it and the Paste pastes nothing; adding or hiding a
 //          sheet keeps it, and the Paste still moves the cells. Driven through
 //          the REAL tauri-api sheet wrappers (their announcements) and the REAL
 //          clipboard hook; the IPC and the Tauri clipboard plugin are doubles.
+// UPDATE:  Round 9 (lane clipexcel, BUG-0616 item 5 -- the owner's rule: when
+//          Calcula and Excel differ, Excel wins). Round 8 ENDED the cut on a
+//          rename and KEPT it on a move or a copy; both are now Excel's.
 // CONTEXT: Bug-ledger fix programme round 8 (lane cutmode, review rev6A#6). A
 //          cut stores its formulas as TEXT at the cut, and a rename repairs the
 //          workbook's formulas but not that text: Sheet1!A2 =Sheet2!B1*2, Cut
@@ -71,9 +75,15 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
         return backend.list();
       case "get_active_sheet":
         return backend.activeIndex;
-      case "rename_sheet":
+      case "rename_sheet": {
+        // The backend repairs every formula naming the sheet (here: Sheet1's cells).
+        const oldName = backend.sheets[a.index as number].name;
         backend.sheets[a.index as number].name = a.newName as string;
+        for (const cell of model.cells.values()) {
+          if (cell.formula) cell.formula = cell.formula.split(`${oldName}!`).join(`${a.newName as string}!`);
+        }
         return backend.list();
+      }
       case "delete_sheet":
         backend.sheets.splice(a.index as number, 1);
         return backend.list();
@@ -124,8 +134,21 @@ vi.mock("../../lib/tauri-api", async (importOriginal) => ({
   clearCell: (row: number, col: number) => api.clearCell(row, col),
   relocateCellReferences: (...args: unknown[]) => api.relocateCellReferences(...args),
   shiftFormulasBatch: vi.fn(async (inputs: { formula: string }[]) => inputs.map((i) => i.formula)),
-  getRangeCellsTyped: vi.fn(async () => {
-    throw new Error("no typed read in this double");
+  // The sheet-addressed reads a stale snapshot is read again through: Sheet1
+  // (id S1) holds the model's cells, wherever it stands; every other sheet is empty.
+  getWatchCells: vi.fn(async (requests: [number, number, number][]) =>
+    requests.map(([sheet, row, col]) => (backend.sheets[sheet]?.sheetId === "S1" ? cellData(row, col) : null)),
+  ),
+  getRangeCellsTyped: vi.fn(async (r0: number, c0: number, r1: number, c1: number, sheet?: number) => {
+    const out: unknown[] = [];
+    if (backend.sheets[sheet ?? backend.activeIndex]?.sheetId !== "S1") return out;
+    for (const [key, cell] of model.cells) {
+      const [row, col] = key.split(",").map(Number);
+      if (row < r0 || row > r1 || col < c0 || col > c1) continue;
+      const n = Number(cell.display);
+      out.push({ row, col, display: cell.display, formula: cell.formula, type: Number.isFinite(n) ? "number" : "text", value: Number.isFinite(n) ? n : cell.display });
+    }
+    return out;
   }),
   getCell: vi.fn(async (row: number, col: number) => cellData(row, col)),
   getCollectionTexts: vi.fn(async () => []),
@@ -271,25 +294,84 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-describe("a sheet renamed or deleted between Cut and Paste ends the cut (rev6A#6)", () => {
-  it("the review's case: Sheet2 renamed to Inputs -- the paste does not write =Sheet2!B1*2 and A2 keeps it", async () => {
+/** The rename KEPT the cut (Excel's), and the Paste moved A2 to C2 spelling the formula `formula`. */
+async function expectKeptAndMovedAs(why: string, formula: string): Promise<void> {
+  expect(isCutModeLive(), `${why}: ended the cut (Excel keeps cut mode across a rename)`).toBe(true);
+  expect(gridState.clipboard.mode).toBe("cut");
+  await pasteAtC2();
+  expect(api.updateCellsBatch).toHaveBeenCalledTimes(1);
+  const [updates] = api.updateCellsBatch.mock.calls[0] as unknown as [Array<{ row: number; col: number; value: string }>];
+  expect(
+    updates.map((u) => [u.row, u.col, u.value]),
+    `${why}: the paste wrote the snapshot's stale formula text (a #REF! in the workbook)`,
+  ).toEqual([[1, 2, formula]]);
+  expect(api.clearCell.mock.calls).toEqual([[1, 0]]);
+}
+
+// BUG-0616 item 5 / the endings round 8 chose against Excel. Excel 16 [LIVE,
+// 2026-10-30, clipexcel/probe-copy.ps1] KEEPS cut mode across a rename of the
+// source sheet or of another one, and the paste spells the new name. Round 8
+// ENDED the cut instead (its snapshot held the old spelling); the snapshot is
+// now read again from its source after a rename (useClipboard.ts CLIPBOARD MODE).
+describe("a sheet renamed between Cut and Paste keeps the cut, and the paste spells the new name", () => {
+  it("the review's case: Sheet2 renamed to Inputs -- the paste writes =Inputs!B1*2, never =Sheet2!B1*2", async () => {
     await cutA2();
     await change(() => renameSheet(1, "Inputs"));
     expect(backend.sheets[1].name, "precondition: the rename landed").toBe("Inputs");
-    await expectEndedAndNothingPasted("Sheet2 renamed");
+    await expectKeptAndMovedAs("Sheet2 renamed", "=Inputs!B1*2");
   });
 
-  it("the cut's OWN sheet renamed ends it too (a formula naming it, =Sheet1!B5, would go stale)", async () => {
-    await cutA2();
+  it("the cut's OWN sheet renamed: a formula naming it (=Sheet1!B5) moves as =Src!B5", async () => {
+    model.cells.set("1,0", { display: "3", formula: "=Sheet1!B5", styleIndex: 0 });
+    await select(1, 0);
+    await act(async () => {
+      await clipboard.cut();
+    });
+    await settle();
     await change(() => renameSheet(0, "Src"));
-    await expectEndedAndNothingPasted("Sheet1 renamed");
+    await expectKeptAndMovedAs("Sheet1 renamed", "=Src!B5");
   });
 
-  it("a THIRD sheet deleted ends it, as Excel does", async () => {
+  it("a COPY across a rename pastes the new name as well (Excel: =Inputs!E1*2 after the copy's shift)", async () => {
+    model.cells.set("1,0", { display: "42", formula: "=Sheet2!B1*2", styleIndex: 0 });
+    await select(1, 0);
+    await act(async () => {
+      await clipboard.copy();
+    });
+    await settle();
+    await change(() => renameSheet(1, "Inputs"));
+    expect(getInternalClipboard(), "the rename ended the copy").not.toBeNull();
+    await pasteAtC2();
+    const [updates] = api.updateCellsBatch.mock.calls[0] as unknown as [Array<{ row: number; col: number; value: string }>];
+    expect(updates.map((u) => [u.row, u.col, u.value])).toEqual([[1, 2, "=Inputs!B1*2"]]);
+    expect(api.clearCell).not.toHaveBeenCalled();
+  });
+});
+
+describe("a sheet deleted, moved or copied between Cut and Paste ends the cut, as Excel does", () => {
+  it("a THIRD sheet deleted ends it", async () => {
     await cutA2();
     await change(() => deleteSheet(2));
     expect(backend.sheets.map((s) => s.name), "precondition: the delete landed").toEqual(["Sheet1", "Sheet2"]);
     await expectEndedAndNothingPasted("Sheet3 deleted");
+  });
+
+  // Round 8 kept the cut across a move and a copy (no name changes); Excel
+  // [LIVE] ends cut mode on both, and Excel wins.
+  it("a sheet MOVED ends it (the move as the tab strip and the script door announce it)", async () => {
+    await cutA2();
+    await change(async () => {
+      await moveSheet(2, 1);
+      window.dispatchEvent(new CustomEvent("sheet:reorder", { detail: { fromIndex: 2, toIndex: 1 } }));
+    });
+    expect(backend.sheets.map((s) => s.name), "precondition: the move landed").toEqual(["Sheet1", "Sheet3", "Sheet2"]);
+    await expectEndedAndNothingPasted("Sheet3 moved");
+  });
+
+  it("a sheet COPIED ends it", async () => {
+    await cutA2();
+    await change(() => copySheet(1));
+    await expectEndedAndNothingPasted("Sheet2 copied");
   });
 });
 
@@ -306,16 +388,14 @@ describe("the sheet changes that keep the cut, and the Paste still moves it", ()
     await expectKeptAndMoved("Sheet3 hidden");
   });
 
-  it("a sheet MOVED keeps it: no name changes, the source is found by its id", async () => {
+  it("a sheet INSERTED before the source keeps it (its sheet:reorder is an insertion, not a move)", async () => {
     await cutA2();
-    await change(() => moveSheet(2, 1));
-    expect(backend.sheets.map((s) => s.name), "precondition: the move landed").toEqual(["Sheet1", "Sheet3", "Sheet2"]);
-    await expectKeptAndMoved("Sheet3 moved");
-  });
-
-  it("a sheet COPIED keeps it: no name changes", async () => {
-    await cutA2();
-    await change(() => copySheet(1));
-    await expectKeptAndMoved("Sheet2 copied");
+    await change(async () => {
+      await addSheet();
+      window.dispatchEvent(
+        new CustomEvent("sheet:reorder", { detail: { fromIndex: Number.MAX_SAFE_INTEGER, toIndex: 0 } }),
+      );
+    });
+    await expectKeptAndMoved("a sheet inserted");
   });
 });

@@ -62,6 +62,8 @@ const slot = vi.hoisted(() => {
 // --- A tiny sheet: cell styles, the style table, column widths --------------
 const h = vi.hoisted(() => ({
   clipboard: null as unknown,
+  /** What settledInternalClipboard answers when it differs from getInternalClipboard (a re-read landed). */
+  settled: null as unknown,
   writes: [] as string[],
   updates: [] as Array<[number, number, string]>,
   /** Whether each write was flagged as a PASTE (CellUpdateInput.pasted), in order. */
@@ -93,6 +95,8 @@ vi.mock("@api/lib", async (importOriginal) => {
   return {
     ...real,
     getInternalClipboard: () => h.clipboard,
+    // The door waits for a stale snapshot's re-read (round 11): what it answers.
+    settledInternalClipboard: async () => h.settled ?? h.clipboard,
     getCell: vi.fn(async (r: number, c: number) => {
       const s = h.destStyle.get(`${r},${c}`);
       return s === undefined ? null : { row: r, col: c, display: "old", formula: null, styleIndex: s };
@@ -228,6 +232,7 @@ beforeEach(() => {
   h.widthWrites = [];
   h.destStyle = new Map();
   h.styles = new Map([[0, style({})]]);
+  h.settled = null;
   h.alerts = [];
   h.current = true;
   h.canvas = false;
@@ -451,5 +456,18 @@ describe("Paste All's empty source cells (Transpose, Keep Source Column Widths)"
       [4, 4, 1],
       [5, 4, 0],
     ]);
+  });
+});
+
+// Round 11 (lane clip3, rev9B nit): the variants read the clipboard through
+// settledInternalClipboard, which WAITS for a re-read of a stale snapshot (an
+// undo, a rename, a write onto the source since the copy) -- Ctrl+Z, then
+// Paste Values at once, used to paste the pre-undo snapshot.
+describe("a variant pastes the snapshot as its source holds it NOW", () => {
+  it("Paste Values takes the settled (re-read) clipboard, not the one a re-read is still replacing", async () => {
+    h.clipboard = clipboardOf([[{ display: "5", styleIndex: 0 }]]);
+    h.settled = clipboardOf([[{ display: "3", styleIndex: 0 }]]);
+    await run(CoreCommands.PASTE_VALUES);
+    expect(h.updates.map((u) => u[2]), "Paste Values pasted the pre-undo snapshot").toEqual(["3"]);
   });
 });

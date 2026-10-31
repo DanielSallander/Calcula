@@ -11,7 +11,9 @@
 //            Insert dialog (shift right / down / entire row / entire column),
 //            or straight to rows / columns for a whole-row / whole-column
 //            selection, as Excel's does. Ctrl+Plus runs the same command, so
-//            its live chip is shown on this row.
+//            its live chip is shown on this row. With a COPY pending the row
+//            reads "Insert Copied Cells..." and inserts the copied cells, as
+//            Excel's does.
 //          - Insert Sheet Rows / Columns run core.grid.insertRow / insertColumn,
 //            which act on every row / column the selection SPANS, whatever its
 //            shape (Excel's rule; core-grid lane).
@@ -22,6 +24,8 @@
 import React from "react";
 import { RibbonIcon } from "@api";
 import { CoreCommands } from "@api/commands";
+import { getGridStateSnapshot } from "@api/grid";
+import { insertCopiedCellsLabel } from "@api/lib";
 import type { HomeItemProps } from "../homeItemProps";
 import { StructureSplitButton, type StructureMenuRow } from "./StructureSplitButton";
 
@@ -33,6 +37,14 @@ export const INSERT_MENU_ROWS: readonly StructureMenuRow[] = [
     commandId: CoreCommands.INSERT_CELLS,
     icon: RibbonIcon.InsertCells,
     showShortcut: true,
+    // With a COPY pending Excel's row reads "Insert Copied Cells..." (no
+    // dots over whole rows / columns, where no dialog follows) [LIVE
+    // 2026-10-30, GetLabelMso("CellsInsertDialog")]: the command then inserts
+    // the copied cells (the InsertDeleteCells extension).
+    liveLabel: () => {
+      const type = getGridStateSnapshot()?.selection?.type;
+      return insertCopiedCellsLabel(type === "rows" || type === "columns");
+    },
   },
   {
     label: "Insert Sheet Rows",

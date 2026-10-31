@@ -608,20 +608,111 @@ fn a_row_location_takes_a_sparkline_for_a_column_inserted_inside_it() {
     assert_eq!(groups_after(&groups, &cols_insert(1, 1)), Some(vec![(rect(6, 0, 6, 3), rect(1, 0, 4, 3), 4)]));
 }
 
+/// Every group after the edit as (id, its areas: the group's own
+/// location/data first, then each of `moreAreas`); `None` = nothing moved.
+fn group_areas_after(groups: &serde_json::Value, band: &BandEdit) -> Option<Vec<(u64, Vec<(CellRange, CellRange)>)>> {
+    let text = shift_sparkline_groups(&groups.to_string(), band)?;
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let area = |a: &serde_json::Value| {
+        (ref_rect(a["location"].as_object().unwrap()).unwrap(), ref_rect(a["dataRange"].as_object().unwrap()).unwrap())
+    };
+    Some(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|g| {
+                assert_eq!(g["type"], json!("line"), "every other property is kept");
+                let mut areas = vec![area(g)];
+                if let Some(more) = g.get(MORE_AREAS_KEY) {
+                    let more = more.as_array().expect("moreAreas is an array when present");
+                    assert!(!more.is_empty(), "an empty moreAreas is never written");
+                    areas.extend(more.iter().map(area));
+                }
+                (g["id"].as_u64().unwrap(), areas)
+            })
+            .collect(),
+    )
+}
+
+/// The live-probe group (2026-10-30): E2:E6 over A2:C6, one sparkline per row.
+fn probe_groups_5() -> serde_json::Value {
+    json!([{
+        "id": 1, "type": "line", "color": "#4472C4",
+        "location": { "startRow": 1, "startCol": 4, "endRow": 5, "endCol": 4 },
+        "dataRange": { "startRow": 1, "startCol": 0, "endRow": 5, "endCol": 2 }
+    }])
+}
+
 #[test]
-fn insert_cells_splits_a_group_where_its_sparklines_part_ways() {
+fn insert_cells_keeps_a_group_one_group_where_its_sparklines_part_ways() {
     // A3:C3 down (data only): Excel's E2 <- A2:C2, E3 <- A4:C4, E4 <- A5:C5,
-    // E5 <- A6:C6 -- two groups here, the second with a fresh id.
+    // E5 <- A6:C6 -- and Excel keeps ONE group, so the second part is an AREA
+    // of group 1, never a group of its own.
     assert_eq!(
-        groups_after(&probe_groups(), &cells(2, 0, 2, 2, CellShift::Down)),
-        Some(vec![(rect(1, 4, 1, 4), rect(1, 0, 1, 2), 1), (rect(2, 4, 4, 4), rect(3, 0, 5, 2), 2)])
+        group_areas_after(&probe_groups(), &cells(2, 0, 2, 2, CellShift::Down)),
+        Some(vec![(1, vec![(rect(1, 4, 1, 4), rect(1, 0, 1, 2)), (rect(2, 4, 4, 4), rect(3, 0, 5, 2))])])
     );
     // E3 down (location only): Excel's E2 <- A2:C2, E3 <- A3:C3 (the copy),
     // E4 <- A3:C3, E5 <- A4:C4, E6 <- A5:C5.
     assert_eq!(
-        groups_after(&probe_groups(), &cells(2, 4, 2, 4, CellShift::Down)),
-        Some(vec![(rect(1, 4, 2, 4), rect(1, 0, 2, 2), 1), (rect(3, 4, 5, 4), rect(2, 0, 4, 2), 2)])
+        group_areas_after(&probe_groups(), &cells(2, 4, 2, 4, CellShift::Down)),
+        Some(vec![(1, vec![(rect(1, 4, 2, 4), rect(1, 0, 2, 2)), (rect(3, 4, 5, 4), rect(2, 0, 4, 2))])])
     );
+}
+
+#[test]
+fn a_column_inserted_just_after_a_column_group_adds_an_area_not_a_group() {
+    // [LIVE 2026-10-30] E2:E6 over A2:C6, column F inserted: ONE group of ten,
+    // E2..E6 over A..C and F2..F6 over B..D (each a copy offset one column).
+    assert_eq!(
+        group_areas_after(&probe_groups_5(), &cols_insert(5, 1)),
+        Some(vec![(1, vec![(rect(1, 4, 5, 4), rect(1, 0, 5, 2)), (rect(1, 5, 5, 5), rect(1, 1, 5, 3))])])
+    );
+    // [LIVE] Row 4 inserted in the middle of the location: one area, E2:E7 over A2:C7.
+    assert_eq!(group_areas_after(&probe_groups_5(), &rows_insert(3, 1)), Some(vec![(1, vec![(rect(1, 4, 6, 4), rect(1, 0, 6, 2))])]));
+    // [LIVE] Column B inserted inside the data: F2:F6 over A2:D6.
+    assert_eq!(group_areas_after(&probe_groups_5(), &cols_insert(1, 1)), Some(vec![(1, vec![(rect(1, 5, 5, 5), rect(1, 0, 5, 3))])]));
+}
+
+#[test]
+fn a_row_inserted_just_after_a_row_group_adds_an_area_not_a_group() {
+    // [LIVE 2026-10-30] A8:C8 over A2:C6, row 9 inserted: ONE group of six,
+    // A8:C8 over A2:C6 and A9:C9 over A3:C7.
+    let groups = json!([{
+        "id": 3, "type": "line",
+        "location": { "startRow": 7, "startCol": 0, "endRow": 7, "endCol": 2 },
+        "dataRange": { "startRow": 1, "startCol": 0, "endRow": 5, "endCol": 2 }
+    }]);
+    assert_eq!(
+        group_areas_after(&groups, &rows_insert(8, 1)),
+        Some(vec![(3, vec![(rect(7, 0, 7, 2), rect(1, 0, 5, 2)), (rect(8, 0, 8, 2), rect(2, 0, 6, 2))])])
+    );
+}
+
+#[test]
+fn every_area_of_a_group_follows_later_edits_and_a_lost_area_leaves_it() {
+    // The two-area group the column-F insert made (above).
+    let two = json!([{
+        "id": 1, "type": "line",
+        "location": { "startRow": 1, "startCol": 4, "endRow": 5, "endCol": 4 },
+        "dataRange": { "startRow": 1, "startCol": 0, "endRow": 5, "endCol": 2 },
+        "moreAreas": [{
+            "location": { "startRow": 1, "startCol": 5, "endRow": 5, "endCol": 5 },
+            "dataRange": { "startRow": 1, "startCol": 1, "endRow": 5, "endCol": 3 }
+        }]
+    }]);
+    // Row 1 inserted above: BOTH areas move down a row.
+    assert_eq!(
+        group_areas_after(&two, &rows_insert(0, 1)),
+        Some(vec![(1, vec![(rect(2, 4, 6, 4), rect(2, 0, 6, 2)), (rect(2, 5, 6, 5), rect(2, 1, 6, 3))])])
+    );
+    // Column F deleted again: the second area goes, and `moreAreas` with it.
+    let text = shift_sparkline_groups(&two.to_string(), &cols_delete(5, 1)).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(v[0].get(MORE_AREAS_KEY).is_none(), "{v}");
+    assert_eq!(group_areas_after(&two, &cols_delete(5, 1)), Some(vec![(1, vec![(rect(1, 4, 5, 4), rect(1, 0, 5, 2))])]));
+    // Rows 2:6 deleted: every sparkline of both areas is gone, so is the group.
+    assert_eq!(group_areas_after(&two, &rows_delete(1, 5)), Some(vec![]));
 }
 
 // ---------------------------------------------------------------------------

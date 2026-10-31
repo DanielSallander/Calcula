@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/_shared/components/colorPick/useNativeColorPick.ts
+//! FILENAME: app/src/api/layout/primitives/useNativeColorPick.ts
 // PURPOSE: ONE way to drive an OS colour picker (`<input type="color">`) so a
 //          pick is previewed while it moves and COMMITTED exactly once when it
 //          closes on a colour.
@@ -28,10 +28,15 @@
 //          A caller that keeps a separate draft must ALSO build its own commit
 //          patch against its STORED value (rule (h) of the P1 spec): the hook's
 //          snapshot protects the hook's equality test, not the caller's diff.
-//          Lives in `_shared` (a widget hook, not an @api contract).
+//          Moved from `extensions/_shared/components/colorPick` into the layout
+//          kit on 2026-10-30 (BUG-0536/0372): the kit's own ColorPopover "More
+//          Colors..." input and ColorSwatch `native` committed on EVERY `input`,
+//          and an @api primitive cannot import from extensions. `_shared/
+//          components/colorPick` re-exports this file, so its callers did not move.
 
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
+import { DEFAULT_PICKER_COLOR } from "../colors";
 
 /** The 6-digit form an `<input type="color">` accepts (it refuses #rgb and
  *  alpha); "#000000" for anything else. */
@@ -42,7 +47,7 @@ export function pickerHex(color: string): string {
   if (/^#[0-9a-fA-F]{3}$/.test(c)) {
     return ("#" + c[1] + c[1] + c[2] + c[2] + c[3] + c[3]).toLowerCase();
   }
-  return "#000000";
+  return DEFAULT_PICKER_COLOR;
 }
 
 export interface NativeColorPickOptions {
@@ -80,7 +85,7 @@ interface PickBase {
 }
 
 export function useNativeColorPick(o: NativeColorPickOptions): NativeColorPickProps {
-  const fallback = o.fallback ?? "#000000";
+  const fallback = o.fallback ?? DEFAULT_PICKER_COLOR;
   const ref = useRef<HTMLInputElement>(null);
   const [shown, setShown] = useState(() => pickerHex(o.value || fallback));
   // Bumped when a pick ENDS without a commit, so the picker re-syncs to the

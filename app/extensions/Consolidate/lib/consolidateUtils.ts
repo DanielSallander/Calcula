@@ -4,6 +4,7 @@
 
 import { columnToLetter } from "@api";
 import type { SourceRangeEntry } from "../types";
+import { findBySheetName } from "@api/sheetNames";
 
 // ============================================================================
 // Cell Reference Parsing
@@ -66,10 +67,8 @@ export function parseRangeReference(
     sheetName = sheetName.substring(1, sheetName.length - 1);
   }
 
-  // Find sheet by name (case-insensitive)
-  const sheet = sheets.find(
-    (s) => s.name.toLowerCase() === sheetName.toLowerCase(),
-  );
+  // Find sheet by name (Excel's sheet-name case rule)
+  const sheet = findBySheetName(sheets, sheetName, (s) => s.name);
   if (!sheet) return null;
 
   const rangeParts = rangePart.split(":");

@@ -480,6 +480,37 @@ export const SCRIPT_RANGE_MAX_CELLS = 100_000;
 export const CLEAR_REPLAY_MAX_SCANNED_CELLS = 5_000_000;
 
 /**
+ * The most cells one FORMAT or CLEAR call may name when the rectangle is not
+ * whole rows or whole columns: the broker's `MAX_FORMAT_RECT_CELLS`
+ * (@api/scriptHost/validators `vFormatRangeRef`), itself the backend's
+ * cell-walk limit. Restated like `SCRIPT_RANGE_MAX_CELLS`;
+ * clearRangeBoundedReplay.test.ts pins them equal.
+ */
+export const SCRIPT_FORMAT_RECT_MAX_CELLS = 4_000_000;
+
+/** Last 0-based row / column of a sheet (the engine's EXCEL_MAX_*_INDEX). */
+const SHEET_LAST_ROW = 1_048_575;
+const SHEET_LAST_COL = 16_383;
+
+/**
+ * Whether ONE script format / clear call accepts this rectangle (BUG-0616 #1):
+ * whole rows, whole columns, Select All and ALMOST-whole lines at any size --
+ * the backend writes them as row / column formats -- and anything else up to
+ * `SCRIPT_FORMAT_RECT_MAX_CELLS`. The restated twin of `vFormatRangeRef` /
+ * `isFormatLineRect` (pinned equal by clearRangeBoundedReplay.test.ts).
+ */
+export function formatCallAccepts(startRow: number, startCol: number, endRow: number, endCol: number): boolean {
+  const rows = endRow - startRow + 1;
+  const cols = endCol - startCol + 1;
+  if (rows * cols <= SCRIPT_FORMAT_RECT_MAX_CELLS) return true;
+  if ((startRow === 0 && endRow >= SHEET_LAST_ROW) || (startCol === 0 && endCol >= SHEET_LAST_COL)) return true;
+  const asColumns = Math.max(0, SHEET_LAST_ROW + 1 - rows) * cols;
+  const asRows = Math.max(0, SHEET_LAST_COL + 1 - cols) * rows;
+  const exceptions = Math.min(asColumns, asRows);
+  return exceptions < rows * cols && exceptions <= 65_536;
+}
+
+/**
  * A recorded Clear (Delete / Clear Contents / Clear Formats / Clear All).
  *
  * NEVER UNBOUNDED. The gesture names a RECTANGLE, and a clicked column header
@@ -502,19 +533,22 @@ export const CLEAR_REPLAY_MAX_SCANNED_CELLS = 5_000_000;
  *     at XFD1048576) makes the cut the whole sheet: a cut of more than
  *     `CLEAR_REPLAY_MAX_SCANNED_CELLS` positions is REFUSED when the macro runs
  *     (it throws, naming the size), never looped over -- the cut is only known
- *     then, so it cannot be a generation-time note. Its FORMATS are not
- *     replayable: a whole-column or whole-row format is a property of the line,
- *     not of stored cells, so it can be neither cut to the used range nor
- *     cleared in pieces (each piece would write an explicit-Normal cell per
- *     position), and one call over the rectangle is refused by the script API.
- *     Said out loud (`unsupported`), never dropped.
+ *     then, so it cannot be a generation-time note. Its FORMATS replay as ONE
+ *     call over the whole rectangle (`api.clearRangeFormat`, or a
+ *     sheet-addressed `api.clearRange(..., { applyTo: "formats" }, sheet)`):
+ *     a whole-column or whole-row format is a property of the line, which the
+ *     script API clears as the line (BUG-0616 #1, `formatCallAccepts`), as
+ *     VBA's `Columns("C").ClearFormats` does. Only a rectangle the script API
+ *     still refuses -- more than `SCRIPT_FORMAT_RECT_MAX_CELLS` cells and not
+ *     whole lines -- is said out loud (`unsupported`), never dropped.
  *
  * The contents of the action's OWN sheet go through `api.updateCellsBatch`,
- * not `api.clearRange`, on purpose: an application's macro that a person runs
- * gets cell access only (owner decision B, `EXPLICIT_RUN_CELL_METHODS` in
- * @api/scriptHost/explicitRunGrant), which admits `updateCellsBatch`,
- * `getUsedRange` and `getRangeValues` but not `clearRange` -- a recorded Delete
- * must keep working there.
+ * which an application's macro that a person runs may call (owner decision B,
+ * `EXPLICIT_RUN_CELL_METHODS` in @api/scriptHost/explicitRunGrant), as it may
+ * `getUsedRange`, `getRangeValues` and -- since BUG-0616 #2 -- a CONTENTS
+ * `clearRange`; a FORMATS clear (`clearRangeFormat`, or `clearRange` with
+ * "formats" / "all") is formatting, which that grant refuses, so a recorded
+ * Clear Formats or Clear All is refused in such a run before anything runs.
  *
  * A clear the caller addressed to ANOTHER sheet -- a grouped clear reaches each
  * OTHER grouped sheet this way, and so does a script's off-sheet clear --
@@ -539,6 +573,7 @@ function emitClearRange(
 
   const cells = (endRow - startRow + 1) * (endCol - startCol + 1);
   const fits = cells <= SCRIPT_RANGE_MAX_CELLS;
+  const formatFits = formatCallAccepts(startRow, startCol, endRow, endCol);
   const rect: ClearRect = { startRow, startCol, endRow, endCol, sheet, label };
   if (ctx.o.target === "objectScript") {
     if (rect.sheet !== null) {
@@ -549,7 +584,10 @@ function emitClearRange(
         return;
       }
       if (clearsContents) emitBoundedSheetAddressedContentsClear(ctx, rect);
-      if (clearsFormats) unsupported(ctx, bigFormatClearMessage(label, cells));
+      if (clearsFormats) {
+        if (formatFits) emitSheetAddressedClear(ctx, rect, false, true);
+        else unsupported(ctx, bigFormatClearMessage(label, cells));
+      }
       return;
     }
     if (clearsContents) {
@@ -557,7 +595,7 @@ function emitClearRange(
       else emitBoundedContentsBatches(ctx, rect);
     }
     if (clearsFormats) {
-      if (fits) push(ctx, `await api.clearRangeFormat(${startRow}, ${startCol}, ${endRow}, ${endCol}); // ${label}`);
+      if (formatFits) push(ctx, `await api.clearRangeFormat(${startRow}, ${startCol}, ${endRow}, ${endCol}); // ${label}`);
       else unsupported(ctx, bigFormatClearMessage(label, cells));
     }
     return;
@@ -586,8 +624,8 @@ interface ClearRect {
 
 function bigFormatClearMessage(label: string, cells: number): string {
   return (
-    `clear formats on ${label} (${cells} cells) — the script API clears formats on at most ` +
-    `${SCRIPT_RANGE_MAX_CELLS} cells per call, and a whole-row or whole-column format cannot be cleared piece by piece`
+    `clear formats on ${label} (${cells} cells) — the script API clears formats on whole rows, whole columns ` +
+    `or at most ${SCRIPT_FORMAT_RECT_MAX_CELLS} cells per call, and a format cannot be cleared piece by piece`
   );
 }
 
@@ -1122,6 +1160,29 @@ function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
         ctx,
         `await api.setColumnWidth(${event.col}, ${event.width});`,
         `set width of column ${colLetter(event.col)}`,
+      );
+      return;
+
+    // A batch Row Height / Column Width (the Home tab, the right-click menu,
+    // Select All): ONE call over the runs, as Excel's recorder writes
+    // `Rows("18:22").RowHeight = 30` / `Cells.RowHeight = 30`. The replay
+    // reaches the same backend command, so Select All replays as the sheet's
+    // standard size and hidden rows follow the same rules.
+    case "rowHeights":
+      emitObjectScriptOnly(
+        ctx,
+        `await api.setRowHeights(${JSON.stringify(event.runs)}, ${event.height});`,
+        `set height of rows ${event.runs.map(([a, b]) => (a === b ? `${a + 1}` : `${a + 1}:${b + 1}`)).join(",")}`,
+      );
+      return;
+
+    case "columnWidths":
+      emitObjectScriptOnly(
+        ctx,
+        `await api.setColumnWidths(${JSON.stringify(event.runs)}, ${event.width});`,
+        `set width of columns ${event.runs
+          .map(([a, b]) => (a === b ? colLetter(a) : `${colLetter(a)}:${colLetter(b)}`))
+          .join(",")}`,
       );
       return;
 

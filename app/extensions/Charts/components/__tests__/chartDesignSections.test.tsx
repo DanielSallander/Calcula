@@ -651,12 +651,24 @@ describe("Layout", () => {
     expect(container.querySelector('[data-testid="chart-marks"]')).toBeNull();
     await unmount();
 
+    // BUG-0445 (changed deliberately 2026-10-30): the switch used to write only
+    // `secondaryYAxis`, which moved no series. Excel's "Clustered Column - Line
+    // on Secondary Axis": the LINE series go on the right-hand axis.
+    cachedSeries = [
+      { name: "Q1", values: [1, 2], color: null },
+      { name: "Q2", values: [3, 4], color: null },
+      { name: "Q3", values: [5, 6], color: null },
+    ];
     await seed(fixtureSpec({ mark: "combo" } as Partial<ChartSpec>));
     await render(<ChartLayoutSection placement="ribbon" />);
     const axis = byTestId("chart-secondary-axis", container) as HTMLInputElement;
     expect(axis.getAttribute("role")).toBe("switch");
+    expect(axis.getAttribute("aria-checked") ?? String(axis.checked)).toBe("false");
     await click(axis);
-    expect(liveSpec().markOptions).toMatchObject({ secondaryYAxis: true });
+    // Clustered combo default: series 0 is the column, 1 and 2 are lines.
+    expect(liveSpec().markOptions).toMatchObject({ secondaryYAxis: true, secondaryAxisSeries: [1, 2] });
+    await click(byTestId("chart-secondary-axis", container));
+    expect(liveSpec().markOptions).toMatchObject({ secondaryYAxis: false, secondaryAxisSeries: [] });
   });
 
   it("renders nothing for a pie (the section is not even registered)", async () => {

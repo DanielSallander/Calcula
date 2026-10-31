@@ -238,7 +238,8 @@ describe("checkFormatObject / vRangeFormat (the format-object gate)", () => {
     expect(vRangeFormat([0, 0, 9, 4, { bold: true }])).toBe(true);
     expect(vRangeFormat([0, 0, 9, 4, { bold: true }, 2])).toBe(true);
     expect(vRangeFormat([9, 0, 0, 4, { bold: true }])).not.toBe(true); // inverted
-    expect(vRangeFormat([0, 0, MAX_RANGE_CELLS, 0, { bold: true }])).not.toBe(true); // too big
+    // too big: not whole lines, and over the backend's 4,000,000-cell walk (BUG-0616 #1)
+    expect(vRangeFormat([0, 0, 2000, 1999, { bold: true }])).not.toBe(true);
     expect(vRangeFormat([0, 0, 1, 1, { nope: true }])).not.toBe(true);
     expect(vRangeFormat([0, 0, 1, 1])).not.toBe(true); // missing format
   });
@@ -323,9 +324,14 @@ describe("sheet CRUD validators", () => {
     expect(vSheetName(["Report 2026"])).toBe(true);
   });
 
-  it("vSheetName rejects blank names and the illegal characters", () => {
+  it("vSheetName rejects the empty name and the illegal characters, and keeps spaces like Excel", () => {
     expect(vSheetName([""])).not.toBe(true);
-    expect(vSheetName(["   "])).not.toBe(true);
+    // Excel [LIVE, 2026-10-31]: a name of spaces only, and spaces at either
+    // end, are legal; an apostrophe at an end is not.
+    expect(vSheetName(["   "])).toBe(true);
+    expect(vSheetName([" Data "])).toBe(true);
+    expect(vSheetName([" 'x"])).toBe(true);
+    expect(vSheetName(["x'"])).not.toBe(true);
     expect(vSheetName([42])).not.toBe(true);
     for (const bad of ["a:b", "a\\b", "a/b", "a?b", "a*b", "a[b", "a]b"]) {
       expect(vSheetName([bad]), bad).not.toBe(true);

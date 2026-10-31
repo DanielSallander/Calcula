@@ -56,13 +56,13 @@ const h = vi.hoisted(() => ({
   beginUndoTransaction: vi.fn(async (d: string) => slot.begin(d)),
   commitUndoTransaction: vi.fn(async (t?: number | null) => slot.close(slot.committed, t)),
   cancelUndoTransaction: vi.fn(async (t?: number | null) => slot.close(slot.dropped, t)),
-  setCellStyle: vi.fn(async () => {}),
+  setCellStyle: vi.fn(async (..._a: unknown[]) => null as unknown),
 }));
 
 vi.mock("@api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api")>()),
   getCell: vi.fn(async () => ({ styleIndex: 3 })),
-  setCellStyle: () => h.setCellStyle(),
+  setCellStyle: (...a: unknown[]) => h.setCellStyle(...a),
   beginUndoTransaction: (d: string) => h.beginUndoTransaction(d),
   commitUndoTransaction: (t?: number | null) => h.commitUndoTransaction(t),
   cancelUndoTransaction: (t?: number | null) => h.cancelUndoTransaction(t),
@@ -111,9 +111,7 @@ describe("a Format Painter stroke", () => {
 
   it("refused inside a script's open batch, it does not drop the batch's undo record", async () => {
     slot.holdAsScriptBatch();
-    h.setCellStyle.mockImplementation(async () => {
-      throw new Error("Cell E5 is protected");
-    });
+    h.setCellStyle.mockImplementation(refuseWrites);
     await paint();
     expect(h.setCellStyle).toHaveBeenCalled();
     expect(slot.dropped, "the refused stroke CANCELLED the script's batch").toEqual([]);
@@ -128,12 +126,53 @@ describe("a Format Painter stroke", () => {
     expect(h.commitUndoTransaction, "the commit did not present the stroke's ticket").toHaveBeenCalledWith(100);
   });
 
-  it("refused on its own, it cancels exactly its own step (positive control)", async () => {
-    h.setCellStyle.mockImplementation(async () => {
-      throw new Error("Cell E5 is protected");
-    });
+  it("refused at its first write on its own, it cancels exactly its own step (positive control)", async () => {
+    h.setCellStyle.mockImplementation(refuseWrites);
     await paint();
     expect(slot.dropped).toEqual(["Format Painter"]);
     expect(slot.open).toBeNull();
   });
+
+  it("refused by the whole-stroke CHECK, it opens no step and writes no cell", async () => {
+    // The protected sheet does not allow Format Cells (the check's one
+    // question: a locked cell is formatted when the option is on, as in Excel).
+    h.setCellStyle.mockImplementation(async (...a: unknown[]) => {
+      if (isCheck(a)) throw new Error("Cannot format cells on a protected sheet.");
+      return null;
+    });
+    await paint();
+    expect(h.setCellStyle.mock.calls.filter((a) => !isCheck(a)), "a cell was written before the refusal").toEqual([]);
+    expect(h.beginUndoTransaction, "a refused stroke opened an undo step").not.toHaveBeenCalled();
+    expect(slot.committed).toEqual([]);
+    expect(slot.dropped).toEqual([]);
+    expect(slot.open).toBeNull();
+  });
+
+  it("refused part-way (after cells landed), what landed stays ONE undoable step", async () => {
+    // The check passed, then the sheet was protected without Format Cells
+    // before the third write (the window between separate calls that no
+    // frontend check can close; each write re-asks under its own guards).
+    let writes = 0;
+    h.setCellStyle.mockImplementation(async (...a: unknown[]) => {
+      if (isCheck(a)) return null;
+      writes++;
+      if (writes === 3) throw new Error("Cannot format cells on a protected sheet.");
+      return null;
+    });
+    await paint();
+    expect(slot.committed, "two painted cells were left with no undo step").toEqual(["Format Painter"]);
+    expect(slot.dropped).toEqual([]);
+    expect(slot.open).toBeNull();
+  });
 });
+
+/** The stroke's whole-rectangle CHECK (`checkArea`): writes nothing. */
+function isCheck(a: readonly unknown[]): boolean {
+  return Boolean((a[3] as { checkArea?: unknown } | undefined)?.checkArea);
+}
+
+/** A double whose CHECK passes and whose every cell WRITE is refused. */
+async function refuseWrites(...a: unknown[]): Promise<unknown> {
+  if (isCheck(a)) return null;
+  throw new Error("Cannot format cells on a protected sheet.");
+}

@@ -100,7 +100,10 @@ vi.mock("../lib/webmExporter", () => ({
   isWebmRecordingSupported: () => true,
 }));
 vi.mock("../lib/monteCarloStore", () => ({ mcActive: () => m.mcActive }));
-vi.mock("../lib/animationBackend", () => ({ animationBackend: { set: vi.fn() } }));
+vi.mock("../lib/animationBackend", () => ({
+  animationBackend: { set: vi.fn() },
+  releaseOrphanedBuffers: vi.fn(async () => 0),
+}));
 vi.mock("../components/MonteCarloView", () => ({ MonteCarloView: () => <div>histogram</div> }));
 vi.mock("../components/AnimationDialog", () => ({
   ANIMATION_DIALOG_ID: "animation-dialog",

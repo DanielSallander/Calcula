@@ -486,9 +486,11 @@ fn the_sheet_scoped_pass_marks_the_cycle_members_on_the_sheets_it_does_not_evalu
     // still look right on the sheet you are looking at and leave a plausible 0
     // one tab away.
     const CALCULATION_RS: &str = include_str!("../calculation.rs");
-    // `run_calculation_pass_with` is the pass's body (round 7: the plain
-    // `run_calculation_pass` became a one-line delegation to it).
-    let body = body_of(CALCULATION_RS, "run_calculation_pass_with");
+    // `run_calculation_pass_gated` is the pass's body (round 7: the plain
+    // `run_calculation_pass` became a delegation to `run_calculation_pass_with`;
+    // round 16: that in turn delegates to the gated body, which re-asks the
+    // calculation mode under its grid locks).
+    let body = body_of(CALCULATION_RS, "run_calculation_pass_gated");
     assert!(
         body.contains("mark_off_sheet_circular_cells("),
         "the SHEET-scoped pass (Shift+F9) merges the active sheet's cross-sheet \
@@ -783,7 +785,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("scripting/udf.rs", "collect_udf_calls_impl", "IS NOT A DOCUMENT WRITE: the UDF discovery pass writes the pending edits into a SCRATCH clone of the grids, evaluates there to learn which custom-function calls the edit's cascade needs, and drops it; the real write (update_cell / update_cells_batch) recalculates. It passed this census until 2026-10-29 only because its body spelled `recalc_order_from_seeds(` for its cell set, which it now takes from `active_sheet_write_cascade` -- it never recalculated anything."),
         ("insights/report.rs", "paint", "WRITES ONLY LITERALS, ONTO A SHEET THAT DID NOT EXIST. `insights_create_report_sheet` calls `add_sheet_inner` first — with a name `ensure_sheet_name_is_free` proved was not taken — and paints into a fresh `Grid::new()`. Nothing in the workbook can already depend on cells of a sheet created a moment ago, and `ReportCell` has no formula variant, so nothing painted needs evaluating either. Whether creating a sheet at all should recalculate is `add_sheet_inner`'s question, and it is the same question for every sheet the user adds by hand."),
         // -- It IS recalculation, or an inner step of it -------------------
-        ("calculation.rs", "run_calculation_pass_with", "the full-recalculation pass itself (F9 = workbook, Shift+F9 = active sheet; `run_calculation_pass` delegates to it)"),
+        ("calculation.rs", "run_calculation_pass_gated", "the full-recalculation pass itself (F9 = workbook, Shift+F9 = active sheet; `run_calculation_pass` and `run_calculation_pass_with` delegate to it)"),
         ("calculation.rs", "recalculate_sheet_values_with", "the whole-sheet recalculation itself: `recalculate_sheet_values` and an update's `recalculate_installed_sheet_values` are its two entry points (round 8)"),
         ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of the SHEET-scoped pass: reports a cycle the pass already detected on the sheets it does not evaluate"),
         ("commands/data.rs", "reevaluate_formula_cell", "the cascade's per-cell evaluator"),
@@ -796,21 +798,13 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("sheets.rs", "rename_sheet_inner", "a rename rewrites references to spell the new name; every reference still denotes the same cell, so no value moves (it does re-key the cross-sheet dependency maps and rebuild the single-sheet ones). The `rename_sheet` command is now a one-line delegation here (testability split) and writes nothing itself"),
         ("tables.rs", "fill_calculated_columns", "a SHARED HELPER, not a command: it writes one table's calculated columns across the rows its caller names and collects them as SEEDS. All three callers (set_calculated_column and the two row-growth paths) drop every guard and then run the shared cascade with those seeds -- `every_row_growth_path_fills_the_calculated_columns` in tables.rs is what keeps a fourth caller from appearing without one"),
         ("named_ranges.rs", "rename_name_in_grids", "the DEFINED-NAME twin of rename_sheet_inner above: it rewrites `NamedRef` nodes to spell the new name, and every one still denotes the same range, so no value moves. Its caller `rename_named_range_impl` does run a phase B (`rebuild_all_dependencies` then `recalc_after_name_change`) — necessary because the name dependency edges are keyed BY NAME and would otherwise all be filed under a name the workbook no longer has, not because a value changed"),
-        // -- Own evaluation loop over the cells it writes -------------------
-        ("data_tables.rs", "data_table_one_var", "what-if table: evaluates each substitution itself"),
-        ("data_tables.rs", "data_table_two_var", "what-if table: evaluates each substitution itself"),
-        ("data_tables.rs", "re_evaluate_formulas", "the what-if table's own evaluation step"),
-        ("data_tables.rs", "restore_cell", "restores the probe cell the loop borrowed"),
-        ("data_tables.rs", "set_cell_value", "sets the probe cell the loop borrowed"),
-        ("goal_seek.rs", "goal_seek", "iterates to a root, evaluating every trial itself"),
-        ("goal_seek.rs", "evaluate_target", "one goal-seek trial"),
-        ("goal_seek.rs", "finalize_result", "writes the converged value the loop already evaluated"),
-        ("solver.rs", "solver_solve", "runs its own objective evaluation loop"),
-        ("solver.rs", "solver_revert", "restores the pre-solve values the loop captured"),
-        ("solver.rs", "set_variables_and_evaluate", "one solver trial"),
-        ("scenario_manager.rs", "scenario_show", "transient scenario preview with its own evaluation"),
-        ("scenario_manager.rs", "scenario_summary", "builds a report block from values it evaluated"),
-        ("animation_commands.rs", "apply_set_ops_and_recalc", "transient frame playback; orders through the shared recalc_order_from_seeds"),
+        // (The what-if routes -- data tables, Goal Seek, Solver, Scenario Show /
+        // Summary and the animation frames -- sat here with "own evaluation loop"
+        // reasons. That loop was BUG-0613: it re-evaluated only the written
+        // sheet's dependents, positionlessly, and nothing on any other sheet.
+        // They now write through whatif_recalc::write_cells_and_recalc_on, which
+        // seeds the shared cascade and is classified by the detector.)
+        ("whatif_recalc.rs", "restore_journal_values", "the restore of a TRANSIENT run under MANUAL calculation: it puts back each formula cell's stored value from before the run (stale or not), which is exactly the state no recalculation may disturb -- recalculating here is the defect it closes (an animation stopped under manual calculation showed values the user never asked for)"),
         // -- Style only: changes nothing a formula can read -----------------
         // The cell writes of apply_formatting (and apply_formatting_to_sheets)
         // live in their walk, write_style_delta -- or, for whole rows, whole
@@ -818,9 +812,11 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         // the border presets' and adjust_number_format_decimals' live too
         // (2026-10-04).
         ("commands/styles.rs", "write_style_delta", "style_index only"),
-        ("commands/styles.rs", "set_cell_style", "style_index only"),
+        ("commands/styles.rs", "set_cell_style_core", "style_index only (the body of set_cell_style; BUG-0513 split it out so the floating-grid route is driven by tests)"),
+        ("commands/styles.rs", "set_cell_styles_core", "style_index only (set_cell_style's style-only batch, `cells`: the one-cell write over a list; value and formula untouched)"),
         ("commands/styles.rs", "set_cell_rich_text_core", "rich-text runs only (the body of set_cell_rich_text; P3 split it out so tests drive it)"),
         ("cell_target.rs", "set_backing_style", "style_index only, inside update_cells_batch_on_target, whose phase B recalculates the backing sheet"),
+        ("cell_target.rs", "keep_backing_lock", "style_index only (puts back the cell's Locked flag on a protected host), inside update_cells_batch_on_target, whose phase B recalculates the backing sheet"),
         ("commands/styles.rs", "write_range_style_plan", "style_index and row/column style tiers only"),
         ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
         ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),

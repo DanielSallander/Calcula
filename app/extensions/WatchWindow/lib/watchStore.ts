@@ -4,6 +4,7 @@
 
 import { getWatchCells, getSheets, columnToLetter } from "@api";
 import type { CellData } from "@api";
+import { followCell, type StructuralFollowEdit, type StructuralFollowStep } from "@api/structuralFollow";
 
 // ============================================================================
 // Types
@@ -12,8 +13,20 @@ import type { CellData } from "@api";
 export interface WatchItem {
   /** Unique ID */
   id: string;
-  /** Sheet index (0-based) */
+  /**
+   * Sheet index (0-based), kept CURRENT: renumbered when sheets are moved,
+   * inserted or deleted (`applySheetRenumbering`) and re-checked against the
+   * sheet's stable id on every refresh (`resyncSheets`).
+   */
   sheetIndex: number;
+  /**
+   * The sheet's STABLE id (`SheetInfo.sheetId`): what the watch follows. A
+   * move or a rename never changes it, so Excel's rule holds -- a watch
+   * follows its sheet when the sheet is moved, and goes when the sheet is
+   * deleted [LIVE 2026-10-30]. Filled in from the index on the first refresh
+   * when the caller did not know it.
+   */
+  sheetId?: string;
   /** Sheet name at time of creation */
   sheetName: string;
   /** Row index (0-based) */
@@ -84,6 +97,7 @@ export function addWatch(
   row: number,
   col: number,
   name?: string | null,
+  sheetId?: string,
 ): WatchItem {
   // Prevent duplicate watches on same cell/sheet
   const existing = items.find(
@@ -100,6 +114,7 @@ export function addWatch(
     name: name ?? null,
     value: "",
     formula: null,
+    ...(sheetId ? { sheetId } : {}),
   };
   items = [...items, item];
   notify();
@@ -128,14 +143,17 @@ export function removeAllWatches(): void {
 export async function refreshWatches(): Promise<void> {
   if (items.length === 0) return;
 
-  // Also refresh sheet names in case they were renamed
+  // Each watch's sheet by its stable id first (moved, renamed or deleted),
+  // then the names as they are now.
   let sheetNames: string[] = [];
   try {
     const sheetsResult = await getSheets();
+    resyncSheets(sheetsResult.sheets);
     sheetNames = sheetsResult.sheets.map((s) => s.name);
   } catch {
     // Keep existing names
   }
+  if (items.length === 0) return;
 
   const requests: [number, number, number][] = items.map((w) => [
     w.sheetIndex,
@@ -173,6 +191,122 @@ export async function refreshWatches(): Promise<void> {
   } catch (err) {
     console.error("[WatchWindow] Failed to refresh:", err);
   }
+}
+
+/**
+ * Follow one coordinate change (or its undo / redo) on any sheet
+ * (@api/structuralFollow, with moves): each watch moves with its cell, as
+ * Excel's Watch Window entries do [LIVE 2026-10-30: a watch on C5 reads C6
+ * after a row is inserted above, Ctrl+Z puts it back on C5, Ctrl+Y on C6; an
+ * Insert Cells band moves only the cells inside it; a watch on a cut-pasted
+ * cell moves with it, onto the sheet it was pasted on, and Undo moves it
+ * back]. A watch whose cell was DELETED -- its row or column deleted, or a
+ * pasted block landed on it -- is removed, as Excel's Watch Window drops the
+ * entry, and an Undo does not bring it back [LIVE]. The Undo of a move
+ * overwrites nothing: a watch on a cell the block returns to stays [LIVE
+ * 2026-10-30: C5 cut and pasted onto F8, a watch added on the empty C5,
+ * Ctrl+Z -> both watches read C5]. Returns true when anything changed.
+ */
+export function applyStructuralStep(step: StructuralFollowStep<StructuralFollowEdit>): boolean {
+  const { edit, cause } = step;
+  const restoresCells = edit.kind === "move" && cause === "undo";
+  let changed = false;
+  const next: WatchItem[] = [];
+  for (const item of items) {
+    const moved = followCell(edit, item.sheetIndex, item.row, item.col);
+    if (moved === null && restoresCells) {
+      next.push(item);
+      continue;
+    }
+    if (moved === null) {
+      changed = true;
+      continue;
+    }
+    if (moved.sheetIndex === item.sheetIndex && moved.row === item.row && moved.col === item.col) {
+      next.push(item);
+      continue;
+    }
+    changed = true;
+    if (moved.sheetIndex === item.sheetIndex) {
+      next.push({ ...item, row: moved.row, col: moved.col });
+    } else {
+      // Pasted on another sheet: its id and name are read on the next refresh.
+      const { sheetId: _gone, ...rest } = item;
+      next.push({ ...rest, sheetIndex: moved.sheetIndex, row: moved.row, col: moved.col });
+    }
+  }
+  if (changed) {
+    items = next;
+    notify();
+  }
+  return changed;
+}
+
+/**
+ * The sheet list was renumbered (a sheet moved, inserted or deleted;
+ * @api/structuralFollow `followSheetRenumbering`): each watch keeps its
+ * sheet, and a watch on a deleted sheet goes, as Excel's does [LIVE]. Returns
+ * true when anything changed.
+ */
+export function applySheetRenumbering(renumber: (index: number) => number | null): boolean {
+  let changed = false;
+  const next: WatchItem[] = [];
+  for (const item of items) {
+    const index = renumber(item.sheetIndex);
+    if (index === null) {
+      changed = true;
+      continue;
+    }
+    if (index !== item.sheetIndex) changed = true;
+    next.push(index === item.sheetIndex ? item : { ...item, sheetIndex: index });
+  }
+  if (changed) {
+    items = next;
+    notify();
+  }
+  return changed;
+}
+
+/**
+ * Re-check every watch's sheet against the backend's list, BY ITS STABLE ID:
+ * the index and the name are taken from the sheet that carries the id now
+ * (moved, renamed), and a watch whose sheet is gone is removed (deleted, as
+ * Excel drops it [LIVE]). A watch without an id takes the id of the sheet at
+ * its index. A list that carries no ids at all (an older backend) changes
+ * nothing. Returns true when anything changed.
+ */
+export function resyncSheets(sheets: ReadonlyArray<{ index: number; name: string; sheetId?: string }>): boolean {
+  if (!sheets.some((s) => s.sheetId)) return false;
+  let changed = false;
+  const next: WatchItem[] = [];
+  for (const item of items) {
+    if (item.sheetId) {
+      const sheet = sheets.find((s) => s.sheetId === item.sheetId);
+      if (!sheet) {
+        changed = true;
+        continue;
+      }
+      if (sheet.index !== item.sheetIndex || sheet.name !== item.sheetName) {
+        changed = true;
+        next.push({ ...item, sheetIndex: sheet.index, sheetName: sheet.name });
+      } else {
+        next.push(item);
+      }
+      continue;
+    }
+    const sheet = sheets.find((s) => s.index === item.sheetIndex);
+    if (sheet?.sheetId) {
+      changed = true;
+      next.push({ ...item, sheetId: sheet.sheetId, sheetName: sheet.name });
+    } else {
+      next.push(item);
+    }
+  }
+  if (changed) {
+    items = next;
+    notify();
+  }
+  return changed;
 }
 
 /**

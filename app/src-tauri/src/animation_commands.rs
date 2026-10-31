@@ -13,19 +13,16 @@
 //          so a trusted built-in extension reaches them through the gated
 //          ExtensionContext.invokeBackend door with no capability friction.
 
-use std::collections::HashSet;
 use tauri::State;
 
 use crate::api_types::{
     AnimApplyFrameParams, AnimRerollParams, AnimRerollResult, AnimRestoreParams, AnimSnapshotParams,
-    AnimSnapshotResult, AnimationFrameResult, CellData, GifExportRequest, GifFrame, MergedRegion,
+    AnimSnapshotResult, AnimationFrameResult, CellData, GifExportRequest, GifFrame,
 };
 use crate::document_effect::{DocumentEffect, TransientScope};
-use crate::{
-    evaluate_formula_multi_sheet, get_column_row_dependents,
-    get_recalculation_order, AppState,
-};
-use engine::{Cell, CellValue, Grid, StyleRegistry};
+use crate::whatif_recalc::{stored_cell, write_cells_and_recalc_on, RecalcMode, WhatIfStates};
+use crate::AppState;
+use engine::{Cell, CellValue};
 
 // ============================================================================
 // Helpers
@@ -45,47 +42,14 @@ pub struct AnimSnapshot {
     /// stable id on file, which then falls back to the caller's index.
     pub sheet_id: Option<identity::SheetId>,
     /// The saved (cell coord, prior Cell) pairs; `None` = the cell was absent.
+    /// They are also the ONLY cells a frame of this run may write.
     pub cells: Vec<((u32, u32), Option<Cell>)>,
-}
-
-/// Build a CellData snapshot from the grid (copy of scenario_manager's helper —
-/// kept local so the two modules stay independent).
-fn build_cell_data(
-    grid: &Grid,
-    styles: &StyleRegistry,
-    merged_regions: &HashSet<MergedRegion>,
-    r: u32,
-    c: u32,
-    locale: &engine::LocaleSettings,
-) -> Option<CellData> {
-    let cell = grid.get_cell(r, c)?;
-    // Row/column style tiers: resolve against the same grid the cell came from.
-    let effective_style_index = grid.effective_style_index(r, c);
-    let style = styles.get(effective_style_index);
-    let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, locale);
-
-    let merge = merged_regions
-        .iter()
-        .find(|m| m.start_row == r && m.start_col == c);
-    let (row_span, col_span) = match merge {
-        Some(m) => (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1),
-        None => (1, 1),
-    };
-
-    Some(CellData {
-        row: r,
-        col: c,
-        display,
-        overflow,
-        display_color: None,
-        formula: cell.formula_string().map(|f| format!("={}", f)),
-        style_index: effective_style_index,
-        row_span,
-        col_span,
-        sheet_index: None,
-        rich_text: None,
-        accounting_layout: None,
-    })
+    /// Under MANUAL calculation, every formula cell's stored value when the
+    /// run began (`whatif_recalc::ValueJournal`): the restore puts these back
+    /// instead of recalculating, so a value the user left stale for F9 is still
+    /// the value they see after Stop. `None` under automatic calculation, where
+    /// recalculating gives back the same values.
+    pub values: Option<crate::whatif_recalc::ValueJournal>,
 }
 
 /// Parse a transient write value as a literal (number / boolean / text), exactly
@@ -107,37 +71,36 @@ fn parse_transient_value(value: &str) -> CellValue {
     }
 }
 
-/// One grid mutation to perform for a frame: set a literal/prior cell, or clear
-/// it back to empty (used when restoring a cell that was originally absent).
-enum SetOp {
-    Set(Cell),
-    Clear,
-}
-
-/// Apply a batch of set/clear ops to a sheet, recalculate the affected formula
-/// dependents (scoped — NOT a full workbook recalc), and return the changed
-/// CellData. Pure over grid references so it is unit-testable without Tauri State.
-/// Mirrors scenario_manager::scenario_show's recalc loop.
-#[allow(clippy::too_many_arguments)]
-fn apply_set_ops_and_recalc(
+/// Apply a batch of writes to a sheet -- `Some(cell)` sets, `None` clears it back
+/// to empty (a cell that was absent when the run's snapshot was taken) -- and
+/// recalculate every dependent, ON EVERY SHEET, through the shared cascade
+/// (`whatif_recalc`, BUG-0613), returning the changed CellData.
+///
+/// A frame therefore shows exactly the values a real recalculation of that
+/// driver value would, and the restore puts back exactly the values the model
+/// had: this used to re-evaluate only the frame sheet's own dependents,
+/// positionlessly (`ROW()` / implicit intersection / a cube or custom-function
+/// cell's preserve answered for nowhere), through the ACTIVE sheet's dependency
+/// map -- so a chart or a formula on another sheet that read the driver never
+/// moved during playback, and kept the last frame's value after a stop.
+///
+/// A frame is recalculated whatever the calculation mode (`RecalcMode::Always`,
+/// the seeded cascade: only the cells that read the driver): a frame is only
+/// worth showing recalculated. The restore under manual calculation passes
+/// `RecalcMode::AsAnEdit` and puts the run's value journal back instead, so
+/// the workbook ends exactly as it began, stale values included.
+fn apply_writes_and_recalc(
+    state: &AppState,
+    states: &WhatIfStates<'_>,
     // The gate. Every caller must have decided what this write does to the saved
     // document; animation is the one surface that legitimately answers "transient",
     // and it can only say so by presenting a TransientScope, i.e. by proving the
     // matching anim_restore snapshot is already filed. See `document_effect`.
-    _effect: &DocumentEffect,
-    grids: &mut Vec<Grid>,
-    active_grid: &mut Grid,
-    active_sheet: usize,
-    sheet_idx: usize,
-    sheet_names: &[String],
-    styles: &StyleRegistry,
-    dependents_map: &crate::DependencyMap,
-    column_dependents_map: &crate::StripeDependentsMap,
-    row_dependents_map: &crate::StripeDependentsMap,
-    merged_regions: &HashSet<MergedRegion>,
-    locale: &engine::LocaleSettings,
-    ops: &[((u32, u32), SetOp)],
-) -> Vec<CellData> {
+    effect: &DocumentEffect,
+    resolve_sheet: &dyn Fn() -> Option<usize>,
+    writes: &[((u32, u32), Option<Cell>)],
+    mode: RecalcMode,
+) -> Result<Option<Vec<CellData>>, String> {
     // BACKGROUND, and the surface a `#LIMIT!` here MUST be transient in the
     // undo sense: animation advances a driver and recalculates dependents per
     // FRAME under the transient-write pattern, so nothing it produces — error
@@ -146,90 +109,17 @@ fn apply_set_ops_and_recalc(
     // and `anim_stop` restores the pre-animation cells verbatim. The ceiling is
     // the persisting one because the frames ARE what the user is looking at.
     let _governor = crate::eval_budget::inherit_or(crate::eval_budget::EvalSurface::Background);
-    let mut changed: Vec<(u32, u32)> = Vec::new();
-    for ((r, c), op) in ops {
-        match op {
-            SetOp::Set(cell) => {
-                grids[sheet_idx].set_cell(*r, *c, cell.clone());
-                if sheet_idx == active_sheet {
-                    active_grid.set_cell(*r, *c, cell.clone());
-                }
-            }
-            SetOp::Clear => {
-                grids[sheet_idx].clear_cell(*r, *c);
-                if sheet_idx == active_sheet {
-                    active_grid.clear_cell(*r, *c);
-                }
-            }
-        }
-        if !changed.contains(&(*r, *c)) {
-            changed.push((*r, *c));
-        }
-    }
-
-    // Affected = changed cells + their (cell/column/row) dependents.
-    let mut all_affected: Vec<(u32, u32)> = Vec::new();
-    for &cc in &changed {
-        if !all_affected.contains(&cc) {
-            all_affected.push(cc);
-        }
-        let recalc = get_recalculation_order(cc, dependents_map);
-        let extra = get_column_row_dependents(cc, column_dependents_map, row_dependents_map);
-        for dep in recalc.iter().chain(extra.iter()) {
-            if !all_affected.contains(dep) {
-                all_affected.push(*dep);
-            }
-        }
-    }
-
-    // Re-evaluate the formula cells among the affected set.
-    for &(r, c) in &all_affected {
-        if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-            if let Some(formula) = cell.formula_string() {
-                let new_value =
-                    evaluate_formula_multi_sheet(&grids[..], sheet_names, sheet_idx, &formula);
-                let mut updated = cell;
-                updated.value = new_value;
-                grids[sheet_idx].set_cell(r, c, updated.clone());
-                if sheet_idx == active_sheet {
-                    active_grid.set_cell(r, c, updated);
-                }
-            }
-        }
-    }
-
-    // Build CellData for every affected cell; emit an explicit blank for any
-    // changed cell that is now empty (a cleared-on-restore driver cell) so the
-    // frontend repaints it as blank instead of keeping the last frame value.
     let mut updated_cells = Vec::new();
-    let mut present: HashSet<(u32, u32)> = HashSet::new();
-    for &(r, c) in &all_affected {
-        if let Some(cd) = build_cell_data(&grids[sheet_idx], styles, merged_regions, r, c, locale) {
-            present.insert((r, c));
-            updated_cells.push(cd);
-        }
-    }
-    for &(r, c) in &changed {
-        if !present.contains(&(r, c)) && grids[sheet_idx].get_cell(r, c).is_none() {
-            updated_cells.push(CellData {
-                row: r,
-                col: c,
-                display: String::new(),
-                // Empty: nothing to overflow, and text never marks.
-                overflow: crate::api_types::OverflowClass::Text,
-                display_color: None,
-                formula: None,
-                // Now-empty cell: a row/column style still applies to it.
-                style_index: grids[sheet_idx].effective_style_index(r, c),
-                row_span: 1,
-                col_span: 1,
-                sheet_index: None,
-                rich_text: None,
-                accounting_layout: None,
-            });
-        }
-    }
-    updated_cells
+    let written = write_cells_and_recalc_on(
+        state,
+        states,
+        effect,
+        resolve_sheet,
+        writes,
+        mode,
+        &mut updated_cells,
+    )?;
+    Ok(written.map(|_| updated_cells))
 }
 
 /// The transient gate for the anim_* trio, and the only place any of them can obtain
@@ -263,6 +153,21 @@ pub fn anim_snapshot(state: State<AppState>, params: AnimSnapshotParams) -> Anim
 /// `anim_snapshot` over a plain reference, so the restore's sheet binding can be
 /// driven from a unit test (a `tauri::State` cannot be built in one).
 pub(crate) fn anim_snapshot_inner(state: &AppState, params: AnimSnapshotParams) -> AnimSnapshotResult {
+    // NOT WHILE A WHAT-IF RUN IS WRITING TRIALS. Data Table, Goal Seek and
+    // Solver are `(async)` and Scenario Summary puts its changing cells back:
+    // a buffer filed between two trials would snapshot a TRIAL value as the
+    // cell's original, and Stop would put that trial back for good. The flag is
+    // held until the buffer is filed, so no run can start in between either
+    // (`whatif_recalc::begin_whatif_run` refuses while a buffer is on file).
+    let _whatif = match crate::whatif_recalc::claim_whatif_flag(state) {
+        Ok(guard) => guard,
+        Err(()) => {
+            return AnimSnapshotResult {
+                success: false,
+                error: Some(crate::whatif_recalc::ANIMATION_WHATIF_BUSY.to_string()),
+            };
+        }
+    };
     let sheet_idx = params.sheet_index;
     // A CANVAS has no cells to drive: refusing the snapshot also refuses every
     // frame of the run (a frame needs its snapshot on file), so no transient
@@ -288,11 +193,15 @@ pub(crate) fn anim_snapshot_inner(state: &AppState, params: AnimSnapshotParams) 
     let sheet_id = state.sheet_ids.read().unwrap().get(sheet_idx).copied();
     drop(grids);
 
+    // Under manual calculation the restore must give back stale values too.
+    let manual = state.calculation_mode.lock().map(|m| *m != "automatic").unwrap_or(false);
+    let values = manual.then(|| crate::whatif_recalc::journal_formula_values(state));
+
     state
         .animation_snapshots
         .lock()
         .unwrap()
-        .insert(params.token, AnimSnapshot { sheet_id, cells: saved });
+        .insert(params.token, AnimSnapshot { sheet_id, cells: saved, values });
 
     AnimSnapshotResult {
         success: true,
@@ -305,6 +214,25 @@ pub(crate) fn anim_snapshot_inner(state: &AppState, params: AnimSnapshotParams) 
 #[tauri::command]
 pub fn anim_apply_frame(
     state: State<AppState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    params: AnimApplyFrameParams,
+) -> AnimationFrameResult {
+    let states = WhatIfStates {
+        user_files: &user_files_state,
+        pivots: &pivot_state,
+        pane_control: &pane_control_state,
+        ribbon_filter: &ribbon_filter_state,
+    };
+    anim_apply_frame_inner(&state, &states, params)
+}
+
+/// `anim_apply_frame` over plain references (see `anim_snapshot_inner`).
+pub(crate) fn anim_apply_frame_inner(
+    state: &AppState,
+    states: &WhatIfStates<'_>,
     params: AnimApplyFrameParams,
 ) -> AnimationFrameResult {
     // Animation frames recalculate under the transient-write pattern (no undo
@@ -315,11 +243,45 @@ pub fn anim_apply_frame(
         crate::eval_budget::EvalSurface::Background,
         &state.calc_cancel,
     );
-    let sheet_idx = params.sheet_index;
+    // THE FRAME WRITES WHERE ITS SNAPSHOT WAS TAKEN, and only the cells the
+    // snapshot holds. It used to write `params.sheet_index` -- where the sheet
+    // was when playback STARTED -- and any cell at all: drag a tab past the
+    // animated sheet mid-run and later frames wrote into the other sheet, which
+    // the restore (keyed by the snapshot's stable id) never put back and which
+    // never dirtied the document, so the frame values were saved with the next
+    // unrelated save. The snapshot's id is copied out under the registry lock;
+    // the sheet is re-resolved under the grid locks by the write itself. With
+    // no snapshot on file the frame is refused below (`frame_effect`).
+    let snapshot = state.animation_snapshots.lock().unwrap().get(&params.token).map(|snapshot| {
+        (
+            snapshot.sheet_id,
+            snapshot.cells.iter().map(|(pos, _)| *pos).collect::<std::collections::HashSet<(u32, u32)>>(),
+        )
+    });
+    let fallback = params.sheet_index;
+    let snapshot_sheet_id = snapshot.as_ref().and_then(|(id, _)| *id);
+    if let Some((_, snapshot_cells)) = &snapshot {
+        if let Some(w) = params.writes.iter().find(|w| !snapshot_cells.contains(&(w.row, w.col))) {
+            return AnimationFrameResult {
+                updated_cells: Vec::new(),
+                error: Some(format!(
+                    "Cell at row {}, column {} is not in this animation's snapshot; a frame may only write the cells its restore puts back",
+                    w.row + 1,
+                    w.col + 1
+                )),
+            };
+        }
+    }
+    let Some(sheet_idx) = snapshot_sheet_index(state, snapshot_sheet_id, fallback) else {
+        return AnimationFrameResult {
+            updated_cells: Vec::new(),
+            error: Some("The sheet this animation snapshot was taken on no longer exists".to_string()),
+        };
+    };
 
-    // The frame names its sheet independently of the snapshot, so it is gated
-    // on its own: a frame aimed at a CANVAS writes nothing. Before any lock.
-    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, sheet_idx, "animate cells") {
+    // A frame aimed at a CANVAS writes nothing (the snapshot refuses one too).
+    // Before the effect.
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(state, sheet_idx, "animate cells") {
         return AnimationFrameResult { updated_cells: Vec::new(), error: Some(e) };
     }
 
@@ -327,7 +289,7 @@ pub fn anim_apply_frame(
     // what makes "transient" checkable rather than remembered: no snapshot, no restore,
     // no exemption -- so the write is refused instead of silently escaping the dirty
     // flag. (scenario_show cannot satisfy this, which is correct: it has no restore.)
-    let effect = match frame_effect(&state, &params.token) {
+    let effect = match frame_effect(state, &params.token) {
         Ok(e) => e,
         Err(e) => {
             return AnimationFrameResult {
@@ -337,59 +299,33 @@ pub fn anim_apply_frame(
         }
     };
 
-    // Lock order matches scenario_show to avoid cross-path deadlocks.
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
-    let dependents_map = state.dependents.lock().unwrap();
-    let column_dependents_map = state.column_dependents.lock().unwrap();
-    let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
+    let writes: Vec<((u32, u32), Option<Cell>)> = params
+        .writes
+        .iter()
+        .map(|w| {
+            let style_index = stored_cell(state, sheet_idx, w.row, w.col).map_or(0, |c| c.style_index);
+            let mut cell = match parse_transient_value(&w.value) {
+                CellValue::Number(n) => Cell::new_number(n),
+                CellValue::Text(t) => Cell::new_text(t),
+                CellValue::Boolean(b) => Cell::new_boolean(b),
+                _ => Cell::new_text(w.value.clone()),
+            };
+            cell.style_index = style_index;
+            ((w.row, w.col), Some(cell))
+        })
+        .collect();
 
-    if sheet_idx >= grids.len() {
-        return AnimationFrameResult {
+    let resolve = || snapshot_sheet_index(state, snapshot_sheet_id, fallback);
+    match apply_writes_and_recalc(state, states, &effect, &resolve, &writes, RecalcMode::Always) {
+        Ok(Some(updated_cells)) => {
+            note_frame_in_journal(state, &params.token, resolve(), &updated_cells);
+            AnimationFrameResult { updated_cells, error: None }
+        }
+        Ok(None) => AnimationFrameResult {
             updated_cells: Vec::new(),
-            error: Some(format!("Sheet index {} out of range", sheet_idx)),
-        };
-    }
-
-    let mut ops: Vec<((u32, u32), SetOp)> = Vec::with_capacity(params.writes.len());
-    for w in &params.writes {
-        let style_index = grids[sheet_idx]
-            .get_cell(w.row, w.col)
-            .map_or(0, |c| c.style_index);
-        let mut cell = match parse_transient_value(&w.value) {
-            CellValue::Number(n) => Cell::new_number(n),
-            CellValue::Text(t) => Cell::new_text(t),
-            CellValue::Boolean(b) => Cell::new_boolean(b),
-            _ => Cell::new_text(w.value.clone()),
-        };
-        cell.style_index = style_index;
-        ops.push(((w.row, w.col), SetOp::Set(cell)));
-    }
-
-    let updated_cells = apply_set_ops_and_recalc(
-        &effect,
-        &mut grids,
-        &mut grid,
-        active_sheet,
-        sheet_idx,
-        &sheet_names,
-        &styles,
-        &dependents_map,
-        &column_dependents_map,
-        &row_dependents_map,
-        &merged_regions,
-        &locale,
-        &ops,
-    );
-
-    AnimationFrameResult {
-        updated_cells,
-        error: None,
+            error: Some("The sheet this animation snapshot was taken on no longer exists".to_string()),
+        },
+        Err(e) => AnimationFrameResult { updated_cells: Vec::new(), error: Some(e) },
     }
 }
 
@@ -397,8 +333,48 @@ pub fn anim_apply_frame(
 /// dependents. Safe to call with an unknown token (no-op) so stop/cleanup is
 /// idempotent.
 #[tauri::command]
-pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> AnimationFrameResult {
-    anim_restore_inner(&state, params)
+pub fn anim_restore(
+    state: State<AppState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    params: AnimRestoreParams,
+) -> AnimationFrameResult {
+    let states = WhatIfStates {
+        user_files: &user_files_state,
+        pivots: &pivot_state,
+        pane_control: &pane_control_state,
+        ribbon_filter: &ribbon_filter_state,
+    };
+    anim_restore_inner(&state, &states, params)
+}
+
+/// Under MANUAL calculation, record in the run's value journal what this frame
+/// LEFT in the cells it recalculated, so Stop restores only the run's own
+/// values and never a cell the user re-typed or recalculated while the run was
+/// paused (`whatif_recalc::ValueJournal`). A frame whose sheet is not the
+/// active one may not report every cell it recalculated (under automatic
+/// calculation it is recalculated as a whole background sheet, which reports
+/// none): the journal then falls back to the formula check alone. The values
+/// are read first and the registry locked alone afterwards (no nesting).
+fn note_frame_in_journal(state: &AppState, token: &str, frame_sheet: Option<usize>, updated_cells: &[CellData]) {
+    let journalled = state
+        .animation_snapshots
+        .lock()
+        .map(|snapshots| snapshots.get(token).is_some_and(|s| s.values.is_some()))
+        .unwrap_or(false);
+    if !journalled {
+        return;
+    }
+    let left = crate::whatif_recalc::frame_left_values(state, updated_cells);
+    let active = state.active_sheet.read().map(|a| *a).ok();
+    let unreported = frame_sheet.is_none() || frame_sheet != active;
+    if let Ok(mut snapshots) = state.animation_snapshots.lock() {
+        if let Some(journal) = snapshots.get_mut(token).and_then(|s| s.values.as_mut()) {
+            journal.note_frame(left, unreported);
+        }
+    }
 }
 
 /// Where a snapshot's sheet is NOW: the index its stable id resolves to, or the
@@ -418,7 +394,11 @@ fn snapshot_sheet_index(state: &AppState, sheet_id: Option<identity::SheetId>, f
 /// dropped when the sheet no longer exists (there is nothing left to restore
 /// into, and keeping it would keep a transient-write licence alive for a run
 /// that can never be put back).
-pub(crate) fn anim_restore_inner(state: &AppState, params: AnimRestoreParams) -> AnimationFrameResult {
+pub(crate) fn anim_restore_inner(
+    state: &AppState,
+    states: &WhatIfStates<'_>,
+    params: AnimRestoreParams,
+) -> AnimationFrameResult {
     let _pass = crate::eval_budget::begin_pass(
         crate::eval_budget::EvalSurface::Background,
         &state.calc_cancel,
@@ -485,72 +465,40 @@ pub(crate) fn anim_restore_inner(state: &AppState, params: AnimRestoreParams) ->
         }
     };
 
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    // RE-RESOLVED under the grid locks (`grid` -> `grids` -> `sheet_ids`, the
-    // canonical order): a sheet moved between the gate and here is still
-    // found. Its kind cannot have changed -- a sheet's kind is fixed for its
-    // life and moves with it -- so the gate above still holds for it.
-    let Some(sheet_idx) = snapshot_sheet_index(state, saved.sheet_id, params.sheet_index) else {
-        return AnimationFrameResult {
+    // `effect` is already a plain DocumentEffect: the token is proven at the top
+    // of the command (an unregistered one refuses there), so there is no longer an
+    // Option to unwrap here.
+    //
+    // The sheet is RE-RESOLVED under the grid locks (`grid` -> `grids` ->
+    // `sheet_ids`, the canonical order), inside the write: a sheet moved between
+    // the gate and here is still found. Its kind cannot have changed -- a sheet's
+    // kind is fixed for its life and moves with it -- so the gate above still
+    // holds for it.
+    let sheet_id = saved.sheet_id;
+    let fallback = params.sheet_index;
+    let resolve = || snapshot_sheet_index(state, sheet_id, fallback);
+    // Under MANUAL calculation (still), the driver cells go back as a typed value
+    // would -- nothing recalculated -- and every formula value the frames
+    // changed goes back to what it was, stale or not. Otherwise the restore
+    // recalculates the driver's dependents, which gives back the same values.
+    let manual = state.calculation_mode.lock().map(|m| *m != "automatic").unwrap_or(false);
+    let journal = if manual { saved.values.as_ref() } else { None };
+    let mode = if journal.is_some() { RecalcMode::AsAnEdit } else { RecalcMode::Always };
+    match apply_writes_and_recalc(state, states, &effect, &resolve, &saved.cells, mode) {
+        Ok(Some(mut updated_cells)) => {
+            if let Some(journal) = journal {
+                crate::whatif_recalc::restore_journal_values(state, &effect, journal, &mut updated_cells);
+            }
+            AnimationFrameResult { updated_cells, error: None }
+        }
+        Ok(None) => AnimationFrameResult {
             updated_cells: Vec::new(),
             error: Some(
                 "The sheet this animation snapshot was taken on no longer exists; nothing was restored"
                     .to_string(),
             ),
-        };
-    };
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
-    let dependents_map = state.dependents.lock().unwrap();
-    let column_dependents_map = state.column_dependents.lock().unwrap();
-    let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
-
-    if sheet_idx >= grids.len() {
-        return AnimationFrameResult {
-            updated_cells: Vec::new(),
-            error: Some(format!("Sheet index {} out of range", sheet_idx)),
-        };
-    }
-
-    // `effect` is already a plain DocumentEffect: the token is proven at the top
-    // of the command (an unregistered one refuses there), so there is no longer an
-    // Option to unwrap here.
-
-    let ops: Vec<((u32, u32), SetOp)> = saved
-        .cells
-        .into_iter()
-        .map(|((r, c), prior)| {
-            let op = match prior {
-                Some(cell) => SetOp::Set(cell),
-                None => SetOp::Clear,
-            };
-            ((r, c), op)
-        })
-        .collect();
-
-    let updated_cells = apply_set_ops_and_recalc(
-        &effect,
-        &mut grids,
-        &mut grid,
-        active_sheet,
-        sheet_idx,
-        &sheet_names,
-        &styles,
-        &dependents_map,
-        &column_dependents_map,
-        &row_dependents_map,
-        &merged_regions,
-        &locale,
-        &ops,
-    );
-
-    AnimationFrameResult {
-        updated_cells,
-        error: None,
+        },
+        Err(e) => AnimationFrameResult { updated_cells: Vec::new(), error: Some(e) },
     }
 }
 
@@ -570,6 +518,18 @@ pub fn anim_reroll_and_read(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: AnimRerollParams,
 ) -> AnimRerollResult {
+    // A Monte Carlo trial recalculates the whole sheet; between a what-if run's
+    // trials that pass would read (and settle dependents on) the run's borrowed
+    // input. Held for the trial, so no run starts mid-pass either.
+    let _whatif = match crate::whatif_recalc::claim_whatif_flag(&state) {
+        Ok(guard) => guard,
+        Err(()) => {
+            return AnimRerollResult {
+                value: None,
+                error: Some(crate::whatif_recalc::ANIMATION_WHATIF_BUSY.to_string()),
+            };
+        }
+    };
     crate::calculation::recalculate_sheet_values(
         &state,
         &user_files_state,
@@ -577,6 +537,14 @@ pub fn anim_reroll_and_read(
         params.sheet_index,
         Some((&*pane_control_state, &*ribbon_filter_state)),
     );
+    // A whole-sheet pass reports no cells, so a run journalling values under
+    // manual calculation can no longer tell which ones it changed: its restore
+    // falls back to the formula check alone (`whatif_recalc::ValueJournal`).
+    if let Ok(mut snapshots) = state.animation_snapshots.lock() {
+        for journal in snapshots.values_mut().filter_map(|s| s.values.as_mut()) {
+            journal.note_frame(Vec::new(), true);
+        }
+    }
 
     let grids = state.grids.read().unwrap();
     if params.sheet_index >= grids.len() {
@@ -656,17 +624,6 @@ pub fn export_gif(req: GifExportRequest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    /// A transient effect for the pure-helper tests: they exercise the recalc mechanics
-    /// directly, so they stand in for a live animation run with its snapshot on file.
-    fn test_transient_effect() -> DocumentEffect {
-        let mut registry: HashMap<String, ()> = HashMap::new();
-        registry.insert("test-run".to_string(), ());
-        let scope = TransientScope::prove_restore_registered(&registry, "test-run")
-            .expect("registered token");
-        DocumentEffect::transient(&scope)
-    }
 
     #[test]
     fn encode_gif_produces_a_valid_header() {
@@ -689,112 +646,7 @@ mod tests {
         assert!(encode_gif(2, 2, vec![], false).is_err());
     }
 
-    fn locale() -> engine::LocaleSettings {
-        engine::LocaleSettings::from_locale_id("en-US")
-    }
-
-    /// A1 (literal) with B1 = A1*2 depending on it.
-    fn model() -> (Vec<Grid>, Grid, crate::DependencyMap) {
-        let mut g = Grid::new();
-        g.set_cell(0, 0, Cell::new_number(10.0)); // A1 = 10
-        g.set_cell(0, 1, Cell::new_formula("A1*2".to_string())); // B1 = A1*2
-        let mut active = Grid::new();
-        active.set_cell(0, 0, Cell::new_number(10.0));
-        active.set_cell(0, 1, Cell::new_formula("A1*2".to_string()));
-
-        let mut deps = crate::DependencyMap::default();
-        let mut b1 = crate::CoordSet::default();
-        b1.insert((0, 1)); // B1 depends on A1
-        deps.insert((0, 0), b1);
-
-        (vec![g], active, deps)
-    }
-
-    #[test]
-    fn apply_then_restore_round_trips_literal_and_dependent() {
-        let (mut grids, mut active, deps) = model();
-        let coldeps = crate::StripeDependentsMap::default();
-        let rowdeps = crate::StripeDependentsMap::default();
-        let merged = HashSet::new();
-        let styles = StyleRegistry::new();
-        let names = vec!["Sheet1".to_string()];
-
-        // Snapshot A1.
-        let saved: Vec<((u32, u32), Option<Cell>)> =
-            vec![((0, 0), grids[0].get_cell(0, 0).cloned())];
-
-        // Apply frame: A1 = 99 -> B1 should recalc to 198.
-        let mut a1 = Cell::new_number(99.0);
-        a1.style_index = 0;
-        let apply_ops = vec![((0, 0), SetOp::Set(a1))];
-        apply_set_ops_and_recalc(
-            &test_transient_effect(),
-            &mut grids, &mut active, 0, 0, &names, &styles, &deps, &coldeps, &rowdeps,
-            &merged, &locale(), &apply_ops,
-        );
-        assert!(matches!(grids[0].get_cell(0, 0).unwrap().value, CellValue::Number(n) if (n - 99.0).abs() < 1e-9));
-        assert!(matches!(grids[0].get_cell(0, 1).unwrap().value, CellValue::Number(n) if (n - 198.0).abs() < 1e-9));
-
-        // Restore from snapshot: A1 back to 10 -> B1 back to 20.
-        let restore_ops: Vec<((u32, u32), SetOp)> = saved
-            .into_iter()
-            .map(|((r, c), prior)| (
-                (r, c),
-                match prior { Some(cell) => SetOp::Set(cell), None => SetOp::Clear },
-            ))
-            .collect();
-        apply_set_ops_and_recalc(
-            &test_transient_effect(),
-            &mut grids, &mut active, 0, 0, &names, &styles, &deps, &coldeps, &rowdeps,
-            &merged, &locale(), &restore_ops,
-        );
-
-        let a1_after = grids[0].get_cell(0, 0).unwrap();
-        assert!(matches!(a1_after.value, CellValue::Number(n) if (n - 10.0).abs() < 1e-9));
-        assert!(a1_after.formula_string().is_none(), "restored A1 must stay a literal");
-        assert_eq!(a1_after.style_index, 0);
-
-        let b1_after = grids[0].get_cell(0, 1).unwrap();
-        assert!(matches!(b1_after.value, CellValue::Number(n) if (n - 20.0).abs() < 1e-9));
-        assert!(b1_after.formula_string().is_some(), "restored B1 must keep its formula");
-    }
-
-    #[test]
-    fn restore_clears_a_cell_that_was_originally_empty() {
-        let (mut grids, mut active, deps) = model();
-        let coldeps = crate::StripeDependentsMap::default();
-        let rowdeps = crate::StripeDependentsMap::default();
-        let merged = HashSet::new();
-        let styles = StyleRegistry::new();
-        let names = vec!["Sheet1".to_string()];
-
-        // C1 (0,2) is empty originally. Snapshot it (None), then write, then restore.
-        let saved: Vec<((u32, u32), Option<Cell>)> =
-            vec![((0, 2), grids[0].get_cell(0, 2).cloned())];
-        assert!(saved[0].1.is_none());
-
-        let apply_ops = vec![((0, 2), SetOp::Set(Cell::new_number(5.0)))];
-        apply_set_ops_and_recalc(
-            &test_transient_effect(),
-            &mut grids, &mut active, 0, 0, &names, &styles, &deps, &coldeps, &rowdeps,
-            &merged, &locale(), &apply_ops,
-        );
-        assert!(grids[0].get_cell(0, 2).is_some());
-
-        let restore_ops: Vec<((u32, u32), SetOp)> = saved
-            .into_iter()
-            .map(|((r, c), prior)| (
-                (r, c),
-                match prior { Some(cell) => SetOp::Set(cell), None => SetOp::Clear },
-            ))
-            .collect();
-        let updated = apply_set_ops_and_recalc(
-            &test_transient_effect(),
-            &mut grids, &mut active, 0, 0, &names, &styles, &deps, &coldeps, &rowdeps,
-            &merged, &locale(), &restore_ops,
-        );
-        assert!(grids[0].get_cell(0, 2).is_none(), "C1 must be empty again after restore");
-        // The cleared cell is reported as an explicit blank so the UI repaints it.
-        assert!(updated.iter().any(|c| c.row == 0 && c.col == 2 && c.display.is_empty()));
-    }
+    // The frame / restore round trip (a literal, a same-sheet dependent and a
+    // dependent on ANOTHER sheet, a cell absent before the run) is driven
+    // through the real anim_* bodies in whatif_recalc_tests.rs (BUG-0613).
 }

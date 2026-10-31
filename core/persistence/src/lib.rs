@@ -5,13 +5,14 @@
 
 mod error;
 mod xlsx_chart_reader;
+mod xlsx_formula_text;
 mod xlsx_reader;
 mod xlsx_style_reader;
 mod xlsx_writer;
 
 pub use error::PersistenceError;
-pub use xlsx_reader::load_xlsx;
-pub use xlsx_writer::save_xlsx;
+pub use xlsx_reader::{load_xlsx, read_xlsx_manual_calculation};
+pub use xlsx_writer::{save_xlsx, save_xlsx_reporting_losses, save_xlsx_with_calculation_mode, XlsxExportLosses};
 
 use engine::cell::{Cell, CellValue, DictKey, RichTextRun};
 use engine::grid::Grid;
@@ -85,10 +86,6 @@ pub struct Workbook {
     pub scripts: Vec<SavedScript>,
     /// Workbook-embedded notebooks
     pub notebooks: Vec<SavedNotebook>,
-    /// Default row height in pixels (`DEFAULT_ROW_HEIGHT_PX` when not customized)
-    pub default_row_height: f64,
-    /// Default column width in pixels (`DEFAULT_COLUMN_WIDTH_PX` when not customized)
-    pub default_column_width: f64,
     /// Document properties (author, title, subject, etc.)
     pub properties: WorkbookProperties,
     /// Chart entries (opaque JSON blobs)
@@ -209,6 +206,32 @@ pub struct Workbook {
     /// Persisting the remainder closes the laundering path and lets the reopened
     /// session resume exactly where the cancel stopped.
     pub pending_recalc: Option<SavedPendingRecalc>,
+    /// The workbook was saved with values that may be STALE for their
+    /// formulas -- Excel's `calcCompleted="0"`: a manual-calculation workbook
+    /// edited and saved without recalculating (calculate-before-save off), or
+    /// one whose calculation left manual and has not been recalculated since
+    /// (BUG-0615#2). `false` for a workbook whose values are all current.
+    ///
+    /// Nothing says WHICH cells are stale (manual calculation records no
+    /// pending set, unlike a cancelled recalculation), so this is one flag for
+    /// the workbook: on open every sheet's values count as possibly stale, so a
+    /// full recalculation that has no data for a cube or custom-function call
+    /// refuses it rather than keeping a stale value as current, and no saved
+    /// value is filed as the answer for the arguments beside it -- until a
+    /// completed Calculate Now. Written to `calc_state.json`, stamped
+    /// `CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION` (an older reader would
+    /// vouch for the stale values: the lie class).
+    pub calculation_incomplete: bool,
+    /// The workbook was saved under MANUAL calculation. Excel's calculation
+    /// mode is an application setting that every save records
+    /// (`<calcPr calcMode="manual"/>`, absent = automatic) and that the
+    /// workbook opened when no other is open SETS [LIVE, Excel 16]; a Calcula
+    /// window holds one document, so every open is that case and adopts it.
+    /// Written to `calc_mode.json` only when manual, under a manifest FEATURE
+    /// ID with no format-version link: an older reader merely loses the mode
+    /// (the session keeps its own), it is never misled about a value. `false`
+    /// for an `.xlsx` read, whose mode the host reads from `calcPr` itself.
+    pub calculation_manual: bool,
     /// INBOUND ONLY: the `format_version` the archive this workbook was READ
     /// from carried, or `0` when it did not come from a versioned `.cala`
     /// (constructed in memory, or read from `.xlsx`, which has no such stamp).
@@ -742,8 +765,6 @@ impl Workbook {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
-            default_row_height: DEFAULT_ROW_HEIGHT_PX,
-            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             sparklines: Vec::new(),
@@ -771,6 +792,8 @@ impl Workbook {
             sheet_protections: Vec::new(),
             workbook_protection: None,
             pending_recalc: None,
+            calculation_incomplete: false,
+            calculation_manual: false,
             // Not read from an archive. See the field doc.
             format_version: 0,
             object_bindings: Vec::new(),
@@ -788,8 +811,6 @@ impl Workbook {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
-            default_row_height: DEFAULT_ROW_HEIGHT_PX,
-            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             sparklines: Vec::new(),
@@ -817,6 +838,8 @@ impl Workbook {
             sheet_protections: Vec::new(),
             workbook_protection: None,
             pending_recalc: None,
+            calculation_incomplete: false,
+            calculation_manual: false,
             // Not read from an archive. See the field doc.
             format_version: 0,
             object_bindings: Vec::new(),
@@ -843,6 +866,14 @@ pub struct Sheet {
     pub cells: HashMap<(u32, u32), SavedCell>,
     pub column_widths: HashMap<u32, f64>,
     pub row_heights: HashMap<u32, f64>,
+    /// This sheet's STANDARD row height in px, for every row without a height
+    /// of its own (Excel's `<sheetFormatPr defaultRowHeight customHeight="1">`,
+    /// what Select All + Row Height sets). `None` = `DEFAULT_ROW_HEIGHT_PX`.
+    /// Per sheet, as in Excel -- it was one workbook-wide value (BUG-0352/0353).
+    pub default_row_height: Option<f64>,
+    /// This sheet's STANDARD column width in px (Format > Default Width...,
+    /// `<sheetFormatPr defaultColWidth>`). `None` = `DEFAULT_COLUMN_WIDTH_PX`.
+    pub default_column_width: Option<f64>,
     pub styles: Vec<CellStyle>,
     /// Merged cell regions
     pub merged_regions: Vec<SavedMergedRegion>,
@@ -1669,6 +1700,8 @@ impl Sheet {
             cells: HashMap::new(),
             column_widths: HashMap::new(),
             row_heights: HashMap::new(),
+            default_row_height: None,
+            default_column_width: None,
             styles: vec![CellStyle::new()],
             merged_regions: Vec::new(),
             freeze_row: None,
@@ -1715,6 +1748,8 @@ impl Sheet {
             cells,
             column_widths: dimensions.column_widths.clone(),
             row_heights: dimensions.row_heights.clone(),
+            default_row_height: grid.default_row_height,
+            default_column_width: grid.default_column_width,
             styles: styles.all_styles().to_vec(),
             merged_regions: Vec::new(),
             freeze_row: None,
@@ -1768,6 +1803,10 @@ impl Sheet {
         for (col, idx) in &self.column_styles {
             grid.set_column_style(*col, *idx);
         }
+
+        // The sheet's standard sizes are sheet properties the grid carries.
+        grid.default_row_height = self.default_row_height;
+        grid.default_column_width = self.default_column_width;
 
         (grid, style_registry)
     }

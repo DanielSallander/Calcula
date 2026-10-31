@@ -20,6 +20,7 @@
 //          Pure: the caller supplies the sheet list (one `getSheets()`).
 
 import type { SheetInfo } from "@api/lib";
+import { findBySheetName, sheetNamesEqual } from "@api/sheetNames";
 import type { DataRangeRef } from "../types";
 
 /** The corners of an A1 range, 0-based and inclusive. */
@@ -148,10 +149,9 @@ export function looksLikeDefinedName(text: string): boolean {
   return true;
 }
 
-/** Find a sheet by name, case-insensitively (the resolver's own rule). */
+/** Find a sheet by name by Excel's sheet-name case rule (@api/sheetNames). */
 export function findSheetByName(sheets: readonly SheetInfo[], name: string): SheetInfo | undefined {
-  const wanted = name.toLowerCase();
-  return sheets.find((s) => s.name.toLowerCase() === wanted);
+  return findBySheetName(sheets, name, (s) => s.name);
 }
 
 /** Whether a sheet is a canvas (absent kind = a worksheet). */
@@ -176,7 +176,7 @@ export function bindRangeText(text: string, ctx: RangeBindingContext): RangeBind
       // follow; any other name has nothing to resolve against -- and nothing
       // wrong to report either, yet.
       const current = ctx.currentSheetName;
-      if (!ctx.currentIsCanvas && current && current.toLowerCase() === sheetName.toLowerCase()) {
+      if (!ctx.currentIsCanvas && current && sheetNamesEqual(current, sheetName)) {
         return { ok: true, ref: { sheetIndex: ctx.currentSheetIndex, ...corners }, sheet: null };
       }
       return { ok: false, message: null };

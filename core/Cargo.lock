@@ -967,6 +967,7 @@ dependencies = [
  "calamine",
  "engine",
  "identity",
+ "parser",
  "quick-xml",
  "rust_xlsxwriter",
  "serde",
@@ -1280,6 +1281,7 @@ name = "script-engine"
 version = "0.1.0"
 dependencies = [
  "engine",
+ "identity",
  "rquickjs",
  "serde",
  "serde_json",

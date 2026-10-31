@@ -74,7 +74,8 @@ pub struct WorkingCopyLink {
     pub base_script_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_notebook_ids: Vec<String>,
-    /// UPPERCASED keys of the workbook-scoped named ranges the base version had.
+    /// Keys of the workbook-scoped named ranges the base version had, by
+    /// Excel's defined-name rule (the host's `name_key`), compared as stored.
     ///
     /// Same job again, and the same leak: a pull is ADDITIVE for names, so an
     /// application whose `RATE` collides with the author's own is silently
@@ -177,7 +178,8 @@ pub enum CollectStreams {
 pub struct WorkingCopyContent {
     pub script_ids: Vec<String>,
     pub notebook_ids: Vec<String>,
-    /// UPPERCASED workbook-scoped name keys.
+    /// Workbook-scoped name keys, by Excel's defined-name rule
+    /// (`identity::defined_name_key`; the host's `name_resolution::name_key`).
     pub named_range_keys: Vec<String>,
     pub pane_control_ids: Vec<String>,
     /// TRIMMED, UPPERCASED Custom Functions names.

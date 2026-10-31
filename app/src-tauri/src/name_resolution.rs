@@ -64,8 +64,26 @@ use parser::ast::BuiltinFunction;
 use crate::named_ranges::NamedRange;
 use crate::CoordSet;
 
-/// UPPERCASE name keys — the same casing `AppState::named_ranges` is keyed by.
+/// Defined-name KEYS ([`name_key`]) — the keys `AppState::named_ranges` is keyed by.
 pub type NameSet = HashSet<String>;
+
+/// The key of a DEFINED NAME: Excel's defined-name rule
+/// (`identity::defined_name_key`), under which `Straße`, `STRASSE` and the
+/// lexer's per-character fold `STRAẞE` are one name [LIVE]. Every map keyed by a
+/// defined name, and every set compared with one, is built from this; a bare
+/// `to_uppercase` keyed `Straße` as `STRASSE` while a formula reached the
+/// resolver as `STRAẞE`, so `=Straße` was #NAME?.
+pub(crate) fn name_key(name: &str) -> String {
+    identity::defined_name_key(name)
+}
+
+/// The key of a LET / LAMBDA BINDING, which shadows a defined name only when
+/// the two match by the per-character fold: `=LET(straße,5,STRAẞE)` is 5 but
+/// `=LET(straße,5,STRASSE)` is #NAME? [LIVE] -- a binding is not compared the
+/// way defined names are.
+fn local_key(name: &str) -> String {
+    identity::sheet_name_key(name)
+}
 
 /// name -> formula cells on the ACTIVE sheet that resolve through it.
 ///
@@ -231,7 +249,7 @@ pub fn needs_name_resolution(ast: &Expression, named_ranges: &HashMap<String, Na
 }
 
 fn is_defined(name: &str, named_ranges: &HashMap<String, NamedRange>) -> bool {
-    named_ranges.contains_key(&name.to_uppercase())
+    named_ranges.contains_key(&name_key(name))
 }
 
 fn walk_needs(ast: &Expression, nr: &HashMap<String, NamedRange>) -> bool {
@@ -286,8 +304,8 @@ pub fn collect_names(ast: &Expression, out: &mut NameSet) {
 fn collect_with_shadows(ast: &Expression, shadows: &[String], out: &mut NameSet) {
     match ast {
         Expression::NamedRef { name, .. } => {
-            let key = name.to_uppercase();
-            if !shadows.contains(&key) {
+            let key = name_key(name);
+            if !shadows.contains(&local_key(name)) {
                 out.insert(key);
             }
         }
@@ -307,7 +325,7 @@ fn collect_with_shadows(ast: &Expression, shadows: &[String], out: &mut NameSet)
                 let mut inner: Vec<String> = shadows.to_vec();
                 for p in &args[..args.len() - 1] {
                     if let Expression::NamedRef { name, .. } = p {
-                        inner.push(name.to_uppercase());
+                        inner.push(local_key(name));
                     }
                 }
                 collect_with_shadows(args.last().unwrap(), &inner, out);
@@ -318,7 +336,7 @@ fn collect_with_shadows(ast: &Expression, shadows: &[String], out: &mut NameSet)
                 let mut inner: Vec<String> = shadows.to_vec();
                 for i in 0..pair_count {
                     if let Expression::NamedRef { name, .. } = &args[i * 2] {
-                        inner.push(name.to_uppercase());
+                        inner.push(local_key(name));
                     }
                 }
                 for (idx, arg) in args.iter().enumerate() {
@@ -332,8 +350,8 @@ fn collect_with_shadows(ast: &Expression, shadows: &[String], out: &mut NameSet)
                 // `=myLambda(5)` is a name in FUNCTION position. `__INVOKE__` is
                 // the already-expanded marker, never a user name.
                 if let Some(name) = func.user_definable_name() {
-                    let key = name.to_uppercase();
-                    if key != "__INVOKE__" && !shadows.contains(&key) {
+                    let key = name_key(name);
+                    if key != "__INVOKE__" && !shadows.contains(&local_key(name)) {
                         out.insert(key);
                     }
                 }
@@ -448,18 +466,23 @@ pub fn restamp_grid_name_casing(
     changed
 }
 
-fn defined_spelling(name: &str, nr: &HashMap<String, NamedRange>) -> Option<String> {
-    let entry = nr.get(&name.to_uppercase())?;
-    (entry.name != name).then(|| entry.name.clone())
+/// The defined name's own spelling for a reference spelled `name`, or `None`
+/// when it already is that spelling. Never a spelling a LET / LAMBDA binding in
+/// scope would capture: in `=LET(STRASSE,5,straße)` the body reads the DEFINED
+/// name STRASSE [LIVE 7] because a binding matches per character, and
+/// respelling it `STRASSE` would hand it to the binding (5).
+fn defined_spelling(name: &str, nr: &HashMap<String, NamedRange>, shadows: &[String]) -> Option<String> {
+    let entry = nr.get(&name_key(name))?;
+    (entry.name != name && !shadows.contains(&local_key(&entry.name))).then(|| entry.name.clone())
 }
 
 fn restamp(ast: &mut Expression, nr: &HashMap<String, NamedRange>, shadows: &[String]) {
     match ast {
         Expression::NamedRef { name, .. } => {
-            if shadows.contains(&name.to_uppercase()) {
+            if shadows.contains(&local_key(name)) {
                 return;
             }
-            if let Some(spelling) = defined_spelling(name, nr) {
+            if let Some(spelling) = defined_spelling(name, nr, shadows) {
                 *name = spelling;
             }
         }
@@ -481,7 +504,7 @@ fn restamp(ast: &mut Expression, nr: &HashMap<String, NamedRange>, shadows: &[St
                     args[..args.len() - 1]
                         .iter()
                         .filter_map(|a| match a {
-                            Expression::NamedRef { name, .. } => Some(name.to_uppercase()),
+                            Expression::NamedRef { name, .. } => Some(local_key(name)),
                             _ => None,
                         })
                         .collect(),
@@ -490,15 +513,15 @@ fn restamp(ast: &mut Expression, nr: &HashMap<String, NamedRange>, shadows: &[St
                     0,
                     (0..(args.len() - 1) / 2)
                         .filter_map(|i| match &args[i * 2] {
-                            Expression::NamedRef { name, .. } => Some(name.to_uppercase()),
+                            Expression::NamedRef { name, .. } => Some(local_key(name)),
                             _ => None,
                         })
                         .collect(),
                 ),
                 _ => {
                     if let Some(name) = func.user_definable_name().map(str::to_string) {
-                        if !shadows.contains(&name.to_uppercase()) {
-                            if let Some(spelling) = defined_spelling(&name, nr) {
+                        if !shadows.contains(&local_key(&name)) {
+                            if let Some(spelling) = defined_spelling(&name, nr, shadows) {
                                 *func = BuiltinFunction::Custom(spelling);
                             }
                         }
@@ -600,7 +623,7 @@ fn restamp(ast: &mut Expression, nr: &HashMap<String, NamedRange>, shadows: &[St
 pub fn rename_name_in_ast(ast: &Expression, old_name: &str, new_name: &str) -> (Expression, bool) {
     let mut out = ast.clone();
     let mut changed = false;
-    rename_walk(&mut out, &old_name.to_uppercase(), new_name, &[], &mut changed);
+    rename_walk(&mut out, &name_key(old_name), new_name, &[], &mut changed);
     (out, changed)
 }
 
@@ -613,8 +636,8 @@ fn rename_walk(
 ) {
     match ast {
         Expression::NamedRef { name, .. } => {
-            let key = name.to_uppercase();
-            if shadows.contains(&key) || key != old_upper || name == new_name {
+            let key = name_key(name);
+            if shadows.contains(&local_key(name)) || key != old_upper || name == new_name {
                 return;
             }
             // The name is written in the USER'S SPELLING, the same thing
@@ -646,7 +669,7 @@ fn rename_walk(
                     args[..args.len() - 1]
                         .iter()
                         .filter_map(|a| match a {
-                            Expression::NamedRef { name, .. } => Some(name.to_uppercase()),
+                            Expression::NamedRef { name, .. } => Some(local_key(name)),
                             _ => None,
                         })
                         .collect(),
@@ -655,16 +678,16 @@ fn rename_walk(
                     0,
                     (0..(args.len() - 1) / 2)
                         .filter_map(|i| match &args[i * 2] {
-                            Expression::NamedRef { name, .. } => Some(name.to_uppercase()),
+                            Expression::NamedRef { name, .. } => Some(local_key(name)),
                             _ => None,
                         })
                         .collect(),
                 ),
                 _ => {
                     if let Some(name) = func.user_definable_name().map(str::to_string) {
-                        let key = name.to_uppercase();
+                        let key = name_key(&name);
                         if key != "__INVOKE__"
-                            && !shadows.contains(&key)
+                            && !shadows.contains(&local_key(&name))
                             && key == old_upper
                             && name != new_name
                         {
@@ -791,8 +814,8 @@ pub fn cell_reads_any_name(cell: &engine::Cell, wanted: &NameSet) -> bool {
 fn reads_any(ast: &Expression, wanted: &NameSet, shadows: &[String]) -> bool {
     match ast {
         Expression::NamedRef { name, .. } => {
-            let key = name.to_uppercase();
-            !shadows.contains(&key) && wanted.contains(&key)
+            let key = name_key(name);
+            !shadows.contains(&local_key(name)) && wanted.contains(&key)
         }
         Expression::Literal(_)
         | Expression::CellRef { .. }
@@ -808,7 +831,7 @@ fn reads_any(ast: &Expression, wanted: &NameSet, shadows: &[String]) -> bool {
                 let mut inner: Vec<String> = shadows.to_vec();
                 for p in &args[..args.len() - 1] {
                     if let Expression::NamedRef { name, .. } = p {
-                        inner.push(name.to_uppercase());
+                        inner.push(local_key(name));
                     }
                 }
                 reads_any(args.last().unwrap(), wanted, &inner)
@@ -817,7 +840,7 @@ fn reads_any(ast: &Expression, wanted: &NameSet, shadows: &[String]) -> bool {
                 let mut inner: Vec<String> = shadows.to_vec();
                 for i in 0..(args.len() - 1) / 2 {
                     if let Expression::NamedRef { name, .. } = &args[i * 2] {
-                        inner.push(name.to_uppercase());
+                        inner.push(local_key(name));
                     }
                 }
                 args.iter().enumerate().any(|(idx, a)| {
@@ -826,8 +849,8 @@ fn reads_any(ast: &Expression, wanted: &NameSet, shadows: &[String]) -> bool {
             }
             _ => {
                 if let Some(name) = func.user_definable_name() {
-                    let key = name.to_uppercase();
-                    if key != "__INVOKE__" && !shadows.contains(&key) && wanted.contains(&key) {
+                    let key = name_key(name);
+                    if key != "__INVOKE__" && !shadows.contains(&local_key(name)) && wanted.contains(&key) {
                         return true;
                     }
                 }
@@ -852,6 +875,10 @@ fn reads_any(ast: &Expression, wanted: &NameSet, shadows: &[String]) -> bool {
         Expression::ImplicitIntersection { operand } => reads_any(operand, wanted, shadows),
     }
 }
+
+#[cfg(test)]
+#[path = "defined_name_key_tests.rs"]
+mod defined_name_key_tests;
 
 #[cfg(test)]
 mod tests {

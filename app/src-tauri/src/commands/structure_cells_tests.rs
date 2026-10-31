@@ -616,7 +616,20 @@ fn insert_down_moves_the_band_rewrites_every_sheet_and_is_one_undo_step() {
     let b5_before = fx.number(0, "B5");
 
     let result = fx.shift("B2:C3", CellShift::Down, false).expect("insert cells");
-    assert_eq!(result, CellShiftResult { applied: true, confirm: None, whole_lines: false });
+    assert_eq!(
+        result,
+        CellShiftResult {
+            applied: true,
+            confirm: None,
+            whole_lines: false,
+            delta: Some(crate::api_types::StructuralDelta::RowInsert {
+                sheet_index: 0,
+                at: 1,
+                count: 2,
+                band: Some(crate::api_types::DeltaBand { start: 1, end: 2 }),
+            }),
+        }
+    );
     assert!(fx.file.is_dirty(), "a committed insert dirties the document");
     assert_eq!(fx.undo_depth(), depth + 1, "ONE undo step");
 
@@ -970,3 +983,9 @@ mod lines;
 // (straddling ranges, spill-claims undo, push-off on every insert path).
 #[path = "structure_review_tests.rs"]
 mod review;
+
+// An undo step says WHERE its lines and cells moved (the `structural_delta`
+// marker, `UndoResult::structural_deltas`), so the frontend's coordinate
+// stores follow an Undo / Redo from the step itself, never its description.
+#[path = "structural_delta_tests.rs"]
+mod structural_delta;

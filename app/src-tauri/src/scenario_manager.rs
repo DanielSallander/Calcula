@@ -3,21 +3,18 @@
 // CONTEXT: Each scenario stores a set of changing cell values that can be applied
 //          to the spreadsheet. Scenarios are stored per-sheet in AppState.
 
-use std::collections::HashSet;
 use tauri::State;
 
 use crate::api_types::{
-    CellData, MergedRegion, Scenario, ScenarioAddParams, ScenarioDeleteParams,
+    Scenario, ScenarioAddParams, ScenarioDeleteParams,
     ScenarioListResult, ScenarioResult, ScenarioShowParams, ScenarioShowResult,
     ScenarioSummaryParams, ScenarioSummaryResult, ScenarioSummaryRow,
 };
 use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
-use crate::{
-    evaluate_formula_multi_sheet, format_cell_value, get_column_row_dependents,
-    get_recalculation_order, AppState,
-};
-use engine::{Cell, CellValue, Grid, StyleRegistry};
+use crate::whatif_recalc::{stored_cell, write_cells_and_recalc, RecalcMode, WhatIfStates};
+use crate::{format_cell_value, AppState};
+use engine::{Cell, CellValue};
 
 // SCENARIOS ARE PERSISTED (`workbook.scenarios`) AND SCENARIO_SHOW IS NOT TRANSIENT.
 //
@@ -34,48 +31,6 @@ use engine::{Cell, CellValue, Grid, StyleRegistry};
 //
 // The same reasoning covers `scenario_summary`: it writes a summary report into fresh
 // grid cells, and those cells are saved.
-
-// ============================================================================
-// Helper: build CellData from grid
-// ============================================================================
-
-fn build_cell_data(
-    grid: &Grid,
-    styles: &StyleRegistry,
-    merged_regions: &HashSet<MergedRegion>,
-    r: u32,
-    c: u32,
-    locale: &engine::LocaleSettings,
-) -> Option<CellData> {
-    let cell = grid.get_cell(r, c)?;
-    // Honour the row/column style tiers for display and for the index we hand out.
-    let effective_style_index = grid.effective_style_index(r, c);
-    let style = styles.get(effective_style_index);
-    let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, locale);
-
-    let merge = merged_regions
-        .iter()
-        .find(|m| m.start_row == r && m.start_col == c);
-    let (row_span, col_span) = match merge {
-        Some(m) => (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1),
-        None => (1, 1),
-    };
-
-    Some(CellData {
-        row: r,
-        col: c,
-        display,
-        overflow,
-        display_color: None,
-        formula: cell.formula_string().map(|f| format!("={}", f)),
-        style_index: effective_style_index,
-        row_span,
-        col_span,
-        sheet_index: None,
-        rich_text: None,
-        accounting_layout: None,
-    })
-}
 
 /// Format a cell reference like "$A$1" from 0-based row/col.
 fn format_cell_ref(row: u32, col: u32) -> String {
@@ -227,15 +182,47 @@ pub fn scenario_delete(
 pub fn scenario_show(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ScenarioShowParams,
 ) -> ScenarioShowResult {
-    // BACKGROUND. scenario_show is the TRANSIENT-WRITE pattern: it applies
-    // values and recalculates without entering the undo stack. Transient in the
-    // undo sense is NOT the same as Transient in the budget sense — these
-    // results are written into cells the user reads, so they get the persisting
-    // ceiling, not the tighter one.
+    let states = WhatIfStates {
+        user_files: &user_files_state,
+        pivots: &pivot_state,
+        pane_control: &pane_control_state,
+        ribbon_filter: &ribbon_filter_state,
+    };
+    scenario_show_impl(&state, &file_state, &states, params)
+}
+
+/// The body of [`scenario_show`], callable without a Tauri runtime.
+///
+/// The changing cells are written and EVERY dependent, on every sheet, is
+/// recalculated through the shared cascade (`whatif_recalc`, BUG-0613), exactly
+/// as if the user had typed the values. Excel [LIVE]: showing a scenario that
+/// sets `Sheet1!A5` to 100 leaves `Sheet2!B5 = Sheet1!A5*3` at 300. This used to
+/// re-evaluate only the scenario sheet's own dependents, positionlessly, through
+/// the ACTIVE sheet's dependency map -- so a reader on another sheet kept its old
+/// value, and the save's keep rule could then vouch for a stale cube or
+/// custom-function value there.
+pub(crate) fn scenario_show_impl(
+    state: &AppState,
+    file_state: &FileState,
+    states: &WhatIfStates<'_>,
+    params: ScenarioShowParams,
+) -> ScenarioShowResult {
+    // ONE what-if run at a time, taken before every gate (see `begin_whatif_run`):
+    // a scenario shown between an async Data Table / Goal Seek / Solver run's
+    // trials writes the cells that run borrowed and restores, and one shown
+    // while an animation holds a restore buffer is undone by its Stop.
+    let _run = match crate::whatif_recalc::begin_whatif_run(state) {
+        Ok(run) => run,
+        Err(e) => return ScenarioShowResult { updated_cells: Vec::new(), error: Some(e) },
+    };
+    // BACKGROUND. These results are written into cells the user reads, so they
+    // get the persisting ceiling, not the tighter one.
     let _pass = crate::eval_budget::begin_pass(
         crate::eval_budget::EvalSurface::Background,
         &state.calc_cancel,
@@ -251,20 +238,21 @@ pub fn scenario_show(
     // store cannot hold one there any more (add and merge both refuse a
     // canvas), but a scenario that reached one before would otherwise write
     // straight into the hidden grid. Refused before the effect.
-    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, params.sheet_index, "show a scenario") {
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(state, params.sheet_index, "show a scenario") {
         return ScenarioShowResult { updated_cells: Vec::new(), error: Some(e) };
     }
 
     // Find the scenario
-    let scenarios = state.scenarios.read().unwrap();
-    let sheet_scenarios = scenarios.get(&params.sheet_index);
-    let scenario = sheet_scenarios.and_then(|ss| {
+    let scenario = {
+        let scenarios = state.scenarios.read().unwrap();
         let name_upper = params.name.to_uppercase();
-        ss.iter().find(|s| s.name.to_uppercase() == name_upper)
-    });
-
+        scenarios
+            .get(&params.sheet_index)
+            .and_then(|ss| ss.iter().find(|s| s.name.to_uppercase() == name_upper))
+            .cloned()
+    };
     let scenario = match scenario {
-        Some(s) => s.clone(),
+        Some(s) => s,
         None => {
             return ScenarioShowResult {
                 updated_cells: Vec::new(),
@@ -272,23 +260,12 @@ pub fn scenario_show(
             };
         }
     };
-    drop(scenarios);
 
     // The scenario resolved, so the cell writes below WILL happen. They are permanent
     // (see the file header: there is no scenario_restore), so they change what a save
     // writes. Built here, past the not-found return above, so a bad scenario name
     // leaves the document clean.
-    //
-    // Held for the whole write even though `grids` is not a `Persisted<T>` yet: when it
-    // is onboarded this is the effect its `write()` will take, and constructing it here
-    // already sets is_modified, which is the part that was missing.
-    let effect = DocumentEffect::mutates(&file_state);
-
-    // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below (canonical
-    // lock order: control stores first, grids last).
-    let control_values = crate::control_values::build_control_values(
-        &state, &pane_control_state, &ribbon_filter_state,
-    );
+    let effect = DocumentEffect::mutates(file_state);
 
     // Check writeback regions: skip changing cells that fall in writeback regions
     let writeback_skip: std::collections::HashSet<(u32, u32)> = {
@@ -308,103 +285,25 @@ pub fn scenario_show(
         }
     };
 
-    // Acquire grid locks
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
-    let dependents_map = state.dependents.lock().unwrap();
-    let column_dependents_map = state.column_dependents.lock().unwrap();
-    let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
-
     let sheet_idx = params.sheet_index;
-    let mut all_affected = Vec::new();
+    let writes: Vec<((u32, u32), Option<Cell>)> = scenario
+        .changing_cells
+        .iter()
+        .filter(|sc| !writeback_skip.contains(&(sc.row, sc.col)))
+        .map(|sc| ((sc.row, sc.col), Some(scenario_cell(state, sheet_idx, sc.row, sc.col, &sc.value))))
+        .collect();
 
-    // Apply each changing cell value (skip writeback-protected cells)
-    for sc in &scenario.changing_cells {
-        if writeback_skip.contains(&(sc.row, sc.col)) {
-            continue;
-        }
-
-        let style_index = grids[sheet_idx]
-            .get_cell(sc.row, sc.col)
-            .map_or(0, |c| c.style_index);
-
-        let cell_value = parse_scenario_value(&sc.value);
-        let mut new_cell = match &cell_value {
-            CellValue::Number(n) => Cell::new_number(*n),
-            CellValue::Text(t) => Cell::new_text(t.clone()),
-            CellValue::Boolean(b) => Cell::new_boolean(*b),
-            _ => Cell::new_text(sc.value.clone()),
-        };
-        new_cell.style_index = style_index;
-
-        grids[sheet_idx].set_cell(sc.row, sc.col, new_cell.clone());
-        if sheet_idx == active_sheet {
-            grid.set_cell(sc.row, sc.col, new_cell);
-        }
-
-        all_affected.push((sc.row, sc.col));
-
-        // Collect dependents for recalculation
-        let recalc = get_recalculation_order((sc.row, sc.col), &dependents_map);
-        let extra =
-            get_column_row_dependents((sc.row, sc.col), &column_dependents_map, &row_dependents_map);
-        for dep in recalc.iter().chain(extra.iter()) {
-            if !all_affected.contains(dep) {
-                all_affected.push(*dep);
-            }
-        }
-    }
-
-    // Re-evaluate all affected formula cells (context-taking eval so
-    // GET.CONTROLVALUE sees the snapshot; parity otherwise with the plain
-    // multi-sheet string eval used before).
-    for &(r, c) in &all_affected {
-        if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-            if let Some(formula) = cell.formula_string() {
-                let new_value = match parser::parse(&formula) {
-                    Ok(parsed) => {
-                        let engine_ast = crate::convert_expr(&parsed);
-                        let eval_ctx = engine::EvalContext {
-                            cube_prefetch: None,
-                            current_row: Some(r),
-                            current_col: Some(c),
-                            row_heights: None,
-                            column_widths: None,
-                            hidden_rows: None,
-                            control_values: Some(control_values.clone()),
-                        };
-                        crate::evaluate_formula_with_context(
-                            &grids,
-                            &sheet_names,
-                            sheet_idx,
-                            &engine_ast,
-                            eval_ctx,
-                            None,
-                        )
-                    }
-                    Err(_) => CellValue::Error(engine::CellError::Value),
-                };
-                let mut updated = cell;
-                updated.value = new_value;
-                grids[sheet_idx].set_cell(r, c, updated.clone());
-                if sheet_idx == active_sheet {
-                    grid.set_cell(r, c, updated);
-                }
-            }
-        }
-    }
-
-    // Build updated cells
     let mut updated_cells = Vec::new();
-    for &(r, c) in &all_affected {
-        if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c, &locale) {
-            updated_cells.push(cd);
-        }
+    if let Err(e) = write_cells_and_recalc(
+        state,
+        states,
+        &effect,
+        sheet_idx,
+        &writes,
+        RecalcMode::AsAnEdit,
+        &mut updated_cells,
+    ) {
+        return ScenarioShowResult { updated_cells, error: Some(e) };
     }
 
     ScenarioShowResult {
@@ -413,13 +312,83 @@ pub fn scenario_show(
     }
 }
 
+/// A changing cell holding `value`, keeping the style the cell has now.
+fn scenario_cell(state: &AppState, sheet: usize, row: u32, col: u32, value: &str) -> Cell {
+    let style_index = stored_cell(state, sheet, row, col).map_or(0, |c| c.style_index);
+    let mut new_cell = match parse_scenario_value(value) {
+        CellValue::Number(n) => Cell::new_number(n),
+        CellValue::Text(t) => Cell::new_text(t),
+        CellValue::Boolean(b) => Cell::new_boolean(b),
+        _ => Cell::new_text(value.to_string()),
+    };
+    new_cell.style_index = style_index;
+    new_cell
+}
+
+/// A cell's value as the sheet displays it (its effective style, the app locale).
+fn display_of(state: &AppState, sheet: usize, row: u32, col: u32) -> String {
+    let grids = state.grids.read().unwrap();
+    let Some(g) = grids.get(sheet) else { return String::new() };
+    let styles = state.style_registry.read().unwrap();
+    let locale = state.locale.lock().unwrap();
+    let effective_style_index = g.effective_style_index(row, col);
+    g.get_cell(row, col)
+        .map(|cell| format_cell_value(&cell.value, styles.get(effective_style_index), &locale))
+        .unwrap_or_default()
+}
+
 /// Generate a scenario summary report comparing all scenarios.
 #[tauri::command]
 pub fn scenario_summary(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ScenarioSummaryParams,
 ) -> ScenarioSummaryResult {
+    let states = WhatIfStates {
+        user_files: &user_files_state,
+        pivots: &pivot_state,
+        pane_control: &pane_control_state,
+        ribbon_filter: &ribbon_filter_state,
+    };
+    scenario_summary_impl(&state, &file_state, &states, params)
+}
+
+/// The body of [`scenario_summary`], callable without a Tauri runtime.
+///
+/// Each scenario is shown (written and recalculated through the shared
+/// cascade, as Scenario Show does), its result cells read, and the changing
+/// cells put back exactly as they were -- recalculated again -- before the next
+/// one; so a result cell that reaches a changing cell through another sheet
+/// reports that scenario's value, and the workbook ends as it began.
+///
+/// UNDER MANUAL CALCULATION nothing is recalculated, as Scenario Show
+/// recalculates nothing there (`RecalcMode::AsAnEdit`): the summary reports
+/// the result cells' STORED values and every dependent ends exactly as it was,
+/// stale or not. Excel [LIVE, 2026-10-30, manual calculation, `C1` changed
+/// to 7 with no F9 so `D1 = C1*3` still shows 3]: the summary of a scenario
+/// setting C1 to 100 reports D1 = 3 under both Current and the scenario, and
+/// afterwards C1 = 7, D1 = 3 and an unrelated stale `B1 = A1*2` keep their
+/// values. This used to recalculate each scenario and each restore whatever
+/// the mode, so a value the user had left stale for F9 came back recalculated.
+pub(crate) fn scenario_summary_impl(
+    state: &AppState,
+    file_state: &FileState,
+    states: &WhatIfStates<'_>,
+    params: ScenarioSummaryParams,
+) -> ScenarioSummaryResult {
+    // ONE what-if run at a time, taken before every gate (see `begin_whatif_run`):
+    // the summary writes each scenario's changing cells and puts them back, the
+    // same borrow-and-restore a Data Table run makes.
+    let _run = match crate::whatif_recalc::begin_whatif_run(state) {
+        Ok(run) => run,
+        Err(e) => {
+            return ScenarioSummaryResult { scenario_names: Vec::new(), rows: Vec::new(), error: Some(e) };
+        }
+    };
     let _pass = crate::eval_budget::begin_pass(
         crate::eval_budget::EvalSurface::Background,
         &state.calc_cancel,
@@ -428,36 +397,28 @@ pub fn scenario_summary(
 
     // The summary applies each scenario into the sheet's grid and restores it,
     // leaving materialized cells behind: never on a canvas. Before the effect.
-    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, params.sheet_index, "summarize scenarios") {
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(state, params.sheet_index, "summarize scenarios") {
         return ScenarioSummaryResult { scenario_names: Vec::new(), rows: Vec::new(), error: Some(e) };
     }
 
-    let scenarios_store = state.scenarios.read().unwrap();
-    let sheet_scenarios = match scenarios_store.get(&params.sheet_index) {
-        Some(ss) if !ss.is_empty() => ss.clone(),
-        _ => {
-            return ScenarioSummaryResult {
-                scenario_names: Vec::new(),
-                rows: Vec::new(),
-                error: Some("No scenarios defined for this sheet.".to_string()),
-            };
+    let sheet_scenarios = {
+        let scenarios_store = state.scenarios.read().unwrap();
+        match scenarios_store.get(&params.sheet_index) {
+            Some(ss) if !ss.is_empty() => ss.clone(),
+            _ => {
+                return ScenarioSummaryResult {
+                    scenario_names: Vec::new(),
+                    rows: Vec::new(),
+                    error: Some("No scenarios defined for this sheet.".to_string()),
+                };
+            }
         }
     };
-    drop(scenarios_store);
 
-    // The summary report is written into fresh grid cells, which are persisted. Built
-    // past the "no scenarios defined" return above, so that refusal stays clean.
-    let effect = DocumentEffect::mutates(&file_state);
-
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
-    let dependents_map = state.dependents.lock().unwrap();
-    let column_dependents_map = state.column_dependents.lock().unwrap();
-    let row_dependents_map = state.row_dependents.lock().unwrap();
-    let locale = state.locale.lock().unwrap();
+    // The scenarios are written into the grid and put back, and a volatile
+    // dependent recalculated in between does not come back the same. Built past
+    // the "no scenarios defined" return above, so that refusal stays clean.
+    let effect = DocumentEffect::mutates(file_state);
 
     let sheet_idx = params.sheet_index;
     let scenario_names: Vec<String> = sheet_scenarios.iter().map(|s| s.name.clone()).collect();
@@ -473,153 +434,67 @@ pub fn scenario_summary(
         }
     }
 
-    // Save current values for all changing cells so we can restore
-    let mut original_cells: Vec<((u32, u32), Option<Cell>)> = Vec::new();
-    for &(r, c) in &changing_cell_positions {
-        let cell = grids[sheet_idx].get_cell(r, c).cloned();
-        original_cells.push(((r, c), cell));
-    }
+    // Save current cells for all changing cells so we can restore
+    let original_cells: Vec<((u32, u32), Option<Cell>)> = changing_cell_positions
+        .iter()
+        .map(|&(r, c)| ((r, c), stored_cell(state, sheet_idx, r, c)))
+        .collect();
 
-    // Also save current values of result cells
     let result_positions: Vec<(u32, u32)> = params
         .result_cells
         .iter()
         .map(|rc| (rc.row, rc.col))
         .collect();
 
-    // Get current display values for all cells
-    let mut current_changing_values: Vec<String> = Vec::new();
-    for &(r, c) in &changing_cell_positions {
-        let effective_style_index = grids[sheet_idx].effective_style_index(r, c);
-        let val = grids[sheet_idx]
-            .get_cell(r, c)
-            .map(|cell| {
-                let style = styles.get(effective_style_index);
-                format_cell_value(&cell.value, style, &locale)
-            })
-            .unwrap_or_default();
-        current_changing_values.push(val);
-    }
+    // Current display values
+    let current_changing_values: Vec<String> = changing_cell_positions
+        .iter()
+        .map(|&(r, c)| display_of(state, sheet_idx, r, c))
+        .collect();
+    let current_result_values: Vec<String> = result_positions
+        .iter()
+        .map(|&(r, c)| display_of(state, sheet_idx, r, c))
+        .collect();
 
-    let mut current_result_values: Vec<String> = Vec::new();
-    for &(r, c) in &result_positions {
-        let effective_style_index = grids[sheet_idx].effective_style_index(r, c);
-        let val = grids[sheet_idx]
-            .get_cell(r, c)
-            .map(|cell| {
-                let style = styles.get(effective_style_index);
-                format_cell_value(&cell.value, style, &locale)
-            })
-            .unwrap_or_default();
-        current_result_values.push(val);
-    }
-
-    // For each scenario, apply values and evaluate result cells
+    // For each scenario, show it, read the result cells, and put the sheet back
     let mut scenario_changing_values: Vec<Vec<String>> = Vec::new();
     let mut scenario_result_values: Vec<Vec<String>> = Vec::new();
 
     for scenario in &sheet_scenarios {
-        // Apply scenario values
-        for &(r, c) in &changing_cell_positions {
-            let sc_cell = scenario
-                .changing_cells
-                .iter()
-                .find(|sc| sc.row == r && sc.col == c);
-            if let Some(sc) = sc_cell {
-                let style_index = grids[sheet_idx]
-                    .get_cell(r, c)
-                    .map_or(0, |c| c.style_index);
-                let cell_value = parse_scenario_value(&sc.value);
-                let mut new_cell = match &cell_value {
-                    CellValue::Number(n) => Cell::new_number(*n),
-                    CellValue::Text(t) => Cell::new_text(t.clone()),
-                    CellValue::Boolean(b) => Cell::new_boolean(*b),
-                    _ => Cell::new_text(sc.value.clone()),
-                };
-                new_cell.style_index = style_index;
-                grids[sheet_idx].set_cell(r, c, new_cell);
-            }
-        }
-
-        // Recalculate all dependents
-        let mut all_deps = Vec::new();
-        for &(r, c) in &changing_cell_positions {
-            let recalc = get_recalculation_order((r, c), &dependents_map);
-            let extra = get_column_row_dependents(
-                (r, c),
-                &column_dependents_map,
-                &row_dependents_map,
-            );
-            for dep in recalc.iter().chain(extra.iter()) {
-                if !all_deps.contains(dep) {
-                    all_deps.push(*dep);
-                }
-            }
-        }
-
-        for &(r, c) in &all_deps {
-            if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-                if let Some(formula) = cell.formula_string() {
-                    let new_value =
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, &formula);
-                    let mut updated = cell;
-                    updated.value = new_value;
-                    grids[sheet_idx].set_cell(r, c, updated);
-                }
-            }
+        let writes: Vec<((u32, u32), Option<Cell>)> = scenario
+            .changing_cells
+            .iter()
+            .map(|sc| ((sc.row, sc.col), Some(scenario_cell(state, sheet_idx, sc.row, sc.col, &sc.value))))
+            .collect();
+        let mut sink = Vec::new();
+        if let Err(e) = write_cells_and_recalc(state, states, &effect, sheet_idx, &writes, RecalcMode::AsAnEdit, &mut sink) {
+            return ScenarioSummaryResult { scenario_names: Vec::new(), rows: Vec::new(), error: Some(e) };
         }
 
         // Collect changing cell values for this scenario
-        let mut changing_vals = Vec::new();
-        for &(r, c) in &changing_cell_positions {
-            let sc_cell = scenario
-                .changing_cells
-                .iter()
-                .find(|sc| sc.row == r && sc.col == c);
-            changing_vals.push(sc_cell.map_or(String::new(), |sc| sc.value.clone()));
-        }
+        let changing_vals: Vec<String> = changing_cell_positions
+            .iter()
+            .map(|&(r, c)| {
+                scenario
+                    .changing_cells
+                    .iter()
+                    .find(|sc| sc.row == r && sc.col == c)
+                    .map_or(String::new(), |sc| sc.value.clone())
+            })
+            .collect();
         scenario_changing_values.push(changing_vals);
 
         // Collect result cell values
-        let mut result_vals = Vec::new();
-        for &(r, c) in &result_positions {
-            let effective_style_index = grids[sheet_idx].effective_style_index(r, c);
-            let val = grids[sheet_idx]
-                .get_cell(r, c)
-                .map(|cell| {
-                    let style = styles.get(effective_style_index);
-                    format_cell_value(&cell.value, style, &locale)
-                })
-                .unwrap_or_default();
-            result_vals.push(val);
-        }
-        scenario_result_values.push(result_vals);
+        scenario_result_values.push(
+            result_positions
+                .iter()
+                .map(|&(r, c)| display_of(state, sheet_idx, r, c))
+                .collect(),
+        );
 
-        // Restore original values
-        for &((r, c), ref orig_cell) in &original_cells {
-            match orig_cell {
-                Some(cell) => grids[sheet_idx].set_cell(r, c, cell.clone()),
-                None => {
-                    grids[sheet_idx].set_cell(r, c, Cell::default());
-                }
-            }
-        }
-
-        // Recalculate after restore
-        for &(r, c) in &all_deps {
-            if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-                if let Some(formula) = cell.formula_string() {
-                    let new_value =
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, &formula);
-                    let mut updated = cell;
-                    updated.value = new_value;
-                    grids[sheet_idx].set_cell(r, c, updated.clone());
-                    if sheet_idx == active_sheet {
-                        grid.set_cell(r, c, updated);
-                    }
-                }
-            }
-        }
+        // Restore original cells, and their dependents with them
+        sink.clear();
+        let _ = write_cells_and_recalc(state, states, &effect, sheet_idx, &original_cells, RecalcMode::AsAnEdit, &mut sink);
     }
 
     // Build summary rows

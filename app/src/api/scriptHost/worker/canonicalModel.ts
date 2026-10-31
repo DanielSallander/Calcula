@@ -10,10 +10,14 @@
 //          sheet.getCellValue / sheet.setCellValue, plus the BULK
 //          sheet.getRangeValues / sheet.setRangeValues (B1) which move a whole
 //          rectangle — typed, with formulas — in ONE round trip and land a
-//          block write as a single undo step. Pure + self-contained: no imports,
-//          so it is safe to run inside the hardened worker realm. The single
+//          block write as a single undo step. Pure + self-contained: its one
+//          import is the pure, dependency-free sheet-name rule (../../sheetNames,
+//          data table only), so it is safe to run inside the hardened worker
+//          realm. The single
 //          shared .d.ts that makes all three runtimes agree on one model is
 //          C3 step 4.
+
+import { sheetNamesEqual } from "../../sheetNames";
 
 /** Reads a cell's display value by 0-based row/col (resolved by the shim to a
  *  broker aspect). */
@@ -722,7 +726,8 @@ function sheetNamesForError(names: string[]): string {
 
 /**
  * Resolve a sheet NAME to its 0-based index: exact match first, then a UNIQUE
- * case-insensitive match. The error lists the workbook's sheet names so the
+ * match by Excel's sheet-name case rule (@api/sheetNames, the twin of Rust's
+ * `identity::sheet_names_equal`). The error lists the workbook's sheet names so the
  * script author sees what WOULD have matched. Twin of `resolve_sheet_name` in
  * core/script-engine/src/ops/mod.rs — both realms must agree, message for
  * message.
@@ -730,10 +735,9 @@ function sheetNamesForError(names: string[]): string {
 export function resolveSheetName(names: string[], name: string): number {
   const exact = names.indexOf(name);
   if (exact !== -1) return exact;
-  const lower = name.toLowerCase();
   const matches: number[] = [];
   for (let i = 0; i < names.length; i++) {
-    if (names[i].toLowerCase() === lower) matches.push(i);
+    if (sheetNamesEqual(names[i], name)) matches.push(i);
   }
   if (matches.length === 1) return matches[0];
   if (matches.length === 0) {

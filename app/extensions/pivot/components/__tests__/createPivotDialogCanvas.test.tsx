@@ -432,6 +432,25 @@ describe("worksheet mode is unchanged", () => {
     expect(h.getUsedRange).not.toHaveBeenCalled();
     expect(pivotRefreshes).toBe(0);
   });
+
+  // A sheet name keeps its spaces (round 15, Excel [LIVE]): the new-sheet name
+  // is taken exactly as typed, as every other create door takes it (rev15C).
+  it("creates the new worksheet with the name exactly as typed, spaces kept", async () => {
+    await open({ selection: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 } });
+    await typeInto(byTestId<HTMLInputElement>("pivot-new-sheet-name"), " Pivot ");
+    await clickOk();
+    expect(h.addSheet).toHaveBeenCalledWith(" Pivot ");
+    expect(h.create).toHaveBeenCalledTimes(1);
+    expect(h.create.mock.calls[0][0]).toMatchObject({ destinationCell: "' Pivot '!A1", destinationSheet: 1 });
+  });
+
+  it("still refuses an empty new-sheet name in the dialog", async () => {
+    await open({ selection: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 } });
+    await typeInto(byTestId<HTMLInputElement>("pivot-new-sheet-name"), "");
+    await clickOk();
+    expect(h.addSheet).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Please enter a name for the new worksheet.");
+  });
 });
 
 // Wave D, X3 (completes W24): Insert > PivotTable asks for no prefill

@@ -53,11 +53,11 @@ pub struct SheetCellRef {
 /// Gets all sheet names between start and end (inclusive) based on tab order.
 /// Returns an empty Vec if either sheet is not found.
 pub fn get_sheets_in_range(start: &str, end: &str, sheet_order: &[String]) -> Vec<String> {
-    let start_upper = start.to_uppercase();
-    let end_upper = end.to_uppercase();
+    let start_upper = identity::sheet_name_key(start);
+    let end_upper = identity::sheet_name_key(end);
 
-    let start_idx = sheet_order.iter().position(|s| s.to_uppercase() == start_upper);
-    let end_idx = sheet_order.iter().position(|s| s.to_uppercase() == end_upper);
+    let start_idx = sheet_order.iter().position(|s| identity::sheet_name_key(s) == start_upper);
+    let end_idx = sheet_order.iter().position(|s| identity::sheet_name_key(s) == end_upper);
 
     match (start_idx, end_idx) {
         (Some(si), Some(ei)) => {

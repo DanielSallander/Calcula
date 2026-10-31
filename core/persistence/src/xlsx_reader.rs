@@ -9,7 +9,7 @@ use crate::{
     CalculaMeta, PersistenceError, SavedCell, SavedCellValue, SavedMergedRegion, Sheet, Workbook,
     META_SHEET_NAME,
 };
-use calamine::{open_workbook, Data, Reader, Xlsx};
+use calamine::{Data, Reader, Xlsx};
 use engine::style::CellStyle;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -46,8 +46,11 @@ use std::path::Path;
 /// delimiter involved (`"`, `'`, `[`, `]`, the prefixes, the boundary
 /// punctuation) is ASCII, so byte comparison at a char boundary is exact.
 ///
-/// The export side needs no counterpart: `rust_xlsxwriter::Formula::new`
+/// The export side needs no counterpart for `_xlfn.`: `rust_xlsxwriter::Formula::new`
 /// re-adds the prefixes from its own table when it writes the formula back.
+/// Excel's file-only spellings of typed syntax (`_xlop.y`, `_TRO_*`,
+/// `ANCHORARRAY`, `SINGLE`, `[#This Row],`) are turned back first by
+/// `xlsx_formula_text::calcula_formula_text`, which calls this.
 pub(crate) fn strip_future_function_prefixes(formula: &str) -> String {
     const PREFIXES: [&str; 3] = ["_xlfn._xlws.", "_xlfn.", "_xlpm."];
 
@@ -172,6 +175,15 @@ pub(crate) fn strip_future_function_prefixes(formula: &str) -> String {
 /// `#VALUE!`, changing what `ERROR.TYPE` reports and which branch `IFERROR`
 /// takes. It is the same defect `SavedCellValue::from_value` carries a comment
 /// about having fixed on the `.cala` side; the xlsx sibling was missed.
+/// Excel's compatibility name for a future function or a LAMBDA/LET parameter
+/// (`_xlfn.LAMBDA`, `_xlpm.x`), matched without regard to case: Excel names
+/// are case-insensitive, so a writer's `_XLFN.LET` or `_Xlpm.x` is the same
+/// name, never a user's.
+fn is_compatibility_name(name: &str) -> bool {
+    let starts = |prefix: &str| name.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix));
+    starts("_xlfn.") || starts("_xlpm.")
+}
+
 fn error_literal(e: &calamine::CellErrorType) -> String {
     use calamine::CellErrorType as E;
     match e {
@@ -248,8 +260,146 @@ fn converts_from_1904(format: &engine::style::NumberFormat, value: f64) -> bool 
     }
 }
 
+/// The error literals calamine parses in a `t="e"` cell; it refuses any other,
+/// and with it the whole sheet.
+pub(crate) const CALAMINE_ERROR_LITERALS: &[&str] = &["#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!"];
+
+/// The archive calamine can read: when a worksheet part caches an error
+/// calamine does not know (`#SPILL!`, `#CALC!`, `#BLOCKED!` ... -- all of which
+/// Excel writes as `t="e"`), a copy in which each such value is `#N/A`.
+/// `None` when no part needs it (the file is read as it is). The real literal
+/// is read off the original part (`SheetMeta::cell_error_literals`) and put
+/// back by the value pass.
+fn archive_calamine_can_read(bytes: &[u8]) -> Result<Option<Vec<u8>>, PersistenceError> {
+    use std::io::{Read, Write};
+    let invalid = |e: zip::result::ZipError| PersistenceError::InvalidFormat(format!("xlsx read: {}", e));
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(invalid)?;
+    let mut rewritten: HashMap<String, String> = HashMap::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(invalid)?;
+        let name = entry.name().to_string();
+        if !(name.starts_with("xl/worksheets/") && name.ends_with(".xml")) {
+            continue;
+        }
+        let mut xml = String::new();
+        if entry.read_to_string(&mut xml).is_err() {
+            continue;
+        }
+        if let Some(sanitized) = with_unknown_errors_as_na(&xml) {
+            rewritten.insert(name, sanitized);
+        }
+    }
+    if rewritten.is_empty() {
+        return Ok(None);
+    }
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(invalid)?;
+        let name = entry.name().to_string();
+        match rewritten.remove(&name) {
+            None => out.raw_copy_file(entry).map_err(invalid)?,
+            Some(xml) => {
+                drop(entry);
+                out.start_file(name, zip::write::SimpleFileOptions::default()).map_err(invalid)?;
+                out.write_all(xml.as_bytes())?;
+            }
+        }
+    }
+    Ok(Some(out.finish().map_err(invalid)?.into_inner()))
+}
+
+/// A worksheet part with every `t="e"` cell's unknown literal replaced by
+/// `#N/A`; `None` when it has none.
+fn with_unknown_errors_as_na(xml: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = xml;
+    let mut changed = false;
+    while let Some(at) = rest.find("<c ") {
+        let tag_end = at + rest[at..].find('>')?;
+        let tag = &rest[at..tag_end];
+        let is_error = tag.contains(" t=\"e\"") || tag.contains(" t='e'");
+        if !is_error || tag.ends_with('/') {
+            out.push_str(&rest[..=tag_end]);
+            rest = &rest[tag_end + 1..];
+            continue;
+        }
+        let cell_end = tag_end + rest[tag_end..].find("</c>")?;
+        let body = &rest[tag_end + 1..cell_end];
+        out.push_str(&rest[..=tag_end]);
+        match (body.find("<v>"), body.find("</v>")) {
+            (Some(v_at), Some(v_end)) if v_at < v_end => {
+                let literal = &body[v_at + 3..v_end];
+                if CALAMINE_ERROR_LITERALS.contains(&literal) {
+                    out.push_str(body);
+                } else {
+                    out.push_str(&body[..v_at + 3]);
+                    out.push_str("#N/A");
+                    out.push_str(&body[v_end..]);
+                    changed = true;
+                }
+            }
+            _ => out.push_str(body),
+        }
+        rest = &rest[cell_end..];
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
+
+/// The value a cell's cached result really is, where calamine reads it wrongly:
+/// an error literal it does not know (it was handed `#N/A`, see
+/// [`archive_calamine_can_read`]) and a `t="str"` text result that looks like a
+/// number (calamine returns the number).
+fn typed_cached_value(
+    value: SavedCellValue,
+    meta: Option<&crate::xlsx_style_reader::SheetMeta>,
+    at: (u32, u32),
+) -> SavedCellValue {
+    let Some(meta) = meta else { return value };
+    match value {
+        SavedCellValue::Error(_) => match meta.cell_error_literals.get(&at) {
+            // `#GETTING_DATA` keeps the reader's `#N/A` (see `error_literal`).
+            Some(literal) if !CALAMINE_ERROR_LITERALS.contains(&literal.as_str()) && literal != "#GETTING_DATA" => {
+                SavedCellValue::Error(literal.clone())
+            }
+            _ => value,
+        },
+        SavedCellValue::Number(_) => match meta.numeric_text_results.get(&at) {
+            Some(text) => SavedCellValue::Text(text.clone()),
+            None => value,
+        },
+        other => other,
+    }
+}
+
+/// Read an .xlsx.
+///
+/// PROPORTIONAL (rev12B, round 13): the styles-and-metadata pass runs first
+/// and says whether any worksheet part caches an error literal calamine
+/// cannot parse. Only then is the file read whole and sanitized
+/// ([`archive_calamine_can_read`], which reads every worksheet part); an
+/// ordinary file is handed to calamine straight from disk, never held in
+/// memory whole and never decompressed an extra time. A file whose metadata
+/// pass fails is read the careful way.
 pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
-    let mut workbook: Xlsx<_> = open_workbook(path)?;
+    let style_data = parse_xlsx_styles(path);
+    if style_data.as_ref().map_or(true, |sd| sd.unknown_error_literals) {
+        let bytes = std::fs::read(path)?;
+        let bytes = archive_calamine_can_read(&bytes)?.unwrap_or(bytes);
+        let workbook: Xlsx<_> = Xlsx::new(std::io::Cursor::new(bytes))?;
+        load_xlsx_from(path, workbook, style_data)
+    } else {
+        let workbook: Xlsx<_> = Xlsx::new(std::io::BufReader::new(std::fs::File::open(path)?))?;
+        load_xlsx_from(path, workbook, style_data)
+    }
+}
+
+/// [`load_xlsx`]'s body over an opened calamine workbook and the metadata pass.
+fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
+    path: &Path,
+    mut workbook: Xlsx<RS>,
+    style_data: Option<crate::xlsx_style_reader::XlsxStyleData>,
+) -> Result<Workbook, PersistenceError> {
     let sheet_names = workbook.sheet_names().to_vec();
 
     if sheet_names.is_empty() {
@@ -258,8 +408,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         ));
     }
 
-    // ---------- Second pass: parse styles and sheet metadata from raw XML ----------
-    let style_data = parse_xlsx_styles(path);
+    // ---------- Second pass: styles and sheet metadata (read by `load_xlsx`) ----------
     // `<workbookPr date1904="1">`: every date serial in this file counts from
     // 1904-01-01 and has to be moved onto Calcula's 1900 epoch. See
     // `converts_from_1904` for exactly which cells that is.
@@ -392,6 +541,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     Data::DateTimeIso(s) => SavedCellValue::Text(s.clone()),
                     Data::DurationIso(s) => SavedCellValue::Text(s.clone()),
                 };
+                let saved_value = typed_cached_value(saved_value, sheet_meta, (actual_row, actual_col));
 
                 // Look up the XLSX style index for this cell (using absolute coords
                 // since the XML parser stores absolute positions)
@@ -435,7 +585,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                         let fr_col = (actual_col - formula_start.1) as usize;
                         fr.get((fr_row, fr_col))
                             .filter(|f| !f.is_empty())
-                            .map(|f| format!("={}", strip_future_function_prefixes(f)))
+                            .map(|f| format!("={}", crate::xlsx_formula_text::calcula_formula_text(f)))
                     } else {
                         None
                     }
@@ -451,13 +601,37 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     continue;
                 }
 
+                // A rich shared string's runs (calamine reads only its text),
+                // over the font of the cell's own format in the file.
+                let rich_text = match (&saved_value, &formula, sheet_meta, style_data.as_ref()) {
+                    (SavedCellValue::Text(text), None, Some(meta), Some(sd)) => meta
+                        .rich_string_cells
+                        .get(&(actual_row, actual_col))
+                        .and_then(|index| sd.rich_strings.get(index))
+                        .and_then(|runs| {
+                            let xf = meta.cell_styles.get(&(actual_row, actual_col)).copied().unwrap_or(0);
+                            let base = sd
+                                .cell_xfs
+                                .get(xf as usize)
+                                .and_then(|xf| sd.fonts.get(xf.font_id))
+                                .cloned()
+                                .unwrap_or_else(|| crate::xlsx_style_reader::ParsedFont {
+                                    size: engine::style::FontSize::from_whole_points(11),
+                                    name: "Calibri".to_string(),
+                                    ..Default::default()
+                                });
+                            crate::xlsx_style_reader::rich_text_runs(runs, text, &base)
+                        }),
+                    _ => None,
+                };
+
                 cells.insert(
                     (actual_row, actual_col),
                     SavedCell {
                         value: saved_value,
                         formula,
                         style_index,
-                        rich_text: None,
+                        rich_text,
                         // xlsx array formulas are not read as arrays here (see
                         // the `format_version: 0` note below); the host's spill
                         // recovery re-derives the extent by evaluating.
@@ -501,6 +675,11 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         let row_heights = sheet_meta
             .map(|m| m.row_heights.clone())
             .unwrap_or_default();
+
+        // The sheet's own standard sizes (<sheetFormatPr>), per sheet as Excel
+        // keeps them; None = the application standard.
+        let default_row_height = sheet_meta.and_then(|m| m.default_row_height);
+        let default_column_width = sheet_meta.and_then(|m| m.default_column_width);
 
         // Merged regions
         let merged_regions = sheet_meta
@@ -561,6 +740,8 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             cells,
             column_widths,
             row_heights,
+            default_row_height,
+            default_column_width,
             styles: calcula_styles.clone(),
             merged_regions,
             freeze_row,
@@ -640,10 +821,6 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         theme: engine::theme::ThemeDefinition::default(),
         scripts: Vec::new(),
         notebooks: Vec::new(),
-        // The shared authority, not a re-typed literal: an imported xlsx must
-        // land on the same grid the app launches with and File > New produces.
-        default_row_height: crate::DEFAULT_ROW_HEIGHT_PX,
-        default_column_width: crate::DEFAULT_COLUMN_WIDTH_PX,
         // Document properties come off `docProps/core.xml` (S8). This was
         // `WorkbookProperties::default()` while the WRITER emitted title,
         // author, subject, description, keywords and category on every export
@@ -684,6 +861,8 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         sheet_protections: Vec::new(),
         workbook_protection: None,
         pending_recalc: None,
+        calculation_incomplete: false,
+        calculation_manual: false,
         // `.xlsx` carries no `.cala` format_version, and this reader does not
         // read xlsx's own array-formula `ref` attributes either (calamine's
         // formula range gives the text, not the `t="array"`/`ref` pair), so an
@@ -721,6 +900,11 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             // added/removed in Excel, sheets reordered) the NATIVE charts win
             // for that sheet, plus carried charts that never had a native
             // form (non-mappable marks Excel could not have edited).
+            // Excel's `calcCompleted="0"`: the cached values were saved with
+            // calculation pending, so the opened workbook must not vouch for
+            // them (`Workbook::calculation_incomplete`, BUG-0615#2).
+            wb.calculation_incomplete = read_calculation_incomplete(&mut archive);
+
             let sheet_paths = crate::xlsx_style_reader::build_sheet_path_mapping(&mut archive);
             let native_entries =
                 crate::xlsx_chart_reader::parse_xlsx_charts(&mut archive, &sheet_paths);
@@ -809,7 +993,8 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             // workbook.xml sheet order (calamine's sheet_names order, which
             // includes _calcula_meta), so resolve through sheet_names first.
             //
-            // Calcula's runtime name map is keyed by UPPERCASE NAME ONLY, so
+            // Calcula's runtime name map is keyed by NAME ONLY (its defined-name
+            // key), so
             // Excel's same-name-different-scope pattern (a "Total" per sheet)
             // cannot be represented: keep ONE entry per name, preferring the
             // workbook-scoped one (usable from every sheet), else the first
@@ -823,6 +1008,19 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     if name == "_xlnm.Print_Area" || name == "_xlnm.Print_Titles" {
                         apply_print_defined_name(&mut wb, &sheet_names, &name, &refers_to, local_idx);
                     }
+                    continue;
+                }
+                // Excel's compatibility names for the future functions and
+                // LAMBDA/LET parameters a file uses ([LIVE] Excel 16 lists
+                // `_xlfn.LAMBDA`, `_xlpm.x`, ... all `=#NAME?` and hidden, on
+                // opening any such file, its own too). They are no user's
+                // names: Excel refuses `Names.Add` for a name starting with
+                // either prefix ([LIVE]), which is the file's spelling of a
+                // function or parameter name. A hidden one is skipped by
+                // `parse_defined_names` already; this holds for a writer that
+                // writes them unhidden. CASE-INSENSITIVELY, as Excel matches
+                // names: `_XLFN.LET` is the same compatibility name (rev16C).
+                if is_compatibility_name(&name) {
                     continue;
                 }
                 let sheet_id = match local_idx {
@@ -844,9 +1042,13 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                 // named LAMBDA lexed as one unknown identifier and was #NAME?.
                 let refers_to = format!(
                     "={}",
-                    strip_future_function_prefixes(refers_to.strip_prefix('=').unwrap_or(&refers_to))
+                    crate::xlsx_formula_text::calcula_formula_text(refers_to.strip_prefix('=').unwrap_or(&refers_to))
                 );
-                let key = name.trim().to_uppercase();
+                // Excel's defined-name rule (`identity::defined_name_key`), the
+                // key the runtime map uses: `Pæresalg` / `PAERESALG` is ONE
+                // name and `qµ` / `qμ` are two, where `to_uppercase` said the
+                // opposite of each.
+                let key = identity::defined_name_key(name.trim());
                 if let Some(&existing_idx) = by_name.get(&key) {
                     let existing_is_global = wb.named_ranges[existing_idx].sheet_id.is_none();
                     if !existing_is_global && sheet_id.is_none() {
@@ -883,6 +1085,86 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
     }
 
     Ok(wb)
+}
+
+/// Whether the archive's `xl/workbook.xml` says calculation was not completed
+/// (`<calcPr calcCompleted="0"/>`, or `"false"`). The attribute's default is
+/// true, so an absent attribute, element or part answers `false`.
+fn read_calculation_incomplete<R: std::io::Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> bool {
+    use std::io::Read;
+    let mut xml = String::new();
+    match archive.by_name(crate::xlsx_writer::XLSX_WORKBOOK_PART) {
+        Ok(mut part) => {
+            if part.read_to_string(&mut xml).is_err() {
+                return false;
+            }
+        }
+        Err(_) => return false,
+    }
+    calc_pr_says_incomplete(&xml)
+}
+
+/// The calculation mode an .xlsx was saved under: `true` for Excel's
+/// `<calcPr calcMode="manual"/>`. `"auto"`, `"autoNoTable"` (Calcula has no
+/// automatic-except-tables mode; it calculates them), an absent attribute,
+/// element or part all answer `false` -- the attribute's default is `auto`.
+///
+/// Read apart from [`load_xlsx`] because the mode is not the workbook's: in
+/// Excel it is an APPLICATION setting that a save records and an open of the
+/// first workbook adopts (see the host's `open_file`), so it never lives on
+/// `Workbook`.
+pub fn read_xlsx_manual_calculation(path: &Path) -> Result<bool, PersistenceError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| PersistenceError::InvalidFormat(format!("xlsx calcPr read: {}", e)))?;
+    let mut xml = String::new();
+    match archive.by_name(crate::xlsx_writer::XLSX_WORKBOOK_PART) {
+        Ok(mut part) => {
+            part.read_to_string(&mut xml)?;
+        }
+        Err(_) => return Ok(false),
+    }
+    Ok(calc_pr_says_manual(&xml))
+}
+
+/// [`read_xlsx_manual_calculation`] over the workbook part's text.
+pub(crate) fn calc_pr_says_manual(workbook_xml: &str) -> bool {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(workbook_xml);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) if e.local_name().as_ref() == b"calcPr" => {
+                return e.attributes().flatten().any(|attr| {
+                    attr.key.local_name().as_ref() == b"calcMode" && attr.value.as_ref() == b"manual"
+                });
+            }
+            Ok(Event::Eof) | Err(_) => return false,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// [`read_calculation_incomplete`] over the workbook part's text.
+pub(crate) fn calc_pr_says_incomplete(workbook_xml: &str) -> bool {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(workbook_xml);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) if e.local_name().as_ref() == b"calcPr" => {
+                return e.attributes().flatten().any(|attr| {
+                    attr.key.local_name().as_ref() == b"calcCompleted"
+                        && matches!(attr.value.as_ref(), b"0" | b"false")
+                });
+            }
+            Ok(Event::Eof) | Err(_) => return false,
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// Apply an Excel `_xlnm.Print_Area` / `_xlnm.Print_Titles` defined name to
@@ -925,5 +1207,59 @@ fn apply_print_defined_name(
         if is_row_range {
             ps.print_titles_rows = value;
         }
+    }
+}
+
+#[cfg(test)]
+mod defined_name_key_tests {
+    use crate::{SavedNamedRange, Sheet, Workbook};
+
+    fn name(name: &str, sheet_id: Option<identity::SheetId>) -> SavedNamedRange {
+        SavedNamedRange {
+            name: name.to_string(),
+            refers_to: "=Data!$A$1".to_string(),
+            sheet_id,
+            comment: None,
+            folder: None,
+        }
+    }
+
+    /// AN IMPORT KEEPS ONE NAME PER EXCEL NAME, by Excel's defined-name rule
+    /// (`identity::defined_name_key`, measured live in `defined_name_case.rs`):
+    /// `Pæresalg` (workbook scope) and `PAERESALG` (sheet scope) are ONE name
+    /// in the runtime map, so the reader keeps the workbook-scoped one -- and
+    /// `qµ` (MICRO SIGN) / `qμ` (GREEK MU) are TWO names, so both arrive.
+    /// `to_uppercase` said the opposite of each: it kept the ligature pair
+    /// apart (the second silently overwrote the first at load) and merged the
+    /// two mus into one.
+    ///
+    /// SABOTAGE: key `by_name` with `name.trim().to_uppercase()` again.
+    #[test]
+    fn imported_defined_names_are_deduplicated_by_excels_name_rule() {
+        let mut wb = Workbook::default();
+        wb.sheets = vec![Sheet::new("Data".to_string())];
+        let data = wb.sheets[0].id;
+        wb.named_ranges = vec![
+            name("PAERESALG", Some(data)),
+            name("Pæresalg", None),
+            name("q\u{B5}", None),
+            name("q\u{3BC}", None),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("name-keys.xlsx");
+        crate::xlsx_writer::save_xlsx(&wb, &path).unwrap();
+        let loaded = super::load_xlsx(&path).unwrap();
+        let mut got: Vec<(String, bool)> =
+            loaded.named_ranges.iter().map(|n| (n.name.clone(), n.sheet_id.is_none())).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("Pæresalg".to_string(), true),
+                ("q\u{B5}".to_string(), true),
+                ("q\u{3BC}".to_string(), true),
+            ],
+            "one name per Excel name, the workbook-scoped one kept"
+        );
     }
 }

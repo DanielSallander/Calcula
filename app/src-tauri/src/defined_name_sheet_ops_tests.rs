@@ -32,7 +32,7 @@ fn state_with_names(names: &[(&str, Option<usize>, &str)]) -> AppState {
         let mut table = state.named_ranges.write(&effect).unwrap();
         for (name, sheet_index, refers_to) in names {
             table.insert(
-                name.to_uppercase(),
+                identity::defined_name_key(name),
                 NamedRange {
                     name: name.to_string(),
                     sheet_index: *sheet_index,
@@ -47,7 +47,7 @@ fn state_with_names(names: &[(&str, Option<usize>, &str)]) -> AppState {
 }
 
 fn refers_to(state: &AppState, name: &str) -> String {
-    state.named_ranges.read().unwrap()[&name.to_uppercase()]
+    state.named_ranges.read().unwrap()[&identity::defined_name_key(name)]
         .refers_to
         .clone()
 }
@@ -57,7 +57,7 @@ fn scope_of(state: &AppState, name: &str) -> Option<Option<usize>> {
         .named_ranges
         .read()
         .unwrap()
-        .get(&name.to_uppercase())
+        .get(&identity::defined_name_key(name))
         .map(|nr| nr.sheet_index)
 }
 

@@ -2,106 +2,34 @@
 // PURPOSE: Goal Seek solver - iterative single-variable numerical solver.
 // CONTEXT: Uses the secant method to find a variable cell value that makes
 //          a target formula evaluate to a desired result.
+//
+// EVERY TRIAL IS A REAL WRITE (BUG-0613). A trial writes the changing cell and
+// recalculates through the shared cascade (`whatif_recalc`), then reads the
+// target cell's STORED value. It used to set the cell and evaluate the target's
+// formula text alone, so a target that reached the changing cell through any
+// other cell (`C1 = B1+1`, `B1 = A1*2`, or the same through another sheet) read
+// a value no trial ever recalculated -- a flat function Goal Seek could not
+// solve -- and the final value's dependents on other sheets were never
+// recalculated at all. Excel [LIVE]: Goal Seek on `Sheet1!C1 = Sheet2!B1+1`,
+// `Sheet2!B1 = Sheet1!A1*2` for 11 finds A1 = 5 and leaves Sheet2!B1 = 10.
+//
+// NO DEPENDENCY REFUSAL. This command refused a target that did not depend on
+// the changing cell through the ACTIVE sheet's map -- which also refused every
+// chain that crossed a sheet. Excel refuses nothing here [LIVE]: Goal Seek of
+// `G1 = 5` to 7 by F1 returns "not found" and leaves the last trial value in
+// F1. So does this now -- the LAST trial, not the best one.
 
-use std::collections::HashSet;
 use tauri::State;
 
-use crate::api_types::{CellData, GoalSeekParams, GoalSeekResult};
+use crate::api_types::{GoalSeekParams, GoalSeekResult};
 use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
-use crate::{
-    evaluate_formula_multi_sheet,
-    get_column_row_dependents, get_recalculation_order, AppState,
+use crate::whatif_recalc::{
+    begin_whatif_run, calculate_workbook_at_run_end, check_run_protection_held, stored_value_in,
+    write_cells_and_recalc, write_cells_and_recalc_in, RecalcMode, RunSheet, WhatIfStates,
 };
-use engine::{Cell, CellValue, Grid, StyleRegistry};
-
-// ============================================================================
-// Dependency verification
-// ============================================================================
-
-/// Check if the target cell transitively depends on the variable cell.
-/// Uses BFS through the dependents map (variable -> ... -> target).
-fn variable_affects_target(
-    variable_pos: (u32, u32),
-    target_pos: (u32, u32),
-    dependents: &crate::DependencyMap,
-    column_dependents: &crate::StripeDependentsMap,
-    row_dependents: &crate::StripeDependentsMap,
-) -> bool {
-    let mut visited = HashSet::new();
-    let mut stack = vec![variable_pos];
-
-    while let Some(cell) = stack.pop() {
-        if cell == target_pos {
-            return true;
-        }
-        if visited.contains(&cell) {
-            continue;
-        }
-        visited.insert(cell);
-
-        // Direct cell-to-cell dependents
-        if let Some(deps) = dependents.get(&cell) {
-            for dep in deps {
-                if !visited.contains(dep) {
-                    stack.push(*dep);
-                }
-            }
-        }
-    }
-
-    // Also check column-level and row-level dependents for the variable cell
-    // (e.g., formulas using whole-column references like A:A)
-    let (var_row, var_col) = variable_pos;
-    if let Some(col_deps) = column_dependents.get(&var_col) {
-        if col_deps.contains(&target_pos) {
-            return true;
-        }
-    }
-    if let Some(row_deps) = row_dependents.get(&var_row) {
-        if row_deps.contains(&target_pos) {
-            return true;
-        }
-    }
-
-    false
-}
-
-// ============================================================================
-// Solver helper
-// ============================================================================
-
-/// Set the variable cell to a numeric value in the grids array and evaluate
-/// the target formula. Returns the numeric result, or None if non-numeric.
-fn evaluate_target(
-    grids: &mut [Grid],
-    sheet_names: &[String],
-    active_sheet: usize,
-    variable_pos: (u32, u32),
-    variable_style_index: usize,
-    target_formula: &str,
-    value: f64,
-) -> Option<f64> {
-    // Create a cell with the trial value, preserving the original style
-    let mut var_cell = Cell::new_number(value);
-    var_cell.style_index = variable_style_index;
-
-    // Set in the active sheet's grid
-    grids[active_sheet].set_cell(variable_pos.0, variable_pos.1, var_cell);
-
-    // Evaluate the target formula in multi-sheet context
-    let result = evaluate_formula_multi_sheet(
-        grids,
-        sheet_names,
-        active_sheet,
-        target_formula,
-    );
-
-    match result {
-        CellValue::Number(n) if n.is_finite() => Some(n),
-        _ => None,
-    }
-}
+use crate::AppState;
+use engine::{Cell, CellValue};
 
 /// Build an error GoalSeekResult with the given message.
 fn error_result(msg: &str) -> GoalSeekResult {
@@ -113,6 +41,7 @@ fn error_result(msg: &str) -> GoalSeekResult {
         original_variable_value: 0.0,
         updated_cells: Vec::new(),
         error: Some(msg.to_string()),
+        undo_seq: None,
     }
 }
 
@@ -120,12 +49,162 @@ fn error_result(msg: &str) -> GoalSeekResult {
 // Tauri command
 // ============================================================================
 
-#[tauri::command]
+/// `(async)`: a run is many trials, each a recalculation of the changing
+/// cells' dependents; as a sync command the whole run sat on the WebView2 UI
+/// thread and the window showed Not Responding until it ended.
+///
+/// Two calls in one door: `params` runs a Goal Seek; `cancel_run` (the
+/// `undo_seq` a run answered) is the status dialog's CANCEL
+/// ([`cancel_goal_seek_impl`]).
+#[tauri::command(async)]
 pub fn goal_seek(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    params: Option<GoalSeekParams>,
+    cancel_run: Option<u64>,
+) -> GoalSeekResult {
+    let states = WhatIfStates {
+        user_files: &user_files_state,
+        pivots: &pivot_state,
+        pane_control: &pane_control_state,
+        ribbon_filter: &ribbon_filter_state,
+    };
+    match (params, cancel_run) {
+        (_, Some(run)) => cancel_goal_seek_impl(&state, &file_state, &states, run),
+        (Some(params), None) => goal_seek_impl(&state, &file_state, &states, params),
+        (None, None) => error_result("Goal Seek needs a target, a value and a changing cell"),
+    }
+}
+
+/// Why a Cancel took nothing back: the run's step is no longer the newest
+/// entry in the undo history.
+pub(crate) const CANCEL_STEP_MOVED: &str =
+    "Something else changed the workbook after the Goal Seek ran, so its result was not taken back. \
+     Use Undo to reach it.";
+
+/// THE STATUS DIALOG'S CANCEL, as Excel's: the changing cell goes back exactly
+/// as it was and the run leaves NOTHING in the history -- no undo step and no
+/// redo step [LIVE, Excel 16, visible instance: Goal Seek of `B1 = A1*2` to 10
+/// by A1, Cancel in Goal Seek Status -> A1 = 1 again, Undo and Redo both
+/// disabled, Ctrl+Y changes nothing; Workbook.Saved is False, so the document
+/// counts as changed]. Cancel used to be a scoped undo of the run's step,
+/// which moved it onto the REDO stack, so Ctrl+Y re-applied the result.
+///
+/// The run's step (`run`, its `undo_seq`) is taken off the history only while
+/// it is still the newest entry and is the Goal Seek step this door pushed,
+/// under the stack lock alone; the cell it holds is then written back through
+/// the same write and recalculation a trial uses. Anything else on top refuses
+/// and moves nothing.
+pub(crate) fn cancel_goal_seek_impl(
+    state: &AppState,
+    file_state: &FileState,
+    states: &WhatIfStates<'_>,
+    run: u64,
+) -> GoalSeekResult {
+    // Not while a run is writing trials (see `begin_whatif_run`).
+    let _run = match begin_whatif_run(state) {
+        Ok(run) => run,
+        Err(e) => return error_result(&e),
+    };
+    // WRITE BACK FIRST, THEN TAKE THE STEP (rev12B, round 13). The step was
+    // popped before the write-back, so a write that failed (a sheet removed
+    // while the status dialog was open) lost the run's undo step AND left the
+    // cell unrestored. Now the step is only READ here; it leaves the history
+    // after the cell is back, so a failed write leaves the step for Undo.
+    let change = {
+        let mut stack = state.undo_stack.lock().unwrap();
+        let is_the_run = stack.top_undo_seq() == Some(run) && stack.undo_description() == Some(GOAL_SEEK_STEP);
+        if !is_the_run {
+            return error_result(CANCEL_STEP_MOVED);
+        }
+        // Read the top step in place: taken and put straight back under this
+        // one hold (`push_undo_for_redo` keeps its id and the redo stack).
+        let step = stack.pop_undo();
+        let change = step.as_ref().and_then(|step| step.changes.first().cloned());
+        if let Some(step) = step {
+            stack.push_undo_for_redo(step);
+        }
+        change
+    };
+    let Some(engine::CellChange::SetCell { sheet, row, col, previous }) = change else {
+        return error_result(CANCEL_STEP_MOVED);
+    };
+    // Excel's Cancel leaves the workbook changed (Saved = False) [LIVE].
+    let effect = DocumentEffect::mutates(file_state);
+    let mut updated_cells = Vec::new();
+    if let Err(e) = write_cells_and_recalc(
+        state,
+        states,
+        &effect,
+        sheet,
+        &[((row, col), previous.clone())],
+        RecalcMode::Always,
+        &mut updated_cells,
+    ) {
+        return error_result(&e);
+    }
+    // The cell is back: the run leaves nothing in the history (Excel's
+    // Cancel). Taken only if it is still the newest step -- the single-flight
+    // keeps every other what-if out, and a step pushed on top meanwhile is
+    // left alone (undoing the run's step later re-writes the value already
+    // restored).
+    {
+        let mut stack = state.undo_stack.lock().unwrap();
+        if stack.top_undo_seq() == Some(run) && stack.undo_description() == Some(GOAL_SEEK_STEP) {
+            stack.pop_undo();
+        }
+    }
+    // Excel's Cancel also leaves the whole workbook calculated [LIVE: under
+    // manual calculation, Cancel in Goal Seek Status puts A1 back and
+    // recalculates stale cells that never read it, CalculationState xlDone].
+    calculate_workbook_at_run_end(state, states, &mut updated_cells);
+    let restored = match previous.as_ref().map(|c| &c.value) {
+        Some(CellValue::Number(n)) => *n,
+        _ => 0.0,
+    };
+    GoalSeekResult {
+        found_solution: false,
+        variable_value: restored,
+        target_result: 0.0,
+        iterations: 0,
+        original_variable_value: restored,
+        updated_cells,
+        error: None,
+        undo_seq: None,
+    }
+}
+
+/// The description of the one step a run pushes.
+const GOAL_SEEK_STEP: &str = "Goal Seek";
+
+/// The target's stored value as Goal Seek reads it: a number, or a logical
+/// (TRUE = 1, FALSE = 0) -- [LIVE, Excel 16 COM] Goal Seek of `=A3>5` to 1 by
+/// A3 returns True and leaves A3 = 6.12. Text, an error and an empty cell are
+/// no number.
+fn target_number(value: &CellValue) -> Option<f64> {
+    match value {
+        CellValue::Number(n) if n.is_finite() => Some(*n),
+        CellValue::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// The body of [`goal_seek`], callable without a Tauri runtime.
+pub(crate) fn goal_seek_impl(
+    state: &AppState,
+    file_state: &FileState,
+    states: &WhatIfStates<'_>,
     params: GoalSeekParams,
 ) -> GoalSeekResult {
+    // ONE what-if run at a time, taken before every gate (see `begin_whatif_run`).
+    let _run = match begin_whatif_run(state) {
+        Ok(run) => run,
+        Err(e) => return error_result(&e),
+    };
     // BACKGROUND: up to 100 secant iterations, each a full dependent recalc
     // whose results are WRITTEN into the grid — the persisting ceiling, per
     // formula, with no aggregate cap (the 100-iteration bound already exists and
@@ -138,21 +217,8 @@ pub fn goal_seek(
         params.target_row, params.target_col, params.target_value,
         params.variable_row, params.variable_col);
 
-    // Sheet protection on the CHANGING cell, before acquiring other locks.
-    // Goal Seek writes that cell permanently, so a locked cell refuses the run.
-    {
-        let active_sheet = *state.active_sheet.read().unwrap();
-        if let Err(e) = crate::protection::check_sheet_protection_range(
-            &state,
-            active_sheet,
-            params.variable_row,
-            params.variable_col,
-            params.variable_row,
-            params.variable_col,
-        ) {
-            return error_result(&e);
-        }
-    }
+    // (Sheet protection on the CHANGING cell is asked under the validation's
+    // grid guards below, of the sheet the run writes -- rev13A.)
 
     // Check writeback region before acquiring other locks
     {
@@ -171,67 +237,114 @@ pub fn goal_seek(
         }
     }
 
-    // Acquire locks (same order as update_cell to avoid deadlocks)
-    let grid = state.grid.lock_pending().unwrap();
-    let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
-    let dependents_map = state.dependents.lock().unwrap();
-    let column_dependents_map = state.column_dependents.lock().unwrap();
-    let row_dependents_map = state.row_dependents.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
-
     let target_pos = (params.target_row, params.target_col);
     let variable_pos = (params.variable_row, params.variable_col);
 
-    // --- Validation ---
+    // --- Validation, under the grid locks; every guard dropped before a trial
+    // writes (the cascade takes them itself) ---
+    let (effect, run_sheet, original_cell, original_value, variable_style_index) = {
+        let grid = state.grid.lock_pending().unwrap();
+        let grids = state.grids.lock_pending().unwrap();
+        let active_sheet = *state.active_sheet.read().unwrap();
 
-    // 1. Target cell must contain a formula
-    let target_formula = match grid.get_cell(params.target_row, params.target_col) {
-        Some(cell) => match cell.formula_string() {
-            Some(f) => f,
-            None => return error_result("Cell must contain a formula"),
-        },
-        None => return error_result("Cell must contain a formula"),
+        // 0. Sheet protection on the CHANGING cell: Goal Seek writes it
+        // permanently, so a locked cell refuses the run. Asked under these
+        // guards, of the sheet the run writes (rev13A: it read the active
+        // sheet before taking them).
+        if let Err(e) = check_run_protection_held(state, &grid, &grids, active_sheet, |kinds, protection, sheet, styles| {
+            crate::protection::check_sheet_protection_range_in(
+                kinds,
+                protection,
+                sheet,
+                styles,
+                active_sheet,
+                params.variable_row,
+                params.variable_col,
+                params.variable_row,
+                params.variable_col,
+            )
+        }) {
+            return error_result(&e);
+        }
+
+        // 1. Target cell must contain a formula
+        let target_cell = grid.get_cell(params.target_row, params.target_col);
+        if target_cell.and_then(|cell| cell.formula_string()).is_none() {
+            return error_result("Cell must contain a formula");
+        }
+        // ...whose value is a number now. [LIVE, Excel 16 COM] a target that
+        // currently holds text (`="x"&A2`, `=""`) or an error (`=1/A2` with A2
+        // = 0) is refused before anything is written -- the changing cell
+        // keeps its value and Workbook.Saved stays True (the UI dialog refuses
+        // the same way). This run used to write a trial, find no number, put
+        // the cell back and report the error with the document dirtied and no
+        // undo step. A logical counts (TRUE = 1), as in Excel.
+        if target_cell.and_then(|cell| target_number(&cell.value)).is_none() {
+            return error_result("Target formula does not evaluate to a number");
+        }
+
+        // 2. Variable cell must NOT contain a formula
+        let variable_cell = grid.get_cell(params.variable_row, params.variable_col).cloned();
+        if variable_cell.as_ref().map_or(false, |c| c.has_formula()) {
+            return error_result("Changing cell must not contain a formula");
+        }
+
+        // Save original variable value and style index for potential revert
+        let original_value = match variable_cell.as_ref().map(|c| &c.value) {
+            Some(CellValue::Number(n)) => *n,
+            _ => 0.0,
+        };
+        let variable_style_index = variable_cell.as_ref().map_or(0, |c| c.style_index);
+
+        // Every refusal is now behind us (sheet protection, writeback region,
+        // target has a formula, variable has none), so from here the solver
+        // WRITES into the grid. It is marked here rather than at the end because
+        // even an unsuccessful run leaves the last trial in the changing cell,
+        // as Excel's does [LIVE].
+        let effect = DocumentEffect::mutates(file_state);
+        let _grid = grid.authorize(&effect);
+        let _grids = grids.authorize(&effect);
+        // The run's sheet by stable id: every trial, read-back and the undo
+        // step follow it if a tab moves while the run is going.
+        let run_sheet = RunSheet::at(state, active_sheet);
+        (effect, run_sheet, variable_cell, original_value, variable_style_index)
     };
 
-    // 2. Variable cell must NOT contain a formula
-    let variable_cell = grid.get_cell(params.variable_row, params.variable_col);
-    if variable_cell.map_or(false, |c| c.has_formula()) {
-        return error_result("Changing cell must not contain a formula");
-    }
-
-    // Save original variable value and style index for potential revert
-    let original_value = match variable_cell.map(|c| &c.value) {
-        Some(CellValue::Number(n)) => *n,
-        Some(CellValue::Empty) | None => 0.0,
-        _ => 0.0,
+    // One trial: the changing cell written, every dependent recalculated
+    // through the shared cascade, the target's stored value read back. A write
+    // that FAILED -- the run's sheet deleted mid-run (`WHATIF_SHEET_GONE`) -- is
+    // an error, never "the target is no number" (rev13A: it was swallowed into
+    // a silent "no solution, NaN").
+    let trial = |x: f64, updated: &mut Vec<crate::api_types::CellData>| -> Result<Option<f64>, String> {
+        let mut cell = Cell::new_number(x);
+        cell.style_index = variable_style_index;
+        write_cells_and_recalc_in(
+            state,
+            states,
+            &effect,
+            run_sheet,
+            &[(variable_pos, Some(cell))],
+            RecalcMode::Always,
+            updated,
+        )?;
+        Ok(target_number(&stored_value_in(state, run_sheet, target_pos.0, target_pos.1)))
     };
-    let variable_style_index = variable_cell.map_or(0, |c| c.style_index);
-
-    // 3. Dependency verification: target must depend on variable
-    if !variable_affects_target(
-        variable_pos,
-        target_pos,
-        &dependents_map,
-        &column_dependents_map,
-        &row_dependents_map,
-    ) {
-        return error_result("Target cell formula does not depend on the changing cell");
-    }
-
-    // Every refusal is now behind us (sheet protection, writeback region, target has a
-    // formula, variable has none, and the dependency check above), so from here the
-    // solver WRITES into the grid. It is marked here rather than at the end because
-    // the failure paths below restore only the variable cell -- the dependents they
-    // recalculated along the way keep the perturbed values, so even an unsuccessful
-    // run leaves the document different from the last save. Per the census rule for
-    // reverts: a revert to a mid-run snapshot is not a revert to disk.
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut grid = grid.authorize(&effect);
-    let mut grids = grids.authorize(&effect);
+    let mut sink = Vec::new();
+    // The last value tried: what a search that finds nothing leaves behind.
+    let mut last_x = original_value;
+    // The first failed write; the search stops on it and the run reports it.
+    let mut failed: Option<String> = None;
+    let mut probe = |x: f64| -> Option<f64> {
+        sink.clear();
+        last_x = x;
+        match trial(x, &mut sink) {
+            Ok(target) => target,
+            Err(e) => {
+                failed.get_or_insert(e);
+                None
+            }
+        }
+    };
 
     let goal = params.target_value;
     let max_iter = params.max_iterations;
@@ -239,285 +352,157 @@ pub fn goal_seek(
 
     // --- Secant Method Solver ---
 
-    // Initial point: current variable value
-    let mut x0 = original_value;
-    let f0_eval = evaluate_target(
-        &mut grids, &sheet_names, active_sheet,
-        variable_pos, variable_style_index, &target_formula, x0,
-    );
-    let mut f0 = match f0_eval {
-        Some(v) => v - goal,
-        None => {
-            // Restore original value
-            let mut restore_cell = Cell::new_number(original_value);
-            restore_cell.style_index = variable_style_index;
-            grids[active_sheet].set_cell(variable_pos.0, variable_pos.1, restore_cell);
-            return error_result("Target formula does not evaluate to a number");
+    // A trial whose target is no number ends the search with nothing found,
+    // leaving that trial in the changing cell -- the first two probes as much
+    // as any later one. [LIVE, Excel 16 COM] `=IF(A4>5,"big",A4)` sought to 10
+    // by A4 = 1 returns False and leaves A4 = 5.00000000022352, the trial that
+    // turned it into text. A target that is no number BEFORE the run was
+    // refused above, before anything was written.
+    let (best_x, iterations, found) = 'solve: {
+        // Initial point: current variable value
+        let mut x0 = original_value;
+        let mut f0 = match probe(x0) {
+            Some(v) => v - goal,
+            None => break 'solve (x0, 0, false),
+        };
+
+        // Check if already at the solution
+        if f0.abs() < tol {
+            break 'solve (x0, 0, true);
         }
-    };
 
-    // Check if already at the solution
-    if f0.abs() < tol {
-        // Already solved - still need to build updated_cells
-        // Fall through to finalization with x0 as the answer
-        return finalize_result(
-            &mut grid, &mut grids, &styles, &merged_regions,
-            &dependents_map, &column_dependents_map, &row_dependents_map,
-            &sheet_names, active_sheet,
-            variable_pos, variable_style_index,
-            target_pos, &target_formula,
-            x0, original_value, 0, true,
-            &locale,
-        );
-    }
+        // Second point: perturb slightly for secant method
+        let mut x1 = if x0.abs() < 1e-10 { 0.001 } else { x0 * 1.001 };
+        let mut f1 = match probe(x1) {
+            Some(v) => v - goal,
+            None => break 'solve (x1, 0, false),
+        };
 
-    // Second point: perturb slightly for secant method
-    let mut x1 = if x0.abs() < 1e-10 { 0.001 } else { x0 * 1.001 };
-    let f1_eval = evaluate_target(
-        &mut grids, &sheet_names, active_sheet,
-        variable_pos, variable_style_index, &target_formula, x1,
-    );
-    let mut f1 = match f1_eval {
-        Some(v) => v - goal,
-        None => {
-            let mut restore_cell = Cell::new_number(original_value);
-            restore_cell.style_index = variable_style_index;
-            grids[active_sheet].set_cell(variable_pos.0, variable_pos.1, restore_cell);
-            return error_result("Target formula does not evaluate to a number");
+        if f1.abs() < tol {
+            break 'solve (x1, 1, true);
         }
-    };
 
-    if f1.abs() < tol {
-        return finalize_result(
-            &mut grid, &mut grids, &styles, &merged_regions,
-            &dependents_map, &column_dependents_map, &row_dependents_map,
-            &sheet_names, active_sheet,
-            variable_pos, variable_style_index,
-            target_pos, &target_formula,
-            x1, original_value, 1, true,
-            &locale,
-        );
-    }
+        let mut iterations: u32 = 0;
+        let mut best_x = if f0.abs() < f1.abs() { x0 } else { x1 };
+        let mut best_f = f0.abs().min(f1.abs());
 
-    let mut iterations: u32 = 0;
-    let mut best_x = if f0.abs() < f1.abs() { x0 } else { x1 };
-    let mut best_f = f0.abs().min(f1.abs());
+        for _ in 0..max_iter {
+            iterations += 1;
 
-    for _ in 0..max_iter {
-        iterations += 1;
+            let denominator = f1 - f0;
+            if denominator.abs() < 1e-15 {
+                // Derivative effectively zero - try a bigger perturbation
+                x1 = x1 + if x1.abs() < 1e-10 { 1.0 } else { x1 * 0.1 };
+                f1 = match probe(x1) {
+                    Some(v) => v - goal,
+                    None => break,
+                };
+                if f1.abs() < tol {
+                    best_x = x1;
+                    best_f = f1.abs();
+                    break;
+                }
+                if f1.abs() < best_f {
+                    best_f = f1.abs();
+                    best_x = x1;
+                }
+                continue;
+            }
 
-        let denominator = f1 - f0;
-        if denominator.abs() < 1e-15 {
-            // Derivative effectively zero - try a bigger perturbation
-            x1 = x1 + if x1.abs() < 1e-10 { 1.0 } else { x1 * 0.1 };
-            f1 = match evaluate_target(
-                &mut grids, &sheet_names, active_sheet,
-                variable_pos, variable_style_index, &target_formula, x1,
-            ) {
+            // Secant step
+            let x_new = x1 - f1 * (x1 - x0) / denominator;
+
+            // Clamp step size to prevent wild divergence
+            let step = x_new - x1;
+            let max_step = (x1 - x0).abs() * 10.0 + 1.0;
+            let x_new = if step.abs() > max_step {
+                x1 + step.signum() * max_step
+            } else {
+                x_new
+            };
+
+            let f_new = match probe(x_new) {
                 Some(v) => v - goal,
                 None => break,
             };
-            if f1.abs() < tol {
-                best_x = x1;
-                best_f = f1.abs();
+
+            if f_new.abs() < best_f {
+                best_f = f_new.abs();
+                best_x = x_new;
+            }
+
+            if f_new.abs() < tol {
                 break;
             }
-            if f1.abs() < best_f {
-                best_f = f1.abs();
-                best_x = x1;
-            }
-            continue;
+
+            // Advance for next iteration
+            x0 = x1;
+            f0 = f1;
+            x1 = x_new;
+            f1 = f_new;
         }
-
-        // Secant step
-        let x_new = x1 - f1 * (x1 - x0) / denominator;
-
-        // Clamp step size to prevent wild divergence
-        let step = x_new - x1;
-        let max_step = (x1 - x0).abs() * 10.0 + 1.0;
-        let x_new = if step.abs() > max_step {
-            x1 + step.signum() * max_step
-        } else {
-            x_new
-        };
-
-        let f_new = match evaluate_target(
-            &mut grids, &sheet_names, active_sheet,
-            variable_pos, variable_style_index, &target_formula, x_new,
-        ) {
-            Some(v) => v - goal,
-            None => break,
-        };
-
-        if f_new.abs() < best_f {
-            best_f = f_new.abs();
-            best_x = x_new;
-        }
-
-        if f_new.abs() < tol {
-            break;
-        }
-
-        // Advance for next iteration
-        x0 = x1;
-        f0 = f1;
-        x1 = x_new;
-        f1 = f_new;
-    }
-
-    let found = best_f < tol;
-
-    crate::log_info!("GOALSEEK", "Done: found={} value={} residual={} iters={}",
-        found, best_x, best_f, iterations);
-
-    finalize_result(
-        &mut grid, &mut grids, &styles, &merged_regions,
-        &dependents_map, &column_dependents_map, &row_dependents_map,
-        &sheet_names, active_sheet,
-        variable_pos, variable_style_index,
-        target_pos, &target_formula,
-        best_x, original_value, iterations, found,
-        &locale,
-    )
-}
-
-// ============================================================================
-// Finalization: apply result and build updated cells
-// ============================================================================
-
-#[allow(clippy::too_many_arguments)]
-fn finalize_result(
-    grid: &mut Grid,
-    grids: &mut [Grid],
-    styles: &StyleRegistry,
-    merged_regions: &HashSet<crate::api_types::MergedRegion>,
-    dependents_map: &crate::DependencyMap,
-    column_dependents_map: &crate::StripeDependentsMap,
-    row_dependents_map: &crate::StripeDependentsMap,
-    sheet_names: &[String],
-    active_sheet: usize,
-    variable_pos: (u32, u32),
-    variable_style_index: usize,
-    target_pos: (u32, u32),
-    target_formula: &str,
-    final_value: f64,
-    original_value: f64,
-    iterations: u32,
-    found: bool,
-    locale: &engine::LocaleSettings,
-) -> GoalSeekResult {
-    // 1. Set the final value in the variable cell
-    let mut final_cell = Cell::new_number(final_value);
-    final_cell.style_index = variable_style_index;
-    grids[active_sheet].set_cell(variable_pos.0, variable_pos.1, final_cell.clone());
-    grid.set_cell(variable_pos.0, variable_pos.1, final_cell);
-
-    // 2. Re-evaluate the target cell to get its final display value
-    let target_result_value = evaluate_formula_multi_sheet(
-        grids,
-        sheet_names,
-        active_sheet,
-        target_formula,
-    );
-    let target_result_num = match &target_result_value {
-        CellValue::Number(n) => *n,
-        _ => f64::NAN,
+        (best_x, iterations, best_f < tol)
     };
+    drop(probe);
 
-    // Update the target cell value in the grid
-    if let Some(target_cell) = grids[active_sheet].get_cell(target_pos.0, target_pos.1).cloned() {
-        let mut updated_target = target_cell;
-        updated_target.value = target_result_value.clone();
-        grids[active_sheet].set_cell(target_pos.0, target_pos.1, updated_target.clone());
-        grid.set_cell(target_pos.0, target_pos.1, updated_target);
+    // A trial that could not be written (the sheet is gone) ends the run with
+    // that error: there is no sheet to leave a value on and no step to take
+    // back.
+    if let Some(e) = failed {
+        return error_result(&e);
     }
 
-    // 3. Re-evaluate all dependents of the variable cell
-    let mut recalc_order = get_recalculation_order(variable_pos, dependents_map);
-    // Also get column/row dependents
-    let extra_deps = get_column_row_dependents(variable_pos, column_dependents_map, row_dependents_map);
-    for dep in &extra_deps {
-        if !recalc_order.contains(dep) {
-            recalc_order.push(*dep);
-        }
-    }
+    // A search that finds nothing leaves its LAST trial in the changing cell,
+    // as Excel does [LIVE: Goal Seek of `G1 = 5` to 7 by F1 = 10 returned False
+    // and left F1 at -1006629.96, its last trial]. This used to write the best
+    // trial instead -- for a target that does not depend on the changing cell
+    // that is the second probe, `x0*1.001`, every time.
+    let final_x = if found { best_x } else { last_x };
+    crate::log_info!("GOALSEEK", "Done: found={} value={} iters={}", found, final_x, iterations);
 
-    for &(r, c) in &recalc_order {
-        if let Some(cell) = grids[active_sheet].get_cell(r, c).cloned() {
-            if let Some(formula) = cell.formula_string() {
-                let new_value = evaluate_formula_multi_sheet(
-                    grids,
-                    sheet_names,
-                    active_sheet,
-                    &formula,
-                );
-                let mut updated = cell;
-                updated.value = new_value;
-                grids[active_sheet].set_cell(r, c, updated.clone());
-                grid.set_cell(r, c, updated);
-            }
-        }
-    }
-
-    // 4. Build updated_cells vector
+    // The answer, written like any trial; this reply repaints every cell the
+    // cascade re-evaluated, on every sheet.
     let mut updated_cells = Vec::new();
-
-    // Helper to build CellData
-    let build_cell_data = |g: &Grid, r: u32, c: u32| -> Option<CellData> {
-        let cell = g.get_cell(r, c)?;
-        // Resolve against `g` - the same grid the cell was read from.
-        let effective_style_index = g.effective_style_index(r, c);
-        let style = styles.get(effective_style_index);
-        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, style, &locale);
-
-        let merge = merged_regions.iter().find(|m| m.start_row == r && m.start_col == c);
-        let (row_span, col_span) = match merge {
-            Some(m) => (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1),
-            None => (1, 1),
-        };
-
-        Some(CellData {
-            row: r,
-            col: c,
-            display,
-            overflow,
-            display_color: None,
-            formula: cell.formula_string().map(|f| format!("={}", f)),
-            style_index: effective_style_index,
-            row_span,
-            col_span,
-            sheet_index: None,
-            rich_text: None,
-                accounting_layout: None,
-        })
+    let target_result = match trial(final_x, &mut updated_cells) {
+        Ok(target) => target.unwrap_or(f64::NAN),
+        // The sheet went between the last trial and the answer.
+        Err(e) => return error_result(&e),
     };
 
-    // Variable cell
-    if let Some(cd) = build_cell_data(&grids[active_sheet], variable_pos.0, variable_pos.1) {
-        updated_cells.push(cd);
-    }
+    // ONE undo step that puts the changing cell back EXACTLY as it was -- a
+    // text, an empty cell or a number, with its own format -- through the
+    // restore Ctrl+Z uses, which recalculates its dependents. Pushed as a step
+    // of its OWN (never joined to a stranger's open transaction) and the id it
+    // was stamped with handed back, so the status dialog's Cancel can take back
+    // THIS step and nothing else, leaving no redo step (`cancel_goal_seek_impl`).
+    // Every guard is released here, so the stack is taken alone.
+    // The sheet as it is NOW (a tab may have moved during the run); a sheet
+    // deleted mid-run leaves nothing to take back.
+    let undo_seq = run_sheet.index(state).and_then(|sheet| {
+        let mut step = engine::Transaction::new(GOAL_SEEK_STEP);
+        step.add_change(engine::CellChange::SetCell {
+            sheet,
+            row: variable_pos.0,
+            col: variable_pos.1,
+            previous: original_cell.clone(),
+        });
+        state.undo_stack.lock().unwrap().push_own_step(step)
+    });
 
-    // Target cell
-    if let Some(cd) = build_cell_data(&grids[active_sheet], target_pos.0, target_pos.1) {
-        updated_cells.push(cd);
-    }
-
-    // Dependent cells
-    for &(r, c) in &recalc_order {
-        if (r, c) != target_pos && (r, c) != variable_pos {
-            if let Some(cd) = build_cell_data(&grids[active_sheet], r, c) {
-                updated_cells.push(cd);
-            }
-        }
-    }
+    // Found or not, the run ends with the WHOLE workbook calculated, as Excel's
+    // does under manual calculation [LIVE]: every stale cell on every sheet,
+    // and the "calculation incomplete" mark cleared (see
+    // `calculate_workbook_at_run_end`). The trials above stayed seeded.
+    calculate_workbook_at_run_end(state, states, &mut updated_cells);
 
     GoalSeekResult {
         found_solution: found,
-        variable_value: final_value,
-        target_result: target_result_num,
+        variable_value: final_x,
+        target_result,
         iterations,
         original_variable_value: original_value,
         updated_cells,
         error: None,
+        undo_seq,
     }
 }

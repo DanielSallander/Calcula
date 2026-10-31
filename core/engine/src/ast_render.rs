@@ -648,31 +648,99 @@ pub fn quote_sheet_name(name: &str) -> String {
 /// trailing dot is the trim-reference operator). So a sheet named `True`,
 /// `Q1.` or `a..b` rendered bare produced text that does not parse --
 /// `every_sheet_name_survives_render_then_parse_in_every_reference_shape`.
+///
+/// AND EXCEL WOULD WRITE IT BARE TOO. Excel [LIVE, Excel 16, 2026-10-31,
+/// relocref/probe-quote*.ps1: a sheet of each name, `Range.Formula` read back]
+/// writes a non-ASCII LETTER bare (`=Översikt!A1`, `=Straße!A1`, `=Å1!A1`,
+/// `=中文!A1` -- the lexer reads every one of them), and QUOTES two shapes this
+/// rule used to leave bare:
+///   * a name that IS a cell address in range: `'A1'`, `'Q1'`, `'x1'`,
+///     `'XFD1048576'`, `'A01'` -- but `XFE1`, `AAAA1`, `A0`, `XFD1048577`
+///     bare;
+///   * a name that STARTS with an R1C1 reference: `'R'`, `'C'`, `'RC'`,
+///     `'R2'`, `'C3'`, `'R1C1'`, `'R1x'`, `'RC1x'`, `'R1Ö'`, `'C16385'` -- but
+///     `Rx`, `RCx`, `RR`, `R0`, `C0`, `R1048577` and `R1.x` bare.
+/// `Sheet1` is neither, so the default names stay bare, as in Excel.
 fn is_bare_sheet_name(name: &str) -> bool {
     let chars: Vec<char> = name.chars().collect();
+    // The lexer's letter class (`is_letter`, core/parser/src/lexer.rs), minus
+    // the `\` a sheet name cannot hold.
+    let letter = |c: char| c.is_ascii_alphabetic() || c == '_' || (!c.is_ascii() && c.is_alphabetic());
     match chars.first() {
-        Some(c) if c.is_ascii_alphabetic() || *c == '_' => {}
+        Some(c) if letter(*c) => {}
         _ => return false,
     }
-    // A reference-SHAPED name (`A1`, `ZZ100`) needs no quoting: the trailing
-    // `!` is what tells the lexer this is a sheet, and `=A1!B2` parses with
-    // sheet `A1`. Quoting them would have been harmless in isolation but it
-    // also captures `Sheet1`, `Sheet2`, `Q1` -- the DEFAULT sheet names -- and
-    // would have re-quoted the formula text of essentially every existing
-    // workbook for nothing.
     for (i, c) in chars.iter().enumerate() {
         match c {
-            c if c.is_ascii_alphanumeric() || *c == '_' => {}
+            c if letter(*c) || c.is_ascii_digit() => {}
             // The lexer's own continuation rule for a dot.
             '.' => match chars.get(i + 1) {
-                Some(next) if next.is_ascii_alphanumeric() || *next == '_' => {}
+                Some(next) if letter(*next) || next.is_ascii_digit() => {}
                 _ => return false,
             },
             _ => return false,
         }
     }
     // The words the lexer turns into something other than an identifier.
-    !(name.eq_ignore_ascii_case("TRUE") || name.eq_ignore_ascii_case("FALSE"))
+    if name.eq_ignore_ascii_case("TRUE") || name.eq_ignore_ascii_case("FALSE") {
+        return false;
+    }
+    !is_a1_cell_shaped(name) && !starts_with_r1c1_reference(name)
+}
+
+/// Is `name` exactly an A1 cell address on the sheet (column A..XFD, row
+/// 1..1048576, leading zeros allowed)? Excel quotes such a sheet name.
+fn is_a1_cell_shaped(name: &str) -> bool {
+    let letters = name.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+    let digits = &name[letters..];
+    if !(1..=3).contains(&letters) || digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let col = name[..letters]
+        .chars()
+        .fold(0u32, |n, c| n * 26 + (c.to_ascii_uppercase() as u32 - 'A' as u32 + 1));
+    let row = digits.trim_start_matches('0').parse::<u64>().unwrap_or(0);
+    col <= 16_384 && (1..=1_048_576).contains(&row)
+}
+
+/// Does `name` begin with an R1C1 reference -- `R`, `C` or `RC` alone, or
+/// `R<n>`, `C<n>`, `R<n>C`, `RC<n>`, `R<n>C<m>` followed by anything but a
+/// `.`? Excel quotes such a sheet name (measured shapes in
+/// [`is_bare_sheet_name`]): a row number must be 1..1048576, a column number
+/// any positive number (`C16385` is quoted too).
+fn starts_with_r1c1_reference(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if matches!(upper.as_str(), "R" | "C" | "RC") {
+        return true;
+    }
+    let bytes = upper.as_bytes();
+    let mut i = 0;
+    let digits_at = |from: usize| bytes[from..].iter().take_while(|b| b.is_ascii_digit()).count();
+    let number = |from: usize, len: usize| upper[from..from + len].trim_start_matches('0').parse::<u64>().unwrap_or(0);
+    let mut has_number = false;
+    if bytes.first() == Some(&b'R') {
+        i = 1;
+        let n = digits_at(i);
+        if n > 0 {
+            if !(1..=1_048_576).contains(&number(i, n)) {
+                return false;
+            }
+            has_number = true;
+            i += n;
+        }
+    }
+    if bytes.get(i) == Some(&b'C') {
+        i += 1;
+        let n = digits_at(i);
+        if n > 0 {
+            if number(i, n) == 0 {
+                return false;
+            }
+            has_number = true;
+            i += n;
+        }
+    }
+    has_number && bytes.get(i) != Some(&b'.')
 }
 
 /// May a 3-D reference's bookend PAIR be written without apostrophes?
@@ -690,7 +758,9 @@ fn sheet_range_renders_bare(start: &str, end: &str) -> bool {
     }
     match parser::parse(&format!("={}:{}!A1", start, end)) {
         Ok(Expression::Sheet3DRef { start_sheet, end_sheet, .. }) => {
-            start_sheet.eq_ignore_ascii_case(start) && end_sheet.eq_ignore_ascii_case(end)
+            // Excel's sheet-name rule, not ASCII case: a bare non-ASCII name
+            // reads back folded per character (`ÖVERSIKT`).
+            identity::sheet_names_equal(&start_sheet, start) && identity::sheet_names_equal(&end_sheet, end)
         }
         _ => false,
     }
@@ -1184,12 +1254,57 @@ mod tests {
         }
     }
 
+    /// Excel's quoting, measured [LIVE, Excel 16, 2026-10-31,
+    /// relocref/probe-quote*.ps1: a sheet of each name, `Range.Formula` read
+    /// back]. This REPLACES the old assertion that `A1` and `ZZ100` render bare
+    /// -- Excel writes `='A1'!A1` and `='ZZ100'!A1` -- and the ASCII-only rule
+    /// that quoted every non-ASCII name Excel writes bare (`=Översikt!A1`).
+    #[test]
+    fn a_sheet_name_is_quoted_exactly_where_excel_quotes_it() {
+        let bare = [
+            "\u{d6}versikt", "Stra\u{df}e", "\u{c5}r2024", "\u{c5}B12", "\u{c5}1", "\u{e9}1", "\u{d6}A1",
+            "\u{131}f", "\u{4e2d}\u{6587}", "\u{d6}R1C1", "A1\u{d6}", "x\u{e9}y", "\u{212a}elvin", "Sheet1", "XFE1",
+            "AAAA1", "A0", "XFD1048577", "A1x", "A1B", "AB1C", "Rx", "Cx", "RCx", "Rab", "Cab", "RR", "CC", "R0",
+            "C0", "R1048577", "R_1", "R1.x", "a.1", "A1.B", "R1.B", "Cr", "Sum", "A", "ABCD", "Data_2024", "_x",
+        ];
+        let quoted = [
+            "A1", "ZZ100", "Q1", "x1", "Ra1", "XFD1", "XFD1048576", "A01", "R1C1", "R", "C", "RC", "r", "R2", "C3",
+            "r2c", "R1", "C1", "RC1", "R1C", "R1x", "C1x", "R1C1x", "R1Cx", "RC1x", "RC2x", "R1_", "R01",
+            "R1048576", "C16384", "C16385", "R1C16385", "R1\u{d6}", "TRUE", "FALSE", "1abc",
+        ];
+        let mut wrong = Vec::new();
+        for name in bare {
+            if quote_sheet_name(name) != name {
+                wrong.push(format!("{name}: Excel writes it bare, Calcula {}", quote_sheet_name(name)));
+            }
+        }
+        for name in quoted {
+            if quote_sheet_name(name) != format!("'{name}'") {
+                wrong.push(format!("{name}: Excel quotes it, Calcula {}", quote_sheet_name(name)));
+            }
+        }
+        assert!(wrong.is_empty(), "disagrees with Excel:\n  {}", wrong.join("\n  "));
+        // Every one of them reads back as its own sheet.
+        for name in bare.iter().chain(quoted.iter()) {
+            let formula = format!("={}!A1", quote_sheet_name(name));
+            match parser::parse(&formula) {
+                Ok(Expression::CellRef { sheet: Some(got), .. }) => assert!(
+                    identity::sheet_names_equal(&got, name),
+                    "`{formula}` read back as sheet `{got}`"
+                ),
+                other => panic!("`{formula}` -> {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn a_bare_identifier_sheet_name_is_left_unquoted() {
         // The widened rule must not start quoting everything. In particular it
         // must not capture the DEFAULT sheet names, or every saved formula in
-        // every existing workbook would be rewritten for no reason.
-        for name in ["Sheet1", "Sheet2", "Data", "_hidden", "Q1_2026", "a.b", "A1", "ZZ100"] {
+        // every existing workbook would be rewritten for no reason. (`A1` and
+        // `ZZ100` used to be listed here; Excel quotes both -- see
+        // `a_sheet_name_is_quoted_exactly_where_excel_quotes_it`.)
+        for name in ["Sheet1", "Sheet2", "Data", "_hidden", "Q1_2026", "a.b"] {
             assert_eq!(quote_sheet_name(name), name);
             // Bare names are upper-cased by the lexer (this predates the
             // change and `normalize_cross_sheet_refs` is what canonicalises

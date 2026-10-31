@@ -121,6 +121,8 @@ export function buildExtensionContext(
   runtime: ExtWorkerRuntime;
 } {
   const handlers = new Map<number, Handler>();
+  /** `schedule.expose`: each published name -> the handler id it was last sent with. */
+  const scheduleSlots = new Map<string, number>();
   const pending = new Map<
     number,
     { resolve: (v: unknown) => void; reject: (e: unknown) => void; timer: number }
@@ -518,13 +520,66 @@ export function buildExtensionContext(
         },
       },
       // Persistent recurring jobs (the `schedule` capability). `handlerName`
-      // must be a method the extension published with context.expose(...) —
+      // must be a name the extension published with `schedule.expose(...)` —
       // a schedule stores a NAME, never a closure, so what it will run stays
-      // reviewable in the transparency panel after the workbook reloads.
+      // reviewable in the transparency panel.
       //
-      // Jobs live in the workbook and resume when it is reopened, but only
-      // while Calcula is open: there is no headless runtime behind this.
+      // An EXTENSION's jobs are never saved into the workbook
+      // (scripting/scheduler.rs writes only jobs whose script the workbook
+      // carries, and refuses an extension job a workbook brings): they end
+      // when the workbook is closed or another is opened, and the extension
+      // schedules them again when it needs them. They run only while Calcula
+      // is open.
       schedule: {
+        /**
+         * Publish `fn` under `handlerName` for THIS extension's own scheduled
+         * jobs (Excel's Application.OnTime calls a named procedure). Nothing
+         * else can call it: not a script, not a form, not another extension,
+         * and not a job a workbook carries -- only a job THIS extension created
+         * with `every` / `at` in this session (an extension's jobs are never
+         * saved into a workbook, since a document cannot vouch for code it does
+         * not contain). Asks for no consent: the manifest must DECLARE
+         * `schedule`, and creating the job is what asks the user. Expose the
+         * name before you schedule it; calling this from `activate` is fine.
+         * Resolves to a function that withdraws THIS registration (a later
+         * expose under the same name is left in place). Exposing a name again
+         * REPLACES the earlier function: the host's name now points at the new
+         * one, so the earlier one is freed here at once rather than held until
+         * its own withdraw runs.
+         */
+        async expose(handlerName: string, fn: Handler): Promise<() => Promise<void>> {
+          const handlerId = registerHandler(fn);
+          // Recorded at SEND time: the host applies registrations in the order
+          // they are posted, so the latest one sent is the one its name ends
+          // up pointing at.
+          const previous = scheduleSlots.get(handlerName);
+          scheduleSlots.set(handlerName, handlerId);
+          try {
+            await brokerCall("ext.scheduleExpose", [handlerName, handlerId]);
+          } catch (e) {
+            handlers.delete(handlerId);
+            if (scheduleSlots.get(handlerName) === handlerId) {
+              if (previous === undefined) scheduleSlots.delete(handlerName);
+              else scheduleSlots.set(handlerName, previous);
+            }
+            throw e;
+          }
+          // OVERWRITTEN, SO UNREACHABLE: the host's slot for this name now
+          // names THIS registration, and a job can only ever reach a function
+          // through that slot. Keeping the earlier closure alive until its
+          // withdraw (which may never run) only pinned it and everything it
+          // captured for the life of the worker.
+          if (previous !== undefined && previous !== handlerId) handlers.delete(previous);
+          let withdrawn = false;
+          return async () => {
+            if (withdrawn) return;
+            withdrawn = true;
+            handlers.delete(handlerId);
+            if (scheduleSlots.get(handlerName) === handlerId) scheduleSlots.delete(handlerName);
+            // Names ITS slot: a newer expose under the same name is not withdrawn.
+            await brokerCall("ext.scheduleExpose", [handlerName, null, handlerId]);
+          };
+        },
         every(
           intervalSecs: number,
           handlerName: string,

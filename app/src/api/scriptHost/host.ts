@@ -27,6 +27,7 @@ import {
   type ScriptHandle,
 } from "./broker";
 import { assertMountAllowed } from "./mountGate";
+import { sheetNamesEqual } from "../sheetNames";
 import { drainBrokerTraffic, synthesizableHookPayload, withTimeout } from "./scriptPreview/runShape";
 import type { PreviewBackend } from "./scriptPreview/backend";
 import {
@@ -67,7 +68,7 @@ import { ALLOWLIST, thinAppEventForScripts, thinWorkbookPathDetail } from "./all
 // only reason this design was chosen over VBA's UserInterfaceOnly flag.
 import { appendAudit } from "./auditRing";
 import type { CapabilityId } from "./capabilityIds";
-import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS, checkCellWriteValue } from "./validators";
+import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS, checkCellWriteValue, vFormatRangeRef } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
 // The sheet-switch seam's "follow the backend's answer" (BUG-0464), shared with
 // the command line. Imported statically: its own grid reach is loaded on use.
@@ -193,7 +194,6 @@ import {
   onAppEvent,
   type ApplicationUpdatedPayload,
   type CellValueChange,
-  type MutationDomain,
 } from "../events";
 import type { PullResponse } from "../collaboration";
 import {
@@ -214,6 +214,7 @@ import {
   type UndoTransactionTicket,
 } from "../../core/lib/tauri-api";
 import { registerCellContextMenuInterceptor } from "../../core/lib/cellContextMenuInterceptors";
+import { announceRolledBackRestore, releaseAnnouncedMoves } from "../../core/lib/cellsMoved";
 import {
   rectRowsCols,
   tableCellCoord,
@@ -702,6 +703,12 @@ async function closeGrantedRunStep(writes: GrantedRunWrites, completed: boolean)
   };
   if (completed) {
     await commitStep();
+    // The step is kept: its Undo hands any joined move back from the step's
+    // own record, so the take-back memory of those moves is released (rev14A)
+    // -- ONLY that step's (round 18), and only when the run OPENED it: a run
+    // that joined a caller's step leaves it open, and the moves a gesture
+    // holding it announced are still that gesture's to take back.
+    if (step.ticket !== null) releaseAnnouncedMoves(step.savepoint.transaction);
     return { completed: true, undoable: true, rolledBack: false, notUndoneBecause: null, othersUndone: 0 };
   }
   let result: UndoRollbackWire | null = null;
@@ -717,7 +724,11 @@ async function closeGrantedRunStep(writes: GrantedRunWrites, completed: boolean)
   // run's and the commit pushes nothing; refused, it holds the run's writes,
   // which then stay ONE step that Ctrl+Z takes back.
   await commitStep();
-  if (why === null && result !== null) await showRolledBackRun(result);
+  if (why === null && result !== null) await showRolledBackRun(result, step.savepoint.transaction);
+  // The run's step is closed either way (when the run opened it): what the
+  // take-back undid was consumed above, and nothing later may match what is
+  // left of THAT step (rev14A; per step, round 18).
+  if (step.ticket !== null) releaseAnnouncedMoves(step.savepoint.transaction);
   return {
     completed: false,
     undoable: true,
@@ -755,12 +766,20 @@ function countOthersUndone(writes: GrantedRunWrites, taken: unknown): number {
   return others;
 }
 
-/** Show what a taken-back run restored: the cells, their styles, the sheet. */
-async function showRolledBackRun(result: UndoResult): Promise<void> {
+/**
+ * Show what a taken-back run restored: the cells, their styles, the sheet --
+ * and, through the ONE take-back announcer every gesture's rollback uses
+ * (`announceRolledBackRestore`, core/lib/cellsMoved.ts), the line edits the
+ * run made (inverse deltas, STRUCTURAL_UNDO `source: "rollback"`) and any
+ * announced move of a gesture that JOINED the run's step (a Merge & Center
+ * the run ran), so a pending copy's source, bookmarks and Watch Window
+ * entries go back where they were. It used to announce MUTATION_REFRESH
+ * alone, and every follower stayed where the run's insert had moved it.
+ */
+async function showRolledBackRun(result: UndoResult, transaction: number): Promise<void> {
   try {
     await afterCellDataChange(result.updatedCells ?? []);
-    const domains: MutationDomain[] = ["styles", ...((result.refreshDomains ?? []) as MutationDomain[])];
-    emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "undo" });
+    announceRolledBackRestore(result, transaction);
     // The restore follows the sheet the run's first write was on (Excel's
     // undo does): follow it, so the tab strip shows where the cells came back.
     if (typeof result.activeSheetIndex === "number" && result.activeSheetIndex !== activeSheetIndexForEvents) {
@@ -2533,7 +2552,17 @@ registerClosePreparation(
   settleHostResetRestores,
 );
 
-export function hostResetAll(): void {
+/** What the workbook reset is FOR (see `hostResetAll`). */
+export interface HostResetOptions {
+  /**
+   * The reset follows a File > Open (AFTER_OPEN): the opened file has already
+   * set the calculation mode, so a script's manual-calculation debt is
+   * forgotten rather than restored to "automatic" over it.
+   */
+  openedDocument?: boolean;
+}
+
+export function hostResetAll(options?: HostResetOptions): void {
   // FIRST, ahead of the per-script unmounts: every task pane, its layout and
   // its dock bucket (M2). The ORDER is the whole point. This sweep is the only
   // caller that knows the WORKBOOK is going, and it closes panes as "reset",
@@ -2554,6 +2583,9 @@ export function hostResetAll(): void {
   // Before the unmounts, whose teardown would report a granted run's writes:
   // the document is already the next one, and the writes were not made there.
   dropGrantedRunWrites();
+  // ...and the moves a joined gesture remembered for a take-back: the steps
+  // they joined belonged to the document that is going.
+  releaseAnnouncedMoves();
   for (const scriptId of [...mounted.keys()]) {
     hostUnmountScript(scriptId);
   }
@@ -2588,7 +2620,21 @@ export function hostResetAll(): void {
   // here rather than left to the per-script unmounts above: their restores are
   // fire-and-forget microtasks, and clearing the tracking set below would win
   // the race and swallow them. One direct restore covers the workbook swap.
-  if (manualCalcHolders.size > 0) {
+  //
+  // EXCEPT after an OPEN (rev12B, round 13): open_file has already set the
+  // calculation mode the opened file was saved under (`calc_mode.json` /
+  // calcPr), as the workbook Excel opens does, and this sweep runs on
+  // AFTER_OPEN, after it. Restoring "automatic" there flipped a workbook saved
+  // under manual to automatic and recalculated it. The debt belonged to the
+  // document that is gone, so it is forgotten, not paid. (File > New keeps
+  // the session's mode, so a New -- and a close, where the workbook is still
+  // live and may be saved -- still restores. So does an Open Application for
+  // Editing, which also announces AFTER_OPEN but replaces no document and sets
+  // no mode: its sweep passes no `openedDocument` -- rev14C, round 16,
+  // extensions/ScriptableObjects/lib/afterOpenReset.ts.)
+  if (manualCalcHolders.size > 0 && options?.openedDocument === true) {
+    resetManualCalculationTracking();
+  } else if (manualCalcHolders.size > 0) {
     resetManualCalculationTracking();
     trackResetRestore(
       getLib()
@@ -5590,16 +5636,36 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const [row, height, sheetIndex] = args as [number, number, (number | string)?];
       const lib = await getLib();
       await assertActiveSheet(lib, sheetIndex, "setRowHeight");
-      await lib.setRowHeight(row, height);
-      await syncDimensionToGrid("row", row, height);
+      // Excel's Rows(n).RowHeight = h: the Row Height command over one row,
+      // so a height given to a hidden row shows it ([LIVE] round 14, also
+      // under a filter) -- the same command, and the same rules, as the batch
+      // gestures (a recorded batch resize replays as api.setRowHeights below).
+      await lib.setRowHeights([[row, row]], height);
+      await syncDimensionToGrid("row", row, height, true);
       return undefined;
     }
     case "api.setColumnWidth": {
       const [col, width, sheetIndex] = args as [number, number, (number | string)?];
       const lib = await getLib();
       await assertActiveSheet(lib, sheetIndex, "setColumnWidth");
-      await lib.setColumnWidth(col, width);
-      await syncDimensionToGrid("column", col, width);
+      // Excel's Columns(n).ColumnWidth = w (see api.setRowHeight).
+      await lib.setColumnWidths([[col, col]], width);
+      await syncDimensionToGrid("column", col, width, true);
+      return undefined;
+    }
+    // The BATCH forms: Excel's Rows("18:22").RowHeight = h / Cells.RowHeight =
+    // h, ONE call over inclusive runs -- the command the Row Height... dialog
+    // and a recorded batch resize use, so Select All ([[0, 1048575]]) sets
+    // the sheet's standard height and hidden rows follow the same rules.
+    case "api.setRowHeights":
+    case "api.setColumnWidths": {
+      const [runs, size, sheetIndex] = args as [Array<[number, number]>, number, (number | string)?];
+      const lib = await getLib();
+      const rows = method === "api.setRowHeights";
+      await assertActiveSheet(lib, sheetIndex, rows ? "setRowHeights" : "setColumnWidths");
+      if (rows) await lib.setRowHeights(runs, size);
+      else await lib.setColumnWidths(runs, size);
+      await syncDimensionRunsToGrid(rows ? "row" : "column", runs, size);
       return undefined;
     }
     case "api.autoFitColumns": {
@@ -8964,6 +9030,19 @@ function assertRangeSize(startRow: number, startCol: number, endRow: number, end
 }
 
 /**
+ * The host-side twin of the FORMAT / CLEAR rectangle bound (`vFormatRangeRef`,
+ * BUG-0616 #1): whole rows, whole columns, Select All and almost-whole lines at
+ * any size -- the backend writes them as row / column formats -- and any other
+ * rectangle up to the backend's own cell-walk limit. Never the 100,000-cell
+ * bound of a read or a value write: a format crosses the bridge as its
+ * rectangle (`encodeIndexList` sends a whole column as `{ first, last }`).
+ */
+function assertFormatRangeSize(startRow: number, startCol: number, endRow: number, endCol: number): void {
+  const verdict = vFormatRangeRef([startRow, startCol, endRow, endCol]);
+  if (verdict !== true) throw new BrokerError("ValidationError", verdict);
+}
+
+/**
  * Read a rectangle as a DENSE rows x cols grid of typed cells in ONE backend
  * call. The backend answers sparsely (only cells that exist); the rectangle is
  * filled here so scripts can index it positionally.
@@ -10146,8 +10225,7 @@ export function resolveSheetRefIn(
   }
   const exact = sheets.filter((s) => s.name === ref);
   if (exact.length === 1) return exact[0].index;
-  const lower = ref.toLowerCase();
-  const relaxed = sheets.filter((s) => s.name.toLowerCase() === lower);
+  const relaxed = sheets.filter((s) => sheetNamesEqual(s.name, ref));
   if (relaxed.length === 1) return relaxed[0].index;
   if (relaxed.length > 1) {
     throw new BrokerError(
@@ -10793,6 +10871,8 @@ async function syncDimensionToGrid(
   kind: "row" | "column",
   index: number,
   size: number,
+  /** Re-read the sizes AND the hidden sets: the resize may have shown the line. */
+  reread = false,
 ): Promise<void> {
   const [gridApi, dispatchMod] = await Promise.all([import("../grid"), import("../gridDispatch")]);
   dispatchMod.dispatchGridAction(
@@ -10805,8 +10885,30 @@ async function syncDimensionToGrid(
   );
   // A size of 0 removed the override — re-read the authoritative map rather
   // than leaving the optimistic 0 in Core's state.
-  if (size <= 0) gridApi.refreshGridDimensions();
+  if (size <= 0 || reread) gridApi.refreshGridDimensions();
   gridApi.refreshGridData();
+}
+
+/** Mirror a script's BATCH resize into Core the way the Row Height... dialog
+ *  does: re-read the authoritative sizes and hidden sets (a whole-axis run
+ *  changed the sheet's STANDARD, and a resize may have shown lines), and ONE
+ *  resize announcement for the call -- never one per line, which for Select
+ *  All would be a million. */
+async function syncDimensionRunsToGrid(
+  kind: "row" | "column",
+  runs: ReadonlyArray<readonly [number, number]>,
+  size: number,
+): Promise<void> {
+  const gridApi = await import("../grid");
+  gridApi.refreshGridDimensions();
+  gridApi.refreshGridData();
+  if (runs.length === 0) return;
+  const sheetIndex = await (await getLib()).getActiveSheet();
+  const first = Math.min(...runs.map(([a, b]) => Math.min(a, b)));
+  emitAppEvent(
+    kind === "row" ? AppEvents.ROW_RESIZED : AppEvents.COLUMN_RESIZED,
+    kind === "row" ? { sheetIndex, row: first, height: size } : { sheetIndex, col: first, width: size },
+  );
 }
 
 /** Sheet list changed (add / delete / rename / visibility): sync Core's sheet
@@ -10843,7 +10945,7 @@ async function assertSheetNameFree(
 ): Promise<void> {
   const { sheets } = await lib.getSheets();
   const clash = sheets.find(
-    (s) => s.index !== ignoreIndex && s.name.toLowerCase() === name.toLowerCase(),
+    (s) => s.index !== ignoreIndex && sheetNamesEqual(s.name, name),
   );
   if (clash) {
     throw new BrokerError("ValidationError", `A sheet named "${clash.name}" already exists`);
@@ -11227,8 +11329,7 @@ function resolveCrossFilterPage(
     }
   } else {
     const exact = pages.filter((p) => p.name === sheetRef);
-    const lower = sheetRef.toLowerCase();
-    const matches = exact.length > 0 ? exact : pages.filter((p) => p.name.toLowerCase() === lower);
+    const matches = exact.length > 0 ? exact : pages.filter((p) => sheetNamesEqual(p.name, sheetRef));
     if (matches.length > 1) {
       throw new BrokerError(
         "ValidationError",
@@ -11657,7 +11758,7 @@ export async function applyRangeFormat(
   endCol: number,
   format: ScriptRangeFormat,
 ): Promise<void> {
-  assertRangeSize(startRow, startCol, endRow, endCol);
+  assertFormatRangeSize(startRow, startCol, endRow, endCol);
   // Lower the script vocabulary first (theme refs -> *Theme/*Tint or resolved
   // hex, script fill -> FillParam) — a pure read, so it precedes every write.
   const lowered = await lowerScriptFormat(lib, format);
@@ -11722,7 +11823,7 @@ async function clearRangeFormat(
   endRow: number,
   endCol: number,
 ): Promise<void> {
-  assertRangeSize(startRow, startCol, endRow, endCol);
+  assertFormatRangeSize(startRow, startCol, endRow, endCol);
   await assertActiveSheet(lib, sheetIndex, "clearRangeFormat");
   await lib.clearRangeWithOptions(startRow, startCol, endRow, endCol, "formats");
   emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
@@ -12767,6 +12868,7 @@ export async function executeClearRange(
   options?: { applyTo?: "all" | "contents" | "formats" },
   sheetRef?: number | string | null,
 ): Promise<{ count: number }> {
+  assertFormatRangeSize(startRow, startCol, endRow, endCol);
   const t = await resolveSheetWriteTarget(lib, sheetRef, "clearRange");
   const applyTo = options?.applyTo ?? "all";
   const result = (await lib.clearRangeWithOptions(
@@ -12783,9 +12885,11 @@ export async function executeClearRange(
   } else if (result.count > 0) {
     // Off-sheet: the canvas is NOT re-fetched (pinned by
     // crossSheetStructural.test.ts), but the clear is still announced. The
-    // backend returns no cell list here today, so whatever it does return is
-    // tagged, and the bare refresh it owes covers both the cleared cells and
-    // the dependents it recalculated (see noteOffSheetWrite).
+    // backend answers the cells it changed on that sheet (BUG-0616 #2 -- the
+    // list was always empty there, so an approved macro's off-sheet clear
+    // reached its run's trail as nothing); they are tagged, and the bare
+    // refresh it owes covers the dependents it recalculated (see
+    // noteOffSheetWrite).
     noteOffSheetWrite(
       t.sheet,
       updated.map((c) => ({
@@ -16125,8 +16229,14 @@ async function resolveFormBindings(
       let coords: NamedRangeCoordsLike;
       try {
         coords = (await lib.resolveNamedRangeCoords(parsed.name)) as NamedRangeCoordsLike;
-      } catch {
-        out.seeds[decl.name] = { value: null, readOnly: true, reason: `the defined name "${parsed.name}" was not found` };
+      } catch (e) {
+        // The backend's own sentence: the name is missing, is not a range, or
+        // names a sheet that is not in the workbook (refused, never re-aimed).
+        out.seeds[decl.name] = {
+          value: null,
+          readOnly: true,
+          reason: e instanceof Error ? e.message : typeof e === "string" ? e : `the defined name "${parsed.name}" was not found`,
+        };
         continue;
       }
       if (!coords || coords.startRow !== coords.endRow || coords.startCol !== coords.endCol) {
@@ -18318,7 +18428,20 @@ function pushNamedRangeMirror(mw: MountedWorker, instanceId: string): void {
       postMirror(mw, "namedRange.startCol", coords.startCol);
       postMirror(mw, "namedRange.endRow", coords.endRow);
       postMirror(mw, "namedRange.endCol", coords.endCol);
-    } catch { /* keep stale mirror */ }
+    } catch {
+      // The name no longer resolves (rev12C): the backend REFUSES a name whose
+      // sheet is not in the workbook, or that is not a range. Keeping the last
+      // mirrors would show the script the previous range's address and values
+      // as current while its async getValues/setValues reject. The script sees
+      // what a mount of an unresolvable name seeds instead: getAddress() is ""
+      // and getValues() is [] -- and the bounds are cleared, so onChange hears
+      // every change (unknown bounds over-fire) and re-asks.
+      postMirror(mw, "namedRange.values", []);
+      postMirror(mw, "namedRange.address", "");
+      for (const bound of ["sheetIndex", "startRow", "startCol", "endRow", "endCol"]) {
+        postMirror(mw, `namedRange.${bound}`, null);
+      }
+    }
   })();
 }
 

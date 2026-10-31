@@ -90,7 +90,9 @@ describe("locked / formulaHidden tier gate", () => {
     expect(vRangeFormatUnlocked([0, 0, 1, 1, { formulaHidden: 1 }])).not.toBe(true);
     // Everything else stays exactly as strict as the base gate.
     expect(vRangeFormatUnlocked([0, 0, 1, 1, { bgColor: "#ffffff" }])).not.toBe(true);
-    expect(vRangeFormatUnlocked([0, 0, MAX_RANGE_CELLS, 0, { bold: true }])).not.toBe(true);
+    // A rectangle that is not whole lines is bounded by the backend's cell walk
+    // (4,000,000; BUG-0616 #1) -- 2001 x 2000 is one row over.
+    expect(vRangeFormatUnlocked([0, 0, 2000, 1999, { bold: true }])).not.toBe(true);
   });
 
   it("the keys stay OUT of SCRIPT_FORMAT_KEYS (the shared enumeration)", () => {

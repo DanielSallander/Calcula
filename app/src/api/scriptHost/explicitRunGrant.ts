@@ -66,6 +66,9 @@ export const EXPLICIT_RUN_CELL_METHODS: ReadonlySet<string> = new Set<string>([
   "api.updateCellsBatch", // Calcula.setRange
   "api.setCellFormula", //   Calcula.setCellValue("=...")
   "api.fillRange", //        Calcula.fillDown / fillRight (writes only cells inside the named rectangle)
+  "api.clearRange", //       Calcula.setCellValue(r, c, null) / setRange of blanks -- VBA's Range.ClearContents.
+  //                          CONTENTS ONLY (`explicitRunArgsRefusal`): clearing a cell's value is
+  //                          cell access, clearing its format is formatting (BUG-0616 #2).
   // ---- ADDRESSING ----
   "api.setActiveSheet", //   Calcula.setActiveSheet (the recorder's first statement)
   // ---- CALCULATION ----
@@ -128,6 +131,31 @@ export function explicitRunAdmits(identity: ExplicitRunIdentity, method: string)
     identity.explicitRun?.cells === true &&
     EXPLICIT_RUN_CELL_METHODS.has(method) &&
     !ALLOWLIST[method]?.capability
+  );
+}
+
+/**
+ * The ARGUMENT half of the grant (BUG-0616 #2): a granted row whose arguments
+ * reach beyond cell access is refused, with the reason; null when the call is
+ * within it. Asked only for a realm carrying the grant, after the row itself
+ * was admitted.
+ *
+ * `api.clearRange` is Range.ClearContents when `applyTo` is "contents" -- a
+ * cell's value and formula go, its look stays -- which the module runtime does
+ * with `Calcula.setCellValue(r, c, null)`. "formats" and "all" (the default)
+ * also strip the cells' formatting, and the owner's ceiling is "the same CELL
+ * access ... not how cells look" (`explicitRunFormatRefusalMessage`), so they
+ * are refused like `sheet.clearRangeFormat`.
+ */
+export function explicitRunArgsRefusal(method: string, args: readonly unknown[]): string | null {
+  if (method !== "api.clearRange") return null;
+  const options = args[4] as { applyTo?: unknown } | null | undefined;
+  const applyTo = options?.applyTo ?? "all";
+  if (applyTo === "contents") return null;
+  return (
+    `${method}: an application's macro that you run gets cell access, not formatting, so it ` +
+    `may clear cell contents ({ applyTo: "contents" }) but not "${String(applyTo)}", which also ` +
+    "removes how the cells look."
   );
 }
 
@@ -209,5 +237,34 @@ export function ungrantedApiCalls(source: string): string[] {
     }
   }
   if (/\bcallMethod\s*\(/.test(text)) found.add("base.callMethod");
+  // The ARGUMENT half (`explicitRunArgsRefusal`): a clear that does not say
+  // `applyTo: "contents"` in so many words clears formats too. Read from the
+  // text, so a computed applyTo is refused here even when it would be
+  // "contents" at run time -- the safe direction, as above.
+  if (clearRangeCallsBeyondContents(text)) found.add("api.clearRange");
   return [...found].sort();
+}
+
+/**
+ * Whether `text` (comments already stripped) calls `api.clearRange(...)`
+ * without the literal option `applyTo: "contents"` -- each call's argument
+ * list is read up to its matching parenthesis.
+ */
+function clearRangeCallsBeyondContents(text: string): boolean {
+  const call = /\bapi\s*\.\s*clearRange\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = call.exec(text)) !== null) {
+    let depth = 1;
+    let i = match.index + match[0].length;
+    const start = i;
+    while (i < text.length && depth > 0) {
+      const ch = text[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      i++;
+    }
+    const argText = text.slice(start, i - 1);
+    if (!/\bapplyTo\s*:\s*(["'`])contents\1/.test(argText)) return true;
+  }
+  return false;
 }

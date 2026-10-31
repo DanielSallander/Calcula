@@ -510,6 +510,43 @@ fn a_clear_inside_a_callers_open_step_joins_it_and_leaves_it_open() {
     assert!(undo.pop_undo().is_none(), "one Ctrl+Z must take back the caller's whole step");
 }
 
+/// BUG-0616 #2: the reply names every cell an off-sheet clear changed, on ITS
+/// sheet. It was always empty off the active sheet, so a script's off-sheet
+/// clear went unattributed and an approved macro's run (owner decision B),
+/// which records every cell it changed on the persistent trail, recorded none.
+// SABOTAGE: answer `updated_cells: Vec::new()` again in
+// clear_range_with_options_off_sheet_at -> the reply is empty.
+#[test]
+fn off_sheet_clear_answers_the_cells_it_changed() {
+    let state = two_sheet_state(|g| {
+        g.set_cell(0, 0, Cell::new_number(5.0));
+        let mut kept = Cell::new_number(6.0);
+        kept.style_index = 3;
+        g.set_cell(1, 1, kept);
+        g.set_cell(9, 9, Cell::new_number(7.0)); // outside the rectangle
+    });
+    let a = aux();
+
+    let result = crate::commands::data::clear_range_with_options_off_sheet(
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters,
+        1,
+        clear_params(ClearApplyTo::Contents),
+    )
+    .expect("clear succeeds");
+
+    let answered: Vec<(u32, u32, Option<usize>, String, usize)> = result
+        .updated_cells
+        .iter()
+        .map(|c| (c.row, c.col, c.sheet_index, c.display.clone(), c.style_index))
+        .collect();
+    assert_eq!(
+        answered,
+        vec![(0, 0, Some(1), String::new(), 0), (1, 1, Some(1), String::new(), 3)],
+        "A1 and B2 of Sheet2, emptied, B2 keeping its format -- and not J10"
+    );
+    assert_eq!(result.count, 2);
+}
+
 #[test]
 fn off_sheet_clear_contents_keeps_the_style() {
     let state = two_sheet_state(|g| {

@@ -22,8 +22,11 @@
 //            with the theme; without it, onChange(resolvedHex).
 //          - A theme swatch is selected when themeSlot/themeTint match; a
 //            standard swatch when no theme slot is set and the hex matches.
-//          - The custom <input type="color"> reports live (the OS picker's
-//            drag), exactly as the dialog's did.
+//          - The custom <input type="color"> ("More Colors...") commits ONCE
+//            per pick, on the picker's closing `change`, and closes the
+//            palette -- Excel's More Colors dialog applies once, on OK. It
+//            used to report live (every drag step a write and an undo step,
+//            BUG-0536/0372); see "The OS picker, committed once".
 //
 //          ColorSwatch has two faces: `bar` (Font colour / Fill colour: an icon
 //          over a 4px bar of the current colour — the mockup's 32x28 control)
@@ -32,6 +35,7 @@
 //          lies transparent over the face, so the click that opens the picker is
 //          a real click on a real input — which is also what the existing
 //          chart-pane tests drive (`input[type="color"]` + a change event).
+//          It commits once per pick too (useNativeColorPick).
 //
 //          SPLIT (`split` + `onApply`) is Excel's Font Color / Fill Color: the
 //          face half APPLIES the colour shown on its bar, a separate 16px
@@ -93,6 +97,7 @@ import type { TooltipPlacement } from "./Tooltip";
 import { focusWhenShown, gridKeyTarget, gridRows } from "./Tile";
 import { DISABLED_LOOK, softDisabled } from "./disabled";
 import { useFlyoutFocus, useMenuClose } from "./Menu";
+import { useNativeColorPick } from "./useNativeColorPick";
 
 // ============================================================================
 // Geometry
@@ -498,6 +503,53 @@ type SwatchEntry =
   | { kind: "theme"; info: ThemeColorInfo }
   | { kind: "fixed"; hex: string };
 
+// ---- The OS picker, committed once ------------------------------------------
+//
+// WebView2 opens Chromium's in-page colour popup for <input type="color">, and
+// one pick there fires MANY `input` events before its one `change` (measured
+// live, canvas round 2 Q7: 8 inputs + 1 change for one keyboard pick; a drag
+// fires one per pointer step). Both kit inputs used to commit on React's
+// onChange -- every `input` -- so one pick wrote once per step: one undo step
+// each, and Format > Tab Color > More Colors... ran the tab-colour command on
+// every intermediate value (BUG-0536, BUG-0372). Excel's More Colors dialog
+// applies ONCE, on OK. Both inputs now go through useNativeColorPick: the
+// steps move only the picker, and the closing `change` commits exactly once.
+
+type NativeInputRest = Omit<
+  React.InputHTMLAttributes<HTMLInputElement>,
+  "type" | "value" | "onChange" | "defaultValue"
+>;
+
+/** An <input type="color"> that commits once per pick (see above). `value` is
+ *  the STORED hex ("" = none: then every pick commits, even one equal to
+ *  `fallback`, which is only what the picker opens on). */
+function NativeColorInput({
+  value,
+  fallback,
+  onCommit,
+  onBlur,
+  ...rest
+}: NativeInputRest & {
+  value: string;
+  fallback: string;
+  onCommit: (hex: string) => void;
+}): React.ReactElement {
+  const picker = useNativeColorPick({ value, fallback, onCommit });
+  return (
+    <input
+      {...rest}
+      ref={picker.ref}
+      type="color"
+      value={picker.value}
+      onChange={picker.onChange}
+      onBlur={(e) => {
+        onBlur?.(e);
+        picker.onBlur();
+      }}
+    />
+  );
+}
+
 // ---- One body, two hosts ----------------------------------------------------
 //
 // The palette is drawn by ONE function (renderPaletteBody) for two hosts:
@@ -818,7 +870,23 @@ function renderPaletteBody(o: PaletteBodyOptions, s: PaletteState): React.ReactE
   const moreAction = o.moreAction;
 
   return (
-    <div ref={s.bodyRef} className={popoverBody} onKeyDown={handleKeyDown} data-testid={testId}>
+    <div
+      ref={s.bodyRef}
+      className={popoverBody}
+      onKeyDown={handleKeyDown}
+      // A PICK WINS OVER A HALF-TYPED HEX (BUG-0344). In Chromium the press on
+      // a swatch focuses it, the hex field's blur commits its draft, and then
+      // the click applies the swatch: two writes, two undo steps, and the
+      // first undo left the TYPED colour. The press is the user's last act, so
+      // it drops the draft before the blur can commit it. Every button in the
+      // body is a pick (swatches, Automatic / No Fill, the extra action), and
+      // so is opening the OS picker.
+      onMouseDown={(e) => {
+        const t = e.target as HTMLElement;
+        if (t.closest('button, input[type="color"]') !== null) setHexDraft(null);
+      }}
+      data-testid={testId}
+    >
       {o.automaticPlacement === "first" && automaticRow}
 
       {themeBase.length > 0 && (
@@ -866,12 +934,21 @@ function renderPaletteBody(o: PaletteBodyOptions, s: PaletteState): React.ReactE
             aria-hidden
           />
           <span>{o.customLabel}</span>
-          <input
-            type="color"
+          {/* Excel's More Colors... is a modal dialog that applies once, on OK,
+              and closes the palette: one commit per pick, then done(). The
+              stored value is passed as "" so a deliberate pick always applies
+              -- a split button's `value` is the REMEMBERED colour, not the
+              cell's (the hex field's Enter follows the same rule). */}
+          <NativeColorInput
             className={overlayInput}
             aria-label={o.customLabel}
-            value={currentHex ?? DEFAULT_PICKER_COLOR}
-            onChange={(e) => onChange(e.target.value)}
+            value=""
+            fallback={currentHex ?? DEFAULT_PICKER_COLOR}
+            onCommit={(hex) => {
+              setHexDraft(null);
+              onChange(hex);
+              done();
+            }}
             data-testid={testId ? `${testId}-custom` : undefined}
           />
         </span>
@@ -1115,7 +1192,8 @@ export interface ColorSwatchProps
    *  chevron half of its own. */
   chevron?: boolean;
   /** Open the OS colour picker directly instead of the palette popover.
-   *  Wins over `split`. */
+   *  Wins over `split`. `onChange` runs ONCE per pick, when the picker closes
+   *  on a colour other than `color` -- never per drag step. */
   native?: boolean;
   /** Excel's split colour button (Font Color / Fill Color): the face half
    *  runs `onApply`, a separate 16px chevron half opens the palette. Pass the
@@ -1316,14 +1394,16 @@ export function ColorSwatch({
           placement={tooltipPlacement}
           zIndex={zIndex !== undefined ? zIndex + 2 : undefined}
         >
-          <input
+          {/* One commit per pick, on the picker's closing `change` (see "The
+              OS picker, committed once"); the steps before it write nothing. */}
+          <NativeColorInput
             {...inputRest}
-            type="color"
             className={overlayInput}
             aria-label={label}
-            value={normalizeHex(color) ?? DEFAULT_PICKER_COLOR}
+            value={normalizeHex(color) ?? ""}
+            fallback={DEFAULT_PICKER_COLOR}
             disabled={disabled}
-            onChange={(e) => onChange(e.target.value)}
+            onCommit={onChange}
             data-testid={testId}
           />
         </Tooltip>

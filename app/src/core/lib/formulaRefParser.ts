@@ -7,6 +7,7 @@
 import type { FormulaReference } from "../types";
 import { FORMULA_REFERENCE_COLORS, columnToLetter } from "../types";
 import { quoteSheetNameForFormula } from "./formulaEditTarget";
+import { sheetNamesEqual } from "../../api/sheetNames";
 
 /**
  * Extended FormulaReference with text position information.
@@ -112,7 +113,12 @@ function extractSheetName(prefix: string | undefined): string | undefined {
  * edit's own sheet, and dragging that phantom Q1 wrote `R2.2026!B2`. Both
  * patterns below are built from this one source so they cannot drift apart.
  */
-const SHEET_NAME_BARE = String.raw`[A-Za-z_](?:[A-Za-z0-9_]|\.(?=[A-Za-z0-9_]))*`;
+// A bare name may also hold any non-ASCII LETTER (`Översikt!A1`, `Straße!A1`),
+// as the parser's lexer reads it (`is_letter`, core/parser/src/lexer.rs) and
+// Excel writes it [LIVE, round 13]; the patterns carry the `u` flag for it.
+const BARE_START = String.raw`(?:[A-Za-z_]|(?![\x00-\x7F])\p{Alphabetic})`;
+const BARE_PART = String.raw`(?:[A-Za-z0-9_]|(?![\x00-\x7F])\p{Alphabetic})`;
+const SHEET_NAME_BARE = String.raw`${BARE_START}(?:${BARE_PART}|\.(?=${BARE_PART}))*`;
 const SHEET_NAME_QUOTED = String.raw`'(?:[^']|'')*'`;
 const SHEET_PREFIX = `((?:${SHEET_NAME_QUOTED}|${SHEET_NAME_BARE}(?::${SHEET_NAME_BARE})?)!)?`;
 
@@ -140,7 +146,7 @@ export function parseFormulaReferences(
   // Group 5: Second row number (for ranges, optional)
   const refPattern = new RegExp(
     SHEET_PREFIX + String.raw`\$?([A-Z]{1,3})\$?(\d{1,7})(?::\$?([A-Z]{1,3})\$?(\d{1,7}))?`,
-    "gi",
+    "giu",
   );
 
   let match;
@@ -201,7 +207,7 @@ export function parseFormulaReferencesWithPositions(
   // Group 9: Second row number (optional)
   const refPattern = new RegExp(
     SHEET_PREFIX + String.raw`(\$)?([A-Z]{1,3})(\$)?(\d{1,7})(?::(\$)?([A-Z]{1,3})(\$)?(\d{1,7}))?`,
-    "gi",
+    "giu",
   );
 
   let match;
@@ -362,7 +368,7 @@ export function findReferenceAtCell(
     // Check if the reference's sheet matches the current sheet
     // If ref has no sheet name, it refers to the formula's source sheet
     const refSheet = ref.sheetName ?? formulaSourceSheet;
-    if (sheetName && refSheet && sheetName.toLowerCase() !== refSheet.toLowerCase()) {
+    if (sheetName && refSheet && !sheetNamesEqual(sheetName, refSheet)) {
       continue;
     }
 

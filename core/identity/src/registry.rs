@@ -81,7 +81,7 @@ impl IdRegistry {
     /// Register a new sheet with a given name. Returns the minted SheetId.
     /// If the sheet name already exists, returns the existing SheetId.
     pub fn register_sheet(&mut self, name: &str) -> SheetId {
-        let key = name.to_uppercase();
+        let key = crate::sheet_name_case::sheet_name_key(name);
         if let Some(&id) = self.sheet_name_to_id.get(&key) {
             return id;
         }
@@ -95,7 +95,7 @@ impl IdRegistry {
 
     /// Register a sheet with a pre-existing SheetId (used during file load).
     pub fn register_sheet_with_id(&mut self, name: &str, id: SheetId) {
-        let key = name.to_uppercase();
+        let key = crate::sheet_name_case::sheet_name_key(name);
         self.sheet_name_to_id.insert(key, id);
         self.sheet_id_to_name.insert(id, name.to_string());
         if !self.sheet_order.contains(&id) {
@@ -106,7 +106,7 @@ impl IdRegistry {
 
     /// Look up a SheetId by name (case-insensitive).
     pub fn sheet_id(&self, name: &str) -> Option<SheetId> {
-        self.sheet_name_to_id.get(&name.to_uppercase()).copied()
+        self.sheet_name_to_id.get(&crate::sheet_name_case::sheet_name_key(name)).copied()
     }
 
     /// Look up a sheet's display name by SheetId.
@@ -122,16 +122,16 @@ impl IdRegistry {
     /// Rename a sheet (changes name, preserves SheetId).
     pub fn rename_sheet(&mut self, id: SheetId, new_name: &str) {
         if let Some(old_name) = self.sheet_id_to_name.get(&id).cloned() {
-            self.sheet_name_to_id.remove(&old_name.to_uppercase());
+            self.sheet_name_to_id.remove(&crate::sheet_name_case::sheet_name_key(&old_name));
         }
-        self.sheet_name_to_id.insert(new_name.to_uppercase(), id);
+        self.sheet_name_to_id.insert(crate::sheet_name_case::sheet_name_key(new_name), id);
         self.sheet_id_to_name.insert(id, new_name.to_string());
     }
 
     /// Remove a sheet from the registry entirely.
     pub fn remove_sheet(&mut self, id: SheetId) {
         if let Some(name) = self.sheet_id_to_name.remove(&id) {
-            self.sheet_name_to_id.remove(&name.to_uppercase());
+            self.sheet_name_to_id.remove(&crate::sheet_name_case::sheet_name_key(&name));
         }
         self.sheet_order.retain(|s| *s != id);
         self.cell_maps.remove(&id);

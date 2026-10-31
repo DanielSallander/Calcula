@@ -77,6 +77,23 @@ pub const CADENCE_ONCE: &str = "once";
 /// anything shorter is indistinguishable from setTimeout with extra consent.
 pub const MIN_ONCE_DELAY_SECS: u64 = 5;
 
+/// The surface of a SANDBOXED EXTENSION's job (`cap.scheduleEvery` / `At` from
+/// a worker extension, extensionWorkerHost.ts). Its firing reaches the method
+/// that extension published for its own jobs (`ext.scheduleExpose`).
+pub const EXTENSION_WORKER_SURFACE: &str = "extension-worker";
+
+/// The script-id namespace of a mounted worker extension (`extension:<extId>`,
+/// extensionWorkerHost.ts). An extension's job is owned by exactly that id.
+pub const EXTENSION_SCRIPT_PREFIX: &str = "extension:";
+
+/// Whether a job row names an installed extension as its owner -- by surface or
+/// by script-id namespace. Such a job is valid ONLY when the extension itself
+/// registered it in this session (`ScheduledJob::registered_live`): a workbook
+/// cannot vouch for code it does not carry, so it never carries one.
+fn names_an_extension(surface: &str, script_id: &str) -> bool {
+    surface == EXTENSION_WORKER_SURFACE || script_id.starts_with(EXTENSION_SCRIPT_PREFIX)
+}
+
 // ---------------------------------------------------------------------------
 // Job model
 // ---------------------------------------------------------------------------
@@ -148,6 +165,14 @@ pub struct ScheduledJob {
     /// the next successful firing. Not persisted.
     #[serde(skip)]
     denial_logged: bool,
+    /// True only for a job registered through the live `every` / `at` / `once`
+    /// ops in THIS session (the host supplies the owner from the mount, never
+    /// from the caller); false for every row that came from a file. An
+    /// installed extension's job fires only while this is true, so a crafted
+    /// workbook row naming an extension can never call that extension's
+    /// published job method (ext2, round 11). Not persisted, by construction.
+    #[serde(skip)]
+    registered_live: bool,
 }
 
 /// The subset handed to the renderer when a job comes due.
@@ -320,6 +345,22 @@ fn upsert_job(
     now: i64,
 ) -> Result<ScheduledJob, String> {
     validate_registration(script_id, handler, cadence, interval_secs, minute_of_day, &label)?;
+    // An extension's job is owned by the extension's own id and addresses its
+    // own mount: `extension:<extId>` with object_type `<extId>`, exactly as the
+    // worker host registers it. Anything else naming an extension is refused,
+    // so no job can be registered under one extension and fire another.
+    if names_an_extension(surface, script_id) {
+        let bound = surface == EXTENSION_WORKER_SURFACE
+            && script_id.strip_prefix(EXTENSION_SCRIPT_PREFIX) == Some(object_type)
+            && !object_type.is_empty()
+            && instance_id.is_none();
+        if !bound {
+            return Err(
+                "an extension's job must be owned by that extension (extension:<id> on its own mount)"
+                    .to_string(),
+            );
+        }
+    }
 
     let existing = inner.jobs.iter().position(|j| {
         j.script_id == script_id
@@ -345,6 +386,7 @@ fn upsert_job(
             job.label = label;
             job.enabled = true;
             job.denial_logged = false;
+            job.registered_live = true;
             // Re-arm from now so a remount cannot be used to fire immediately
             // and repeatedly by re-registering in a loop.
             job.next_run_ms = compute_next_run(job, now);
@@ -372,6 +414,7 @@ fn upsert_job(
                 last_error: None,
                 run_count: 0,
                 denial_logged: false,
+                registered_live: true,
             };
             job.next_run_ms = compute_next_run(&job, now);
             inner.jobs.push(job.clone());
@@ -400,6 +443,9 @@ struct DueSweep {
     denied: Vec<(String, String)>,
     /// Jobs force-released by the watchdog.
     watchdogged: Vec<(String, String)>,
+    /// (script_id, handler) of jobs that name an installed extension but were
+    /// not registered by it in this session: REMOVED and audited, never fired.
+    unowned_extension: Vec<(String, String)>,
 }
 
 /// Select the jobs that may fire right now.
@@ -419,11 +465,29 @@ fn sweep_due(
     is_granted: &dyn Fn(&str) -> bool,
     now: i64,
 ) -> DueSweep {
-    let mut sweep = DueSweep { due: Vec::new(), denied: Vec::new(), watchdogged: Vec::new() };
+    let mut sweep = DueSweep {
+        due: Vec::new(),
+        denied: Vec::new(),
+        watchdogged: Vec::new(),
+        unowned_extension: Vec::new(),
+    };
     // One-shot jobs whose single firing was handed out but never reported
     // back: the watchdog retires them outright ("fires once" includes a run
     // that died mid-flight — re-arming would be a second firing).
     let mut spent_once_ids: Vec<String> = Vec::new();
+
+    // 0. VERIFIED AT FIRING: a job naming an installed extension fires only if
+    //    that extension registered it, live, in this session. The load path
+    //    already refuses such a row; this is the same rule at the point of
+    //    use, so no future way in (a new import path, a merge) can hand an
+    //    extension's published job method to a job the extension never made.
+    inner.jobs.retain(|job| {
+        if names_an_extension(&job.surface, &job.script_id) && !job.registered_live {
+            sweep.unowned_extension.push((job.script_id.clone(), job.handler.clone()));
+            return false;
+        }
+        true
+    });
 
     for job in inner.jobs.iter_mut() {
         // Watchdog first: release a run whose renderer never reported back, so
@@ -616,6 +680,9 @@ pub fn export_jobs_for_workbook(script_hashes: &HashMap<String, String>) -> Vec<
     inner
         .jobs
         .iter()
+        // An extension's job is session-scoped even if a workbook script were to
+        // share its id: the load path refuses such a row, so it is never written.
+        .filter(|job| !names_an_extension(&job.surface, &job.script_id))
         .filter_map(|job| script_hashes.get(&job.script_id).map(|h| job_to_def(job, h)))
         .collect()
 }
@@ -670,6 +737,12 @@ pub fn import_jobs_for_workbook(
             Some("unknown cadence")
         } else if def.script_id.is_empty() || def.handler.is_empty() || def.id.is_empty() {
             Some("job is missing its script, handler or id")
+        } else if names_an_extension(&def.surface, &def.script_id) {
+            // An installed extension's job is never written (export below), so
+            // a row naming one was not written by Calcula: it is a crafted row
+            // trying to fire that extension's published job method. Only the
+            // extension itself may schedule it, live, in this session.
+            Some("a workbook cannot carry an installed extension's job; only the extension itself can schedule it")
         } else {
             match script_hashes.get(&def.script_id) {
                 None => Some("the owning script is no longer in this workbook"),
@@ -724,6 +797,8 @@ pub fn import_jobs_for_workbook(
             last_error: def.last_error,
             run_count: def.run_count,
             denial_logged: false,
+            // A row from a file was registered by nobody in this session.
+            registered_live: false,
         });
         outcome.restored += 1;
     }
@@ -1098,6 +1173,22 @@ pub fn script_scheduler(
                     false,
                     Some(&format!("scheduled run of {}", handler)),
                     Some("schedule not granted (revoked)"),
+                );
+            }
+            for (script_id, handler) in &sweep.unowned_extension {
+                crate::log_warn!(
+                    "SECURITY",
+                    "script_scheduler: job refused (names an extension that did not schedule it): script={} handler={}",
+                    script_id,
+                    handler
+                );
+                record_capability_call(
+                    &app_state.audit_log,
+                    SCHEDULE_CAPABILITY,
+                    script_id,
+                    false,
+                    Some(&format!("scheduled run of {}", handler)),
+                    Some("refused: the job names an installed extension that did not schedule it in this session"),
                 );
             }
             for (script_id, handler) in &sweep.watchdogged {
@@ -1590,6 +1681,125 @@ mod tests {
         let saved = export_jobs_for_workbook(&hashes(&[("workbook-script", "src")]));
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].script_id, "workbook-script");
+        reset_jobs();
+    }
+
+    // ---- An installed extension's job: only the extension may make it --------
+    //
+    // ext2 (round 11, rev9C nit): a crafted .cala could carry a job row naming
+    // an installed worker extension (`surface: "extension-worker"`, script id
+    // `extension:<id>`, plus a workbook script of that id so the hash matched).
+    // With the extension mounted and holding `schedule`, `due` handed it out and
+    // the renderer called the extension's published job method -- a job the
+    // extension never scheduled.
+
+    const EXT_SCRIPT: &str = "extension:acme.ticker";
+    const EXT_ID: &str = "acme.ticker";
+
+    fn add_extension_job(inner: &mut SchedulerInner, handler: &str) -> Result<ScheduledJob, String> {
+        upsert_job(
+            inner, EXT_SCRIPT, EXTENSION_WORKER_SURFACE, EXT_ID, None, handler,
+            CADENCE_EVERY, 30, 0, None, 0,
+        )
+    }
+
+    /// SABOTAGE: drop the `names_an_extension` arm of the import refusal ladder
+    /// -> the crafted row is restored.
+    #[test]
+    fn a_workbook_row_naming_an_extension_is_refused_on_load() {
+        let _g = global_guard();
+        reset_jobs();
+        // The attacker controls both the row and a workbook script of that id,
+        // so the hash gate alone would pass.
+        let sources = hashes(&[(EXT_SCRIPT, "planted"), ("s1", "src")]);
+        let forged = ScheduledJobDef {
+            id: "sched-1".into(), script_id: EXT_SCRIPT.into(),
+            script_hash: sources[EXT_SCRIPT].clone(), surface: EXTENSION_WORKER_SURFACE.into(),
+            object_type: EXT_ID.into(), instance_id: None, handler: "refresh".into(),
+            cadence: CADENCE_EVERY.into(), interval_secs: 30, minute_of_day: 0,
+            next_run_ms: 0, enabled: true, label: None,
+            last_run_ms: 0, last_ok: false, last_error: None, run_count: 0,
+        };
+        // The same id under another surface is the extension's namespace too.
+        let forged_surface = ScheduledJobDef {
+            id: "sched-2".into(),
+            surface: "object-script".into(),
+            ..forged.clone()
+        };
+        // POSITIVE CONTROL: an ordinary workbook script's row still restores.
+        let honest = ScheduledJobDef {
+            id: "sched-3".into(), script_id: "s1".into(), script_hash: sources["s1"].clone(),
+            surface: "object-script".into(), object_type: "shape".into(),
+            ..forged.clone()
+        };
+        let outcome = import_jobs_for_workbook(vec![forged, forged_surface, honest], &sources);
+        assert_eq!(outcome.restored, 1, "only the workbook script's own job restores");
+        assert_eq!(outcome.dropped.len(), 2);
+        assert!(
+            outcome.dropped.iter().all(|d| d.reason.contains("installed extension")),
+            "both refusals say why: {:?}",
+            outcome.dropped
+        );
+        assert!(live_jobs().iter().all(|j| j.script_id == "s1"));
+        reset_jobs();
+    }
+
+    /// SABOTAGE: drop the `registered_live` retain at the top of `sweep_due` ->
+    /// the unowned extension job is handed out.
+    #[test]
+    fn an_extension_job_fires_only_if_the_extension_registered_it_this_session() {
+        let mut i = inner();
+        let live = add_extension_job(&mut i, "refresh").expect("the extension's own job registers");
+        let planted = add_extension_job(&mut i, "snapshot").expect("registers");
+        // A row that reached the registry by any route other than the live op.
+        let idx = i.jobs.iter().position(|j| j.id == planted.id).unwrap();
+        i.jobs[idx].registered_live = false;
+
+        let mounted = vec![EXT_SCRIPT.to_string()];
+        let sweep = sweep_due(&mut i, &mounted, GRANTED, 60_000);
+        let fired: Vec<&str> = sweep.due.iter().map(|d| d.handler.as_str()).collect();
+        assert_eq!(fired, vec!["refresh"], "POSITIVE CONTROL: the extension's own job fires; the planted one does not");
+        assert_eq!(live.handler, "refresh");
+        assert_eq!(
+            sweep.unowned_extension,
+            vec![(EXT_SCRIPT.to_string(), "snapshot".to_string())],
+            "the refusal is reported for the audit trail"
+        );
+        assert!(i.jobs.iter().all(|j| j.id != planted.id), "and the unowned job is removed");
+    }
+
+    /// SABOTAGE: drop the binding check in `upsert_job` -> a job registered
+    /// under one extension names another's mount.
+    #[test]
+    fn an_extension_job_is_bound_to_that_extensions_own_mount() {
+        let mut i = inner();
+        let wrong_mount = upsert_job(
+            &mut i, EXT_SCRIPT, EXTENSION_WORKER_SURFACE, "other.ext", None, "refresh",
+            CADENCE_EVERY, 30, 0, None, 0,
+        );
+        assert!(wrong_mount.is_err(), "extension:acme.ticker cannot schedule on other.ext");
+        let wrong_surface = upsert_job(
+            &mut i, EXT_SCRIPT, "object-script", EXT_ID, None, "refresh",
+            CADENCE_EVERY, 30, 0, None, 0,
+        );
+        assert!(wrong_surface.is_err(), "the extension namespace is not an object script");
+        let not_an_extension = upsert_job(
+            &mut i, "script-1", EXTENSION_WORKER_SURFACE, EXT_ID, None, "refresh",
+            CADENCE_EVERY, 30, 0, None, 0,
+        );
+        assert!(not_an_extension.is_err(), "an object script cannot claim the extension surface");
+        assert!(add_extension_job(&mut i, "refresh").is_ok(), "POSITIVE CONTROL: its own mount");
+    }
+
+    #[test]
+    fn an_extension_job_is_never_written_even_if_a_workbook_script_shares_its_id() {
+        let _g = global_guard();
+        reset_jobs();
+        {
+            let mut i = scheduler().lock().unwrap();
+            add_extension_job(&mut i, "refresh").expect("registers");
+        }
+        assert!(export_jobs_for_workbook(&hashes(&[(EXT_SCRIPT, "planted")])).is_empty());
         reset_jobs();
     }
 

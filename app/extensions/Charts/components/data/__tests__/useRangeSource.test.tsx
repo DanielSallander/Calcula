@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
     orientation: "columns",
   })),
   resolveDataSource: vi.fn(),
+  readRangeHeaderLabels: vi.fn(async (..._args: unknown[]) => ["Region", "Q1", "Q2", "Q3"]),
 }));
 
 vi.mock("@api", () => ({
@@ -28,6 +29,7 @@ vi.mock("@api", () => ({
 }));
 vi.mock("../../../lib/chartDataReader", () => ({
   autoDetectSeries: (...args: unknown[]) => h.autoDetectSeries(...args),
+  readRangeHeaderLabels: (...args: unknown[]) => h.readRangeHeaderLabels(...args),
 }));
 vi.mock("../../../lib/dataSourceResolver", () => ({
   resolveDataSource: (...args: unknown[]) => h.resolveDataSource(...args),
@@ -147,6 +149,16 @@ describe("pure rules", () => {
     ]);
   });
 
+  it("rangeAxes: header text names an axis; an empty header cell keeps the letter (BUG-0448)", () => {
+    const ref = { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 3, endCol: 3 };
+    expect(rangeAxes(ref, "columns", ["Region", "Q1", "", "Q3"]).map((a) => a.label)).toEqual([
+      "Region",
+      "Q1",
+      "C",
+      "Q3",
+    ]);
+  });
+
   it("planRangeShape: one cell is one value named by its address (or its name)", () => {
     const cell = { sheetIndex: 0, startRow: 1, startCol: 1, endRow: 1, endCol: 1 };
     expect(planRangeShape(cell, { hasHeaders: true, headersForcedOff: false, name: null })).toEqual({
@@ -214,6 +226,17 @@ describe("pure rules", () => {
 });
 
 describe("the hook (the dialog's wiring: detection on)", () => {
+  it("a range with a header row offers its axes by HEADER TEXT, not column letter (BUG-0448)", async () => {
+    const hx = mountHarness({ detect: true });
+    act(() => hx.setRange("Sheet1!A1:D4"));
+    await flush();
+    expect(hx.state!.availableAxes.map((a) => a.label)).toEqual(["Region", "Q1", "Q2", "Q3"]);
+    expect(h.readRangeHeaderLabels).toHaveBeenLastCalledWith(
+      { sheetIndex: 0, sheetId: "id-0", startRow: 0, startCol: 0, endRow: 3, endCol: 3 },
+      "columns",
+    );
+  });
+
   it("one cell: header row forced off, category 0, the cell is the series, nothing detected", async () => {
     const hx = mountHarness({ detect: true });
     act(() => hx.setRange("Sheet1!B2"));

@@ -237,8 +237,23 @@ impl Table {
 /// Storage: sheet_index -> table_id -> Table
 pub type TableStorage = HashMap<usize, HashMap<identity::EntityId, Table>>;
 
-/// Name registry: table_name (uppercase) -> (sheet_index, table_id)
+/// Name registry: [`table_name_key`] -> (sheet_index, table_id)
 pub type TableNameRegistry = HashMap<String, (usize, identity::EntityId)>;
+
+/// The key a TABLE name is registered and looked up by: Excel's DEFINED-NAME
+/// rule, never Rust's `to_uppercase`. Excel [LIVE, Excel 16, 2026-10-31,
+/// relocref/probe-tables.ps1: `ListObjects(..).Name` set to each spelling]
+/// treats `Straße` / `STRASSE`, `Ärende` / `ärende`, `qæ` / `qae`, `qþ` / `qth`
+/// and `q<KELVIN SIGN>` / `qk` as ONE table name -- the second is refused, and
+/// `=SUM(STRASSE[H])` reads the table named `Straße` -- while `qµ` / `qμ`,
+/// `qı` / `qI` and `qſ` / `qs` are two. That is `identity::defined_name_key`
+/// exactly, and a defined name of either spelling is refused beside the table
+/// (one namespace). `to_uppercase` also missed the lexer's own fold: a formula
+/// `=SUM(Straße[H])` reaches the lookup as `STRAẞE`, which no `to_uppercase`
+/// key ever equalled.
+pub fn table_name_key(name: &str) -> String {
+    identity::defined_name_key(name)
+}
 
 // ============================================================================
 // RESULT TYPES
@@ -402,7 +417,7 @@ fn generate_table_name(existing_names: &TableNameRegistry) -> String {
     let mut i = 1;
     loop {
         let name = format!("Table{}", i);
-        if !existing_names.contains_key(&name.to_uppercase()) {
+        if !existing_names.contains_key(&table_name_key(&name)) {
             return name;
         }
         i += 1;
@@ -520,12 +535,22 @@ pub(crate) fn relink_autofilter_owner(
 /// Tables and defined names resolve out of two unrelated registries into ONE
 /// formula namespace, with names resolved first at every call site. A table
 /// sharing a name with a defined name is therefore permanently unreachable by
-/// name — so refuse the collision instead of creating the ambiguity.
-fn name_collides_with_defined_name(state: &AppState, name: &str) -> bool {
+/// name — so refuse the collision instead of creating the ambiguity. "Shares a
+/// name" is Excel's defined-name rule (`identity::defined_name_key`, the key
+/// the name map is built from): a defined name `Pæresalg` refuses a table
+/// `pæresalg` or `PAERESALG`.
+///
+/// [LIVE, Excel 16, 2026-10-31, namekey/probe2.ps1] Excel's own gate is
+/// one-way over COM: `Names.Add` beside a table of the same name is refused
+/// ("A table with that name already exists"), but `ListObject.Name` set to an
+/// existing defined name's spelling is accepted and the name then wins in
+/// formulas -- the unreachable table this gate exists to prevent. Calcula
+/// refuses both directions.
+pub(crate) fn name_collides_with_defined_name(state: &AppState, name: &str) -> bool {
     state
         .named_ranges
         .read()
-        .map(|names| names.contains_key(&name.to_uppercase()))
+        .map(|names| names.contains_key(&identity::defined_name_key(name)))
         .unwrap_or(false)
 }
 
@@ -613,7 +638,7 @@ pub(crate) fn recalc_after_table_change(
         .unwrap_or(true);
 
     let mut changed_keys: std::collections::HashSet<String> =
-        changed.iter().map(|n| n.to_uppercase()).collect();
+        changed.iter().map(|n| table_name_key(n)).collect();
     if !changed.is_empty() {
         changed_keys.insert(crate::table_deps::BARE_TABLE_KEY.to_string());
     }
@@ -786,7 +811,7 @@ pub fn create_table(
         generate_table_name(&table_names)
     } else if !is_valid_table_name(&params.name) {
         return TableResult::err("Invalid table name");
-    } else if table_names.contains_key(&params.name.to_uppercase()) {
+    } else if table_names.contains_key(&table_name_key(&params.name)) {
         return TableResult::err("Table name already exists");
     } else if name_collides_with_defined_name(&state, &params.name) {
         return TableResult::err(
@@ -881,7 +906,7 @@ pub fn create_table(
     }
 
     // Store table
-    table_names.insert(name.to_uppercase(), (active_sheet, table.id));
+    table_names.insert(table_name_key(&name), (active_sheet, table.id));
     tables
         .entry(active_sheet)
         .or_insert_with(HashMap::new)
@@ -992,7 +1017,7 @@ pub fn delete_table(
         }
     };
 
-    let table_name_upper = table.name.to_uppercase();
+    let table_name_upper = table_name_key(&table.name);
     // `delete_sheet_names` was cloned above, before `tables` — see the lock-order
     // note there. `rewrite_table_refs_to_ranges` needs it only to qualify a
     // reference to a table on another sheet.
@@ -1144,54 +1169,98 @@ pub fn rename_table(
     table_id: identity::EntityId,
     new_name: String,
 ) -> TableResult {
+    let active_sheet = *state.active_sheet.read().unwrap();
+    rename_table_core(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        active_sheet,
+        table_id,
+        new_name,
+    )
+}
+
+/// The body of [`rename_table`] for the table `table_id` on `sheet`: the ONE
+/// route by which a table's name changes (the Rename box, MCP's
+/// `update_table`, and the JSON view's `table` arm all come here). Gates, in
+/// order, before any effect: a valid table name, no defined name of that
+/// name, the sheet unprotected, then -- under the held grid and table guards
+/// -- no OTHER table of that name and the table present. Only then is the
+/// document dirtied. Carries every `Old[...]` reference over to the new name
+/// as ONE undo step, and re-seeds the name-keyed table dependents.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rename_table_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    table_sheet: usize,
+    table_id: identity::EntityId,
+    new_name: String,
+) -> TableResult {
     if !is_valid_table_name(&new_name) {
         return TableResult::err("Invalid table name");
     }
-    if name_collides_with_defined_name(&state, &new_name) {
+    if name_collides_with_defined_name(state, &new_name) {
         return TableResult::err(
             "A defined name with this name already exists. Names and tables share one namespace — pick a different name.",
         );
     }
 
-    let active_sheet = *state.active_sheet.read().unwrap();
     // Tables are not editable while the sheet is protected (Excel greys the
     // whole table surface out). One rule for every table mutation.
-    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+    if let Err(e) = crate::protection::require_sheet_unprotected(state, table_sheet, "the table") {
         return TableResult::err(&e);
     }
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let mut tables = state.tables.write(&effect).unwrap();
-    let mut table_names = state.table_names.write(&effect).unwrap();
+    // The sheet the `grid` mirror shows, so a rewritten formula on it is
+    // mirrored there too (the table may live on another sheet).
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`). Held
+    // PENDING across the refusals below, so the document is dirtied only
+    // after every one of them has passed, in the same critical section.
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
+    let tables = state.tables.lock_pending().unwrap();
+    let table_names = state.table_names.lock_pending().unwrap();
 
     // Check if new name already exists
-    let upper_new = new_name.to_uppercase();
+    let upper_new = table_name_key(&new_name);
     if let Some(&(sheet, id)) = table_names.get(&upper_new) {
-        if sheet != active_sheet || id != table_id {
+        if sheet != table_sheet || id != table_id {
             return TableResult::err("Table name already exists");
         }
     }
-
-    let sheet_tables = match tables.get_mut(&active_sheet) {
-        Some(t) => t,
+    match tables.get(&table_sheet) {
         None => return TableResult::err("No tables on this sheet"),
-    };
+        Some(sheet_tables) if !sheet_tables.contains_key(&table_id) => {
+            return TableResult::err("Table not found");
+        }
+        Some(_) => {}
+    }
 
-    let table = match sheet_tables.get_mut(&table_id) {
-        Some(t) => t,
-        None => return TableResult::err("Table not found"),
+    // Every gate has passed: the rename changes the document.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut tables = tables.authorize(&effect);
+    let mut table_names = table_names.authorize(&effect);
+    let Some(table) = tables.get_mut(&table_sheet).and_then(|t| t.get_mut(&table_id)) else {
+        return TableResult::err("Table not found");
     };
 
     // Snapshot BEFORE mutating so Ctrl+Z restores the old name (and with it the
     // name-registry entry, which the obj_table restore re-keys).
     let previous = table.clone();
-    let upper_old = table.name.to_uppercase();
+    let upper_old = table_name_key(&table.name);
 
     // Remove old name, add new name
     table_names.remove(&upper_old);
-    table_names.insert(upper_new, (active_sheet, table_id));
+    table_names.insert(upper_new, (table_sheet, table_id));
     table.name = new_name.clone();
 
     let updated = table.clone();
@@ -1237,7 +1306,7 @@ pub fn rename_table(
         }
         undo_stack.record_custom_restore(
             "obj_table".to_string(),
-            crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(previous)),
+            crate::undo_commands::table_snapshot_bytes(table_sheet, table_id, Some(previous)),
             "Rename table",
         );
         undo_stack.commit_owned(owned_txn);
@@ -1257,11 +1326,11 @@ pub fn rename_table(
     // is filed under a name the workbook no longer has. Both spellings are
     // named so the rebuild drops the old bucket and the new one is seeded.
     recalc_after_table_change(
-        &state,
-        &user_files_state,
-        &pivot_state,
-        &pane_control_state,
-        &ribbon_filter_state,
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
         &[upper_old.clone(), new_name.clone()],
         &[],
     );
@@ -1297,7 +1366,7 @@ fn rename_table_refs_in_formulas(
                 // stores what this text re-parses to -- so renaming a table
                 // destroyed every named-function call that mentioned it.
                 cell.formula_string_raw().and_then(|f| {
-                    if f.to_uppercase().contains(old_name_upper) {
+                    if table_name_key(&f).contains(old_name_upper) {
                         Some((row, col, f))
                     } else {
                         None
@@ -1547,7 +1616,7 @@ pub fn rename_table_column(
     table.columns[idx].name = final_name.clone();
 
     let result = table.clone();
-    let table_name_upper = result.name.to_uppercase();
+    let table_name_upper = table_name_key(&result.name);
     let table_bounds = (
         result.start_row,
         result.start_col,
@@ -2399,7 +2468,7 @@ fn rewrite_table_refs_to_ranges(
                 // RAW, for the same reason as the table RENAME above: this
                 // rewrite re-parses the text it reads and stores the result.
                 cell.formula_string_raw().and_then(|f| {
-                    let f_upper = f.to_uppercase();
+                    let f_upper = table_name_key(&f);
                     // A bare `[@Col]` resolves against the table CONTAINING the
                     // cell, so it is only ours when the cell is inside the
                     // target's own range on the target's own sheet.
@@ -2552,7 +2621,7 @@ pub fn convert_to_range(
         None => return TableResult::err("Table not found"),
     };
 
-    let table_name_upper = table.name.to_uppercase();
+    let table_name_upper = table_name_key(&table.name);
 
     let rewritten_cells = rewrite_table_refs_to_ranges(
         &tables,
@@ -3089,7 +3158,7 @@ pub fn enforce_table_header(
     let previous_name = std::mem::replace(&mut table.columns[col_relative].name, final_name.clone());
 
     let result = table.clone();
-    let table_name_upper = result.name.to_uppercase();
+    let table_name_upper = table_name_key(&result.name);
     let table_bounds = (
         result.start_row,
         result.start_col,
@@ -3271,7 +3340,7 @@ pub fn get_table_by_name(
     let tables = state.tables.read().unwrap();
     let table_names = state.table_names.read().unwrap();
 
-    let (sheet_index, table_id) = table_names.get(&name.to_uppercase())?;
+    let (sheet_index, table_id) = table_names.get(&table_name_key(&name))?;
     tables
         .get(sheet_index)
         .and_then(|sheet_tables| sheet_tables.get(table_id).cloned())
@@ -3365,7 +3434,7 @@ pub fn resolve_structured_reference(
     };
 
     // Find table
-    let (sheet_index, table_id) = match table_names.get(&table_name.to_uppercase()) {
+    let (sheet_index, table_id) = match table_names.get(&table_name_key(&table_name)) {
         Some(t) => t,
         None => return StructuredRefResult::err("Table not found"),
     };

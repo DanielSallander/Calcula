@@ -40,7 +40,10 @@ vi.mock("@api", async (importOriginal) => ({
     if (h.gate) await h.gate;
     return { styleIndex: 7 };
   }),
-  setCellStyle: (r: number, c: number, s: number) => h.setCellStyle(r, c, s),
+  // The stroke's whole-rectangle CHECK (`checkArea`, writes nothing) is not a
+  // paint: only the cell writes are counted here.
+  setCellStyle: async (r: number, c: number, s: number, o?: { checkArea?: unknown }) =>
+    o?.checkArea ? null : h.setCellStyle(r, c, s),
   beginUndoTransaction: vi.fn(async (label: string) => {
     h.begins.push(label);
     return h.begins.length;

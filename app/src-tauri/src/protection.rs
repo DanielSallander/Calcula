@@ -1238,13 +1238,58 @@ pub fn is_sheet_protected(state: State<AppState>) -> bool {
         .unwrap_or(false)
 }
 
-/// Check if a specific cell can be edited
-#[tauri::command]
+/// One cell of `can_edit_cell`'s list question (`cells`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtectionCellRef {
+    pub row: u32,
+    pub col: u32,
+}
+
+/// Check if a specific cell can be edited.
+///
+/// `cells` (the LIST question): whether EVERY listed cell can be edited,
+/// asked once under one read of the grid, styles and protection -- the answer
+/// names the first refused cell in list order (`row` / `col` are then not
+/// used). A Paste Special over 100,000 cells of a protected sheet used to ask
+/// this 100,000 times before writing. An empty list can edit.
+///
+/// BOUNDED and off the main thread (round 18): `async`, so a long list never
+/// freezes the window, and a list longer than [`CAN_EDIT_CELLS_MAX`] is
+/// refused with a plain reason before any guard is taken (a whole-column
+/// paste is about 1M cells, well inside it).
+#[tauri::command(async)]
 pub fn can_edit_cell(
     state: State<AppState>,
     row: u32,
     col: u32,
+    cells: Option<Vec<ProtectionCellRef>>,
 ) -> ProtectionCheckResult {
+    can_edit_cell_core(&state, row, col, cells)
+}
+
+/// The most cells one `can_edit_cell` list may name: four whole columns
+/// (4 x 1,048,576). Past it the question is refused, never half answered.
+pub(crate) const CAN_EDIT_CELLS_MAX: usize = 4 * 1_048_576;
+
+/// [`can_edit_cell`] over a plain reference, for the unit tier.
+pub(crate) fn can_edit_cell_core(
+    state: &AppState,
+    row: u32,
+    col: u32,
+    cells: Option<Vec<ProtectionCellRef>>,
+) -> ProtectionCheckResult {
+    if let Some(list) = &cells {
+        if list.len() > CAN_EDIT_CELLS_MAX {
+            return ProtectionCheckResult {
+                can_edit: false,
+                reason: Some(
+                    "Too many cells to check at once. Nothing was changed. Select a smaller range and try again."
+                        .to_string(),
+                ),
+            };
+        }
+    }
     let active_sheet = *state.active_sheet.read().unwrap();
     // Canonical order: grid -> style_registry -> sheet_protection. See the
     // lock-order note on `check_sheet_protection_cells`.
@@ -1255,22 +1300,21 @@ pub fn can_edit_cell(
     // Routed through the SAME decision procedure the backend gates use, so the
     // frontend's answer and the backend's answer cannot drift. This used to be a
     // second inline copy of the rule.
-    match refusal_reason_for_cell(
-        &protection_storage,
-        &grid,
-        &styles,
-        active_sheet,
-        row,
-        col,
-    ) {
-        Some(reason) => ProtectionCheckResult {
-            can_edit: false,
-            reason: Some(reason),
-        },
-        None => ProtectionCheckResult {
-            can_edit: true,
-            reason: None,
-        },
+    let asked: Vec<(u32, u32)> = match cells {
+        Some(list) => list.iter().map(|c| (c.row, c.col)).collect(),
+        None => vec![(row, col)],
+    };
+    for (r, c) in asked {
+        if let Some(reason) = refusal_reason_for_cell(&protection_storage, &grid, &styles, active_sheet, r, c) {
+            return ProtectionCheckResult {
+                can_edit: false,
+                reason: Some(reason),
+            };
+        }
+    }
+    ProtectionCheckResult {
+        can_edit: true,
+        reason: None,
     }
 }
 

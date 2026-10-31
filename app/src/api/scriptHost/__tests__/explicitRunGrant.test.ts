@@ -17,6 +17,7 @@ import {
   EXPLICIT_RUN_REFUSED_FORMAT_METHODS,
   RUN_ONLY_REFUSED_METHODS,
   explicitRunAdmits,
+  explicitRunArgsRefusal,
   explicitRunFormatRefusalMessage,
   explicitRunRefusalMessage,
   explicitRunRestrictedRefusal,
@@ -59,6 +60,9 @@ const THE_TWENTY = [
   "api.updateCellsBatch",
   "api.setCellFormula",
   "api.fillRange",
+  // BUG-0616 #2 (added deliberately): clearing cells IS cell access -- VBA's
+  // Range.ClearContents in a macro -- contents only (explicitRunArgsRefusal).
+  "api.clearRange",
   "api.setActiveSheet",
   "api.recalculate",
   "api.getCalculationMode",
@@ -70,7 +74,7 @@ const THE_TWENTY = [
 describe("the grant is a closed table of cell rows", () => {
   // SABOTAGE (c): add "api.executeCommand" to EXPLICIT_RUN_CELL_METHODS -> this
   // exact-set test and the curated executeCommand refusal go red.
-  it("is EXACTLY these twenty rows (adding one is a deliberate edit here)", () => {
+  it("is EXACTLY these twenty-one rows (adding one is a deliberate edit here)", () => {
     expect([...EXPLICIT_RUN_CELL_METHODS].sort()).toEqual([...THE_TWENTY].sort());
   });
 
@@ -196,6 +200,48 @@ describe("decidePolicy: the grant admits cell calls and refuses the rest, loudly
     }
   });
 
+  // BUG-0616 #2. SABOTAGE: drop the explicitRunArgsRefusal check from
+  // decidePolicy -> a granted Clear All (or Clear Formats) is admitted.
+  it("api.clearRange: a granted run clears CONTENTS on any sheet, never formats", () => {
+    const contents: unknown[][] = [
+      [0, 2, 9, 2, { applyTo: "contents" }],
+      [0, 2, 1_048_575, 2, { applyTo: "contents" }, "Sheet2"],
+    ];
+    for (const args of contents) {
+      expect(decidePolicy(granted, "api.clearRange", args).admitted, JSON.stringify(args)).toBe(true);
+    }
+    const formats: unknown[][] = [
+      [0, 2, 9, 2],
+      [0, 2, 9, 2, { applyTo: "all" }],
+      [0, 2, 9, 2, { applyTo: "formats" }, 1],
+    ];
+    for (const args of formats) {
+      // POSITIVE CONTROL: valid arguments, admitted for an unlocked script.
+      expect(decidePolicy(unlocked, "api.clearRange", args).admitted, "args invalid").toBe(true);
+      const decision = decidePolicy(granted, "api.clearRange", args);
+      expect(decision.admitted, JSON.stringify(args)).toBe(false);
+      if (!decision.admitted) {
+        expect(decision.code).toBe("PermissionDenied");
+        expect(decision.message).toBe(explicitRunArgsRefusal("api.clearRange", args));
+        expect(decision.message).toMatch(/not formatting/);
+      }
+    }
+    // The argument rule is the grant's alone: other rows are untouched by it.
+    expect(explicitRunArgsRefusal("api.setCellValue", [0, 0, "x"])).toBeNull();
+  });
+
+  it("api.clearRange: a run a SCRIPT started (no grant) and an expired grant are refused as before", () => {
+    const args = [0, 2, 9, 2, { applyTo: "contents" }];
+    const plain = decidePolicy(plainRestricted, "api.clearRange", args);
+    expect(plain.admitted).toBe(false);
+    if (!plain.admitted) {
+      expect(plain.message).toBe("api.clearRange requires unlocked access; this script is restricted");
+    }
+    const late = decidePolicy(expired, "api.clearRange", args);
+    expect(late.admitted).toBe(false);
+    if (!late.admitted) expect(late.message).toBe(explicitRunRefusalMessage("api.clearRange"));
+  });
+
   const runOnlyCalls: Array<[string, unknown[]]> = [
     ["base.expose", ["m", false]],
     ["events.subscribe", ["x"]],
@@ -303,6 +349,9 @@ describe("decidePolicy: the grant admits cell calls and refuses the rest, loudly
       "ext.executeCommand",
       "ext.emitEvent",
       "ext.invalidateCellStyles",
+      // Capability-free since ext2 (round 11): publishing a job method grants
+      // nothing; creating the job needs `schedule`.
+      "ext.scheduleExpose",
     ];
     const restrictedNoCap = Object.keys(ALLOWLIST)
       .filter((m) => ALLOWLIST[m].tier === "restricted" && !ALLOWLIST[m].capability)
@@ -402,6 +451,21 @@ describe("the pre-flight names the calls outside cell access, before anything ru
 
   it("a recorder-shaped cell-only macro passes", () => {
     expect(ungrantedApiCalls(RECORDED_CELLS_ONLY)).toEqual([]);
+  });
+
+  // SABOTAGE: delete the clearRangeCallsBeyondContents line in
+  // ungrantedApiCalls -> a Clear All macro passes the pre-flight.
+  it("a clear is named unless it says applyTo \"contents\" (BUG-0616 #2)", () => {
+    const withLine = (line: string): string => `${RECORDED_CELLS_ONLY}\n${line}\n`;
+    expect(ungrantedApiCalls(withLine('await api.clearRange(0, 2, 9, 2, { applyTo: "contents" }, 1);'))).toEqual([]);
+    expect(ungrantedApiCalls(withLine("await api.clearRange(0, 2, 9, 2, { applyTo: 'contents' });"))).toEqual([]);
+    expect(ungrantedApiCalls(withLine('await api.clearRange(0, 2, 9, 2, { applyTo: "all" }, 1);'))).toEqual([
+      "api.clearRange",
+    ]);
+    expect(ungrantedApiCalls(withLine("await api.clearRange(0, 2, 9, 2);"))).toEqual(["api.clearRange"]);
+    expect(ungrantedApiCalls(withLine('await api.clearRange(0, 0, f(1), 2, { applyTo: "formats" });'))).toEqual([
+      "api.clearRange",
+    ]);
   });
 
   it("formatting and sorting are named, unique and sorted", () => {

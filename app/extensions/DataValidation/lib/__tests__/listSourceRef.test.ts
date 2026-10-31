@@ -239,8 +239,9 @@ describe("the sheet prefix follows the formula parser's rule", () => {
     [1, "='TRUE'!$A$1:$A$4"],
     [2, "='Q1.'!$A$1:$A$4"],
     [3, "='Q1-2026'!$A$1:$A$4"],
-    // Bare for the parser: the `!` after a reference-shaped name makes it a sheet.
-    [4, "=A1!$A$1:$A$4"],
+    // A cell-shaped name is QUOTED, as Excel writes it [LIVE, 2026-10-31]
+    // (the parser read it bare too, but Excel parity decides the spelling).
+    [4, "='A1'!$A$1:$A$4"],
     [5, "=Sheet.1!$A$1:$A$4"],
   ])("sheet %i is written %s", (sheetIndex, expected) => {
     expect(formatListSourceText(range(sheetIndex), NAMES, 0)).toBe(expected);
@@ -251,5 +252,75 @@ describe("the sheet prefix follows the formula parser's rule", () => {
       const text = formatListSourceText(range(sheetIndex), NAMES, 0);
       expect(parseListSourceText(text, NAMES, 0), text).toEqual({ kind: "range", ...range(sheetIndex) });
     }
+  });
+});
+
+// A sheet name keeps its spaces (round 15): ` Data ` is a sheet of its own
+// beside `Data`, and Excel keeps the list formula as =' Data '!$A$1:$A$1
+// [LIVE, rev15C/probe2.ps1]. The prefix is read EXACTLY, never trimmed.
+describe("parseListSourceText: a sheet name with spaces is its own sheet", () => {
+  const names = ["Sheet1", "Data", " Data "];
+  const range = (sheetIndex: number) => ({
+    kind: "range",
+    range: { sheetIndex, startRow: 0, startCol: 0, endRow: 2, endCol: 0 },
+  });
+  it("binds =' Data '!A1:A3 to ' Data ', not to 'Data'", () => {
+    expect(parseListSourceText("=' Data '!A1:A3", names, 0)).toEqual(range(2));
+    expect(parseListSourceText("=Data!A1:A3", names, 0)).toEqual(range(1));
+  });
+  it("finds ' Data ' when it is the only one", () => {
+    expect(parseListSourceText("=' Data '!A1:A3", ["Sheet1", " Data "], 0)).toEqual(range(1));
+  });
+  it("round-trips the spaced name (open-then-OK)", () => {
+    const text = formatListSourceText({ range: range(2).range }, names, 0);
+    expect(text).toBe("=' Data '!$A$1:$A$3");
+    expect(parseListSourceText(text, names, 0)).toEqual(range(2));
+  });
+});
+
+// A sheet prefix names its sheet by Excel's sheet-name case rule
+// (@api/sheetNames), not JavaScript's toLowerCase: the Angstrom sign is not
+// a-ring (toLowerCase merged them), and sigma is capital sigma's name
+// (toLowerCase, applying the final-sigma rule, split them). Both [LIVE].
+describe("parseListSourceText: the sheet prefix follows Excel's case rule", () => {
+  const names = ["Sheet1", "Q\u00E5", "Q\u03A3"];
+  it("keeps apart a pair toLowerCase merges", () => {
+    expect(parseListSourceText("='Q\u212B'!A1:A3", names, 0)).toMatchObject({ kind: "error" });
+  });
+  it("merges a pair toLowerCase splits", () => {
+    expect(parseListSourceText("='Q\u03C3'!A1:A3", names, 0)).toEqual({
+      kind: "range",
+      range: { sheetIndex: 2, startRow: 0, startCol: 0, endRow: 2, endCol: 0 },
+    });
+  });
+});
+
+// misc19 (round 19): an UNQUOTED sheet name holds no space. [LIVE] Excel 16
+// (misc19/probe1.ps1, probe4.ps1) refuses the list source =Data !A1:A3 even
+// when a sheet named "Data " exists, takes ='Data '!A1:A3, and takes
+// =Data! A1:A3, = Data!A1:A3 and =data!A1:A3 for "Data". Looked up as written,
+// the unquoted "Data " bound the rule to the sheet "Data ".
+// SABOTAGE: drop the whitespace refusal in splitSheetPrefix -- fails at
+// "an unquoted name with a space".
+describe("parseListSourceText: an unquoted sheet name holds no space, as in Excel", () => {
+  const range = (sheetIndex: number) => ({
+    kind: "range",
+    range: { sheetIndex, startRow: 0, startCol: 0, endRow: 2, endCol: 0 },
+  });
+  it("refuses =Data !A1:A3 even when a sheet 'Data ' exists, and takes it quoted", () => {
+    const names = ["Sheet1", "Data "];
+    const refused = parseListSourceText("=Data !A1:A3", names, 0);
+    expect(refused, "an unquoted name with a space was bound to a sheet").toMatchObject({ kind: "error" });
+    expect((refused as { message: string }).message).toContain("='Data '!");
+    expect(parseListSourceText("='Data '!A1:A3", names, 0)).toEqual(range(1));
+  });
+  it("refuses =Data !A1:A3 beside a sheet 'Data'", () => {
+    expect(parseListSourceText("=Data !A1:A3", ["Sheet1", "Data"], 0)).toMatchObject({ kind: "error" });
+  });
+  it("takes the spellings Excel takes for 'Data'", () => {
+    const names = ["Sheet1", "Data"];
+    expect(parseListSourceText("=Data! A1:A3", names, 0)).toEqual(range(1));
+    expect(parseListSourceText("= Data!A1:A3", names, 0)).toEqual(range(1));
+    expect(parseListSourceText("=data!A1:A3", names, 0)).toEqual(range(1));
   });
 });

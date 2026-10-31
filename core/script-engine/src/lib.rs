@@ -303,6 +303,35 @@ mod tests {
         }
     }
 
+    /// `Calcula.getCalculationState()` answers the host's calculation state
+    /// (Excel's Application.CalculationState) -- it was a stub that answered
+    /// "done" whatever the workbook held -- and an undescribed host is "done".
+    #[test]
+    fn get_calculation_state_answers_the_hosts_state() {
+        let mut host = HostState::default();
+        host.calculation_state = "pending".to_string();
+        let options = ScriptRunOptions {
+            host_state: host,
+            ..ScriptRunOptions::default()
+        };
+        let (result, _) = run("Calcula.log(Calcula.getCalculationState());", options);
+        match result {
+            ScriptResult::Success { output, .. } => assert_eq!(
+                output.last().map(|i| i.to_text()).as_deref(),
+                Some("pending"),
+                "a pending workbook's script was told calculation is done"
+            ),
+            other => panic!("expected success, got {:?}", other),
+        }
+        let (result, _) = run("Calcula.log(Calcula.getCalculationState());", ScriptRunOptions::default());
+        match result {
+            ScriptResult::Success { output, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("done"))
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
     /// A canvas sheet (a report page with no cells) reports its kind on the
     /// canonical Sheet object, so a script can tell it apart from a worksheet
     /// before a cell write is refused there; a sheet the host did not describe

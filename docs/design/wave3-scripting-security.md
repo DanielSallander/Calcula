@@ -985,7 +985,7 @@ the test until someone decides whether `api.setActiveSheet` turns its "sheet on
 screen" into "every sheet" (`explicitRunGrant.test.ts`, "EXHAUSTIVE: every
 capability-free RESTRICTED row").
 
-The table -- twenty broker rows, each paired with its module-runtime twin from
+The table -- twenty-one broker rows, each paired with its module-runtime twin from
 the one-off profile in `core/script-engine/src/manifest.rs`. None carries a
 capability.
 
@@ -997,6 +997,7 @@ capability.
 | `api.getSheetNames`, `api.getSheets`, `api.getActiveSheet` | `Calcula.getSheetNames` / `getSheetVisibility` / `getActiveSheet`, `Calcula.workbook.sheets` |
 | `api.setCellValue` (any sheet), `api.updateCellsBatch`, `api.setCellFormula` | `Calcula.setCellValue`, `Calcula.setRange` |
 | `api.fillRange` | `Calcula.fillDown`, `Calcula.fillRight` (see 11.5) |
+| `api.clearRange`, CONTENTS only (BUG-0616 #2, 2026-10-30) | `Calcula.setCellValue(r, c, null)` / `setRange` of blanks -- VBA's `Range.ClearContents`. Clearing a value is cell access; `"formats"` and `"all"` (the default) also strip the cells' formatting and are refused by the grant's ARGUMENT half (`explicitRunArgsRefusal`, checked in `decidePolicy` after the row is admitted), and the pre-flight names a clear that does not say `applyTo: "contents"`. Its writes reach the run's trail like any other: the backend answers the cells a clear changed, on another sheet too |
 | `api.setActiveSheet` | `Calcula.setActiveSheet` (a recorded macro's first statement) |
 | `api.recalculate`, `api.getCalculationMode` | `Calcula.application.calculate`, `.calculationMode` |
 | `api.beginBatch`, `api.commitBatch`, `api.cancelBatch` | a module run is one transaction -- and so is a granted run: the run's own undo step is opened before it starts, and these JOIN it (11.8) |
@@ -1016,7 +1017,7 @@ is the style a fill copies from its band, 11.5); all structure (insert/delete,
 merge, sort, sheets, sizes, panes, outline, filters, page setup); every object
 (charts, tables, pivots, shapes, notes, comments, names, validation,
 conditional formats); the view; operations that are cell-equivalent but wider
-in shape (`clearRange`, `copyRange`/`pasteRange`, `replaceAll`, `findAll`,
+in shape (`clearRange` beyond contents, `copyRange`/`pasteRange`, `replaceAll`, `findAll`,
 `evaluate`, `setCalculationMode` -- an owner call to widen later); and every
 `cap.pkg*` row (application publishing and pulling, which rely on the tier as
 their only barrier against a self-propagating code channel). The exhaustive

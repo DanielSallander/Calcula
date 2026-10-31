@@ -83,6 +83,52 @@ describe("combo: column or line per series", () => {
     expect(changes.at(-1)).toEqual({ markOptions: { stackMode: "none", seriesMarks: { 0: "bar", 1: "bar", 2: "line" } } });
   });
 
+  it("Secondary Axis per series (Excel's Combo dialog) puts THAT series on the right-hand axis (BUG-0445)", () => {
+    render(spec("combo"));
+    const box = container.querySelector<HTMLInputElement>('[data-testid="chart-dialog-combo-secondary-2"]')!;
+    expect(box.checked).toBe(false);
+    act(() => box.click());
+    expect(changes.at(-1)).toEqual({ markOptions: { secondaryYAxis: true, secondaryAxisSeries: [2] } });
+  });
+
+  it("unticking the last series on the secondary axis turns the axis off", () => {
+    render(spec("combo", { secondaryYAxis: true, secondaryAxisSeries: [1] }));
+    const box = container.querySelector<HTMLInputElement>('[data-testid="chart-dialog-combo-secondary-1"]')!;
+    expect(box.checked).toBe(true);
+    act(() => box.click());
+    expect(changes.at(-1)).toEqual({ markOptions: { secondaryYAxis: false, secondaryAxisSeries: [] } });
+  });
+
+  // Excel ([LIVE] Excel 16, Series.AxisGroup = xlSecondary): moving the LAST
+  // primary series to the secondary axis puts EVERY series back on primary and
+  // removes the secondary axis; a one-series chart's only series stays primary.
+  // SABOTAGE: drop the "next.size >= count" rule in setComboSeriesSecondary ->
+  // the write carries every series on the secondary axis.
+  it("ticking the last primary series puts every series back on primary, as Excel does", () => {
+    render(spec("combo", { secondaryYAxis: true, secondaryAxisSeries: [1, 2] }));
+    const box = container.querySelector<HTMLInputElement>('[data-testid="chart-dialog-combo-secondary-0"]')!;
+    expect(box.checked).toBe(false);
+    act(() => box.click());
+    expect(changes.at(-1)).toEqual({ markOptions: { secondaryYAxis: false, secondaryAxisSeries: [] } });
+  });
+
+  it("a one-series combo's only series stays on the primary axis, as Excel does", () => {
+    render(spec("combo"), ["Revenue"]);
+    const box = container.querySelector<HTMLInputElement>('[data-testid="chart-dialog-combo-secondary-0"]')!;
+    act(() => box.click());
+    expect(changes.at(-1)).toEqual({ markOptions: { secondaryYAxis: false, secondaryAxisSeries: [] } });
+  });
+
+  // SABOTAGE: drop the "out.size >= count" rule in comboSecondarySeries -> a
+  // stored all-secondary spec shows every box ticked.
+  it("a stored spec with every series on the secondary axis is shown (and drawn) all-primary", () => {
+    render(spec("combo", { secondaryYAxis: true, secondaryAxisSeries: [0, 1, 2] }));
+    for (const si of [0, 1, 2]) {
+      const box = container.querySelector<HTMLInputElement>(`[data-testid="chart-dialog-combo-secondary-${si}"]`)!;
+      expect(box.checked, `series ${si}`).toBe(false);
+    }
+  });
+
   it("is not offered on other marks", () => {
     render(spec("bar"));
     expect(select("chart-dialog-combo-series-0")).toBeNull();

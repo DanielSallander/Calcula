@@ -24,11 +24,12 @@
 //          sheet stores an explicit height PER ROW, and that map is what every
 //          structural undo snapshot copies, what every dimension refresh sends
 //          to the grid (a million rows is ~50 MB of IPC) and what the grid's
-//          scroll arithmetic walks. Excel's own answer to "Select All, then Row
-//          Height" is a per-sheet DEFAULT row height, which needs a persisted
-//          per-sheet field (open item, rust-followup report); until then the
-//          bound is "no Row Height stores more heights than Select All +
-//          Column Width already does". HIDE keeps its bound too: it sends every
+//          scroll arithmetic walks. The ONE exception is a span over EVERY row
+//          (Select All, a whole-column selection): Excel answers that with the
+//          sheet's standard row height, one value, and so does the backend
+//          (BUG-0353, `spansEveryRow`). Any other span keeps the bound "no Row
+//          Height stores more heights than Select All + Column Width already
+//          does". HIDE keeps its bound too: it sends every
 //          index. Unhide is NOT limited: it sends only the user-hidden lines
 //          inside the span (read from the backend authority), never the span
 //          itself -- which is what makes Excel's "select all, Unhide Rows"
@@ -170,6 +171,20 @@ function resolveSpan(action: string, axis: LineAxis): { runs: LineInterval[]; ta
   const runs = target ? selectionLineIntervals(t.selection!, axis) : selectionSpan(axis);
   if (!runs || runs.length === 0) return null;
   return { runs, target };
+}
+
+/** The index of a sheet's last row (Excel's 1,048,576 rows). */
+const LAST_SHEET_ROW = 1_048_575;
+
+/**
+ * True when `runs` is every row of the sheet -- Select All, or a whole-column
+ * selection. Excel's Row Height over that span sets the sheet's STANDARD row
+ * height (`<sheetFormatPr defaultRowHeight customHeight="1">`, live Excel 16)
+ * rather than a height per row, and so does the backend
+ * (`set_line_sizes_inner`), so it stores one value and needs no bound.
+ */
+export function spansEveryRow(runs: readonly LineInterval[]): boolean {
+  return runs.length === 1 && runs[0][0] === 0 && runs[0][1] === LAST_SHEET_ROW;
 }
 
 /** Refuse a span beyond the limit; true when refused. */
@@ -323,8 +338,11 @@ async function sizeCommand(axis: LineAxis): Promise<void> {
   if (!span) return;
   const { runs, target } = span;
   // Rows only: a column span can never pass the bound (a sheet has 16,384
-  // columns), and the batch sets any number of them in one call.
-  if (axis === "rows" && refuseOversizedSpan(action, axis, runs)) return;
+  // columns), and the batch sets any number of them in one call. A span over
+  // EVERY row (Select All, or a whole-column selection) is not bounded: the
+  // backend sets the sheet's standard row height for it, one value, as Excel
+  // does (BUG-0353).
+  if (axis === "rows" && !spansEveryRow(runs) && refuseOversizedSpan(action, axis, runs)) return;
   const label = rangeLabel(axis, runs);
   if (axis === "rows") await openRowHeightDialogOnRuns(runs, label, target);
   else await openColumnWidthDialogOnRuns(runs, label, target);
@@ -337,8 +355,8 @@ async function sizeCommand(axis: LineAxis): Promise<void> {
  * asked here FIRST as well, so a protected sheet refuses before the dialog
  * opens (Excel greys the item) -- a failed read refuses rather than guess.
  *
- * Named divergence: Calcula's standard width is ONE value for the whole
- * workbook (AppState.default_column_width), where Excel keeps one per sheet.
+ * The standard width is the ACTIVE SHEET's, one per sheet as in Excel
+ * (BUG-0352); the grid re-reads it on every sheet switch.
  */
 async function defaultWidthCommand(): Promise<void> {
   let allowed = false;

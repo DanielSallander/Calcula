@@ -29,7 +29,7 @@ const recalcWithCube = vi.fn(async () => {
 const refreshCache = vi.fn(async () => {
   calls.push("pivot.refreshCache");
 });
-const emitAppEvent = vi.fn((name: string) => {
+const emitAppEvent = vi.fn((name: string, _payload?: unknown) => {
   calls.push(`emit:${name}`);
 });
 
@@ -38,8 +38,8 @@ vi.mock("../../core/lib/tauri-api", () => ({
   recalcWithCube: () => recalcWithCube(),
 }));
 vi.mock("../events", () => ({
-  emitAppEvent: (name: string) => emitAppEvent(name),
-  AppEvents: { SHEET_CHANGED: "app:sheet-changed" },
+  emitAppEvent: (name: string, payload?: unknown) => emitAppEvent(name, payload),
+  AppEvents: { SHEET_CHANGED: "app:sheet-changed", DATA_COMMAND_APPLIED: "app:data-command-applied" },
 }));
 vi.mock("../pivot", () => ({
   pivot: {
@@ -110,5 +110,17 @@ describe("announceUnderlyingDataChanged", () => {
     }
     expect(recalcWithCube).toHaveBeenCalledTimes(1);
     expect(seen).toHaveLength(1);
+  });
+
+  // Round 15 (lane clip7): a refresh ENDS the clipboard mode, as Excel's Data >
+  // Refresh All does even with nothing to refresh, and a PivotTable's Refresh
+  // [LIVE 2026-10-31, clip7/probe-refresh.ps1]. The forced-cube recalculation
+  // (Excel's CalculateFull) keeps it on its own, so the aftermath says it.
+  it("[LIVE] ends the clipboard mode, as Excel's Refresh All does -- the forced-cube route too", async () => {
+    await announceUnderlyingDataChanged({ forceCube: true });
+    expect(
+      emitAppEvent.mock.calls.filter(([name]) => name === "app:data-command-applied").map(([, payload]) => payload),
+      "a refresh left a pending copy pasteable (Excel ends it)",
+    ).toEqual([{ command: "refresh" }]);
   });
 });

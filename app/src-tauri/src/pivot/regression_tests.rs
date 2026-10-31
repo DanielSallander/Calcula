@@ -980,13 +980,13 @@ fn add_table(fx: &Fx, name: &str, sheet: usize, start: (u32, u32), end: (u32, u3
             auto_filter_id: None,
         },
     );
-    fx.state.table_names.write(&seed).unwrap().insert(name.to_uppercase(), (sheet, table_id));
+    fx.state.table_names.write(&seed).unwrap().insert(crate::tables::table_name_key(name), (sheet, table_id));
 }
 
 /// The table grows or shrinks to end at `end_row` (a resize the pivot has
 /// not yet been refreshed over).
 fn resize_table_rows(fx: &Fx, name: &str, end_row: u32) {
-    let (sheet, table_id) = fx.state.table_names.read().unwrap()[&name.to_uppercase()];
+    let (sheet, table_id) = fx.state.table_names.read().unwrap()[&crate::tables::table_name_key(name)];
     let mut tables = fx.state.tables.write(&test_seed_effect()).unwrap();
     tables.get_mut(&sheet).unwrap().get_mut(&table_id).unwrap().end_row = end_row;
 }

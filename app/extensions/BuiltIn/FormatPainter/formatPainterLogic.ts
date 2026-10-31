@@ -6,11 +6,13 @@
 // floating grid's selected cells -- read through its styled read
 // (`getCellTargetCells`), never Core's hidden cell under it -- and the painter
 // then paints onto sheet cells as usual. Painting INTO a floating grid's cells
-// is refused with one sentence and the painter stays armed: a stroke assigns
-// the source's style INDEX to each destination cell, and no style-index write
-// takes a target yet (the backend's set_cell_style acts on the active sheet;
-// BUG-0513). A move of the floating grid's own
-// selection (`onCellTargetChanged`) is a stroke attempt like a sheet click.
+// works exactly as onto a sheet's (BUG-0513): each destination cell is pointed
+// at the source's style INDEX through `setCellStyle`'s target (the backing
+// sheet, the host's protection, one undo step for the stroke). A stroke is
+// ALL OR NOTHING on either route: its whole rectangle is checked once
+// (`setCellStyle`'s `checkArea`) before its first cell changes. A move of the
+// floating grid's own selection (`onCellTargetChanged`) is a stroke like a
+// sheet click.
 
 import type { Selection } from "@api/types";
 import {
@@ -55,10 +57,6 @@ import {
   targetRefOf,
   type CellTargetRef,
 } from "@api/cellTarget";
-
-/** The sentence a stroke into a floating grid's cells is refused with. */
-export const PAINT_INTO_FLOATING_GRID_REFUSAL =
-  "Format Painter cannot paint into a floating grid's cells yet. Click a sheet cell to paint there. Nothing was changed.";
 
 /** A stroke's closes, read when the close runs (see ownUndoTransaction). */
 const UNDO_CLOSES: UndoTransactionCloses = {
@@ -133,31 +131,44 @@ export async function captureSourceFormat(
 export async function applyFormatToTarget(target: Selection): Promise<void> {
   if (!isFormatPainterActive()) return;
 
-  // Where the stroke lands. Core's selection on the sheet; an owner that does
-  // not admit formatting refuses once (BUG-0185: Core's selection is HIDDEN
-  // under it); a floating grid's cells have no style-index write (see the
-  // header) -- refused, once. Either way the painter stays armed.
+  // Where the stroke lands. Core's selection on the sheet, or a floating
+  // grid's selected cells (BUG-0513: written through the grid's target, the
+  // rectangle in the grid's own coordinates); an owner that does not admit
+  // formatting refuses once (BUG-0185: Core's selection is HIDDEN under it)
+  // and the painter stays armed.
   const place = resolveCellTarget("Format Painter", "format");
   if (place === null) return;
-  if (place.kind === "object") {
-    void alertAsync(PAINT_INTO_FLOATING_GRID_REFUSAL);
-    return;
-  }
+  const cellTarget = targetRefOf(place);
+  const strokeArea = place.kind === "object" ? place.selection : target;
 
   const sourceStyles = getSourceStyles();
   const { width: srcW, height: srcH } = getSourceDimensions();
 
   if (sourceStyles.size === 0 || srcW === 0 || srcH === 0) return;
 
-  const minRow = Math.min(target.startRow, target.endRow);
-  const maxRow = Math.max(target.startRow, target.endRow);
-  const minCol = Math.min(target.startCol, target.endCol);
-  const maxCol = Math.max(target.startCol, target.endCol);
+  const minRow = Math.min(strokeArea.startRow, strokeArea.endRow);
+  const maxRow = Math.max(strokeArea.startRow, strokeArea.endRow);
+  const minCol = Math.min(strokeArea.startCol, strokeArea.endCol);
+  const maxCol = Math.max(strokeArea.startCol, strokeArea.endCol);
 
   // Closes ONLY the undo transaction its own begin opened: inside a script's
   // open batch the stroke joins, and the script closes that step (wave E, Y7).
   let tx: OwnedUndoTransaction | null = null;
+  // Whether any cell of the stroke was written (see the catch).
+  let landed = false;
   try {
+    // ALL OR NOTHING: the whole stroke is checked ONCE, before its first
+    // cell changes -- the Format Cells option of the sheet or of the floating
+    // grid's host (`checkArea`, a check that writes nothing). A refused stroke
+    // used to paint some cells before the refusal, and the cancel then left
+    // them with no undo step. Excel refuses a protected format whole [LIVE,
+    // Excel 16]; with Format Cells allowed it paints LOCKED cells too, and the
+    // backend keeps each cell's Locked flag.
+    await setCellStyle(minRow, minCol, 0, {
+      target: cellTarget,
+      checkArea: { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol },
+    });
+
     tx = ownUndoTransaction(await beginUndoTransaction("Format Painter"), UNDO_CLOSES);
 
     for (let r = minRow; r <= maxRow; r++) {
@@ -167,7 +178,8 @@ export async function applyFormatToTarget(target: Selection): Promise<void> {
         const styleIndex = sourceStyles.get(`${relR},${relC}`);
 
         if (styleIndex !== undefined) {
-          await setCellStyle(r, c, styleIndex);
+          await setCellStyle(r, c, styleIndex, { target: cellTarget });
+          landed = true;
         }
       }
     }
@@ -185,8 +197,14 @@ export async function applyFormatToTarget(target: Selection): Promise<void> {
     console.error("[FormatPainter] Failed to apply format:", err);
     // Close the transaction (left open, later edits silently join it) and
     // tell the user why the paint stopped — a sheet-protection refusal names
-    // the cell and the remedy.
-    try { await tx?.cancel(); } catch { /* already closed */ }
+    // the cell and the remedy. The check above refuses before any cell is
+    // written; a refusal AFTER cells were painted (the protection changed
+    // mid-stroke) keeps what landed as ONE undoable step -- a cancel drops the
+    // record and keeps the writes, which left them with no Ctrl+Z.
+    try {
+      if (landed) await tx?.commit();
+      else await tx?.cancel();
+    } catch { /* already closed */ }
     void alertAsync(err instanceof Error ? err.message : String(err));
   }
 
@@ -339,6 +357,11 @@ export async function activateFormatPainter(
     s.endRow === source.endRow &&
     s.endCol === source.endCol;
   let pendingTarget: Selection | null = null;
+  // The floating-grid stroke last painted: a notification that merely
+  // RESTATES it (a repaint, a format announcement after the write) is not a
+  // new stroke, so a locked painter never re-paints the same cells as a second
+  // undo step. A sheet stroke forgets it.
+  let lastGridStroke: { id: string; selection: Selection } | null = null;
 
   const unsubSelection = ExtensionRegistry.onSelectionChange(
     (newSelection: Selection | null) => {
@@ -357,27 +380,27 @@ export async function activateFormatPainter(
 
     const target = pendingTarget;
     pendingTarget = null;
+    lastGridStroke = null;
     applyFormatToTarget(target);
   };
   window.addEventListener("mouseup", handleMouseUp);
   addCleanup(() => window.removeEventListener("mouseup", handleMouseUp));
 
-  // A floating grid's OWN selection moved (P3): a stroke attempt on its cells,
-  // like a click on a sheet cell. Core's selection does not move there, so the
+  // A floating grid's OWN selection moved (P3): a stroke on its cells, like a
+  // click on a sheet cell. Core's selection does not move there, so the
   // listener above never hears it.
+  const sameRect = (a: Selection, b: Selection): boolean =>
+    a.startRow === b.startRow && a.startCol === b.startCol && a.endRow === b.endRow && a.endCol === b.endCol;
   const unsubTarget = onCellTargetChanged(() => {
     if (!isFormatPainterActive()) return;
     const moved = cellTargetFor("format", "Format Painter");
     if ("refusal" in moved || moved.kind !== "object") return;
     // A notification that restates the floating-grid SOURCE is not a stroke.
-    const restatesSource =
-      sourceTarget !== undefined &&
-      moved.ref.id === sourceTarget.id &&
-      moved.selection.startRow === source.startRow &&
-      moved.selection.startCol === source.startCol &&
-      moved.selection.endRow === source.endRow &&
-      moved.selection.endCol === source.endCol;
-    if (restatesSource) return;
+    if (sourceTarget !== undefined && moved.ref.id === sourceTarget.id && sameRect(moved.selection, source)) return;
+    if (lastGridStroke !== null && lastGridStroke.id === moved.ref.id && sameRect(lastGridStroke.selection, moved.selection)) {
+      return;
+    }
+    lastGridStroke = { id: moved.ref.id, selection: { ...moved.selection } };
     void applyFormatToTarget(moved.selection);
   });
   addCleanup(unsubTarget);

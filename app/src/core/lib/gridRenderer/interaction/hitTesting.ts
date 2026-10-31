@@ -9,6 +9,7 @@ import { ensureDimensions } from "../styles/styleUtils";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dimensions";
 import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
 import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
+import { sheetNamesEqual } from "../../../../api/sheetNames";
 
 // =============================================================================
 // SELECTION THRESHOLDS
@@ -687,11 +688,11 @@ function shouldDrawReferenceOnSheet(
   if (!refSheetName) {
     // Reference has no sheet prefix - it refers to the formula's source sheet
     if (!currentSheetName || !formulaSourceSheetName) return true;
-    return currentSheetName.toLowerCase() === formulaSourceSheetName.toLowerCase();
+    return sheetNamesEqual(currentSheetName, formulaSourceSheetName);
   }
   // Reference has a sheet prefix - check if it matches current sheet
   if (!currentSheetName) return true;
-  return refSheetName.toLowerCase() === currentSheetName.toLowerCase();
+  return sheetNamesEqual(refSheetName, currentSheetName);
 }
 
 /**

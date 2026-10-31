@@ -1137,6 +1137,12 @@ pub(crate) fn resolve_icons(
 /// `Interactive` for the same reason the sort passes it: the user opened a
 /// dropdown and is waiting, and a tripped fuel budget here costs a missing
 /// OPTION rather than a missing highlight.
+///
+/// `target` (BUG-0514): the range is a floating grid's cells -- the icons its
+/// BACKING sheet's rules show there (the same `resolve_icons` the targeted sort
+/// keys on), with the rectangle CLIPPED to the object's write extent (a read
+/// past it is not an error, there is simply nothing there). Never the active
+/// sheet's icons at the object's coordinates.
 #[tauri::command]
 pub fn get_range_icons(
     state: State<AppState>,
@@ -1144,29 +1150,63 @@ pub fn get_range_icons(
     start_col: u32,
     end_row: u32,
     end_col: u32,
-) -> Vec<IconRef> {
-    let active_sheet = *state.active_sheet.read().unwrap();
+    target: Option<crate::api_types::CellTargetRef>,
+) -> Result<Vec<IconRef>, String> {
+    get_range_icons_on(&state, start_row, start_col, end_row, end_col, target.as_ref())
+}
+
+/// [`get_range_icons`] over plain references (tests drive the real body).
+pub(crate) fn get_range_icons_on(
+    state: &AppState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    target: Option<&crate::api_types::CellTargetRef>,
+) -> Result<Vec<IconRef>, String> {
+    let min_row = start_row.min(end_row);
+    let mut max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let mut max_col = start_col.max(end_col);
+    // The sheet whose icons are asked: the object's backing sheet (resolved by
+    // id, holding nothing), else the active sheet.
+    let resolved = match target {
+        Some(target) => {
+            let t = crate::cell_target::resolve_cell_target(state, target)?;
+            if t.extent_rows == 0 || t.extent_cols == 0 || min_row >= t.extent_rows || min_col >= t.extent_cols {
+                return Ok(Vec::new());
+            }
+            max_row = max_row.min(t.extent_rows - 1);
+            max_col = max_col.min(t.extent_cols - 1);
+            Some(t)
+        }
+        None => None,
+    };
+    let sheet = match &resolved {
+        Some(t) => t.backing_index,
+        None => *state.active_sheet.read().unwrap(),
+    };
     // Taken and released before the grid guards, the way this module's other
     // callers do it, so no CF guard is alive across a long-lived grid borrow.
-    let rules = match state.conditional_formats.read().unwrap().get(&active_sheet) {
+    let rules = match state.conditional_formats.read().unwrap().get(&sheet) {
         Some(r) => r.clone(),
-        None => return Vec::new(),
+        None => return Ok(Vec::new()),
     };
     if rules.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let grids = state.grids.read().unwrap();
+    if let Some(t) = &resolved {
+        // The backing sheet may have been renumbered since it was resolved:
+        // re-checked under the held `grids` guard (`sheet_ids` after `grids`).
+        crate::cell_target::ensure_target_still_at(state, t)?;
+    }
     let sheet_names = state.sheet_names.read().unwrap();
-    let grid = match grids.get(active_sheet) {
+    let grid = match grids.get(sheet) {
         Some(g) => g,
-        None => return Vec::new(),
+        None => return Ok(Vec::new()),
     };
-
-    let min_row = start_row.min(end_row);
-    let max_row = start_row.max(end_row);
-    let min_col = start_col.min(end_col);
-    let max_col = start_col.max(end_col);
     let mut cells: Vec<(u32, u32)> = Vec::new();
     for row in min_row..=max_row {
         for col in min_col..=max_col {
@@ -1174,11 +1214,11 @@ pub fn get_range_icons(
         }
     }
 
-    let resolved = resolve_icons(
+    let shown = resolve_icons(
         grid,
         &grids,
         &sheet_names,
-        active_sheet,
+        sheet,
         &rules,
         &cells,
         crate::eval_budget::EvalSurface::Interactive,
@@ -1187,7 +1227,7 @@ pub fn get_range_icons(
     // Distinct, and ordered by set then by the icon's own position within it, so
     // the dropdown reads the way the set does rather than in scan order.
     let mut seen: Vec<IconRef> = Vec::new();
-    for icon in resolved.into_values().flatten() {
+    for icon in shown.into_values().flatten() {
         if !seen.contains(&icon) {
             seen.push(icon);
         }
@@ -1197,7 +1237,7 @@ pub fn get_range_icons(
             .cmp(&format!("{:?}", b.icon_set))
             .then(a.icon_index.cmp(&b.icon_index))
     });
-    seen
+    Ok(seen)
 }
 
 /// The pure twin of the `evaluate_conditional_formats` command, which is wired to

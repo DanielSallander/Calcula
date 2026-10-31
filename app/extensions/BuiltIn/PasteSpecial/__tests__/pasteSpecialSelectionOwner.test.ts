@@ -37,6 +37,7 @@ vi.mock("@api/lib", async (importOriginal) => {
   return {
     ...real,
     getInternalClipboard: () => CLIPBOARD,
+    settledInternalClipboard: async () => CLIPBOARD,
     getCell: vi.fn(async () => ({ display: "1", formula: null, styleIndex: 0 })),
     getStyle: vi.fn(async () => ({})),
     updateCell: write("updateCell"),

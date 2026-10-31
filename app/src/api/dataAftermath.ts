@@ -84,12 +84,24 @@ export async function announceUnderlyingDataChanged(
   // 3. The sheet COLLECTION may have changed (a refresh can append a sheet).
   emitAppEvent(AppEvents.SHEET_CHANGED, {});
 
-  // 4. Refetch the visible cells. This must be the BARE `grid:refresh` event:
+  // 4. A REFRESH ends the clipboard mode -- a copy's and a cut's -- as
+  //    Excel's Data > Refresh All does, even with nothing to refresh, and as
+  //    a PivotTable's Refresh does [LIVE, Excel 16 COM 2026-10-31,
+  //    clip7/probe-refresh.ps1: ExecuteMso("RefreshAll") and
+  //    PivotTable.RefreshTable set CutCopyMode to 0; ribbon controls such as
+  //    Zoom 100% keep it]. Every caller of this aftermath is such a refresh
+  //    (Collaboration's refresh of subscribed content, a BI "view as" role
+  //    switch that re-reads every model value). Announced here, unconditional
+  //    on the steps above, because the forced-cube recalculation it runs is
+  //    Excel's CalculateFull, which KEEPS the mode on its own.
+  emitAppEvent(AppEvents.DATA_COMMAND_APPLIED, { command: "refresh" });
+
+  // 5. Refetch the visible cells. This must be the BARE `grid:refresh` event:
   //    `AppEvents.GRID_REFRESH` only redraws what the canvas already holds,
   //    so a fix that emits it would look right in review and change nothing
   //    on screen.
   window.dispatchEvent(new CustomEvent("grid:refresh"));
 
-  // 5. Pane controls may have been re-materialized by the same command.
+  // 6. Pane controls may have been re-materialized by the same command.
   window.dispatchEvent(new CustomEvent("controlspane:controls-refreshed"));
 }

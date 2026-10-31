@@ -1489,7 +1489,7 @@ fn no_structural_rewrite_swallows_a_parse_failure() {
     const STRUCTURE_RS: &str = include_str!("commands/structure.rs");
     const DATA_RS: &str = include_str!("commands/data.rs");
     const EXEMPT: &[(&str, &str)] = &[(
-        "fill_range",
+        "fill_range_core",
         "the Err arm writes #VALUE! into the cell, so the failure is visible",
     )];
 

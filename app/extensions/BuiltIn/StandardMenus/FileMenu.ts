@@ -55,7 +55,23 @@ export async function fileOpen(): Promise<void> {
       );
       if (!confirmed) return;
     }
-    const cells = await workbook.open();
+    // The picker ALONE, then the open (round 18): the workbook stays live
+    // while the picker is open, and a change that lands meanwhile -- a push
+    // recording its new version in the working-copy link, a scheduled job, a
+    // script -- turned a clean workbook dirty after the only question. Asked
+    // again in that case, so it is never discarded unasked. (A workbook that
+    // was already dirty was agreed to be discarded; whether it changed again
+    // meanwhile cannot be told from the flag.)
+    const path = await workbook.pickFileToOpen();
+    if (path === null) return;
+    if (!modified && (await workbook.isModified())) {
+      const confirmed = await confirmAsync(
+        'The workbook changed while you were choosing a file, and those changes are not saved. Open the file anyway?',
+        { title: 'Unsaved changes', kind: 'warning' },
+      );
+      if (!confirmed) return;
+    }
+    const cells = await workbook.openAtPath(path);
     if (cells) {
       window.location.reload();
     }

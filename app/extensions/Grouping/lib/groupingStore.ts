@@ -24,6 +24,7 @@ import {
   dispatchGridAction,
   requestOverlayRedraw,
   createCoalescedRefresh,
+  refreshGridDimensions,
 } from "@api";
 
 import type {
@@ -218,12 +219,19 @@ export function resyncOutlineFromBackend(): Promise<void> {
  * Awaiting the resync here is what keeps the GroupingController contract: the
  * grid, the outline bar and the backend agree before the operation resolves.
  */
-async function applyGroupResult(result: GroupResult): Promise<void> {
+async function applyGroupResult(result: GroupResult, showsDetail = false): Promise<void> {
   if (!result.success) {
     if (result.error) console.warn("[Grouping]", result.error);
     return;
   }
   await outlineRefresh.join();
+  // An expand or a show-level also SHOWS the lines the user hid by hand inside
+  // the groups it leaves expanded (Excel's ShowDetail / ShowLevels [LIVE];
+  // the backend's `show_hand_hidden_in_details`): those live in the grid's
+  // hand-hidden mirror, which only a dimensions re-read refreshes.
+  if (showsDetail && (result.hiddenRowsChanged.length > 0 || result.hiddenColsChanged.length > 0)) {
+    refreshGridDimensions();
+  }
 }
 
 // ============================================================================
@@ -313,7 +321,7 @@ export async function performCollapseRow(row: number): Promise<void> {
 /** Expand the group(s) at the given summary row. */
 export async function performExpandRow(row: number): Promise<void> {
   const result = await apiExpandRowGroup(row);
-  await applyGroupResult(result);
+  await applyGroupResult(result, true);
 }
 
 /** Collapse the group(s) at the given summary column. */
@@ -325,7 +333,7 @@ export async function performCollapseColumn(col: number): Promise<void> {
 /** Expand the group(s) at the given summary column. */
 export async function performExpandColumn(col: number): Promise<void> {
   const result = await apiExpandColumnGroup(col);
-  await applyGroupResult(result);
+  await applyGroupResult(result, true);
 }
 
 /**
@@ -334,13 +342,13 @@ export async function performExpandColumn(col: number): Promise<void> {
  */
 export async function performShowLevel(rowLevel: number): Promise<void> {
   const result = await apiShowOutlineLevel(rowLevel, undefined);
-  await applyGroupResult(result);
+  await applyGroupResult(result, true);
 }
 
 /** Show columns only up to the given outline level. */
 export async function performShowColLevel(colLevel: number): Promise<void> {
   const result = await apiShowOutlineLevel(undefined, colLevel);
-  await applyGroupResult(result);
+  await applyGroupResult(result, true);
 }
 
 /** Update outline settings (summary row/col direction). */
@@ -368,7 +376,7 @@ export async function performClearOutline(): Promise<void> {
 // the controller THROWS on failure and answers with what actually changed.
 
 /** Apply a result for the controller: sync the grid, then answer or throw. */
-async function applyForController(result: GroupResult): Promise<{
+async function applyForController(result: GroupResult, showsDetail = false): Promise<{
   maxRowLevel: number;
   maxColLevel: number;
   hiddenRowsChanged: number[];
@@ -377,7 +385,7 @@ async function applyForController(result: GroupResult): Promise<{
   if (!result.success) {
     throw new Error(result.error || "The grouping operation failed");
   }
-  await applyGroupResult(result);
+  await applyGroupResult(result, showsDetail);
   return {
     maxRowLevel: result.outline?.maxRowLevel ?? 0,
     maxColLevel: result.outline?.maxColLevel ?? 0,
@@ -414,6 +422,7 @@ export async function controllerShowOutlineLevel(
 ) {
   return applyForController(
     await apiShowOutlineLevel(rowLevel ?? undefined, colLevel ?? undefined),
+    true,
   );
 }
 

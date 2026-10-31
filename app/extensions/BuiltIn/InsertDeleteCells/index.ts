@@ -15,14 +15,19 @@
 //          to run. Path A lifecycle.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { CoreCommands } from "@api/commands";
+import { CommandRegistry, CoreCommands } from "@api/commands";
+import { gridExtensions, GridMenuGroups, type GridMenuContext } from "@api";
+import { insertCopiedCellsLabel } from "@api/lib";
 import { alertAsync } from "@api/dialogs";
 import { showDialog } from "@api/ui";
 import { CellShiftDialog } from "./components/CellShiftDialog";
 import {
+  copyToInsert,
+  insertCopiedMenuLabel,
   readShiftArg,
   resolveShiftPlace,
   runChoice,
+  runInsertCopiedPlan,
   runMainHalf,
   wholeLineChoice,
   type CellShiftChoice,
@@ -34,15 +39,23 @@ export const INSERT_CELLS_DIALOG_ID = "insert-cells";
 /** The Delete dialog ("Delete Cells..."). */
 export const DELETE_CELLS_DIALOG_ID = "delete-cells";
 
+/** The grid right-click items: "Insert..." (or "Insert Copied Cells...") and "Delete...". */
+export const CONTEXT_INSERT_ID = "insertDeleteCells.context.insert";
+export const CONTEXT_DELETE_ID = "insertDeleteCells.context.delete";
+
 // The last choice made in each dialog this session. Excel opens a fresh
 // session on the FIRST option (measured: "Shift cells right" / "Shift cells
 // left", whatever the selection's shape).
 const lastChoice: Record<CellShiftMode, CellShiftChoice> = { insert: "right", delete: "left" };
+// The Insert dialog over a COPY opens on "Shift cells right" too (Excel
+// [LIVE]: Ctrl+Plus then Enter shifted right), then remembers the session's.
+let lastCopiedChoice: "right" | "down" = "right";
 
 /** Test seam: forget the remembered dialog choices. */
 export function resetRememberedChoices(): void {
   lastChoice.insert = "right";
   lastChoice.delete = "left";
+  lastCopiedChoice = "right";
 }
 
 const cleanupFns: (() => void)[] = [];
@@ -62,6 +75,30 @@ async function runCellsCommand(mode: CellShiftMode, args: unknown): Promise<void
   const place = resolveShiftPlace(mode);
   if (!place) return;
   const { selection, size } = place;
+  // A COPY pending: Excel's Insert Copied Cells (lib/cellShift.ts) -- the
+  // copied lines without a dialog, a block through the "Insert" dialog's two
+  // shifts, or Excel's refusal.
+  const copied = mode === "insert" ? copyToInsert(place) : null;
+  if (copied) {
+    const named = parsed.kind === "choice" ? parsed.choice : null;
+    const shift = named === "right" || named === "down" ? named : null;
+    const forced = named === "entireRow" || named === "entireColumn" ? named : undefined;
+    await runInsertCopiedPlan(copied, place, shift, forced, named
+      ? undefined
+      : (run) => {
+          showDialog(INSERT_CELLS_DIALOG_ID, {
+            mode,
+            copied: true,
+            initial: lastCopiedChoice,
+            onChoose: (choice: CellShiftChoice) => {
+              if (choice !== "right" && choice !== "down") return;
+              lastCopiedChoice = choice;
+              void run(choice);
+            },
+          });
+        });
+    return;
+  }
   if (parsed.kind === "choice") {
     await runChoice(mode, selection, parsed.choice, size);
     return;
@@ -99,6 +136,50 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.commands.unregister(CoreCommands.INSERT_CELLS));
   context.commands.register(CoreCommands.DELETE_CELLS, (args?: unknown) => runCellsCommand("delete", args));
   cleanupFns.push(() => context.commands.unregister(CoreCommands.DELETE_CELLS));
+
+  // Excel's cell right-click menu: "Insert..." -- "Insert Copied Cells..."
+  // while a copied block is pending, "Insert Copied Cells" for copied whole
+  // lines [LIVE] -- and "Delete...", the two dialogs. On a row or column
+  // header the item is Core's Insert Row / Column, except while a copy is
+  // pending: then it is "Insert Copied Cells" here, and inserts the copy
+  // (Excel [LIVE 2026-10-30, clip6/probe-menu.ps1]: row 6 or F6 copied, row 2
+  // right-clicked -> "Insert Copied Cells"; a copied cell into whole rows is
+  // then refused, as the ribbon's is).
+  gridExtensions.registerContextMenuItems([
+    {
+      id: CONTEXT_INSERT_ID,
+      label: (ctx: GridMenuContext) => insertCopiedMenuLabel(ctx.selection) ?? "Insert...",
+      group: GridMenuGroups.INSERT,
+      order: 5,
+      visible: (ctx: GridMenuContext) =>
+        ctx.selection?.type === "cells" ||
+        ((ctx.selection?.type === "rows" || ctx.selection?.type === "columns") && insertCopiedCellsLabel(true) !== null),
+      // On a header it stands in for Core's Insert Row / Insert Column (one
+      // Insert item, as Excel's header menu has); on cells those never show.
+      replaces: ["core:insertRow", "core:insertColumn"],
+      onClick: async (ctx: GridMenuContext) => {
+        // Over whole rows / columns there is no dialog: the main Insert,
+        // which with a copy pending is Insert Copied Cells.
+        const lines = ctx.selection?.type === "rows" || ctx.selection?.type === "columns";
+        await CommandRegistry.execute(lines ? CoreCommands.INSERT : CoreCommands.INSERT_CELLS);
+      },
+    },
+    {
+      id: CONTEXT_DELETE_ID,
+      label: "Delete...",
+      group: GridMenuGroups.INSERT,
+      order: 6,
+      separatorAfter: true,
+      visible: (ctx: GridMenuContext) => ctx.selection?.type === "cells",
+      onClick: async () => {
+        await CommandRegistry.execute(CoreCommands.DELETE_CELLS);
+      },
+    },
+  ]);
+  cleanupFns.push(() => {
+    gridExtensions.unregisterContextMenuItem(CONTEXT_INSERT_ID);
+    gridExtensions.unregisterContextMenuItem(CONTEXT_DELETE_ID);
+  });
 
   console.log("[InsertDeleteCells] Activated successfully.");
 }

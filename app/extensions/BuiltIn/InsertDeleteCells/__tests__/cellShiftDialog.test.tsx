@@ -51,6 +51,15 @@ describe("CellShiftDialog", () => {
     ]);
   });
 
+  it("[LIVE] Insert over a pending COPY ('Insert Copied Cells...') offers only Shift cells right / down, titled Insert", () => {
+    render({ mode: "insert", copied: true, initial: "right", onChoose: () => {} });
+    expect(document.getElementById("cell-shift-dialog-title")?.textContent).toBe("Insert");
+    expect(radios()).toEqual([
+      { value: "right", label: "Shift cells right", checked: true },
+      { value: "down", label: "Shift cells down", checked: false },
+    ]);
+  });
+
   it("Delete offers left / up / entire row / entire column", () => {
     render({ mode: "delete", initial: "left", onChoose: () => {} });
     expect(document.getElementById("cell-shift-dialog-title")?.textContent).toBe("Delete");

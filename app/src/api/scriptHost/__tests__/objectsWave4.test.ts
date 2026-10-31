@@ -143,6 +143,7 @@ vi.mock("../../lib", () => ({
   resolveNamedRangeCoords: vi.fn(async (name: string) => {
     throw new Error(`Named range ${name} does not exist`);
   }),
+  getWatchCells: vi.fn(async (requests: unknown[]) => requests.map(() => ({ display: "v" }))),
   updateNamedRange: vi.fn(async () => ({ success: true })),
   renameNamedRange: vi.fn(async () => ({ success: true })),
   deleteNamedRange: vi.fn(async () => ({ success: true })),
@@ -718,6 +719,54 @@ describe("Wave 4 host executors", () => {
 
     emitAppEvent("namedRange:changed", { name: "MyName" });
     expect(onChangeEvents(), "the old name is someone else's now").toBe(1);
+  });
+
+  // rev12C. When the bound name stops resolving (the backend refuses a name
+  // whose sheet is not in the workbook), the mirror refresh swallowed the
+  // refusal and KEPT the previous range's address and values, so the script's
+  // sync getAddress()/getValues() showed them as current while its async
+  // reads rejected. It now clears them to what a mount of an unresolvable
+  // name seeds: address "" and values [].
+  // SABOTAGE: the catch in `pushNamedRangeMirror` posts nothing -- the
+  // address mirror stays "Sheet1!C3:C3".
+  it("a named-range mirror is cleared, not kept stale, when the name stops resolving", async () => {
+    await host.hostMountScript({
+      id: "mirror-script",
+      name: "mirror",
+      objectType: "namedRange",
+      instanceId: "MyName",
+      source: "function setup(context) {}",
+      accessLevel: "restricted",
+      apiVersion: "1.0.0",
+    });
+    const worker = FakeWorker.last!;
+    worker.emit({ t: "hookRegistered", hook: "onChange" } as W2H);
+    const { emitAppEvent } = await import("../../events");
+    const lastMirror = (path: string): unknown => {
+      const posts = worker.received.filter(
+        (m) => m.t === "mirror" && (m as { path?: string }).path === path,
+      ) as Array<{ value: unknown }>;
+      return posts.length ? posts[posts.length - 1].value : undefined;
+    };
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    lib.resolveNamedRangeCoords.mockResolvedValueOnce({
+      sheetIndex: 0, startRow: 2, startCol: 2, endRow: 2, endCol: 2,
+    });
+    emitAppEvent("namedRange:changed", { name: "MyName" });
+    await settle();
+    await settle();
+    const resolved = lastMirror("namedRange.address");
+    expect(typeof resolved === "string" && resolved.length > 0, `precondition: a resolved address (${String(resolved)})`).toBe(true);
+    expect(lastMirror("namedRange.sheetIndex")).toBe(0);
+
+    // The name's sheet is gone: the backend refuses (the default mock throws).
+    emitAppEvent("namedRange:changed", { name: "MyName" });
+    await settle();
+    await settle();
+    expect(lastMirror("namedRange.address"), "the previous range's address was kept as current").toBe("");
+    expect(lastMirror("namedRange.values"), "the previous range's values were kept as current").toEqual([]);
+    expect(lastMirror("namedRange.sheetIndex"), "the old bounds still filter onChange").toBeNull();
   });
 
   it("a rename is REFUSED while a distributed script is attached", async () => {

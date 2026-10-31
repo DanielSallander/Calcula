@@ -31,9 +31,10 @@ import { buildCellReference, buildRangeReference } from "../formulaRefParser";
 import { quoteSheetNameForFormula } from "../formulaEditTarget";
 
 /** Names the parser REJECTS bare (see quoteSheetNameForFormula.test.ts). */
-const MUST_QUOTE = ["Q1-2026", "TRUE", "false", "Q1.", "a..b", "Sales(EU)", "Tab+1", "R&D", "Å"];
+// `A1` and `R2` are quoted and `Översikt` / `Å` bare because Excel writes them so [LIVE, 2026-10-31].
+const MUST_QUOTE = ["Q1-2026", "TRUE", "false", "Q1.", "a..b", "Sales(EU)", "Tab+1", "R&D", "A1", "R2"];
 /** Names the parser reads bare -- the default names among them. */
-const BARE = ["Sheet1", "Sheet.1", "Q1_2026", "_x", "A1"];
+const BARE = ["Sheet1", "Sheet.1", "Q1_2026", "_x", "Översikt", "Å"];
 
 describe("conversion.ts spells a sheet by the parser's rule", () => {
   it.each(MUST_QUOTE)("formatSheetName(%s) quotes it", (name) => {

@@ -83,11 +83,11 @@ impl Workbook {
             .table_names
             .write(&effect)
             .unwrap()
-            .insert(name.to_uppercase(), (sheet, id));
+            .insert(crate::tables::table_name_key(name), (sheet, id));
     }
 
     fn table_id_of(&self, name: &str) -> identity::EntityId {
-        self.state.table_names.read().unwrap()[&name.to_uppercase()].1
+        self.state.table_names.read().unwrap()[&crate::tables::table_name_key(name)].1
     }
 
     /// Move a table's boundary, then run exactly what every resizing command
@@ -120,8 +120,8 @@ impl Workbook {
                     t.name = new.to_string();
                 }
             }
-            let entry = names.remove(&old.to_uppercase()).unwrap();
-            names.insert(new.to_uppercase(), entry);
+            let entry = names.remove(&crate::tables::table_name_key(old)).unwrap();
+            names.insert(crate::tables::table_name_key(new), entry);
         }
         // What `rename_table` does next: carry every dependent reference over.
         {
@@ -129,7 +129,7 @@ impl Workbook {
             let mut grids = self.state.grids.write(&effect).unwrap();
             let mut grid = self.state.grid.write(&effect).unwrap();
             let active = *self.state.active_sheet.read().unwrap();
-            let old_upper = old.to_uppercase();
+            let old_upper = crate::tables::table_name_key(old);
             for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
                 let coords: Vec<(u32, u32)> = sheet_grid.cells.keys().copied().collect();
                 for (row, col) in coords {
@@ -164,7 +164,7 @@ impl Workbook {
                 .table_names
                 .write(&effect)
                 .unwrap()
-                .remove(&name.to_uppercase());
+                .remove(&crate::tables::table_name_key(name));
         }
         self.table_changed(&[name]);
     }
@@ -196,7 +196,7 @@ impl Workbook {
     fn table_dependents_of(&self, name: &str) -> Vec<(u32, u32)> {
         let map = self.state.table_dependents.lock().unwrap();
         let mut v: Vec<(u32, u32)> = map
-            .get(&name.to_uppercase())
+            .get(&crate::tables::table_name_key(name))
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
         v.sort_unstable();
@@ -489,6 +489,166 @@ fn the_renamed_table_is_still_live() {
         "a rename that left the edge behind would make the table stop following \
          silently, which is the whole class this change closes"
     );
+}
+
+impl Workbook {
+    /// The REAL rename route (`tables::rename_table_core`), as the Rename box,
+    /// MCP's `update_table` and the JSON view take it.
+    fn rename_through_core(&self, old: &str, new: &str) -> crate::tables::TableResult {
+        crate::tables::rename_table_core(
+            &self.state,
+            &self.file,
+            &self.files,
+            &self.pivots,
+            &self.pane,
+            &self.filters,
+            0,
+            self.table_id_of(old),
+            new.to_string(),
+        )
+    }
+
+    /// The JSON view's `table` arm (`json_view::set_table_json`) with the
+    /// table's own JSON, its name changed to `new`.
+    fn rename_through_json(&self, old: &str, new: &str) -> Result<(), String> {
+        let id = self.table_id_of(old);
+        let mut table = self.state.tables.read().unwrap()[&0][&id].clone();
+        table.name = new.to_string();
+        crate::json_view::set_table_json(
+            &self.state,
+            &self.file,
+            &self.files,
+            &self.pivots,
+            &self.pane,
+            &self.filters,
+            &id.to_string(),
+            &serde_json::to_string(&table).unwrap(),
+        )
+    }
+
+    fn table_name_by_id(&self, id: identity::EntityId) -> String {
+        self.state.tables.read().unwrap()[&0][&id].name.clone()
+    }
+}
+
+/// Rename Table's refusals come before the document is dirtied -- the "Table
+/// name already exists" refusal included, which used to be asked AFTER the
+/// effect was built (rev15 nit), so a refused rename left the title-bar
+/// asterisk and an AutoRecover save behind.
+#[test]
+fn a_refused_rename_leaves_the_document_clean() {
+    let wb = Workbook::new(1);
+    wb.sales_fixture();
+    wb.add_table("Costs", 0, (0, 3, 3, 3), &["Cost"]);
+    crate::document_effect::mark_saved(&wb.file);
+    let refused = wb.rename_through_core("Sales", "Costs");
+    assert!(!refused.success, "a name another table has is refused");
+    assert_eq!(refused.error.as_deref(), Some("Table name already exists"));
+    assert!(!wb.file.is_dirty(), "a refused rename (name taken) must leave the document clean");
+    let refused = wb.rename_through_core("Sales", "1Bad");
+    assert!(!refused.success && !wb.file.is_dirty(), "an invalid name is refused cleanly");
+    let ok = wb.rename_through_core("Sales", "Revenue");
+    assert!(ok.success, "a free name renames: {:?}", ok.error);
+    assert!(wb.file.is_dirty(), "a rename that happened dirties the document");
+}
+
+/// The JSON view's `table` arm renames through the one rename route: a name
+/// another table has, or an invalid one, is refused with nothing applied and
+/// the document clean, and a free name carries every `Old[Col]` formula over
+/// -- it used to swap the registry key, asking nothing and leaving
+/// `=SUM(Sales[Amount])` naming a table that no longer existed.
+#[test]
+fn a_json_view_rename_takes_the_rename_tables_gates_and_formula_rewrite() {
+    let wb = Workbook::new(1);
+    wb.sales_fixture();
+    wb.add_table("Costs", 0, (0, 3, 3, 3), &["Cost"]);
+    wb.set(0, 2, "=SUM(Sales[Amount])");
+    let sales = wb.table_id_of("Sales");
+    crate::document_effect::mark_saved(&wb.file);
+
+    let err = wb.rename_through_json("Sales", "Costs").expect_err("a JSON rename onto another table's name");
+    assert_eq!(err, "Table name already exists");
+    assert_eq!(wb.table_name_by_id(sales), "Sales", "the refused JSON applied nothing");
+    assert_ne!(wb.table_id_of("Costs"), sales, "the registry still maps COSTS to the Costs table");
+    assert!(!wb.file.is_dirty(), "a refused JSON rename leaves the document clean");
+    wb.rename_through_json("Sales", "1Bad").expect_err("a JSON rename to an invalid name");
+    assert_eq!(wb.table_name_by_id(sales), "Sales");
+
+    wb.rename_through_json("Sales", "Revenue").expect("a JSON rename to a free name");
+    assert_eq!(wb.table_name_by_id(sales), "Revenue");
+    assert_eq!(wb.table_id_of("Revenue"), sales);
+    assert_eq!(
+        wb.formula_of(0, 0, 2),
+        "SUM(Revenue[Amount])",
+        "a JSON-view rename carries the table's readers over, as Rename Table does"
+    );
+    assert_eq!(wb.number(0, 0, 2), 60.0, "and the reader still reads the table");
+}
+
+/// misc19 (round 19): a JSON-view table edit is ONE undo step. The field
+/// replacement recorded nothing (an edit with no rename could not be undone at
+/// all) and the rename recorded its own step; a JSON naming another id or
+/// sheet was filed verbatim under a key it did not match.
+///
+/// SABOTAGE: drop the replacement's `obj_table` record -- fails at "a JSON
+/// style edit could not be undone".
+#[test]
+fn a_json_view_table_edit_is_one_undo_step_and_keeps_its_identity() {
+    let wb = Workbook::new(1);
+    wb.sales_fixture();
+    let sales = wb.table_id_of("Sales");
+    let original = wb.state.tables.read().unwrap()[&0][&sales].clone();
+    let edit = |change: &dyn Fn(&mut Table)| {
+        let mut table = wb.state.tables.read().unwrap()[&0][&sales].clone();
+        change(&mut table);
+        crate::json_view::set_table_json(
+            &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters,
+            &sales.to_string(),
+            &serde_json::to_string(&table).unwrap(),
+        )
+    };
+    let depth = || wb.state.undo_stack.lock().unwrap().undo_depth();
+    let undo = || {
+        let transaction = wb.state.undo_stack.lock().unwrap().pop_undo().expect("an undo step");
+        crate::undo_commands::apply_changes(
+            &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, &wb.timelines, transaction, true,
+        );
+    };
+    let style = || wb.state.tables.read().unwrap()[&0][&sales].style_name.clone();
+
+    // A field edit, no rename.
+    let before = depth();
+    edit(&|t| t.style_name = "TableStyleLight9".to_string()).expect("a JSON style edit");
+    assert_eq!(style(), "TableStyleLight9");
+    assert_eq!(depth(), before + 1, "a JSON style edit could not be undone");
+    undo();
+    assert_eq!(style(), original.style_name, "Ctrl+Z put the style back");
+
+    // A rename AND a field edit: one step, undone whole.
+    let before = depth();
+    edit(&|t| {
+        t.name = "Revenue".to_string();
+        t.style_name = "TableStyleDark2".to_string();
+    })
+    .expect("a JSON rename and style edit");
+    assert_eq!(wb.table_name_by_id(sales), "Revenue");
+    assert_eq!(style(), "TableStyleDark2");
+    assert_eq!(depth(), before + 1, "a JSON rename plus a field edit was more than one undo step");
+    undo();
+    assert_eq!(wb.table_name_by_id(sales), "Sales", "one Ctrl+Z undid the rename");
+    assert_eq!(style(), original.style_name, "and the field edit, in the same step");
+
+    // Nothing changed: no step at all.
+    let before = depth();
+    edit(&|_| {}).expect("an unchanged JSON");
+    assert_eq!(depth(), before, "an unchanged JSON recorded a step");
+
+    // The identity is the record's.
+    crate::document_effect::mark_saved(&wb.file);
+    edit(&|t| t.sheet_index = 3).expect_err("a JSON that moves the table to another sheet");
+    edit(&|t| t.id = identity::EntityId::from_bytes(identity::generate_uuid_v7())).expect_err("a JSON that gives the table another id");
+    assert!(!wb.file.is_dirty(), "a refused identity change leaves the document clean");
+    assert_eq!(wb.state.tables.read().unwrap()[&0][&sales].sheet_index, 0);
 }
 
 #[test]
@@ -876,7 +1036,9 @@ fn command_wiring() {
     for command in [
         "create_table",
         "delete_table",
-        "rename_table",
+        // The command is a wrapper; the one rename route is its core, which
+        // the JSON view's `table` arm also takes.
+        "rename_table_core",
         "resize_table",
         "add_table_column",
         "remove_table_column",
@@ -921,4 +1083,48 @@ fn entry_does_not_resolve_table_refs_into_the_stored_form() {
         body.contains("restamp_sheet_casing"),
         "...and from the sheet list (§2ai)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A table name keys by Excel's DEFINED-NAME rule (misc14 remaining)
+// ---------------------------------------------------------------------------
+
+/// Excel [LIVE, Excel 16, 2026-10-31, relocref/probe-tables.ps1] treats
+/// `Straße` and `STRASSE` as ONE table name: the second is refused, and
+/// `=SUM(STRASSE[H])` reads the table named `Straße`. The registry keyed by
+/// `to_uppercase` (`STRASSE`) while the lexer folds a typed `Straße` per
+/// character (`STRAẞE`), so a table with an `ß` in its name could not be read
+/// by its own spelling at all.
+#[test]
+fn a_table_name_is_found_by_excels_name_rule() {
+    let wb = Workbook::new(1);
+    wb.set(0, 0, "Amount");
+    wb.set(1, 0, "10");
+    wb.set(2, 0, "20");
+    wb.set(3, 0, "30");
+    wb.add_table("Stra\u{df}e", 0, (0, 0, 3, 0), &["Amount"]);
+    wb.set(0, 2, "=SUM(Stra\u{df}e[Amount])");
+    wb.set(1, 2, "=SUM(STRASSE[Amount])");
+    wb.set(2, 2, "=SUM(stra\u{df}e[Amount])");
+    assert_eq!(wb.number(0, 0, 2), 60.0, "=SUM(Stra\u{df}e[Amount]) must read its own table");
+    assert_eq!(wb.number(0, 1, 2), 60.0, "=SUM(STRASSE[Amount]) reads the table named Stra\u{df}e [LIVE]");
+    assert_eq!(wb.number(0, 2, 2), 60.0);
+    // One namespace with defined names, by the same rule.
+    let registry = wb.state.table_names.read().unwrap();
+    assert!(registry.contains_key(&identity::defined_name_key("STRASSE")));
+    assert!(registry.contains_key(&identity::defined_name_key("Stra\u{1e9e}e")));
+}
+
+/// rev13C minor reported `=<DOTLESS I>F(TRUE,1,2)` as #NAME? where Excel answers
+/// 1 [LIVE, rev13C kelvin.ps1]. Typed through the real entry path it is 1: the
+/// built-in lookup (`BuiltinFunction::from_name`) reads the dotless i as I.
+/// A pin, beside the parser's and the engine's.
+#[test]
+fn a_dotless_i_function_typed_into_a_cell_calls_the_built_in() {
+    let wb = Workbook::new(1);
+    // Spelled with THIS MACHINE's list separator: the harness runs under the
+    // real regional format (sv-SE here, where `,` is the decimal point).
+    let sep = wb.state.locale.lock().unwrap().list_separator;
+    wb.set(0, 0, &format!("=\u{131}F(TRUE{sep}1{sep}2)"));
+    assert_eq!(wb.number(0, 0, 0), 1.0);
 }

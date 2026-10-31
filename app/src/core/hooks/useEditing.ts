@@ -39,7 +39,6 @@ import {
   getSheets,
   setActiveSheet as setActiveSheetApi,
   getMergeInfo,
-  updateCellOnSheets,
   type SheetInfo,
   type SheetsResult,
 } from "../lib/tauri-api";
@@ -1945,7 +1944,31 @@ export function useEditing(): UseEditingReturn {
         }
       }
 
-      const updateResult = await updateCell(editing.row, editing.col, valueToCommit);
+      // A GROUPED entry is ONE undo step, as Excel's is [LIVE, whatif4 round
+      // 16: Sheet2+Sheet3 grouped, a value typed, ONE Ctrl+Z undoes both and
+      // lands on the sheet that was active at the entry] -- and ONE backend
+      // call (misc19, round 19). `updateCell` with the other grouped sheets
+      // writes the edit's own sheet and replicates to the rest inside a
+      // transaction the backend opens and closes itself (`update_cell_grouped`).
+      // It used to be begin + await update_cell + an emit + await
+      // update_cell_on_sheets + commit, and any write that landed in that window
+      // (a scheduled job, a script, an AI tool, a listener of the emit) joined
+      // the user's step, so one Ctrl+Z undid it too.
+      //
+      // The other grouped sheets are those other than the EDIT'S OWN --
+      // `editSheetIndex`, the sheet just written at its index NOW (after a
+      // point-mode return, the backend's active sheet too). NOT the closure's
+      // `sheetContext.activeSheetIndex`: after a point-mode trip that is the
+      // sheet the user POINTED at, so a pointed-at sheet that was itself grouped
+      // was left out, and the edit's own sheet was asked for instead -- which
+      // the backend skips as its active sheet. The grouped sheet silently never
+      // got the entry (review F2-group-replication-excludes-pointed-sheet).
+      const groupOthers = isSheetGroupingActive() ? getGroupedSheetIndices(editSheetIndex) : [];
+
+      const updateResult =
+        groupOthers.length > 0
+          ? await updateCell(editing.row, editing.col, valueToCommit, groupOthers)
+          : await updateCell(editing.row, editing.col, valueToCommit);
       const updatedCells = updateResult.cells;
       const perfT3UpdateCell = performance.now();
       const primaryCell = updatedCells[0];
@@ -1971,48 +1994,34 @@ export function useEditing(): UseEditingReturn {
         emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "commit" });
       }
 
-      // Sheet grouping: replicate the cell update to every grouped sheet other
-      // than the EDIT'S OWN -- `editSheetIndex`, the sheet just written at its
-      // index NOW (after a point-mode return, the backend's active sheet too).
-      // NOT the closure's `sheetContext.activeSheetIndex`: after a point-mode
-      // trip that is the sheet the user POINTED at, so a pointed-at sheet that
-      // was itself grouped was left out, and the edit's own sheet was asked for
-      // instead -- which the backend skips as its active sheet. The grouped
-      // sheet silently never got the entry (review
-      // F2-group-replication-excludes-pointed-sheet).
-      if (isSheetGroupingActive()) {
-        const otherSheets = getGroupedSheetIndices(editSheetIndex);
-        if (otherSheets.length > 0) {
-          try {
-            const wrote = await updateCellOnSheets(otherSheets, editing.row, editing.col, valueToCommit);
-            // The backend answers the sheets it ACTUALLY wrote (it skips its
-            // own active sheet). A requested sheet missing from that answer did
-            // not get the entry: said out loud, never left silent.
-            if (Array.isArray(wrote)) {
-              const missed = otherSheets.filter((index) => !wrote.includes(index));
-              if (missed.length > 0) {
-                console.error("[commitEdit] Grouped sheets the backend did not write:", missed);
-                void alertAsync(
-                  groupReplicationFailedMessage(
-                    `${missed.length} of the ${otherSheets.length} other grouped sheet${otherSheets.length === 1 ? "" : "s"} did not receive it.`,
-                  ),
-                );
-              } else {
-                console.log("[commitEdit] Replicated to grouped sheets:", otherSheets);
-              }
-            } else {
-              console.warn("[commitEdit] The backend did not say which grouped sheets it wrote:", wrote);
-            }
-          } catch (err) {
-            // update_cell_on_sheets refuses the WHOLE call if any grouped sheet
-            // protects this cell — deliberately, so a group edit never applies
-            // to part of the group. The active sheet has already been written
-            // at this point, so staying silent would leave the group quietly
-            // divergent, which is the one outcome grouping exists to prevent.
-            console.error("[commitEdit] Failed to replicate to grouped sheets:", err);
-            const msg = typeof err === "string" ? err : (err as Error)?.message;
-            void alertAsync(groupReplicationFailedMessage(msg));
+      // The replication's answer, from the same call.
+      if (groupOthers.length > 0) {
+        if (typeof updateResult.groupError === "string") {
+          // The backend refuses the WHOLE replication if any grouped sheet
+          // protects this cell -- deliberately, so a group edit never applies
+          // to part of the group. The edit's own sheet has been written, so
+          // staying silent would leave the group quietly divergent, which is
+          // the one outcome grouping exists to prevent.
+          console.error("[commitEdit] Failed to replicate to grouped sheets:", updateResult.groupError);
+          void alertAsync(groupReplicationFailedMessage(updateResult.groupError));
+        } else if (Array.isArray(updateResult.groupWritten)) {
+          // The backend answers the sheets it ACTUALLY wrote (it skips its own
+          // active sheet). A requested sheet missing from that answer did not
+          // get the entry: said out loud, never left silent.
+          const wrote = updateResult.groupWritten;
+          const missed = groupOthers.filter((index) => !wrote.includes(index));
+          if (missed.length > 0) {
+            console.error("[commitEdit] Grouped sheets the backend did not write:", missed);
+            void alertAsync(
+              groupReplicationFailedMessage(
+                `${missed.length} of the ${groupOthers.length} other grouped sheet${groupOthers.length === 1 ? "" : "s"} did not receive it.`,
+              ),
+            );
+          } else {
+            console.log("[commitEdit] Replicated to grouped sheets:", groupOthers);
           }
+        } else {
+          console.warn("[commitEdit] The backend did not say which grouped sheets it wrote:", updateResult);
         }
       }
 

@@ -609,9 +609,14 @@ impl<'a> Parser<'a> {
                             if self.current_token == Token::Exclamation {
                                 self.advance(); // consume '!'
                                 let inner = self.parse_reference_only()?;
+                                // Both names are lexer output, already folded
+                                // one character for one (never `to_uppercase`,
+                                // which expands `ß` to `SS`); folding again
+                                // is the identity and keeps that invariant
+                                // local.
                                 return Ok(Expression::Sheet3DRef {
-                                    start_sheet: name.to_uppercase(),
-                                    end_sheet: end_name.to_uppercase(),
+                                    start_sheet: identity::sheet_name_key(&name),
+                                    end_sheet: identity::sheet_name_key(&end_name),
                                     reference: Box::new(inner),
                                     ref_site_id: RefSiteId::ZERO,
                                 });
@@ -1103,8 +1108,8 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume !
                 let inner = self.parse_reference_only()?;
                 return Ok(Expression::Sheet3DRef {
-                    start_sheet: start_identifier.to_uppercase(),
-                    end_sheet: end_identifier.to_uppercase(),
+                    start_sheet: identity::sheet_name_key(&start_identifier),
+                    end_sheet: identity::sheet_name_key(&end_identifier),
                     reference: Box::new(inner),
                     ref_site_id: RefSiteId::ZERO,
                 });
@@ -1560,7 +1565,126 @@ impl<'a> Parser<'a> {
 /// Convenience function to parse a formula string directly.
 pub fn parse(input: &str) -> ParseResult<Expression> {
     let mut parser = Parser::new(input);
-    parser.parse()
+    let mut expr = parser.parse()?;
+    bind_parameter_column_ranges(&mut expr, &mut Vec::new());
+    Ok(expr)
+}
+
+/// INSIDE A LET OR A LAMBDA, A BARE `B:B` WHOSE LETTERS ARE A PARAMETER'S NAME
+/// IS THAT PARAMETER'S RANGE, NOT THE COLUMN -- Excel reads the `:` as the
+/// range operator between two names. [LIVE, Excel 16, round 18, COM:
+/// `=LET(b,2,SUM(B:B)*b)` shows #VALUE! and is stored `SUM(b:b)`;
+/// `=LET(b,A1:A3,SUM(B:B))` is 60 (A1:A3); `=LET(b,2,SUM(B:D))` is #NAME? (once
+/// the first letter is a name the other is a name too, and no name D exists); `=LAMBDA(b,SUM(B:B))(2)`
+/// is #VALUE!; `$B:$B`, `Sheet1!B:B`, and `B:B` under `LET(x,..)` stay the
+/// column (12).] Calcula's lexer reads `B:B` as a column whatever binds `b`,
+/// so the same text summed column B. Rewritten here, once, at parse time --
+/// the same point Excel decides it (its file spelling is `_xlpm.b:_xlpm.b`) --
+/// into `Range { NamedRef, NamedRef }`, which the evaluator resolves against
+/// the binding (`Evaluator::eval_bound_name_range`) and which carries no
+/// column-B dependency, as Excel's carries none. `bound` holds the uppercased
+/// parameter names in scope; a LET value sees only the names bound before it.
+///
+/// ONLY THE FIRST HALF DECIDES. [LIVE, Excel 16, round 19/20: with A1:C5 =
+/// 1..5, 10..50, 100..500, `=LET(b,2,SUM(A:B))` is 165 and
+/// `=LET(c,2,SUM(A:C)*c)` is 3330 -- columns, though the SECOND half names a
+/// parameter -- while `=LET(a,1,SUM(A:D)+a)` is #NAME? (stored `a:D`).] Excel
+/// reads the first letters as a name only when a binder names them, and then
+/// reads the second half as a name as well (or, for a bare `C` / `R`, as R1C1's
+/// own column / row -- see `Evaluator::eval_bound_name_range`).
+pub(crate) fn bind_parameter_column_ranges(expr: &mut Expression, bound: &mut Vec<String>) {
+    let is_bound = |bound: &[String], letters: &str| bound.iter().any(|b| b.eq_ignore_ascii_case(letters));
+    match expr {
+        Expression::ColumnRef { sheet: None, start_col, end_col, start_absolute: false, end_absolute: false, .. }
+            if is_bound(bound, start_col) =>
+        {
+            let start = std::mem::take(start_col);
+            let end = std::mem::take(end_col);
+            *expr = Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::NamedRef { name: start, ref_site_id: Default::default() }),
+                end: Box::new(Expression::NamedRef { name: end, ref_site_id: Default::default() }),
+                ref_site_id: Default::default(),
+            };
+        }
+        Expression::FunctionCall { func: BuiltinFunction::Let, args, .. } if args.len() >= 3 => {
+            let depth = bound.len();
+            let last = args.len() - 1;
+            let mut pending: Option<String> = None;
+            for (i, arg) in args.iter_mut().enumerate() {
+                if i == last {
+                    bind_parameter_column_ranges(arg, bound);
+                } else if i % 2 == 0 {
+                    // The name slot. It is bound for every LATER value and the
+                    // calculation -- not for its own value.
+                    pending = match arg {
+                        Expression::NamedRef { name, .. } => Some(name.to_ascii_uppercase()),
+                        _ => None,
+                    };
+                } else {
+                    bind_parameter_column_ranges(arg, bound);
+                    bound.extend(pending.take());
+                }
+            }
+            bound.truncate(depth);
+        }
+        Expression::FunctionCall { func: BuiltinFunction::Lambda, args, .. } if !args.is_empty() => {
+            let depth = bound.len();
+            let last = args.len() - 1;
+            for arg in &args[..last] {
+                if let Expression::NamedRef { name, .. } = arg {
+                    bound.push(name.to_ascii_uppercase());
+                }
+            }
+            bind_parameter_column_ranges(&mut args[last], bound);
+            bound.truncate(depth);
+        }
+        Expression::FunctionCall { args, .. } => {
+            for arg in args {
+                bind_parameter_column_ranges(arg, bound);
+            }
+        }
+        Expression::Range { start, end, .. } => {
+            bind_parameter_column_ranges(start, bound);
+            bind_parameter_column_ranges(end, bound);
+        }
+        Expression::BinaryOp { left, right, .. } => {
+            bind_parameter_column_ranges(left, bound);
+            bind_parameter_column_ranges(right, bound);
+        }
+        Expression::UnaryOp { operand, .. } | Expression::ImplicitIntersection { operand } => {
+            bind_parameter_column_ranges(operand, bound);
+        }
+        Expression::IndexAccess { target, index } => {
+            bind_parameter_column_ranges(target, bound);
+            bind_parameter_column_ranges(index, bound);
+        }
+        Expression::ArrayLiteral { rows } => {
+            for elem in rows.iter_mut().flatten() {
+                bind_parameter_column_ranges(elem, bound);
+            }
+        }
+        Expression::ListLiteral { elements } => {
+            for elem in elements {
+                bind_parameter_column_ranges(elem, bound);
+            }
+        }
+        Expression::DictLiteral { entries } => {
+            for (key, value) in entries {
+                bind_parameter_column_ranges(key, bound);
+                bind_parameter_column_ranges(value, bound);
+            }
+        }
+        Expression::SpillRef { cell, .. } => bind_parameter_column_ranges(cell, bound),
+        // A 3D span's inner reference is qualified by its sheets: never a name.
+        Expression::Literal(_)
+        | Expression::CellRef { .. }
+        | Expression::ColumnRef { .. }
+        | Expression::RowRef { .. }
+        | Expression::NamedRef { .. }
+        | Expression::Sheet3DRef { .. }
+        | Expression::TableRef { .. } => {}
+    }
 }
 
 /// Why a quoted `'...'!` prefix is an EXTERNAL WORKBOOK link rather than a

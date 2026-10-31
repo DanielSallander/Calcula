@@ -275,3 +275,45 @@ describe("the decoration", () => {
     expect(h.decorations).toEqual([]);
   });
 });
+
+describe("a range overlay follows rows and columns inserted and deleted (BUG-0614)", () => {
+  const step = (kind: "rowInsert" | "rowDelete" | "colInsert" | "colDelete", at: number, count: number, cause: "edit" | "undo" = "edit") => ({
+    edit: { sheetIndex: 0, kind, at, count },
+    cause,
+    seq: 1,
+  });
+
+  it("rows inserted above move the rectangle and its cues at once, and it is recomputed there", async () => {
+    await sheet.showSheetOverlay(owner);
+    h.invoke.mockClear();
+    expect(sheet.applyStructuralStepToOverlays(step("rowInsert", 0, 2))).toBe(true);
+    const moved = { kind: "range" as const, request: { ...request, startRow: 5, endRow: 16 } };
+    expect(sheet.isSheetOverlayOn(owner)).toBe(false);
+    expect(sheet.isSheetOverlayOn(moved)).toBe(true);
+    expect(cells.getCellCues(sheet.ownerId(moved)).map((c) => [c.row, c.col])).toEqual([[9, 1], [6, 1]]);
+    expect(cells.getCellCues(sheet.ownerId(owner))).toEqual([]);
+    await vi.advanceTimersByTimeAsync(sheet.SHEET_RECOMPUTE_DEBOUNCE_MS + 1);
+    expect(h.invoke).toHaveBeenCalledWith("insights_analyze_range", { request: { ...moved.request, expandToRegion: false } });
+  });
+
+  it("a row inserted inside grows it, an edit on another sheet leaves it, and deleting all of it hides it", async () => {
+    await sheet.showSheetOverlay(owner);
+    sheet.applyStructuralStepToOverlays(step("rowInsert", 5, 1));
+    const grown = { kind: "range" as const, request: { ...request, endRow: 15 } };
+    expect(sheet.isSheetOverlayOn(grown)).toBe(true);
+    expect(sheet.applyStructuralStepToOverlays({ ...step("rowInsert", 0, 1), edit: { sheetIndex: 3, kind: "rowInsert", at: 0, count: 1 } })).toBe(false);
+    expect(sheet.applyStructuralStepToOverlays(step("rowDelete", 3, 13))).toBe(true);
+    expect(sheet.isSheetOverlayOn(grown)).toBe(false);
+    expect(cells.hasAnyCellCues()).toBe(false);
+  });
+
+  it("the pane's analysed range and its label follow too, so the overlay toggle still finds it", async () => {
+    const token = store.beginRun("Sales!A4:C15", { kind: "range", request });
+    store.completeRun(token, bundle(2, 0, [4, 5, 7, 8]) as never);
+    expect(store.applyStructuralStepToOrigin(step("colInsert", 0, 1))).toBe(true);
+    expect(store.getState().origin).toEqual({ kind: "range", request: { ...request, startCol: 1, endCol: 3 } });
+    expect(store.getState().originLabel).toBe("Sales!B4:D15");
+    expect(store.applyStructuralStepToOrigin(step("colDelete", 1, 3))).toBe(true);
+    expect(store.getState().origin).toBeNull();
+  });
+});

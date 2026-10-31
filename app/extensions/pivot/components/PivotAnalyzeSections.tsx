@@ -37,7 +37,6 @@ import {
 } from '@api/layout';
 import { RibbonIcon } from '@api/ribbonIcons';
 import {
-  refreshPivotCache,
   getPivotTableInfo,
   deletePivotTable,
   addCalculatedField,
@@ -49,6 +48,7 @@ import { ChangeDataSourceDialog } from './ChangeDataSourceDialog';
 import { CalculatedFieldDialog } from './CalculatedFieldDialog';
 import { PIVOT_OPTIONS_DIALOG_ID } from '../manifest';
 import { confirmAsync } from "@api/dialogs";
+import { refreshPivotForUser } from '../lib/pivotUserRefresh';
 
 // ============================================================================
 // Styles (tokens only)
@@ -160,8 +160,8 @@ export function AnalyzeDataSection(_props: PanelSectionProps): React.ReactElemen
     if (!pivotId || isRefreshing) return;
     setIsRefreshing(true);
     try {
-      await refreshPivotCache(pivotId);
-      window.dispatchEvent(new Event('pivot:refresh'));
+      // The user's Refresh ends copy / cut mode, as Excel's does.
+      await refreshPivotForUser(pivotId);
     } catch (err) {
       const errStr = String(err);
       if (errStr.includes('Not connected') || errStr.includes('No connection')) {

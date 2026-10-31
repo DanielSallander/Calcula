@@ -63,7 +63,7 @@ impl Workbook {
             .write(&crate::document_effect::test_seed_effect())
             .unwrap();
         names.insert(
-            name.to_uppercase(),
+            identity::defined_name_key(name),
             NamedRange {
                 name: name.to_string(),
                 sheet_index: scope,
@@ -79,7 +79,7 @@ impl Workbook {
             .named_ranges
             .write(&crate::document_effect::test_seed_effect())
             .unwrap()
-            .remove(&name.to_uppercase());
+            .remove(&identity::defined_name_key(name));
     }
 
     /// What the commands run after the store write: the shared recalculation.
@@ -107,7 +107,7 @@ impl Workbook {
     fn name_dependents_of(&self, name: &str) -> Vec<(u32, u32)> {
         let map = self.state.name_dependents.lock().unwrap();
         let mut v: Vec<(u32, u32)> = map
-            .get(&name.to_uppercase())
+            .get(&identity::defined_name_key(name))
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
         v.sort_unstable();
@@ -576,7 +576,7 @@ fn apply_names_registers_edges_without_recalculating() {
 #[test]
 fn every_entry_path_stores_the_name_bearing_tree() {
     const DATA_RS: &str = include_str!("data.rs");
-    for name in ["update_cell_impl", "update_cells_batch_core", "fill_range"] {
+    for name in ["update_cell_impl", "update_cells_batch_core", "fill_range_core"] {
         let body = body_of(DATA_RS, name);
         assert!(
             body.contains("split_entered_formula("),

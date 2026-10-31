@@ -93,6 +93,10 @@ vi.mock("../../lib/tauri-api", async (importOriginal) => ({
   getComment: vi.fn(async () => null),
   getDataValidation: vi.fn(async () => null),
   relocateCellReferences: vi.fn(async () => []),
+  // A drag-move (like a cut's paste) marks the point it is taken back to
+  // inside the step it holds (round 12): the savepoint door JOINS that step.
+  beginUndoSavepoint: vi.fn(async () => ({ ticket: null, savepoint: { transaction: 7, changes: 0 } })),
+  rollBackToUndoSavepoint: vi.fn(async () => ({ success: true })),
 }));
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({

@@ -265,6 +265,9 @@ describe("on a floating grid: the stored value, in the one targeted batch", () =
   it("Paste All of a constant carries the stored value and the source style", async () => {
     await paste(clip([{ display: "1.23", styleIndex: 4, stored: num(1.23456) }]), "all", "none", REF, G);
     expect(h.log).toEqual([
+      // The cell that takes the source's style is CHECKED first (`checkArea`,
+      // writes nothing): its formatting is never half applied.
+      "setCellStyle 3,0 0",
       `batch@target ${JSON.stringify([{ row: 3, col: 0, value: "1.23456", invariant: true, pasted: true, styleIndex: 4 }])}`,
     ]);
   });

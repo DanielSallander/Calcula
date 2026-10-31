@@ -57,13 +57,13 @@ import { hasDesignQueryDrill, isModelPivot, openPivotPaneForPivot } from "./sele
 import { CommandRegistry } from "@api/commands";
 import { PIVOT_CANVAS_COPY_CELLS_COMMAND } from "../lib/pivotCanvasCellCommands";
 import { runPivotDrillThrough } from "../lib/pivotCellDoubleClick";
+import { refreshPivotForUser } from "../lib/pivotUserRefresh";
 import { editPivotValueField } from "../lib/valueFieldEdits";
 import { requestValueFieldDialog, type ValueFieldDialogKind } from "../lib/valueFieldDialogRequest";
 import { NEEDS_BASE_FIELD, SHOW_VALUES_AS_OPTIONS } from "../lib/showValuesAsOptions";
 import type { AggregationType } from "../components/types";
 
 import {
-  refreshPivotCache,
   deletePivotTable,
   sortPivotField,
   applyPivotFilter,
@@ -527,8 +527,8 @@ export function registerPivotContextMenuItems(): () => void {
       onClick: menuAction("Refresh", async (ctx) => {
         const pivotId = pivotIdOrThrow(ctx);
         try {
-          await refreshPivotCache(pivotId);
-          window.dispatchEvent(new Event("pivot:refresh"));
+          // The user's Refresh ends copy / cut mode, as Excel's does.
+          await refreshPivotForUser(pivotId);
         } catch (err) {
           const errStr = String(err);
           if (errStr.includes("Not connected") || errStr.includes("No connection")) {

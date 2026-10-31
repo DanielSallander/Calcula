@@ -1556,6 +1556,9 @@ impl Harness {
             .collect();
         let names = crate::calp_commands::prepare_refresh_payloads(&self.state, &mut payloads)
             .expect("the refresh's pre-effect pass refused");
+        // The command's other pre-effect gate: one key, one connection.
+        crate::calp_commands::refuse_refreshed_data_sources_already_served(&self.state, &self.bi, &payloads)
+            .expect("the refresh's data-source gate refused");
         crate::calp_commands::apply_refresh_payloads(
             &self.state,
             &test_effect(),
@@ -2884,8 +2887,8 @@ fn a_subscriber_diff_compares_renamed_references_in_the_published_spelling() {
         .expect("names");
     assert_eq!(
         names,
-        [("data (2)".to_string(), "Data".to_string())].into_iter().collect(),
-        "only the collision-renamed sheet, local (lowercased) -> published"
+        [(identity::sheet_name_key("Data (2)"), "Data".to_string())].into_iter().collect(),
+        "only the collision-renamed sheet, local (by Excel's sheet-name key) -> published"
     );
     assert!(
         crate::calp_commands::subscriber_published_names(&h.state, "not-subscribed", &base)
@@ -3105,7 +3108,7 @@ fn the_subscriber_diff_and_the_reset_agree_about_a_detached_sheet() {
     let base = reg.get_version_manifest("literals", "1.0.0").unwrap();
     let names =
         crate::calp_commands::subscriber_published_names(&h.state, "literals", &base).expect("names");
-    assert_eq!(names.get("data (2)").map(String::as_str), Some("Data"), "{names:?}");
+    assert_eq!(names.get(&identity::sheet_name_key("data (2)")).map(String::as_str), Some("Data"), "{names:?}");
     let mut carrier = Workbook::default();
     let mut sheet = Sheet::new("Report".to_string());
     sheet.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_formula(live)));
@@ -4289,8 +4292,18 @@ fn every_connection_door_re_binds_design_query_charts_after_minting_their_connec
     let rebound = refresh.find("remap_chart_bi_connections(").expect("the refresh does not re-bind charts");
     assert!(map < rebound, "the refresh re-binds charts before the full data-source map exists");
 
-    let open = calp_commands_fn_code("pub(crate) fn restore_application_bi_connections(");
-    let minted = open.find("load_embedded_data_sources(").expect("the open path mints connections");
+    // The body lives in the `_in` form (an explicit trust profile, for tests).
+    let open = calp_commands_fn_code("pub(crate) fn restore_application_bi_connections_in(");
+    // The open path mints through its verified-sources half (which decides the
+    // shared ids first, rev10B).
+    assert!(
+        calp_commands_fn_code("pub(crate) fn materialize_verified_application_connections(")
+            .contains("load_embedded_data_sources("),
+        "the open path's minting half no longer mints connections"
+    );
+    let minted = open
+        .find("materialize_verified_application_connections(")
+        .expect("the open path mints connections");
     let rebound = open.find("remap_chart_bi_connections(").expect("the open path does not re-bind charts");
     assert!(minted < rebound, "the open path re-binds charts before its connections exist");
     let clean = open
@@ -4471,24 +4484,26 @@ fn a_save_stamps_each_design_query_chart_from_its_live_connection_and_never_touc
 }
 
 /// A WORKING COPY'S PUSH KEYS ITS DESIGN-QUERY CHARTS BY THE ID IT FILES THEIR
-/// DATA SOURCE UNDER (review RB-1). A checkout mints the developer's connection
-/// with the PREVIOUS version's data-source id as its package key; the push
-/// files that data source under the connection's own id. Before the fix the
-/// carrier stamped the package key, and an existing subscriber -- who still
-/// holds the connection serving the previous version, beside the one the
-/// refresh minted for the new id -- had every such chart re-bound to the OLD
-/// version's model, because the re-bind prefers the key.
+/// DATA SOURCE UNDER -- and that id is the APPLICATION'S OWN data-source id,
+/// the one the previous version filed it under (BUG-0589). A checkout mints the
+/// developer's connection with a fresh session uuid and the application's
+/// data-source id as its package key. Review RB-1 made the carrier and the
+/// capture agree on the session uuid, which re-keyed every data source on
+/// every push; now both use the stable key, so the `.cala` save and the
+/// carrier give a checked-out chart the SAME key, and an existing subscriber's
+/// refresh -- which re-uses its one connection for that id -- binds every
+/// chart to the connection now serving the new version.
 ///
-/// SABOTAGE: return `package_data_source_id` from
-/// `published_chart_connection_keys` -- the carrier key assertions fail.
+/// SABOTAGE: return `connection.id.to_string()` from `published_data_source_id`
+/// -- the `filed_under` assertion fails (and the carrier key assertions with it).
 ///
-/// The builder's `ChartKeysFor` choice is NOT reachable from here:
-/// `build_workbook_for_save_with_slicers` takes Tauri `State` handles, which no
-/// unit test in this crate can construct. Flipping it to `ChartKeysFor::Document`
-/// leaves this test green; it is caught only by the source pin in
-/// `every_door_that_serialises_charts_stamps_them_through_the_one_collector`,
-/// which is therefore that choice's sole guard and must not be deleted as
-/// redundant with this one.
+/// The builder's `ChartKeysFor` choice cannot be seen here: for a connection a
+/// checkout minted, both arms now give the same key. Flipping it to
+/// `ChartKeysFor::Document` in `build_workbook_for_save_with_slicers` is caught
+/// only by the source pin in
+/// `every_door_that_serialises_charts_stamps_them_through_the_one_collector`
+/// (it differs for a connection authored in the publishing workbook, whose
+/// `.cala` key is none), which must not be deleted as redundant with this one.
 #[test]
 fn the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_is_filed_under() {
     let dir = TempDir::new().unwrap();
@@ -4504,6 +4519,7 @@ fn the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_i
     h.empty_as_checkout_does();
     h.materialize(checkout_pull(&dir, prof.path()), MaterializeMode::Checkout);
     let (working, _) = connection_for(&h, &publisher_connection);
+    assert_ne!(working.to_string(), publisher_connection, "the premise: a checkout mints a fresh session uuid");
     // A chart the developer made in the working copy (Insert Chart, a kept
     // drill chart): bound by the session uuid only.
     let made_here = design_query_entry(0, &working.to_string(), None);
@@ -4512,8 +4528,14 @@ fn the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_i
         h.state.charts.write(&effect).unwrap().push(made_here.clone());
     }
     let sheet_ids = h.state.sheet_ids.read().unwrap().clone();
-    let filed_under = crate::calp_commands::published_data_source_id(&working);
-    assert_eq!(filed_under, working.to_string(), "a push files the data source under the connection's own id");
+    let filed_under = {
+        let connections = h.bi.connections.lock().unwrap();
+        crate::calp_commands::published_data_source_id(&connections[&working])
+    };
+    assert_eq!(
+        filed_under, publisher_connection,
+        "a push files the data source under the application's own id, not the session uuid"
+    );
 
     // The .cala save: the package key, which the next open's re-mint answers to.
     let document = crate::persistence::chart_connection_keys(&h.bi).unwrap();
@@ -4521,20 +4543,18 @@ fn the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_i
     assert_eq!(saved_data(&saved, made_here.id)["packageDataSourceId"], publisher_connection.as_str());
 
     // The carrier: the id the data source is filed under in THIS package --
-    // for the chart made here AND for the pulled one, whose store copy carries
-    // the previous version's key from the checkout's re-bind.
+    // for the chart made here AND for the pulled one.
     let package = crate::persistence::published_chart_connection_keys(&h.bi).unwrap();
     let carried = crate::persistence::collect_charts_for_save(&h.state, &sheet_ids, &package);
     assert_eq!(saved_data(&carried, made_here.id)["packageDataSourceId"], filed_under.as_str());
     assert_eq!(saved_data(&carried, wb.charts[0].id)["packageDataSourceId"], filed_under.as_str());
     assert_eq!(saved_data(&carried, made_here.id)["connectionId"], working.to_string().as_str(), "the session uuid is not rewritten");
 
-    // The consequence at an EXISTING subscriber after the refresh: the old
-    // connection still serves v1 (package key = the publisher's id), the
-    // refresh minted a second one for the id v2 files its data source under.
-    let (still_v1, v2) = (new_entity(), new_entity());
+    // At an EXISTING subscriber the refresh re-uses its one connection for
+    // that id, now serving v2: every carried chart binds to it.
+    let serving_v2 = new_entity();
     let live: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
-        [(publisher_connection.clone(), still_v1), (filed_under.clone(), v2)].into_iter().collect();
+        [(publisher_connection.clone(), serving_v2)].into_iter().collect();
     let entry = |saved: &[persistence::SavedChart], id: identity::EntityId| crate::api_types::ChartEntry {
         id,
         sheet_index: 0,
@@ -4543,27 +4563,21 @@ fn the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_i
     let mut from_v2 = vec![entry(&carried, made_here.id), entry(&carried, wb.charts[0].id)];
     assert_eq!(crate::calp_commands::remap_chart_bi_connections(&mut from_v2, &live, None), 2);
     for chart in &from_v2 {
-        assert_eq!(spec_connection(&chart.spec_json).0, v2.to_string(), "bound to the connection serving v2");
+        assert_eq!(spec_connection(&chart.spec_json).0, serving_v2.to_string(), "bound to the connection serving v2");
     }
-    // The premise: the package key, carried as before the fix, binds v1's model.
-    let mut stale = vec![entry(&saved, made_here.id)];
-    assert_eq!(crate::calp_commands::remap_chart_bi_connections(&mut stale, &live, None), 1);
-    assert_eq!(spec_connection(&stale[0].spec_json).0, still_v1.to_string());
 }
 
 /// THE EMBEDDED DATA SOURCE AND THE CARRIED CHART NAME THE SAME THING -- checked
 /// on what the capture really captures (review RB1-WIRING-PIN-GAPS (b)). The
-/// source pin below can only check two substrings, and a root fix applied to the
-/// capture alone, `conn.package_data_source_id.clone().unwrap_or_else(||
-/// published_data_source_id(&conn.id))`, keeps both and every pin green: the
-/// carrier would then key each chart by the connection's own id while the
-/// package files its data source under the package key, and every subscriber's
-/// design-query chart would name a data source the package does not have (RB-1,
-/// reversed).
+/// source pin below can only check substrings, and a fix applied to one side
+/// alone -- the capture filing under one key while the carrier stamps another
+/// -- keeps every pin green while every subscriber's design-query chart names a
+/// data source the package does not have. Since BUG-0589 both sides use the
+/// stable key, which for a checked-out connection is the application's own
+/// data-source id.
 ///
-/// SABOTAGE: file the data source under `conn.package_data_source_id` (else the
-/// connection's own id) in `capture_bi_data_sources` -- the first data-source
-/// assertion fails.
+/// SABOTAGE: file the data source under `conn.id.to_string()` in
+/// `capture_bi_data_sources_of` -- the first data-source assertion fails.
 #[test]
 fn a_checked_out_push_files_each_data_source_under_the_key_its_carried_charts_name() {
     let dir = TempDir::new().unwrap();
@@ -4602,7 +4616,815 @@ fn a_checked_out_push_files_each_data_source_under_the_key_its_carried_charts_na
     for ds in &sources {
         assert_eq!(ds.id, keyed, "the data source is filed under the key the carrier gives its connection");
         assert_eq!(ds.id, carried_key, "the carried chart names the data source the package embeds");
+        assert_eq!(ds.id, publisher_connection, "the push keeps the application's data-source id (BUG-0589)");
     }
+}
+
+/// A ribbon filter as the publisher's carrier writes it, on `connection` with
+/// the stamped data-source id `data_source_id` (None: a filter authored on a
+/// local connection, whose uuid IS the application data-source id).
+fn ribbon_filter_on(connection: &str, data_source_id: Option<&str>, name: &str) -> persistence::SavedRibbonFilter {
+    serde_json::from_value(serde_json::json!({
+        "id": new_entity().to_string(),
+        "name": name,
+        "connection_id": connection,
+        "data_source_id": data_source_id,
+        "field_name": "Sales.Region",
+        "selected_items": null,
+    }))
+    .expect("a minimal ribbon filter deserialises")
+}
+
+/// The PUSH a working copy makes, through the real carrier
+/// (`build_workbook_for_save_with_slicers`, which stamps the design-query
+/// charts and collects the ribbon filters), the real pivot collector and the
+/// real data-source capture -- everything `assemble_publish_snapshot` hands to
+/// core publish for an untouched working copy, minus the steps that do not
+/// touch a data source's identity (renames, pruning, regions, scripts).
+fn push_working_copy(dir: &TempDir, prof: &Path, w: &Harness, version: (u32, u32, u32), base: (u32, u32, u32)) {
+    let (mut carrier, _) = crate::persistence::build_workbook_for_save_with_slicers(
+        &w.state,
+        &crate::persistence::UserFilesState::default(),
+        &w.bi,
+        &w.slicer,
+        &w.ribbon,
+        &w.pivot,
+        &w.timeline,
+    )
+    .expect("the carrier builds");
+    crate::persistence::collect_pivot_definitions(&w.pivot, &w.state, &mut carrier);
+    let (data_sources, model_writebacks) =
+        crate::calp_commands::capture_bi_data_sources(&w.state, &w.bi).expect("the capture runs");
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let request = PublishRequest {
+        workbook: &carrier,
+        package_name: "literals".to_string(),
+        version: SemVer::new(version.0, version.1, version.2),
+        kind: "report".to_string(),
+        mode: PushMode::Update { expected_base: SemVer::new(base.0, base.1, base.2) },
+        change_summary: "an untouched working-copy push".to_string(),
+        sheet_indices: vec![0],
+        now: "2026-10-30T00:00:00Z".to_string(),
+        published_by: "author".to_string(),
+        writeback_regions: None,
+        model_writebacks: if model_writebacks.is_empty() { None } else { Some(model_writebacks) },
+        object_scripts: None,
+        module_scripts: None,
+        notebooks: None,
+        data_sources,
+        excluded_regions: Vec::new(),
+        custom_objects: Vec::new(),
+        include_comments: false,
+        identity_policy: None,
+        min_app_version: String::new(),
+    };
+    publish::publish(&reg, &request, prof).expect("the push publishes");
+}
+
+/// The ribbon filters of `h`: (name, connection, stamped data-source id).
+fn ribbon_filters_of(h: &Harness) -> Vec<(String, identity::EntityId, Option<String>)> {
+    let mut out: Vec<_> = h
+        .ribbon
+        .filters
+        .read()
+        .unwrap()
+        .values()
+        .map(|f| (f.name.clone(), f.connection_id, f.data_source_id.clone()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// BUG-0589, END TO END: publish -> subscribe -> check out -> push UNTOUCHED ->
+/// refresh the existing subscriber, and subscribe a fresh one. Before the fix
+/// the push filed the model under the checkout's session uuid, so (1) every
+/// subscriber lost the application's ribbon filters (the pull skips a filter
+/// whose data source the package does not embed), (2) the existing subscriber's
+/// refresh minted a SECOND connection for the new id and kept the first on
+/// v1's model, and (3) a design-query chart followed the new id while
+/// everything keyed by the stable id stayed on the old connection.
+///
+/// Also pins the ribbon filter's fallback to its carried connection uuid (the
+/// model-slicer rule): a filter whose stamped id names nothing embedded but
+/// whose connection uuid IS the embedded data source is kept, not skipped.
+///
+/// SABOTAGE: file data sources under `connection.id.to_string()` in
+/// `published_data_source_id` -- the "one connection" assertion after the
+/// refresh fails. SABOTAGE (fallback): restore the bare
+/// `.unwrap_or_else(|| saved.connection_id.to_string())` in
+/// `materialize_pulled_ribbon_filters` -- the subscriber's filter count fails.
+#[test]
+fn an_untouched_working_copy_push_keeps_every_subscribers_model_and_ribbon_filters() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let publisher_connection = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    let dashboard = wb.sheets[0].id;
+    wb.charts = vec![design_query_chart(dashboard, &publisher_connection, "Revenue by region")];
+    wb.ribbon_filters = vec![
+        ribbon_filter_on(&publisher_connection, None, "Region"),
+        // Stamped with an id the package does not embed, on the connection
+        // whose uuid it does: kept by the connection fallback.
+        ribbon_filter_on(&publisher_connection, Some("ds-from-elsewhere"), "Channel"),
+    ];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &publisher_connection);
+
+    // An existing subscriber.
+    let s = Harness::new();
+    s.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    let (s_conn, _) = connection_for(&s, &publisher_connection);
+    let filters_v1 = ribbon_filters_of(&s);
+    assert_eq!(filters_v1.len(), 2, "the subscriber got both ribbon filters: {filters_v1:?}");
+    for (name, connection, ds) in &filters_v1 {
+        assert_eq!(*connection, s_conn, "filter {name} reads the subscriber's connection");
+        assert_eq!(ds.as_deref(), Some(publisher_connection.as_str()), "filter {name} keeps the stable id");
+    }
+
+    // The developer checks v1 out and pushes v1.1 without touching the model.
+    let w = Harness::new();
+    w.empty_as_checkout_does();
+    w.materialize(checkout_pull(&dir, prof.path()), MaterializeMode::Checkout);
+    let (w_conn, _) = connection_for(&w, &publisher_connection);
+    assert_ne!(w_conn.to_string(), publisher_connection, "the premise: the checkout minted a fresh session uuid");
+    assert_eq!(ribbon_filters_of(&w).len(), 2, "the working copy holds the application's ribbon filters");
+    push_working_copy(&dir, prof.path(), &w, (1, 1, 0), (1, 0, 0));
+
+    // The existing subscriber refreshes.
+    s.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+    let (s_after, minted) = connection_for(&s, &publisher_connection);
+    assert_eq!(s.bi.connections.lock().unwrap().len(), 1, "the refresh re-used the one connection, never minting a second");
+    assert_eq!(minted, 1);
+    assert_eq!(s_after, s_conn, "the same connection serves v1.1");
+    let filters_v2 = ribbon_filters_of(&s);
+    assert_eq!(filters_v2.len(), 2, "the refresh kept the application's ribbon filters: {filters_v2:?}");
+    for (name, connection, ds) in &filters_v2 {
+        assert_eq!(*connection, s_conn, "filter {name} still reads the subscriber's one connection");
+        assert_eq!(ds.as_deref(), Some(publisher_connection.as_str()), "filter {name} keeps the stable id for the next open");
+    }
+    let charts = s.state.charts.read().unwrap();
+    let chart = charts.iter().find(|c| c.id == wb.charts[0].id).expect("the chart is still there");
+    let (bound, key) = spec_connection(&chart.spec_json);
+    assert_eq!(bound, s_conn.to_string(), "the design-query chart reads the same connection as everything else");
+    assert_eq!(key.as_deref(), Some(publisher_connection.as_str()));
+    drop(charts);
+
+    // A fresh subscriber of v1.1.
+    let f = Harness::new();
+    f.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    let (f_conn, _) = connection_for(&f, &publisher_connection);
+    let fresh = ribbon_filters_of(&f);
+    assert_eq!(fresh.len(), 2, "a fresh subscriber of the pushed version gets the ribbon filters: {fresh:?}");
+    assert!(fresh.iter().all(|(_, c, _)| *c == f_conn));
+}
+
+/// The pivot fallback for metadata that names no embedded data source answers
+/// only for an application with ONE data source (BUG-0589): with several, the
+/// old `values().next()` gave an arbitrary connection by hash order.
+///
+/// SABOTAGE: make `sole_connection` return `ds_to_conn.values().next().copied()`
+/// -- the two-source assertion fails.
+#[test]
+fn the_pivot_fallback_answers_only_for_a_single_data_source() {
+    let (a, b) = (new_entity(), new_entity());
+    let one: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
+        [("ds-a".to_string(), a)].into_iter().collect();
+    assert_eq!(crate::calp_commands::sole_connection(&one), Some(a));
+    let two: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
+        [("ds-a".to_string(), a), ("ds-b".to_string(), b)].into_iter().collect();
+    assert_eq!(crate::calp_commands::sole_connection(&two), None, "two data sources: no arbitrary pick");
+    assert_eq!(crate::calp_commands::sole_connection(&std::collections::HashMap::new()), None);
+}
+
+/// Two live connections of ONE application data source cannot both be filed
+/// under its id: the capture refuses, naming them, instead of letting hash
+/// order decide which model the package carries (BUG-0589).
+///
+/// SABOTAGE: drop the `filed.insert` refusal in `capture_bi_data_sources_of`
+/// -- the `expect_err` fails.
+#[test]
+fn a_capture_refuses_two_connections_filed_under_one_data_source() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let publisher_connection = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &publisher_connection);
+
+    let h = Harness::new();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    let (first, _) = connection_for(&h, &publisher_connection);
+    // A second connection minted from the same data source, sharing the engine.
+    let second = new_entity();
+    {
+        let mut connections = h.bi.connections.lock().unwrap();
+        let engine = connections[&first].engine.clone();
+        let mut twin = local_connection(second);
+        twin.name = "Sales model (2)".into();
+        twin.engine = engine;
+        twin.package_data_source_id = Some(publisher_connection.clone());
+        connections.insert(second, twin);
+    }
+    let err = match crate::calp_commands::capture_bi_data_sources(&h.state, &h.bi) {
+        Ok((sources, _)) => panic!("two connections of one data source must refuse; captured {}", sources.len()),
+        Err(e) => e,
+    };
+    assert!(err.contains("Sales model (2)"), "the refusal names the connections: {err}");
+    // The model-only publish of ONE of them still captures just that one.
+    let (only, _) = crate::calp_commands::capture_bi_data_sources_of(&h.state, &h.bi, Some(&first))
+        .expect("a single connection is captured");
+    assert_eq!(only.len(), 1);
+    assert_eq!(only[0].id, publisher_connection, "filed under the application's id, not the session uuid");
+}
+
+/// A BI pivot created on a connection a subscribe or a checkout minted names
+/// the connection's STABLE key, not its session uuid (BUG-0589): the session
+/// uuid names nothing after the next open's re-mint, nor in a package this
+/// workbook pushes. `create_pivot_from_bi_model` is an async Tauri command
+/// taking `State` handles, so this is a source pin on the one stamp.
+///
+/// SABOTAGE: stamp `data_source_id: Some(connection_id.to_string())` again --
+/// the stamp assertion fails.
+#[test]
+fn a_bi_pivot_is_created_naming_its_connections_stable_key() {
+    let create = crate_fn_code("src/pivot/commands.rs", "pub async fn create_pivot_from_bi_model(");
+    assert!(
+        create.contains("crate::calp_commands::published_data_source_id(conn)"),
+        "the pivot no longer takes its key from published_data_source_id"
+    );
+    assert!(
+        create.contains("data_source_id: Some(data_source_key)"),
+        "the pivot's metadata no longer names the connection's stable key"
+    );
+}
+
+/// Every file of application `package`'s versions in the workspace at `dir`
+/// (the folder named after it), as bytes.
+fn package_files(dir: &TempDir, package: &str) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fn walk(at: &Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(at).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push((path.clone(), std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&dir.path().join(package), &mut out);
+    out
+}
+
+/// ONE KEY, ONE APPLICATION (round 11; review rev9A, calpds D3). A NEW
+/// application published from a workbook that SUBSCRIBES to another files the
+/// subscribed model under its OWN data-source id -- deterministic per
+/// (application, source id) -- and every store it carries that names the
+/// model follows, so the source id appears nowhere in the new package. A
+/// subscriber to both then holds two connections under two keys, each
+/// application's chart reading its own.
+///
+/// Before the fix the new application re-used the source's id (BUG-0589's
+/// stable key): a subscriber to both minted two connections under ONE key,
+/// and refresh, the filter/slicer remap and every key lookup took whichever
+/// the connection map returned first.
+///
+/// SABOTAGE: make `data_source_rekeys_for_target` return an empty map -- the
+/// "files under its own id" assertion fails.
+#[test]
+fn a_new_application_from_a_subscribed_workbook_files_its_model_under_its_own_key() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let source_key = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    wb.ribbon_filters = vec![ribbon_filter_on(&source_key, None, "Region")];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &source_key);
+
+    // W subscribes to A and builds a report of its own on A's model.
+    let w = Harness::new();
+    w.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    let (w_conn, _) = connection_for(&w, &source_key);
+    let mine = design_query_entry(0, &w_conn.to_string(), Some(&source_key));
+    {
+        let effect = crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default());
+        w.state.charts.write(&effect).unwrap().push(mine.clone());
+    }
+    let own_sheet = w.state.sheet_ids.read().unwrap()[0];
+    let registry = dir.path().to_str().unwrap().to_string();
+
+    // ...and publishes it as the NEW application B, through the real carrier.
+    let carrier = crate::calp_commands::assemble_publish_workbook(
+        &w.state,
+        &w.bi,
+        &w.pivot,
+        &w.scripts,
+        &w.slicer,
+        &w.ribbon,
+        &w.pane,
+        &crate::persistence::UserFilesState::default(),
+        &w.timeline,
+        &crate::calp_commands::PublishSheetIds { sheets: vec![own_sheet], backing: vec![] },
+        &registry,
+        "report-b",
+        &[],
+        "published",
+    )
+    .expect("the carrier assembles");
+    let b_key = crate::calp_commands::data_source_key_for_application("report-b", &source_key);
+    assert_ne!(b_key, source_key);
+    let filed: Vec<&str> = carrier.assembly.data_sources.iter().map(|d| d.id.as_str()).collect();
+    assert_eq!(filed, vec![b_key.as_str()], "B files the subscribed model under its OWN id, not A's");
+    assert_eq!(
+        b_key,
+        crate::calp_commands::data_source_key_for_application("report-b", &source_key),
+        "the id is deterministic: the next push of B files it under the same one"
+    );
+    let assembly = carrier.assembly;
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let request = PublishRequest {
+        workbook: &assembly.workbook,
+        package_name: "report-b".to_string(),
+        version: SemVer::new(1, 0, 0),
+        kind: "report".to_string(),
+        mode: PushMode::CreateNew,
+        change_summary: String::new(),
+        sheet_indices: carrier.sheet_indices.clone(),
+        now: "2026-10-30T00:00:00Z".to_string(),
+        published_by: "author".to_string(),
+        writeback_regions: None,
+        model_writebacks: None,
+        object_scripts: None,
+        module_scripts: None,
+        notebooks: None,
+        data_sources: assembly.data_sources,
+        excluded_regions: Vec::new(),
+        custom_objects: Vec::new(),
+        include_comments: false,
+        identity_policy: None,
+        min_app_version: String::new(),
+    };
+    publish::publish(&reg, &request, prof.path()).expect("B publishes");
+
+    // Nothing in B's package names A's id any more -- the data source, the
+    // ribbon filter and the chart all followed.
+    let files = package_files(&dir, "report-b");
+    assert!(!files.is_empty(), "fixture: B's package is where the scan looks");
+    for (path, bytes) in &files {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains(&source_key), "{} still names A's data-source id", path.display());
+    }
+    assert!(
+        files.iter().any(|(_, b)| String::from_utf8_lossy(b).contains(&b_key)),
+        "B's package names its own id"
+    );
+
+    // A subscriber to both: two connections, one per key, each application's
+    // objects on its own.
+    let s = Harness::new();
+    s.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    s.materialize(pull_latest(&dir, prof.path(), "report-b"), MaterializeMode::Subscribe);
+    let (s_a, a_count) = connection_for(&s, &source_key);
+    let (s_b, b_count) = connection_for(&s, &b_key);
+    assert_eq!((a_count, b_count), (1, 1), "one connection per key");
+    assert_ne!(s_a, s_b, "two applications, two connections");
+    let charts = s.state.charts.read().unwrap();
+    let chart = charts.iter().find(|c| c.id == mine.id).expect("B's chart arrived");
+    let (bound, key) = spec_connection(&chart.spec_json);
+    assert_eq!(bound, s_b.to_string(), "B's chart reads B's model");
+    assert_eq!(key.as_deref(), Some(b_key.as_str()));
+    drop(charts);
+    let filters = ribbon_filters_of(&s);
+    assert!(
+        filters.iter().any(|(_, c, ds)| *c == s_a && ds.as_deref() == Some(source_key.as_str())),
+        "A's ribbon filter stays on A's connection: {filters:?}"
+    );
+}
+
+/// THE SUBSCRIBER'S SIDE: a model arriving under an id another connection
+/// already serves is REFUSED, by name, before anything is written -- an
+/// application published before round 11 that re-used another's id, or a
+/// checkout of an application this workbook subscribes to. And a refresh may
+/// re-use only the one connection its own subscription's ledger claims: not
+/// one another subscription claims too (one connection serving two
+/// applications).
+///
+/// SABOTAGE: make `refuse_data_source_already_served` return `Ok(())` at once
+/// -- the subscribe `expect_err` fails.
+#[test]
+fn a_model_under_an_id_another_connection_serves_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let source_key = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &source_key);
+    // An application that files ITS model under A's id (the pre-fix shape).
+    let mut other = Workbook::default();
+    other.sheets = vec![Sheet::new("Report".to_string())];
+    publish_with_model(&dir, prof.path(), &other, vec![0], "copy-b", (1, 0, 0), None, &source_key);
+
+    let s = Harness::new();
+    s.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    let sheets_before = s.state.sheet_names.read().unwrap().clone();
+    let err = materialize_pull_result(
+        &s.state,
+        &test_effect(),
+        &s.pivot,
+        &s.bi,
+        &s.scripts,
+        &s.ribbon,
+        &s.pane,
+        &s.slicer,
+        &s.timeline,
+        pull_latest(&dir, prof.path(), "copy-b"),
+        MaterializeMode::Subscribe,
+        None,
+    )
+    .expect_err("a second connection under one key must be refused");
+    assert!(err.contains("CALP_DATA_SOURCE_SHARED"), "a structured refusal: {err}");
+    assert!(err.contains("copy-b"), "it names the application: {err}");
+    assert_eq!(connection_for(&s, &source_key).1, 1, "no second connection was minted");
+    assert_eq!(*s.state.sheet_names.read().unwrap(), sheets_before, "nothing was installed");
+    assert_eq!(s.state.subscriptions.read().unwrap().subscriptions.len(), 1);
+
+    // A refresh of A re-uses A's own connection...
+    let payload = |pull| vec![calp::refresh::RefreshPayload { subscription_index: 0, pull_result: pull }];
+    crate::calp_commands::refuse_refreshed_data_sources_already_served(
+        &s.state,
+        &s.bi,
+        &payload(pull_latest(&dir, prof.path(), "literals")),
+    )
+    .expect("a subscription refreshes onto its own connection");
+    // ...but not one a second subscription claims as well.
+    {
+        let effect = test_effect();
+        let mut subs = s.state.subscriptions.write(&effect).unwrap();
+        let mut twin = subs.subscriptions[0].clone();
+        twin.package_name = "copy-b".to_string();
+        subs.subscriptions.push(twin);
+    }
+    let err = crate::calp_commands::refuse_refreshed_data_sources_already_served(
+        &s.state,
+        &s.bi,
+        &payload(pull_latest(&dir, prof.path(), "literals")),
+    )
+    .expect_err("one connection serving two subscriptions is ambiguous");
+    assert!(err.contains("CALP_DATA_SOURCE_SHARED"), "{err}");
+
+    // The doors run the gate before their effect.
+    for (door, gate) in [
+        ("pub fn calp_pull(", "refuse_data_source_already_served("),
+        ("pub fn calp_checkout(", "refuse_data_source_already_served("),
+        ("pub fn calp_refresh_apply(", "refuse_refreshed_data_sources_already_served("),
+    ] {
+        let code = crate_fn_code("src/calp_commands.rs", door);
+        let at = code.find(gate).unwrap_or_else(|| panic!("{door} no longer runs {gate}"));
+        let effect = code.find("DocumentEffect::mutates(").expect("the door has an effect");
+        assert!(at < effect, "{door} runs {gate} after its effect: a refusal would dirty the workbook");
+    }
+}
+
+/// THE OPEN PATH'S SIDE of one key, one application (calpkey remaining). A
+/// document written before round 11 can hold two subscriptions whose models
+/// share one data-source id. The open used to mint the FIRST one it verified
+/// and skip the other as "already connected", so the second application's
+/// pivots, filters and charts silently read the first one's model. Now neither
+/// is connected under the shared id, and each is reported as
+/// `sharedDataSource` with the structured refusal text.
+///
+/// SABOTAGE: the partition in `materialize_verified_application_connections`
+/// never treats a key as shared -- a connection is minted.
+#[test]
+fn opening_two_subscriptions_that_claim_one_data_source_id_connects_neither() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let source_key = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &source_key);
+    let mut other = Workbook::default();
+    other.sheets = vec![Sheet::new("Report".to_string())];
+    publish_with_model(&dir, prof.path(), &other, vec![0], "copy-b", (1, 0, 0), None, &source_key);
+    let count = |h: &Harness| {
+        h.bi.connections
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|c| c.package_data_source_id.as_deref() == Some(source_key.as_str()))
+            .count()
+    };
+
+    let s = Harness::new();
+    s.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    // The pre-round-11 document: a second subscription filed under the same id.
+    {
+        let effect = test_effect();
+        let mut subs = s.state.subscriptions.write(&effect).unwrap();
+        let mut twin = subs.subscriptions[0].clone();
+        twin.package_name = "copy-b".to_string();
+        subs.subscriptions.push(twin);
+    }
+    let subscriptions = s.state.subscriptions.read().unwrap().subscriptions.clone();
+    let verified_of = |package: &str, index: usize| {
+        (index, "workspace".to_string(), pull_latest(&dir, prof.path(), package).data_sources)
+    };
+
+    // Positive control: the same call, with ONE claimant, mints the model.
+    let fresh = Harness::new();
+    let mut skips = Vec::new();
+    let minted = crate::calp_commands::materialize_verified_application_connections(
+        &subscriptions[..1],
+        vec![verified_of("literals", 0)],
+        &fresh.bi,
+        &fresh.ribbon,
+        &fresh.slicer,
+        &mut skips,
+    );
+    assert!(minted.contains_key(&source_key), "precondition: an unshared model is connected: {minted:?}");
+    assert_eq!(count(&fresh), 1);
+    assert!(skips.is_empty(), "{skips:?}");
+
+    // The open of the two-claimant document (no live connection yet).
+    let opened = Harness::new();
+    let mut skips = Vec::new();
+    let minted = crate::calp_commands::materialize_verified_application_connections(
+        &subscriptions,
+        vec![verified_of("literals", 0), verified_of("copy-b", 1)],
+        &opened.bi,
+        &opened.ribbon,
+        &opened.slicer,
+        &mut skips,
+    );
+    assert_eq!(count(&opened), 0, "the open served one application's model under an id two claim");
+    assert!(minted.is_empty(), "{minted:?}");
+    let mut reported: Vec<(&str, &str)> = skips.iter().map(|k| (k.package_name.as_str(), k.reason.as_str())).collect();
+    reported.sort();
+    assert_eq!(reported, vec![("copy-b", "sharedDataSource"), ("literals", "sharedDataSource")]);
+    for skip in &skips {
+        assert!(skip.detail.starts_with("CALP_DATA_SOURCE_SHARED"), "{}", skip.detail);
+        assert!(skip.detail.contains(&source_key), "the id is named: {}", skip.detail);
+    }
+    let literals = skips.iter().find(|k| k.package_name == "literals").unwrap();
+    assert!(literals.detail.contains("'copy-b'"), "the other claimant is named: {}", literals.detail);
+}
+
+/// AFTER THE OPEN CONNECTED NEITHER (rev12C). A document in which two
+/// subscriptions claim one data-source id opens with neither model connected.
+/// No connection then serves the id, and the gate used to count connections
+/// only -- so a refresh (or a subscribe) minted one application's model under
+/// the shared id and the other application's pivots, slicers and charts read
+/// it with no error. Now a claim in another subscription's ledger refuses on
+/// its own, and so do two payloads of one refresh carrying one id. When the
+/// copy is re-published under its own id and updated, its stale claim is
+/// dropped from its ledger, the original's model is connected by the
+/// after-refresh re-ask, and the pane's rows are re-written.
+///
+/// SABOTAGES: (1) the `claimed_elsewhere` refusal in
+/// `refuse_data_source_already_served` never fires -- the first refresh is
+/// admitted. (2) the ledger merge keeps every carried dataSource row -- the
+/// original's update stays refused. (3)
+/// `reconnect_application_models_after_refresh_in` returns at once -- the
+/// original's model is not connected and the rows are stale.
+#[test]
+fn after_an_open_that_connected_neither_shared_model_no_refresh_mints_one() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let source_key = new_entity().to_string();
+    let copy_key = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &source_key);
+    let mut other = Workbook::default();
+    other.sheets = vec![Sheet::new("Report".to_string())];
+    publish_with_model(&dir, prof.path(), &other, vec![0], "copy-b", (1, 0, 0), None, &source_key);
+    let count = |h: &Harness, key: &str| {
+        h.bi.connections
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|c| c.package_data_source_id.as_deref() == Some(key))
+            .count()
+    };
+
+    // The pre-round-11 document, as the open leaves it: two subscriptions
+    // claiming one id, NEITHER model connected, a sharedDataSource row each.
+    let s = Harness::new();
+    s.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    {
+        let effect = test_effect();
+        let mut subs = s.state.subscriptions.write(&effect).unwrap();
+        let mut twin = subs.subscriptions[0].clone();
+        twin.package_name = "copy-b".to_string();
+        twin.sheets.clear();
+        twin.objects.retain(|o| o.kind == "dataSource");
+        subs.subscriptions.push(twin);
+    }
+    s.bi.connections.lock().unwrap().clear();
+    {
+        let subscriptions = s.state.subscriptions.read().unwrap().subscriptions.clone();
+        let mut skips = Vec::new();
+        crate::calp_commands::materialize_verified_application_connections(
+            &subscriptions,
+            vec![
+                (0, "workspace".to_string(), pull_latest(&dir, prof.path(), "literals").data_sources),
+                (1, "workspace".to_string(), pull_latest(&dir, prof.path(), "copy-b").data_sources),
+            ],
+            &s.bi,
+            &s.ribbon,
+            &s.slicer,
+            &mut skips,
+        );
+        assert_eq!(skips.len(), 2, "precondition: the open reports both: {skips:?}");
+        *s.state.application_connection_restore_skips.lock().unwrap() = skips;
+    }
+    assert_eq!(count(&s, &source_key), 0, "precondition: the open connected neither");
+
+    // A refresh of either one is refused, though no connection serves the id.
+    let payload = |index: usize, package: &str| calp::refresh::RefreshPayload {
+        subscription_index: index,
+        pull_result: pull_latest(&dir, prof.path(), package),
+    };
+    let err = crate::calp_commands::refuse_refreshed_data_sources_already_served(
+        &s.state,
+        &s.bi,
+        &[payload(0, "literals")],
+    )
+    .expect_err("a refresh minted one model under an id another subscription claims");
+    assert!(err.contains("CALP_DATA_SOURCE_SHARED") && err.contains("'copy-b'"), "{err}");
+    // ...and so is a subscribe of a third application under the id.
+    {
+        let fresh = Harness::new();
+        fresh.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+        fresh.bi.connections.lock().unwrap().clear();
+        let err = materialize_pull_result(
+            &fresh.state,
+            &test_effect(),
+            &fresh.pivot,
+            &fresh.bi,
+            &fresh.scripts,
+            &fresh.ribbon,
+            &fresh.pane,
+            &fresh.slicer,
+            &fresh.timeline,
+            pull_latest(&dir, prof.path(), "copy-b"),
+            MaterializeMode::Subscribe,
+            None,
+        )
+        .expect_err("a subscribe minted a model under an id a subscription claims");
+        assert!(err.contains("CALP_DATA_SOURCE_SHARED") && err.contains("'literals'"), "{err}");
+        assert_eq!(count(&fresh, &source_key), 0);
+    }
+    // Two payloads carrying one id, with ledgers that claim nothing: refused.
+    {
+        let effect = test_effect();
+        let mut subs = s.state.subscriptions.write(&effect).unwrap();
+        let saved: Vec<Vec<calp::manifest::SubscribedObject>> =
+            subs.subscriptions.iter().map(|x| x.objects.clone()).collect();
+        for sub in subs.subscriptions.iter_mut() {
+            sub.objects.retain(|o| o.kind != "dataSource");
+        }
+        drop(subs);
+        let err = crate::calp_commands::refuse_refreshed_data_sources_already_served(
+            &s.state,
+            &s.bi,
+            &[payload(0, "literals"), payload(1, "copy-b")],
+        )
+        .expect_err("two payloads of one refresh under one id");
+        assert!(err.contains("CALP_DATA_SOURCE_SHARED"), "{err}");
+        let mut subs = s.state.subscriptions.write(&effect).unwrap();
+        for (sub, objects) in subs.subscriptions.iter_mut().zip(saved) {
+            sub.objects = objects;
+        }
+    }
+
+    // The copy is published again under its own id and updated: admitted, and
+    // its ledger no longer claims the original's id.
+    publish_with_model(&dir, prof.path(), &other, vec![0], "copy-b", (2, 0, 0), Some((1, 0, 0)), &copy_key);
+    s.refresh(vec![(1, pull_latest(&dir, prof.path(), "copy-b"))]);
+    {
+        let subs = s.state.subscriptions.read().unwrap();
+        let claims: Vec<&str> = subs.subscriptions[1]
+            .objects
+            .iter()
+            .filter(|o| o.kind == "dataSource")
+            .map(|o| o.id.as_str())
+            .collect();
+        assert_eq!(claims, vec![copy_key.as_str()], "the copy's ledger still claims the shared id");
+    }
+    assert_eq!(count(&s, &copy_key), 1, "the copy's own model is connected");
+
+    // The after-refresh re-ask (as `apply_refresh_payloads` runs it, over this
+    // test's trust profile): the original's model is connected and the rows say so.
+    crate::calp_commands::reconnect_application_models_after_refresh_in(
+        &s.state,
+        &test_effect(),
+        &s.bi,
+        &s.pivot,
+        &s.ribbon,
+        &s.slicer,
+        prof.path(),
+    );
+    assert_eq!(count(&s, &source_key), 1, "the original's model was not connected after the update");
+    let rows = s.state.application_connection_restore_skips.lock().unwrap().clone();
+    assert!(rows.is_empty(), "the pane's rows were not re-asked: {rows:?}");
+    // ...and the original refreshes onto it from now on.
+    crate::calp_commands::refuse_refreshed_data_sources_already_served(&s.state, &s.bi, &[payload(0, "literals")])
+        .expect("the original refreshes onto its own connection");
+    // The refresh runs the re-ask itself, with no guard held.
+    let code = crate_fn_code("src/calp_commands.rs", "pub(crate) fn apply_refresh_payloads(");
+    assert!(code.contains("reconnect_application_models_after_refresh_in("), "the refresh no longer re-asks");
+}
+
+/// rev14B (MAJOR): the remedy for two subscriptions claiming one data-source
+/// id is to re-publish the copy under its own id. When BOTH applications had
+/// an update, Refresh Subscriptions ran both payloads in one refresh: the
+/// original's payload minted its model under the shared id, and the copy's
+/// ledger merge then kept its stale claim on that id because "a live
+/// connection serves it" -- the ORIGINAL's, minted a moment earlier. The
+/// original's next refresh was refused again (CALP_DATA_SOURCE_SHARED naming
+/// the copy) and the next open connected neither. A carried claim now counts
+/// only connections that were live BEFORE the refresh
+/// (`data_source_claim_carries`).
+///
+/// SABOTAGE: read the merge's liveness AFTER the payload loop again (as round
+/// 15 did) -- the copy's ledger still claims the shared id.
+#[test]
+fn a_refresh_of_the_original_and_its_re_keyed_copy_together_drops_the_copys_stale_claim() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let source_key = new_entity().to_string();
+    let copy_key = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &source_key);
+    let mut other = Workbook::default();
+    other.sheets = vec![Sheet::new("Report".to_string())];
+    publish_with_model(&dir, prof.path(), &other, vec![0], "copy-b", (1, 0, 0), None, &source_key);
+    let count = |h: &Harness, key: &str| {
+        h.bi.connections
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|c| c.package_data_source_id.as_deref() == Some(key))
+            .count()
+    };
+    let claims_of = |h: &Harness, index: usize| -> Vec<String> {
+        h.state.subscriptions.read().unwrap().subscriptions[index]
+            .objects
+            .iter()
+            .filter(|o| o.kind == "dataSource")
+            .map(|o| o.id.clone())
+            .collect()
+    };
+
+    // The document the open leaves: two subscriptions claiming one id,
+    // NEITHER model connected.
+    let s = Harness::new();
+    s.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    {
+        let effect = test_effect();
+        let mut subs = s.state.subscriptions.write(&effect).unwrap();
+        let mut twin = subs.subscriptions[0].clone();
+        twin.package_name = "copy-b".to_string();
+        twin.sheets.clear();
+        twin.objects.retain(|o| o.kind == "dataSource");
+        subs.subscriptions.push(twin);
+    }
+    s.bi.connections.lock().unwrap().clear();
+    assert_eq!(claims_of(&s, 1), vec![source_key.clone()], "precondition: the copy claims the shared id");
+    assert_eq!(count(&s, &source_key), 0, "precondition: the open connected neither");
+
+    // The copy is re-published under its own id AND the original has a new
+    // version: Refresh Subscriptions updates both in one refresh.
+    publish_with_model(&dir, prof.path(), &other, vec![0], "copy-b", (2, 0, 0), Some((1, 0, 0)), &copy_key);
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (2, 0, 0), Some((1, 0, 0)), &source_key);
+    s.refresh(vec![
+        (0, pull_latest(&dir, prof.path(), "literals")),
+        (1, pull_latest(&dir, prof.path(), "copy-b")),
+    ]);
+    assert_eq!(count(&s, &source_key), 1, "the original's model is connected by its own update");
+    assert_eq!(count(&s, &copy_key), 1, "the copy's own model is connected");
+    assert_eq!(
+        claims_of(&s, 1),
+        vec![copy_key.clone()],
+        "the copy kept its stale claim on the shared id alive on the original's freshly minted connection"
+    );
+    assert_eq!(claims_of(&s, 0), vec![source_key.clone()], "the original claims its own id once");
+
+    // ...so the original's next refresh is admitted, alone or beside the copy.
+    let payload = |index: usize, package: &str| calp::refresh::RefreshPayload {
+        subscription_index: index,
+        pull_result: pull_latest(&dir, prof.path(), package),
+    };
+    crate::calp_commands::refuse_refreshed_data_sources_already_served(&s.state, &s.bi, &[payload(0, "literals")])
+        .expect("the original's next refresh was refused for the copy's stale claim");
+    crate::calp_commands::refuse_refreshed_data_sources_already_served(
+        &s.state,
+        &s.bi,
+        &[payload(0, "literals"), payload(1, "copy-b")],
+    )
+    .expect("a Refresh-all of both was refused");
 }
 
 /// The byte offset of the first `AppState` guard taken in `code`: the first
@@ -4728,8 +5550,8 @@ fn every_door_that_serialises_charts_stamps_them_through_the_one_collector() {
     // and for the chart's key alike.
     let published = crate_fn_code("src/persistence.rs", "pub(crate) fn published_chart_connection_keys(");
     assert!(published.contains("published_data_source_id("), "the carrier's keys no longer come from published_data_source_id");
-    let capture = calp_commands_fn_code("fn capture_bi_data_sources(");
-    assert!(capture.contains("published_data_source_id(&conn.id)"), "the capture no longer files data sources under published_data_source_id");
+    let capture = calp_commands_fn_code("fn capture_bi_data_sources_of(");
+    assert!(capture.contains("published_data_source_id(conn)"), "the capture no longer files data sources under published_data_source_id");
     // The publish door takes one validated attempt at a time; the attempt holds
     // the carrier's build.
     let publish_door = calp_commands_fn_code("fn assemble_publish_workbook(");
@@ -4879,6 +5701,7 @@ fn a_checked_out_application_keeps_its_cube_and_custom_function_values_through_a
                 style_index: None,
                 invariant: Some(true),
                 pasted: None,
+                moved: None,
             }],
             None,
             None,
@@ -4960,9 +5783,10 @@ fn a_subscribed_cell_reading_what_the_application_did_not_bring_is_refused_not_k
 /// SABOTAGE (keep): call `recalculate_sheet_values` per refreshed sheet again
 /// -- B1 and B2 are refused. SABOTAGE (changed set): drop the `written` cells
 /// from `KeepWithoutData::for_installed_sheets` -- B3 keeps MYFN(5)'s 20
-/// beside the override's 6. SABOTAGE (order): never mark a sheet not yet
-/// recalculated as unsettled -- B4 keeps MYFN(3)*2 although Data!A1, which
-/// Data's own turn recalculates later, becomes 4.
+/// beside the override's 6. (Data is visited before Report since rev8A --
+/// Report reads it -- so B4 is judged against Data's own changes, exactly;
+/// the unsettled-sheet rule is pinned by
+/// `an_update_judges_a_cell_after_the_installed_sheets_it_reads`.)
 #[test]
 fn an_updated_application_keeps_its_composite_values_through_a_save_and_refuses_what_an_override_changed() {
     use engine::CellValue;
@@ -5040,4 +5864,367 @@ fn an_updated_application_keeps_its_composite_values_through_a_save_and_refuses_
         );
         the_save_recalculation(&h);
     }
+}
+
+/// rev8A: an UPDATE refused -- and the save then kept the refusal of -- a
+/// composite custom-function formula on an EARLIER installed sheet that reads
+/// a LATER one, even when nothing it reads changed: the sheets were visited in
+/// index order and every reference into a sheet not yet visited counted as
+/// changed, a literal no recalculation can change included. Report first, data
+/// after is the common layout. A sheet is now visited after the installed
+/// sheets it reads. Two sheets that read EACH OTHER still meet an unsettled
+/// sheet, and there the rule stays conservative.
+///
+/// SABOTAGE: `installed_sheet_order` returns the sheets in index order.
+#[test]
+fn an_update_judges_a_cell_after_the_installed_sheets_it_reads() {
+    use engine::CellValue;
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut report = Sheet::new("Report".to_string());
+    report.cells.insert((3, 1), saved_formula("=MYFN(Data!A2)*2", CellValue::Number(84.0)));
+    report.cells.insert((4, 1), saved_formula("=MYFN(Data!A1)*2", CellValue::Number(84.0)));
+    report.cells.insert((0, 2), SavedCell::from_cell(&Cell::new_number(1.0)));
+    let mut data = Sheet::new("Data".to_string());
+    data.cells.insert((0, 0), saved_formula("=A2", CellValue::Number(3.0)));
+    data.cells.insert((1, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![report, data];
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "readsafter", (1, 0, 0), None);
+
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "readsafter"), MaterializeMode::Subscribe);
+    let (at, data_at) = (h.index_of("Report"), h.index_of("Data"));
+    assert!(at < data_at, "precondition: Report comes before the Data it reads");
+    assert_eq!(value_at(&h, at, 3, 1), CellValue::Number(84.0), "precondition: subscribed");
+
+    // v2 changes something else; every formula and its inputs are as they were.
+    wb.sheets[0].cells.insert((0, 2), SavedCell::from_cell(&Cell::new_number(2.0)));
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "readsafter", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "readsafter"))]);
+
+    let at = h.index_of("Report");
+    assert_eq!(value_at(&h, at, 0, 2), CellValue::Number(2.0), "precondition: v2 landed");
+    for pass in ["the update", "a save after it"] {
+        assert_eq!(
+            value_at(&h, at, 3, 1),
+            CellValue::Number(84.0),
+            "{pass}: =MYFN(Data!A2)*2 refused although Data!A2 is a literal nothing changed"
+        );
+        assert_eq!(
+            value_at(&h, at, 4, 1),
+            CellValue::Number(84.0),
+            "{pass}: =MYFN(Data!A1)*2 refused although Data!A1 recalculated to the same 3"
+        );
+        the_save_recalculation(&h);
+    }
+}
+
+/// rev8A: an application UPDATE that replaces a custom function's code left
+/// the old code's answers in the results cache, and a recalculation without a
+/// resolver (the cross-sheet walk, F9, the save) served one for an argument no
+/// cell held at the update as current, with no error. The update now forgets
+/// every answer of a function whose definition changed, BEFORE it seeds the
+/// refreshed sheets with the new code's saved values.
+///
+/// SABOTAGE: drop the `forget_redefined_custom_functions` call after the
+/// library merge in `materialize_distributed_scripts`.
+#[test]
+fn an_update_that_replaces_a_custom_functions_code_forgets_the_old_codes_answers() {
+    use engine::CellValue;
+    let library = |body: &str| persistence::SavedScript {
+        id: "__calcula_custom_functions__".to_string(),
+        name: "Custom Functions (data)".to_string(),
+        description: None,
+        source: serde_json::json!({ "functions": [{ "name": "MYFN", "params": ["x"], "body": body }] }).to_string(),
+        scope: Default::default(),
+        source_package: None,
+    };
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut report = Sheet::new("Report".to_string());
+    report.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    report.cells.insert((0, 1), saved_formula("=MYFN(A1)", CellValue::Number(30.0)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![report];
+    wb.scripts = vec![library("return x*10;")];
+    publish_as(&dir, prof.path(), &wb, vec![0], "codechange", (1, 0, 0), None);
+
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "codechange"), MaterializeMode::Subscribe);
+    let at = h.index_of("Report");
+    let own = h.index_of("Sheet1");
+    let memo_of = |sheet: usize| h.state.grids.read().unwrap()[sheet].call_memo().clone();
+    let call = |x: f64| engine::cube::udf_call_fingerprint("MYFN", &[engine::EvalResult::Number(x)]).unwrap();
+    assert_eq!(memo_of(at).answer(&call(3.0)), Some(engine::EvalResult::Number(30.0)), "precondition: seeded");
+    // An answer the v1 code gave on the subscriber's OWN sheet for an argument
+    // no cell holds at the update (`=MYFN(Report!A1)` there, served by the
+    // resolver while Report!A1 was 4).
+    memo_of(own).remember(call(4.0), &engine::EvalResult::Number(40.0));
+
+    // v2: MYFN's code changes, and the saved value with it.
+    wb.scripts = vec![library("return x*100;")];
+    wb.sheets[0].cells.insert((0, 1), saved_formula("=MYFN(A1)", CellValue::Number(300.0)));
+    publish_as(&dir, prof.path(), &wb, vec![0], "codechange", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "codechange"))]);
+
+    let (at, own) = (h.index_of("Report"), h.index_of("Sheet1"));
+    assert!(
+        h.scripts.workbook_scripts.read().unwrap()["__calcula_custom_functions__"].source.contains("x*100"),
+        "precondition: the update merged the new code"
+    );
+    assert_eq!(memo_of(own).answer(&call(4.0)), None, "the update kept the OLD code's MYFN(4) = 40");
+    assert_eq!(
+        memo_of(at).answer(&call(3.0)),
+        Some(engine::EvalResult::Number(300.0)),
+        "the refreshed sheet is seeded with the NEW code's saved value"
+    );
+}
+
+/// rev10B: the forget ran once, AFTER the refresh's whole per-payload loop, so
+/// an update whose SECOND payload failed returned with the first payload's new
+/// library merged and every results cache still holding the old code's
+/// answers -- which F9 and the save then served as current. The forget is now
+/// part of each payload's library write, so it has happened whatever fails
+/// afterwards. The failure here is the materialization's own inner door (a
+/// reserved notebook id that reached it past the pre-effect gate).
+///
+/// SABOTAGE: drop the `forget_redefined_custom_functions` call after the
+/// library merge in `materialize_distributed_scripts`.
+#[test]
+fn an_update_that_fails_after_merging_a_library_still_forgets_the_old_codes_answers() {
+    use engine::CellValue;
+    let library = |body: &str| persistence::SavedScript {
+        id: "__calcula_custom_functions__".to_string(),
+        name: "Custom Functions (data)".to_string(),
+        description: None,
+        source: serde_json::json!({ "functions": [{ "name": "MYFN", "params": ["x"], "body": body }] }).to_string(),
+        scope: Default::default(),
+        source_package: None,
+    };
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut report = Sheet::new("Report".to_string());
+    report.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    report.cells.insert((0, 1), saved_formula("=MYFN(A1)", CellValue::Number(30.0)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![report];
+    wb.scripts = vec![library("return x*10;")];
+    publish_as(&dir, prof.path(), &wb, vec![0], "cflib", (1, 0, 0), None);
+    let mut other = Workbook::default();
+    let mut data = Sheet::new("Data".to_string());
+    data.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(1.0)));
+    other.sheets = vec![data];
+    publish_as(&dir, prof.path(), &other, vec![0], "cfother", (1, 0, 0), None);
+
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "cflib"), MaterializeMode::Subscribe);
+    h.materialize(pull_latest(&dir, prof.path(), "cfother"), MaterializeMode::Subscribe);
+    let own = h.index_of("Sheet1");
+    let memo_of = |sheet: usize| h.state.grids.read().unwrap()[sheet].call_memo().clone();
+    let call = |x: f64| engine::cube::udf_call_fingerprint("MYFN", &[engine::EvalResult::Number(x)]).unwrap();
+    // An answer the v1 code gave on the subscriber's own sheet.
+    memo_of(own).remember(call(4.0), &engine::EvalResult::Number(40.0));
+
+    wb.scripts = vec![library("return x*100;")];
+    wb.sheets[0].cells.insert((0, 1), saved_formula("=MYFN(A1)", CellValue::Number(300.0)));
+    publish_as(&dir, prof.path(), &wb, vec![0], "cflib", (1, 1, 0), Some((1, 0, 0)));
+    other.sheets[0].cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(2.0)));
+    publish_as(&dir, prof.path(), &other, vec![0], "cfother", (1, 1, 0), Some((1, 0, 0)));
+
+    let mut payloads = vec![
+        calp::refresh::RefreshPayload { subscription_index: 0, pull_result: pull_latest(&dir, prof.path(), "cflib") },
+        calp::refresh::RefreshPayload { subscription_index: 1, pull_result: pull_latest(&dir, prof.path(), "cfother") },
+    ];
+    let names = crate::calp_commands::prepare_refresh_payloads(&h.state, &mut payloads)
+        .expect("the pre-effect pass admits both payloads");
+    // The SECOND payload now fails inside its materialization, after the
+    // first one's library has been merged.
+    payloads[1].pull_result.notebooks.push(persistence::SavedNotebook {
+        id: "__calcula_reserved_notebook".to_string(),
+        name: "N".to_string(),
+        cells: Vec::new(),
+        source_package: Some("cfother".to_string()),
+    });
+    let err = crate::calp_commands::apply_refresh_payloads(
+        &h.state,
+        &test_effect(),
+        &crate::persistence::UserFilesState::default(),
+        &h.pivot,
+        &h.scripts,
+        &h.bi,
+        &h.ribbon,
+        &h.pane,
+        &h.slicer,
+        &h.timeline,
+        payloads,
+        names,
+        &[],
+        "2026-09-25T02:00:00Z",
+        None,
+    )
+    .expect_err("precondition: the second payload's materialization refuses");
+    assert!(err.contains("__calcula_reserved_notebook"), "precondition: refused at the inner door: {err}");
+    assert!(
+        h.scripts.workbook_scripts.read().unwrap()["__calcula_custom_functions__"].source.contains("x*100"),
+        "precondition: the first payload merged the new code before the failure"
+    );
+    assert_eq!(
+        memo_of(own).answer(&call(4.0)),
+        None,
+        "the failed update left the OLD code's MYFN(4) = 40 beside the NEW code in the library"
+    );
+}
+
+/// rev10 cache2 residual (the calp window): the update merges the new
+/// library in the backend and forgets the old code's answers, but the page
+/// keeps serving edits from its OLD realm until it hears
+/// `custom-functions:refresh` and re-installs. An answer served in that window
+/// is the old code's: it answers its edit, but it must not be filed for the
+/// cross-sheet walk, F9 or the save. Once the page reports the generation the
+/// event carried, served answers are filed again.
+///
+/// SABOTAGE: drop the `hold_custom_functions_until_reinstalled` call after the
+/// library merge in `materialize_distributed_scripts`.
+#[test]
+fn an_answer_the_old_realm_serves_before_the_page_reinstalls_is_never_filed() {
+    use engine::CellValue;
+    let library = |body: &str| persistence::SavedScript {
+        id: "__calcula_custom_functions__".to_string(),
+        name: "Custom Functions (data)".to_string(),
+        description: None,
+        source: serde_json::json!({ "functions": [{ "name": "MYFN", "params": ["x"], "body": body }] }).to_string(),
+        scope: Default::default(),
+        source_package: None,
+    };
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut report = Sheet::new("Report".to_string());
+    report.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    report.cells.insert((0, 1), saved_formula("=MYFN(A1)", CellValue::Number(30.0)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![report];
+    wb.scripts = vec![library("return x*10;")];
+    publish_as(&dir, prof.path(), &wb, vec![0], "realmrace", (1, 0, 0), None);
+
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "realmrace"), MaterializeMode::Subscribe);
+    // The page installed v1 and reported it.
+    crate::bi::cube::note_custom_function_registry_impl(
+        &h.state,
+        &h.scripts,
+        vec!["MYFN".to_string()],
+        Some(crate::bi::cube::custom_function_library_generation()),
+    );
+
+    wb.scripts = vec![library("return x*100;")];
+    wb.sheets[0].cells.insert((0, 1), saved_formula("=MYFN(A1)", CellValue::Number(300.0)));
+    publish_as(&dir, prof.path(), &wb, vec![0], "realmrace", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "realmrace"))]);
+
+    let own = h.index_of("Sheet1");
+    crate::sheets::activate_sheet(&h.state, own).expect("activate the subscriber's own sheet");
+    let memo_of = |sheet: usize| h.state.grids.read().unwrap()[sheet].call_memo().clone();
+    let call = |x: f64| engine::cube::udf_call_fingerprint("MYFN", &[engine::EvalResult::Number(x)]).unwrap();
+    let edit = |answer: f64| {
+        let served: std::collections::HashMap<String, crate::scripting::udf::UdfValue> = [(
+            crate::scripting::udf::udf_key("MYFN", &[crate::scripting::udf::UdfValue::Number { value: 4.0 }]),
+            crate::scripting::udf::UdfValue::Number { value: answer },
+        )]
+        .into_iter()
+        .collect();
+        crate::commands::data::update_cell_impl(
+            &h.state,
+            &crate::persistence::FileState::default(),
+            &crate::persistence::UserFilesState::default(),
+            &h.slicer,
+            &h.pivot,
+            &h.pane,
+            &h.ribbon,
+            0,
+            0,
+            "=MYFN(4)".to_string(),
+            Some(served),
+            None,
+            None,
+        )
+        .expect("the edit writes");
+    };
+
+    // The page has not re-installed yet: its OLD realm serves MYFN(4) = 40.
+    edit(40.0);
+    assert_eq!(value_at(&h, own, 0, 0), CellValue::Number(40.0), "the edit shows what was served for it");
+    assert_eq!(
+        memo_of(own).answer(&call(4.0)),
+        None,
+        "the old realm's MYFN(4) = 40, served after the update replaced MYFN, was filed as current"
+    );
+
+    // The page re-installed the generation the refresh event carried.
+    crate::bi::cube::note_custom_function_registry_impl(
+        &h.state,
+        &h.scripts,
+        vec!["MYFN".to_string()],
+        Some(crate::bi::cube::custom_function_library_generation()),
+    );
+    edit(400.0);
+    assert_eq!(
+        memo_of(own).answer(&call(4.0)),
+        Some(engine::EvalResult::Number(400.0)),
+        "once the new code is live its served answers are filed again"
+    );
+}
+
+/// BUG-0613: an application update recalculates the subscriber's OWN sheets
+/// that read a refreshed cell. `Sheet1!A1 = Data!A1*2` on the subscriber's own
+/// sheet showed v1's 2 after an update to `Data!A1 = 7` -- only the refreshed
+/// sheets were recalculated -- and the save's keep rule then had no change in
+/// its pass to tell it otherwise. In Excel every reader of a changed cell
+/// recalculates, on every sheet.
+///
+/// SABOTAGE: drop the `recalc_readers_of_installed_sheets` call in
+/// `apply_refresh_payloads` -- Sheet1!A1 stays 2.
+#[test]
+fn an_update_recalculates_the_subscribers_own_readers_of_a_refreshed_cell() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut data = Sheet::new("Data".to_string());
+    data.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(1.0)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![data];
+    publish_as(&dir, prof.path(), &wb, vec![0], "readers", (1, 0, 0), None);
+
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "readers"), MaterializeMode::Subscribe);
+    let data_at = h.index_of("Data");
+    let own = h.index_of("Sheet1");
+    crate::sheets::activate_sheet(&h.state, own).expect("activate the subscriber's own sheet");
+    crate::commands::data::update_cell_impl(
+        &h.state,
+        &crate::persistence::FileState::default(),
+        &crate::persistence::UserFilesState::default(),
+        &h.slicer,
+        &h.pivot,
+        &h.pane,
+        &h.ribbon,
+        0,
+        0,
+        "=Data!A1*2".to_string(),
+        None,
+        None,
+        None,
+    )
+    .expect("the subscriber's own formula");
+    assert_eq!(value_at(&h, own, 0, 0), engine::CellValue::Number(2.0), "precondition: v1");
+
+    wb.sheets[0].cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(7.0)));
+    publish_as(&dir, prof.path(), &wb, vec![0], "readers", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "readers"))]);
+
+    assert_eq!(value_at(&h, data_at, 0, 0), engine::CellValue::Number(7.0), "precondition: v2 landed");
+    assert_eq!(
+        value_at(&h, own, 0, 0),
+        engine::CellValue::Number(14.0),
+        "the subscriber's own Sheet1!A1 = Data!A1*2 kept v1's value after the update"
+    );
 }

@@ -237,6 +237,7 @@ export type {
 
 export {
   goalSeek,
+  cancelGoalSeek,
 } from "./lib";
 
 export type {
@@ -527,6 +528,7 @@ export type {
   SheetRenamedPayload,
   RecalculationCompletedPayload,
   ApplicationUpdatedPayload,
+  DataCommandAppliedPayload,
 } from "./events";
 
 // ============================================================================
@@ -2006,6 +2008,7 @@ export {
   getProtectionStatus,
   isSheetProtected,
   canEditCell,
+  canEditCells,
   canPerformAction,
   setCellProtection,
   getCellProtection,

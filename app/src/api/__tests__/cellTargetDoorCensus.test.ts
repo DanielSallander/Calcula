@@ -209,6 +209,11 @@ const TARGET_WRAPPERS = [
   "reorderConditionalFormats",
   "getAllConditionalFormats",
   "clearConditionalFormatsInRange",
+  // BUG-0513 / BUG-0514.
+  "setCellStyle",
+  // Round 16: the style-only batch (set_cell_style's `cells`).
+  "setCellStyles",
+  "getRangeIcons",
 ];
 
 /** The only extension files that may read `backingSheetIndex`, and why. */

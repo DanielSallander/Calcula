@@ -260,13 +260,12 @@ export async function getUniqueIconsInColumn(
   absoluteCol: number,
   target?: CellTargetRef | null,
 ): Promise<IconChoice[]> {
-  // An OBJECT's cells (P3): the one evaluator that answers "which icon does a
-  // cell SHOW" (`get_range_icons`) reads the active sheet only, and
-  // re-deriving it from the rule list is BUG-0107's mistake. So no icon is
-  // offered there: the dropdown says none was found, rather than offering an
-  // icon the host's cells show (BUG-0514).
-  if (target) return [];
-  return getRangeIcons(startRow, absoluteCol, endRow, absoluteCol);
+  // An OBJECT's cells (P3, BUG-0514): the same one evaluator that answers
+  // "which icon does a cell SHOW" (`get_range_icons`), asked through the
+  // dialog's target, so the list is the icons the floating grid's column
+  // shows -- never the host's at the same coordinates, and never re-derived
+  // from the rule list (BUG-0107's mistake).
+  return getRangeIcons(startRow, absoluteCol, endRow, absoluteCol, { target: target ?? undefined });
 }
 
 // ============================================================================

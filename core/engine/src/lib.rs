@@ -34,6 +34,11 @@ mod array_semantics_tests;
 #[cfg(test)]
 mod whole_axis_tests;
 
+/// Inside a LET or a LAMBDA a bare `B:B` whose letters are a parameter's name
+/// is the range operator between two names (Excel [LIVE]), not column B.
+#[cfg(test)]
+mod let_column_range_tests;
+
 /// `TRIMRANGE` and the `.` trim-reference operator. Its own file because the
 /// dot is SUGAR for the function — it lowers to the call in the parser — and
 /// that equivalence is the design's load-bearing claim, so it is asserted on
@@ -77,6 +82,11 @@ mod implicit_intersection_tests;
 /// built out of, and because it walked through the deleted-sheet guard.
 #[cfg(test)]
 mod offset_sheet_tests;
+
+/// Sheet lookups follow Excel's sheet-name case rule (`identity::sheet_name_key`):
+/// two names Excel keeps apart (`Straße`, `STRASSE`) are two sheets to a formula.
+#[cfg(test)]
+mod sheet_name_case_tests;
 
 /// Excel's implicit array semantics — the shape algebra behind "array
 /// operation", "lifting", "pairwise lifting" and "broadcasting". Its own file

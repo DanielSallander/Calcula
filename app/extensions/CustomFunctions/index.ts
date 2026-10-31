@@ -192,8 +192,12 @@ function activate(context: ExtensionContext): void {
   // .calp pull/refresh merges a package's function library) so distributed
   // functions install live — without this they stay #NAME? until a reopen.
   let unlistenRefresh: (() => void) | undefined;
-  void listenTauriEvent("custom-functions:refresh", () => {
-    void loadAndInstallCustomFunctions();
+  // The payload names the library generation the backend merged; reporting it
+  // back once the install succeeded lets the backend file served answers again
+  // (until then the old realm may have served them).
+  void listenTauriEvent<{ generation?: number } | null>("custom-functions:refresh", (payload) => {
+    const generation = typeof payload?.generation === "number" ? payload.generation : undefined;
+    void loadAndInstallCustomFunctions({ libraryGeneration: generation });
   }).then((un) => {
     unlistenRefresh = un;
   });

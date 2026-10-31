@@ -40,6 +40,12 @@ import { invoke } from "@tauri-apps/api/core";
 // `unsafe-eval` — see `validateFunctionBody`.
 import { parse as acornParse, type Program as AcornProgram } from "acorn";
 import { registerFunction, UDF_ERROR_KEY } from "./formulaFunctions";
+import {
+  clearLibraryRegisteredNames,
+  newerLibraryGeneration,
+  noteLibraryRegisteredName,
+  reportCustomFunctionRegistry,
+} from "./customFunctionRegistryReport";
 import { hostMountScript, hostUnmountScript } from "./scriptHost/host";
 import { applyConsentedCapabilities, revokeScriptGrants } from "./scriptHost/capabilities";
 import {
@@ -414,6 +420,12 @@ let realms: MountedRealm[] = [];
 // Serialize install/uninstall so a startup install + AFTER_OPEN reload can't
 // interleave and corrupt the module-level mount/cleanup state.
 let installQueue: Promise<unknown> = Promise.resolve();
+// The highest library generation a `loadAndInstallCustomFunctions` install put
+// live (the generation it asked for BEFORE it read the library). The backend's
+// generation is process-wide and monotonic, so a library read under a LOWER one
+// is older than what is mounted: installing it would put the old code back
+// after the newer install had already released its holds (rev13A).
+let highestInstalledLibraryGeneration: number | undefined;
 // The last library that mounted+registered cleanly, for rollback on a failed edit.
 let lastGood: { lib: CustomFunctionLibrary; plan: CustomFunctionRealm[] } | null = null;
 
@@ -552,6 +564,9 @@ async function mountRealm(
   for (const d of plan.functions) {
     const upper = normalizeName(d.name);
     const arity = d.params.map((p) => p.trim()).filter(Boolean).length;
+    // Before the registration, whose registry change triggers the report: the
+    // backend reads the library's names itself, so the report leaves them out.
+    noteLibraryRegisteredName(upper);
     const cleanup = registerFunction({
       name: upper,
       description: d.description?.trim() || "User-defined function",
@@ -815,8 +830,16 @@ export async function loadPersistedLibrary(): Promise<CustomFunctionLibrary | nu
   }
 }
 
-/** Persist the library into the workbook (saved with the .cala). */
+/** Persist the library into the workbook (saved with the .cala).
+ *
+ *  Call it AFTER `installCustomFunctions(lib)` succeeded (the authoring
+ *  dialog's order: mount first, then save). Once the save has landed, the
+ *  stored library IS the installed one, so every library generation the
+ *  backend had reached before the save is live and its holds are released
+ *  (see `loadAndInstallCustomFunctions`). A merge that lands after the
+ *  generation is asked for keeps its hold until its own refresh install. */
 export async function savePersistedLibrary(lib: CustomFunctionLibrary): Promise<void> {
+  const generation = await reportCustomFunctionRegistry();
   await invoke("save_script", {
     script: {
       id: PERSIST_SCRIPT_ID,
@@ -827,23 +850,94 @@ export async function savePersistedLibrary(lib: CustomFunctionLibrary): Promise<
       sourcePackage: null,
     },
   });
+  if (generation !== undefined) {
+    await reportCustomFunctionRegistry(generation);
+  }
 }
 
 /** Load the persisted library (if any) and install it. Call on startup + open.
- *  Best-effort: a corrupt/failing library must not throw into the open path. */
+ *  Best-effort: a corrupt/failing library must not throw into the open path.
+ *
+ *  THE HOLD RELEASE. After an application's subscribe or update merged the
+ *  library, the backend holds the changed functions' served answers (files
+ *  none of them) until the page says the NEW code is live -- until then the
+ *  old realm may have served them. Every call here asks the backend for the
+ *  current library generation BEFORE it reads the library
+ *  (`reportCustomFunctionRegistry`), and once THIS install has succeeded it
+ *  reports that generation installed, which releases every hold up to it. So
+ *  ANY successful install releases -- the refresh listener's (whose
+ *  `libraryGeneration` is the event's and is never newer than the one asked
+ *  for), the consent reinstall's, an open's -- not only the refresh-driven one:
+ *  a hold whose refresh install failed, or whose application door errored
+ *  before it emitted the event, used to stay for the rest of the session
+ *  (rev11C).
+ *
+ *  A FAILED install reports nothing, deliberately: `doInstall` restores the
+ *  PREVIOUS library's realm, i.e. the old code, so the hold must stay and F9
+ *  and the save keep refusing the changed functions' unvouched calls rather
+ *  than filing the old code's answers as current. Excel's analogue -- an add-in
+ *  that fails to load leaves its calls unanswered (#NAME?) -- is a refusal too,
+ *  never the old add-in's number. */
 export async function loadAndInstallCustomFunctions(
-  opts: { cause?: "open" } = {},
+  opts: { cause?: "open"; libraryGeneration?: number } = {},
 ): Promise<void> {
+  const { libraryGeneration, ...installOpts } = opts;
+  let readGeneration: number | undefined;
+  let installedHere: boolean;
   try {
+    readGeneration = await reportCustomFunctionRegistry();
     const lib = await loadPersistedLibrary();
-    if (lib && lib.functions.length > 0) {
-      await installCustomFunctions(lib, opts);
-    } else {
-      uninstallCustomFunctions();
-    }
+    installedHere = await installUnlessSuperseded(readGeneration, async () => {
+      if (lib && lib.functions.length > 0) {
+        await doInstall(lib, installOpts);
+      } else {
+        uninstallCustomFunctions();
+      }
+    });
   } catch (e) {
     console.error("[customFunctions] failed to install persisted functions", e);
+    return;
   }
+  // OVERLAPPING INSTALLS (rev13A): a consent reinstall and a refresh landing
+  // together each read the library, then queue. If the one that read the NEWER
+  // library installed first, the older read is skipped -- installing it would
+  // put the old code back after the newer install released its holds -- and it
+  // reports nothing: the newer install already released what it put live.
+  if (!installedHere) return;
+  const installed = newerLibraryGeneration(readGeneration, libraryGeneration);
+  if (installed !== undefined) {
+    await reportCustomFunctionRegistry(installed);
+  }
+}
+
+/** Run `install` in its turn on the install queue -- unless a library read
+ *  under a NEWER generation than `readGeneration` has already been installed
+ *  (see `highestInstalledLibraryGeneration`), when it is skipped and this
+ *  answers `false`. Decided at the head of the queue, so two overlapping calls
+ *  are judged in the order they actually install. A read with no generation
+ *  (the backend did not answer) is never skipped and moves nothing. */
+function installUnlessSuperseded(
+  readGeneration: number | undefined,
+  install: () => Promise<void>,
+): Promise<boolean> {
+  const run = async (): Promise<boolean> => {
+    if (
+      readGeneration !== undefined &&
+      highestInstalledLibraryGeneration !== undefined &&
+      readGeneration < highestInstalledLibraryGeneration
+    ) {
+      return false;
+    }
+    await install();
+    if (readGeneration !== undefined) {
+      highestInstalledLibraryGeneration = Math.max(highestInstalledLibraryGeneration ?? readGeneration, readGeneration);
+    }
+    return true;
+  };
+  const next = installQueue.then(run, run);
+  // Keep the queue alive even if this install rejects (don't poison the chain).
+  installQueue = next.catch(() => undefined);
+  return next;
 }
 
 /** Unregister all custom-function UDFs and tear down every mounted realm. */
@@ -856,6 +950,7 @@ export function uninstallCustomFunctions(): void {
     }
   }
   registeredCleanups = [];
+  clearLibraryRegisteredNames();
   for (const realm of realms) {
     try {
       realm.release();

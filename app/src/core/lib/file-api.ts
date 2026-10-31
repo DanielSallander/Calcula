@@ -285,18 +285,29 @@ export async function saveFile(password?: string): Promise<string | null> {
  */
 export async function openFile(): Promise<CellData[] | null> {
   try {
-    const path = await open({
-      filters: [CALCULA_FILTER, XLSX_FILTER, ALL_FILTER],
-      multiple: false,
-      directory: false,
-    });
-
-    if (!(path && typeof path === 'string')) return null;
+    const path = await pickFileToOpen();
+    if (path === null) return null;
     return await openFileAtPath(path);
   } catch (error) {
     console.error('[FILE] openFile error:', error);
     throw error;
   }
+}
+
+/**
+ * Show the Open picker and answer the chosen path -- null when the user
+ * cancelled. Opens NOTHING: File > Open asks the picker first, then whether
+ * the workbook turned dirty while the picker was open, and only then loads
+ * (`openFileAtPath`), so a change that landed meanwhile (a push recording its
+ * version, a scheduled job, a script) is never discarded unasked.
+ */
+export async function pickFileToOpen(): Promise<string | null> {
+  const path = await open({
+    filters: [CALCULA_FILTER, XLSX_FILTER, ALL_FILTER],
+    multiple: false,
+    directory: false,
+  });
+  return path && typeof path === 'string' ? path : null;
 }
 
 /**

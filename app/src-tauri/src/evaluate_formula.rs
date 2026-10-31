@@ -548,7 +548,7 @@ fn check_step_in_target(
     let target_sheet = if let Some(sheet_name) = sheet {
         sheet_names
             .iter()
-            .position(|n| n.to_uppercase() == sheet_name.to_uppercase())
+            .position(|n| identity::sheet_names_equal(n, &sheet_name))
             .unwrap_or(current_sheet_index)
     } else {
         current_sheet_index

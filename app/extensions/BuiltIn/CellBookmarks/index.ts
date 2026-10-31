@@ -24,6 +24,7 @@ import {
   unregisterStatusBarItem,
   // Events
   onAppEvent,
+  emitAppEvent,
   AppEvents,
   // Selection
   ExtensionRegistry,
@@ -33,6 +34,7 @@ import {
   // Double-click interceptor
   registerCellDoubleClickInterceptor,
   isKeyClaimed,
+  getSheets,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import { isEditKeystroke } from "@api/editing";
@@ -58,7 +60,11 @@ import {
   getBookmarkCount,
   getAllBookmarks,
   onChange,
+  applyStructuralStep,
+  applySheetRenumbering,
+  resyncSheets,
 } from "./lib/bookmarkStore";
+import { followSheetRenumbering, followStructuralEdits } from "@api/structuralFollow";
 import {
   navigateToNextBookmark,
   navigateToPrevBookmark,
@@ -397,9 +403,48 @@ function activate(context: ExtensionContext): void {
   //      virtual file is already current whenever a save runs.
   cleanupFns.push(startBookmarkWriteThrough());
 
+  // ---- 12c. Bookmarks follow inserted and deleted rows and columns ----
+  //      on every sheet, and their undo and redo (BUG-0614). A bookmark whose
+  //      cell was deleted comes back when that edit is undone. The change
+  //      notification repaints and persists through the write-through above.
+  //      Insert / Delete Cells move the bookmarks inside the band only, and a
+  //      cut-pasted cell takes its bookmark with it (Excel's Watch Window entry
+  //      does [LIVE]); a bookmark the pasted block landed on comes back on Undo.
+  cleanupFns.push(
+    followStructuralEdits(
+      (step) => {
+        if (applyStructuralStep(step)) emitAppEvent(AppEvents.GRID_REFRESH);
+      },
+      { moves: true },
+    ),
+  );
+
+  // ---- 12d. Bookmarks follow their SHEET ----
+  //      Renumbered at once when sheets are moved, inserted or deleted, then
+  //      re-checked against each sheet's stable id: a moved sheet keeps its
+  //      bookmarks, a deleted sheet takes them with it.
+  const resyncBookmarkSheets = async (): Promise<void> => {
+    try {
+      const list = await getSheets();
+      if (resyncSheets(list.sheets)) emitAppEvent(AppEvents.GRID_REFRESH);
+    } catch (error) {
+      console.error("[CellBookmarks] Could not re-check the bookmarks' sheets:", error);
+    }
+  };
+  cleanupFns.push(
+    followSheetRenumbering((renumber) => {
+      if (applySheetRenumbering(renumber)) emitAppEvent(AppEvents.GRID_REFRESH);
+      void resyncBookmarkSheets();
+    }),
+  );
+  for (const eventName of [AppEvents.SHEET_ADDED, AppEvents.SHEET_DELETED, AppEvents.SHEET_RENAMED]) {
+    cleanupFns.push(onAppEvent(eventName, () => void resyncBookmarkSheets()));
+  }
+
   const unregAfterOpen = onAppEvent(AppEvents.AFTER_OPEN, async () => {
     try {
       await loadBookmarks();
+      await resyncBookmarkSheets();
     } catch (error) {
       console.error("[CellBookmarks] Failed to load bookmarks:", error);
     }

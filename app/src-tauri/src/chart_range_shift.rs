@@ -68,21 +68,23 @@
 //! a sparkline cell takes a copy of it, its line offset like a copied formula
 //! (Excel's "format same as above": a row inserted inside OR just after a
 //! column group grows it by one sparkline over the inserted data row). The
-//! pairs are packed back into as few groups as their cells allow; a deleted
+//! pairs are packed back into as few AREAS as their cells allow; a deleted
 //! cell or a deleted line leaves the group (Excel keeps a `#REF!` sparkline
 //! that draws nothing), and a group with no pair left is removed.
 //!
-//! KNOWN DIVERGENCE (group identity, measured live 2026-10-29): Excel keeps a
-//! group ONE group whatever the edit does to its cells -- E2:E5 over A2:C5 with
-//! column F inserted is one group of eight (location `E2,F2,E3,F3,...`), a row
-//! group A7:C7 with row 8 inserted is one group of six, and an Insert Cells
-//! that parts its sparklines leaves one group. A Calcula group is ONE location
-//! rectangle over ONE data rectangle, so such an edit leaves several groups,
-//! each part after the first under a fresh id. What is DRAWN matches Excel; a
-//! later group-level edit (Sparkline Design's type, colour, markers, axis) then
-//! reaches only the part it was made on. Matching Excel needs a group that
-//! holds several areas (the store, the renderer, the Design tab and the saved
-//! shape) -- a feature, not a shift rule.
+//! GROUP IDENTITY (measured live 2026-10-29 and 2026-10-30): Excel keeps a
+//! group ONE group whatever the edit does to its cells -- E2:E6 over A2:C6
+//! with column F inserted is one group of ten (location `E2,F2,E3,F3,...`,
+//! F2 over B2:D2), a row group A8:C8 with row 9 inserted is one group of six,
+//! and an Insert Cells that parts its sparklines leaves one group. A group is
+//! therefore one or more AREAS, each a location rectangle over a data
+//! rectangle: the first is the group's own `location` / `dataRange`, the rest
+//! ride `moreAreas` (`[{location, dataRange}, ...]`, absent when there are
+//! none; Sparklines/types.ts `SparklineGroup.moreAreas`). Every area is
+//! shifted by the same rules, and an edit that parts a group's sparklines
+//! adds areas to it, never a second group -- so a later group-level edit
+//! (Sparkline Design's type, colour, markers, axis) reaches every sparkline
+//! the group had, as in Excel.
 
 use crate::commands::coord_shift::CellRange;
 use crate::commands::structure::structure_cells::BandEdit;
@@ -196,7 +198,7 @@ fn defined_name_on_sheet(source: &Value, names: &DefinedNameSheets, sheet: &Edit
     }
 }
 
-/// The registry key (the upper-cased name) of the defined name a chart's
+/// The registry key (`name_resolution::name_key`) of the defined name a chart's
 /// `data` reads, or `None` when it reads no name: not a string, empty, or an
 /// A1 reference -- `resolveDataSource` (Charts/lib/dataSourceResolver.ts)
 /// tries the trimmed text as an A1 reference FIRST and as a name only when it
@@ -209,7 +211,7 @@ pub(crate) fn defined_name_key(source: &Value) -> Option<String> {
     if text.is_empty() || is_plain_a1(split_qualified(text).map_or(text, |(_, _, range)| range)) {
         return None;
     }
-    Some(text.to_uppercase())
+    Some(crate::name_resolution::name_key(text))
 }
 
 /// `parseA1Reference`'s range form (Charts/lib/dataSourceResolver.ts): one
@@ -245,7 +247,7 @@ impl EditedSheet<'_> {
     /// Does a sheet qualifier name the edited sheet? Excel compares sheet
     /// names without regard to case.
     fn names_sheet(&self, name: &str) -> bool {
-        !self.name.is_empty() && name.to_lowercase() == self.name.to_lowercase()
+        !self.name.is_empty() && identity::sheet_names_equal(name, &self.name)
     }
 }
 
@@ -1041,52 +1043,91 @@ fn shift_sparkline_group(loc: CellRange, data: CellRange, band: &BandEdit) -> Ve
     }
 }
 
+/// The JSON key of a group's areas after its first (module header, GROUP
+/// IDENTITY): `[{ "location": {...}, "dataRange": {...} }, ...]`.
+pub(crate) const MORE_AREAS_KEY: &str = "moreAreas";
+
+/// Every area of a group, its own `location` / `dataRange` first, or `None`
+/// when any of them is not a readable rectangle (the group is then left as
+/// it is).
+fn sparkline_group_areas(group: &Map<String, Value>) -> Option<Vec<(CellRange, CellRange)>> {
+    let area = |m: &Map<String, Value>| -> Option<(CellRange, CellRange)> {
+        let loc = m.get("location").and_then(Value::as_object).and_then(ref_rect)?;
+        let data = m.get("dataRange").and_then(Value::as_object).and_then(ref_rect)?;
+        Some((loc, data))
+    };
+    let mut areas = vec![area(group)?];
+    match group.get(MORE_AREAS_KEY) {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(more)) => {
+            for m in more {
+                areas.push(area(m.as_object()?)?);
+            }
+        }
+        Some(_) => return None,
+    }
+    Some(areas)
+}
+
+/// A `{startRow, startCol, endRow, endCol}` object.
+fn ref_rect_value(r: CellRange) -> Value {
+    let mut m = Map::new();
+    write_ref_rect(&mut m, r);
+    Value::Object(m)
+}
+
 /// Shift a sheet's stored sparkline groups (`SparklineEntry::groups_json`, a
 /// JSON array of SparklineGroup). Returns the new text, or `None` when nothing
-/// moved. A group the edit splits keeps its id on its first part; the others
-/// take fresh ids past every id the sheet uses.
+/// moved. Each AREA of a group is shifted (`shift_sparkline_group`), and every
+/// part the edit leaves stays in the SAME group, under the same id: the first
+/// is the group's `location` / `dataRange`, the rest its `moreAreas` (module
+/// header, GROUP IDENTITY). A group with no sparkline left is removed.
 pub(crate) fn shift_sparkline_groups(groups_json: &str, band: &BandEdit) -> Option<String> {
     let Ok(Value::Array(groups)) = serde_json::from_str::<Value>(groups_json) else { return None };
-    let mut next_id = groups
-        .iter()
-        .filter_map(|g| g.get("id").and_then(Value::as_u64))
-        .max()
-        .unwrap_or(0)
-        + 1;
     let mut changed = false;
     let mut out: Vec<Value> = Vec::with_capacity(groups.len());
     for group in groups {
-        let rects = group.as_object().and_then(|g| {
-            let loc = g.get("location").and_then(Value::as_object).and_then(ref_rect)?;
-            let data = g.get("dataRange").and_then(Value::as_object).and_then(ref_rect)?;
-            Some((loc, data))
-        });
-        let Some((loc, data)) = rects else {
+        let Some(areas) = group.as_object().and_then(sparkline_group_areas) else {
             out.push(group);
             continue;
         };
-        let parts = shift_sparkline_group(loc, data, band);
-        if parts.len() == 1 && parts[0] == (loc, data) {
+        let parts: Vec<(CellRange, CellRange)> = areas
+            .iter()
+            .flat_map(|&(loc, data)| shift_sparkline_group(loc, data, band))
+            .collect();
+        if parts == areas {
             out.push(group);
             continue;
         }
         changed = true;
-        for (i, (part_loc, part_data)) in parts.into_iter().enumerate() {
-            let mut g = group.clone();
-            if let Value::Object(map) = &mut g {
-                if let Some(Value::Object(l)) = map.get_mut("location") {
-                    write_ref_rect(l, part_loc);
-                }
-                if let Some(Value::Object(d)) = map.get_mut("dataRange") {
-                    write_ref_rect(d, part_data);
-                }
-                if i > 0 {
-                    map.insert("id".to_string(), Value::from(next_id));
-                    next_id += 1;
-                }
+        let Some((&(first_loc, first_data), rest)) = parts.split_first() else {
+            // Every sparkline of the group was deleted: the group goes.
+            continue;
+        };
+        let mut g = group;
+        if let Value::Object(map) = &mut g {
+            if let Some(Value::Object(l)) = map.get_mut("location") {
+                write_ref_rect(l, first_loc);
             }
-            out.push(g);
+            if let Some(Value::Object(d)) = map.get_mut("dataRange") {
+                write_ref_rect(d, first_data);
+            }
+            if rest.is_empty() {
+                map.remove(MORE_AREAS_KEY);
+            } else {
+                let more: Vec<Value> = rest
+                    .iter()
+                    .map(|&(loc, data)| {
+                        let mut area = Map::new();
+                        area.insert("location".to_string(), ref_rect_value(loc));
+                        area.insert("dataRange".to_string(), ref_rect_value(data));
+                        Value::Object(area)
+                    })
+                    .collect();
+                map.insert(MORE_AREAS_KEY.to_string(), Value::Array(more));
+            }
         }
+        out.push(g);
     }
     if changed {
         serde_json::to_string(&Value::Array(out)).ok()

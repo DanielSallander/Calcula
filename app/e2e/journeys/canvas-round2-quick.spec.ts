@@ -10,7 +10,7 @@
  *      hand-rolled the OS picker wrong (a controlled restore that made the
  *      native `change` see "same colour"; a commit diffed against the draft the
  *      preview had already moved; a commit on every `input`). They now share
- *      `_shared/components/colorPick/useNativeColorPick`: every `input` step
+ *      `useNativeColorPick` (now in `@api/layout`): every `input` step
  *      PREVIEWS, the native `change` COMMITS once. The plot area no longer
  *      paints its own #fafafa over the visual container, a solid pick clears a
  *      stored gradient and turns the background on, and a style preset no

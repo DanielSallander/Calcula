@@ -2233,8 +2233,9 @@ function findObjectByName(refs: ScriptObjectRef[], name: string): ScriptObjectRe
 /**
  * A named range's grid rectangle as a sheet-bound ScriptRange, parsed from its
  * refersTo formula ("=Sheet1!$A$1:$B$10"). Sheet resolution mirrors the
- * backend's resolve_named_range_coords: the formula's sheet prefix, else the
- * name's scope sheet, else sheet 0.
+ * backend's resolve_named_range_coords: the formula's sheet prefix by Excel's
+ * case rule (a prefix naming no sheet is refused, never re-aimed), and only
+ * for a refersTo with no prefix the name's scope sheet, else sheet 0.
  */
 async function namedRangeRefToRange(
   wbt: WorkbookTransport,
@@ -2808,6 +2809,25 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     setColumnWidth: (col: number, width: number, sheetOrOptions?: SheetRef | ScriptColumnWidthOptions) => {
       const { unit, sheet } = splitDimensionOptions<ColumnWidthUnit>(sheetOrOptions);
       return call(rt, "api.setColumnWidth", [col, columnWidthToPixels(width, unit), sheet]);
+    },
+    // The BATCH forms over inclusive [first, last] runs (Excel's
+    // Rows("18:22").RowHeight = h; Select All is [[0, 1048575]]): one call,
+    // one undo step. Same units and options bag as the one-line forms.
+    setRowHeights: (
+      runs: Array<[number, number]>,
+      height: number,
+      sheetOrOptions?: SheetRef | ScriptRowHeightOptions,
+    ) => {
+      const { unit, sheet } = splitDimensionOptions<RowHeightUnit>(sheetOrOptions);
+      return call(rt, "api.setRowHeights", [runs, rowHeightToPixels(height, unit), sheet]);
+    },
+    setColumnWidths: (
+      runs: Array<[number, number]>,
+      width: number,
+      sheetOrOptions?: SheetRef | ScriptColumnWidthOptions,
+    ) => {
+      const { unit, sheet } = splitDimensionOptions<ColumnWidthUnit>(sheetOrOptions);
+      return call(rt, "api.setColumnWidths", [runs, columnWidthToPixels(width, unit), sheet]);
     },
     // ---- Auto-fit (Wave 3, item 11): the double-click best-fit, scripted.
     //      ACTIVE SHEET only (measurement is canvas metrics over the rendered

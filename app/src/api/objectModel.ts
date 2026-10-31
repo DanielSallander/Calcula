@@ -9,6 +9,7 @@
 
 import { CellRange } from "./range";
 import { getSheets, setActiveSheet } from "./lib";
+import { findBySheetName } from "./sheetNames";
 
 export type SheetVisibility = "visible" | "hidden" | "veryHidden";
 
@@ -66,13 +67,16 @@ export class Workbook {
     return new Sheet(info.index, info.name, info.visibility, info.tabColor);
   }
 
-  /** A sheet by name (exact match) or 0-based index; `null` if not found. */
+  /** A sheet by name or 0-based index; `null` if not found. A name matches by
+   *  Excel's sheet-name case rule (`Worksheets("sheet1")` finds `Sheet1`), the
+   *  exact spelling first. */
   async sheet(nameOrIndex: string | number): Promise<Sheet | null> {
     const r = await getSheets();
     const info =
       typeof nameOrIndex === "number"
         ? r.sheets.find((s) => s.index === nameOrIndex)
-        : r.sheets.find((s) => s.name === nameOrIndex);
+        : (r.sheets.find((s) => s.name === nameOrIndex) ??
+          findBySheetName(r.sheets, nameOrIndex, (s) => s.name));
     return info ? new Sheet(info.index, info.name, info.visibility, info.tabColor) : null;
   }
 }

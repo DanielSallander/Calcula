@@ -619,6 +619,9 @@ export const EXTENSION_BROKER_METHODS: ReadonlySet<string> = new Set([
   "cap.scheduleAt",
   "cap.scheduleList",
   "cap.scheduleCancel",
+  // ...and the method such a job calls (BUG-0616 #3): published for the
+  // extension's OWN jobs only, never into the cross-script registry.
+  "ext.scheduleExpose",
   // ui.dialog: the ONE way a sandboxed extension can reach the user with a
   // QUESTION. The dialog itself is painted by trusted host code from a
   // data-only spec (scriptDialogSpec.ts).

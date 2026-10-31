@@ -25,7 +25,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import type { PanelSectionProps } from "@api/uiTypes";
 import { getActiveSheet } from "@api/lib";
 import { showDialog } from "@api/ui";
-import { ExtensionRegistry } from "@api";
+import { ExtensionRegistry, showToast } from "@api";
 import type { Selection } from "@api";
 import {
   ActionRow,
@@ -111,11 +111,19 @@ export function SavedAnimationsSection(_props: PanelSectionProps): React.ReactEl
           >
             <span
               style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-              title={s.name}
+              title={s.refDeleted ? `${s.name} -- its cell was deleted (#REF!)` : s.name}
             >
-              {s.name}
+              {s.refDeleted ? `${s.name} (#REF!)` : s.name}
             </span>
-            <Button size="sm" title="Load" onClick={() => void playbackEngine.loadSpec(s)}>
+            <Button
+              size="sm"
+              title="Load"
+              onClick={() =>
+                void playbackEngine.loadSpec(s).catch((err: unknown) => {
+                  showToast(err instanceof Error ? err.message : String(err), { variant: "warning" });
+                })
+              }
+            >
               Load
             </Button>
             <Button size="sm" title="Edit" onClick={() => showDialog(ANIMATION_DIALOG_ID, { editingId: s.id })}>

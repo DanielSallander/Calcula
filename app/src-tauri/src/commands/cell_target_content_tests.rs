@@ -167,6 +167,7 @@ fn batch(wb: &Workbook, t: &CellTargetRef, writes: &[(u32, u32, &str)]) -> Resul
                 style_index: None,
                 invariant: Some(true),
                 pasted: None,
+                moved: None,
             })
             .collect(),
         "Paste",
@@ -419,6 +420,299 @@ fn a_batch_paste_on_a_protected_host_refuses_whole_and_leaves_the_document_clean
 
     let err = assert_clean_refusal(&wb, "paste outside the extent", || batch(&wb, &t, &[(9, 0, "1")]));
     assert!(err.contains("A10 is outside floating grid 'Float1'"), "got: {err}");
+}
+
+/// A plain paste (Ctrl+V, `useClipboard`'s floating-grid route) sends each
+/// source cell's `styleIndex` with its value through the target batch. The
+/// batch asked only the backing cells' lock flags, so a host that forbids
+/// Format Cells received the source's format anyway (NEW-target-batch-
+/// ignores-formatcells). Excel [LIVE, Excel 16 COM, Format Cells not allowed]:
+/// Paste All onto unlocked cells lands the value with no bold, no fill and
+/// General, and raises no error. With Format Cells allowed the format lands,
+/// and each cell keeps its Locked flag [LIVE: Paste All of a locked cell onto
+/// an unlocked one leaves it unlocked].
+#[test]
+fn a_styled_paste_onto_a_grid_lands_the_values_and_obeys_the_hosts_format_cells_option() {
+    let wb = Workbook::new(1);
+    let (t, backing) = float1(&wb, 4, 3);
+    let seed = crate::document_effect::test_seed_effect();
+    let (unlocked_italic, locked_bold) = {
+        let mut styles = wb.state.style_registry.write(&seed).unwrap();
+        (
+            styles.get_or_create(CellStyle { locked: false, ..CellStyle::new().with_italic(true) }),
+            styles.get_or_create(CellStyle::new().with_bold(true)),
+        )
+    };
+    // Backing A1:A3 unlocked and italic (A3 holds a value).
+    {
+        let mut grids = wb.state.grids.write(&seed).unwrap();
+        for row in 0..3 {
+            let value = if row == 2 { CellValue::Number(9.0) } else { CellValue::Empty };
+            grids[backing].set_cell(row, 0, Cell { value, ast: None, style_index: unlocked_italic, rich_text: None });
+        }
+    }
+    let styled = |cells: &[(u32, &str)]| -> Result<Vec<crate::api_types::CellData>, String> {
+        crate::cell_target::update_cells_batch_on_target(
+            &wb.state,
+            &wb.file,
+            &wb.files,
+            &wb.pivots,
+            &wb.pane,
+            &wb.filters,
+            &t,
+            cells
+                .iter()
+                .map(|&(row, value)| CellUpdateInput {
+                    row,
+                    col: 0,
+                    value: value.to_string(),
+                    style_index: Some(locked_bold),
+                    invariant: Some(true),
+                    pasted: Some(true),
+                    moved: None,
+                })
+                .collect(),
+            "Paste",
+        )
+    };
+    let style_of = |row: u32| -> CellStyle {
+        let grids = wb.state.grids.read().unwrap();
+        let idx = grids[backing].effective_style_index(row, 0);
+        wb.state.style_registry.read().unwrap().get(idx).clone()
+    };
+
+    // Format Cells NOT allowed: the values land, the format does not, and a
+    // pasted blank keeps the cell's own format.
+    protect_host(&wb, SheetProtectionOptions::default());
+    styled(&[(0, "5"), (2, "")]).expect("the values land without their format");
+    assert_eq!(backing_value(&wb, backing, 0, 0), CellValue::Number(5.0), "the value landed");
+    let a1 = style_of(0);
+    assert!(!a1.font.bold, "the source's format was dropped (Format Cells is off)");
+    assert!(a1.font.italic && !a1.locked, "A1 keeps its own format and stays unlocked");
+    assert_eq!(backing_value(&wb, backing, 2, 0), CellValue::Empty, "the pasted blank cleared A3");
+    let a3 = style_of(2);
+    assert!(a3.font.italic && !a3.locked, "a cleared A3 keeps its own format and stays unlocked");
+
+    // Format Cells allowed: the format lands, and the cell stays unlocked
+    // although the source was locked.
+    protect_host(&wb, SheetProtectionOptions { allow_format_cells: true, ..SheetProtectionOptions::default() });
+    styled(&[(1, "7")]).expect("the value and its format land");
+    let a2 = style_of(1);
+    assert!(a2.font.bold, "Format Cells allowed: the format landed");
+    assert!(!a2.locked, "a paste cannot lock an unlocked cell on a protected host");
+    assert_eq!(backing_value(&wb, backing, 1, 0), CellValue::Number(7.0));
+
+    // Unprotected: a paste carries the source's Locked flag as before.
+    wb.state.sheet_protection.write(&seed).unwrap().remove(&0);
+    styled(&[(1, "8")]).expect("an unprotected host");
+    assert!(style_of(1).locked, "unprotected, the source's Locked flag travels");
+}
+
+/// The batch's Format Cells PLAN is asked holding nothing; each write asks it
+/// AGAIN under its own guards. Driven by handing the writes a stale plan
+/// ("allowed") on a host whose option is now OFF -- what a host protected
+/// between the plan and the write looks like: the values land, the format
+/// does not, and every cell keeps its Locked flag.
+#[test]
+fn a_target_batch_re_asks_format_cells_and_the_hosts_protection_under_the_write_guards() {
+    let wb = Workbook::new(1);
+    let (t, backing) = float1(&wb, 4, 3);
+    let seed = crate::document_effect::test_seed_effect();
+    let (unlocked_italic, locked_bold) = {
+        let mut styles = wb.state.style_registry.write(&seed).unwrap();
+        (
+            styles.get_or_create(CellStyle { locked: false, ..CellStyle::new().with_italic(true) }),
+            styles.get_or_create(CellStyle::new().with_bold(true)),
+        )
+    };
+    {
+        let mut grids = wb.state.grids.write(&seed).unwrap();
+        for row in 0..2 {
+            grids[backing].set_cell(row, 0, Cell { value: CellValue::Number(1.0), ast: None, style_index: unlocked_italic, rich_text: None });
+        }
+    }
+    protect_host(&wb, SheetProtectionOptions::default());
+    let resolved = crate::cell_target::resolve_cell_target(&wb.state, &t).expect("resolve Float1");
+    let owned = wb.state.undo_stack.lock().unwrap().begin_owned_transaction("Paste".to_string());
+    let written = crate::cell_target::write_batch_on_backing(
+        &wb.state,
+        &wb.file,
+        &wb.files,
+        &wb.pivots,
+        &wb.pane,
+        &wb.filters,
+        &resolved,
+        [(0u32, "5"), (1u32, "")]
+            .iter()
+            .map(|&(row, value)| CellUpdateInput {
+                row,
+                col: 0,
+                value: value.to_string(),
+                style_index: Some(locked_bold),
+                invariant: Some(true),
+                pasted: Some(true),
+                moved: None,
+            })
+            .collect(),
+        true, // the stale plan: "Format Cells allowed"
+    );
+    wb.state.undo_stack.lock().unwrap().commit_owned(owned);
+    written.expect("the values land");
+    let style_of = |row: u32| -> (CellStyle, usize) {
+        let grids = wb.state.grids.read().unwrap();
+        let own = grids[backing].get_cell(row, 0).map(|c| c.style_index).unwrap_or(0);
+        let idx = grids[backing].effective_style_index(row, 0);
+        (wb.state.style_registry.read().unwrap().get(idx).clone(), own)
+    };
+    assert_eq!(backing_value(&wb, backing, 0, 0), CellValue::Number(5.0), "the value landed");
+    let (a1, own) = style_of(0);
+    assert_eq!(own, unlocked_italic, "Format Cells is off AT THE WRITE: the format is dropped, A1 keeps its own");
+    assert!(!a1.font.bold && !a1.locked, "A1 is not bold and stays unlocked");
+    let (a2, own) = style_of(1);
+    assert_eq!(own, unlocked_italic, "a pasted blank keeps A2's own format when the write refuses the format");
+    assert!(!a2.locked, "A2 stays unlocked");
+}
+
+/// The floating-grid batch follows the SHEET route's two rules
+/// (`update_cells_batch_core`, round 16): (1) a MOVED cell's format moves with
+/// it on a protected host that does not allow Format Cells, and the cell keeps
+/// its Locked flag [LIVE, rev14A/probe-cut.ps1: a bold 0.00 cell cut to an
+/// unlocked cell of a protected sheet lands bold 0.00 with the option off or
+/// on]; (2) a blank that names no style keeps the cell's OWN format,
+/// unprotected and protected with the option off or on [LIVE, Excel 16 COM,
+/// cutfmt/probe1.ps1: `Range.Value2 = ""` keeps bold 0.00 and the lock].
+#[test]
+fn a_target_batch_moves_a_cut_cells_format_and_a_blank_without_a_style_keeps_its_own() {
+    let wb = Workbook::new(1);
+    let (t, backing) = float1(&wb, 4, 3);
+    let seed = crate::document_effect::test_seed_effect();
+    let (unlocked_italic, locked_bold) = {
+        let mut styles = wb.state.style_registry.write(&seed).unwrap();
+        (
+            styles.get_or_create(CellStyle { locked: false, ..CellStyle::new().with_italic(true) }),
+            styles.get_or_create(CellStyle::new().with_bold(true)),
+        )
+    };
+    {
+        let mut grids = wb.state.grids.write(&seed).unwrap();
+        for row in 0..4 {
+            grids[backing].set_cell(row, 0, Cell { value: CellValue::Number(1.0), ast: None, style_index: unlocked_italic, rich_text: None });
+        }
+    }
+    let write = |cells: &[(u32, &str, Option<usize>, bool)]| -> Result<Vec<crate::api_types::CellData>, String> {
+        crate::cell_target::update_cells_batch_on_target(
+            &wb.state,
+            &wb.file,
+            &wb.files,
+            &wb.pivots,
+            &wb.pane,
+            &wb.filters,
+            &t,
+            cells
+                .iter()
+                .map(|&(row, value, style_index, moved)| CellUpdateInput {
+                    row,
+                    col: 0,
+                    value: value.to_string(),
+                    style_index,
+                    invariant: Some(true),
+                    pasted: Some(true),
+                    // A move CLAIM (round 18: `moved` names its source cell;
+                    // this route reads the claim, the sheet route binds it).
+                    moved: moved.then(|| crate::api_types::MovedFrom { sheet_index: 0, row, col: 0, target: None }),
+                })
+                .collect(),
+            "Paste",
+        )
+    };
+    let style_of = |row: u32| -> CellStyle {
+        let grids = wb.state.grids.read().unwrap();
+        let idx = grids[backing].effective_style_index(row, 0);
+        wb.state.style_registry.read().unwrap().get(idx).clone()
+    };
+
+    // (1) Protected host, Format Cells OFF: a cut lands its format (a value
+    // and a blank), each cell stays unlocked; a COPY still drops it.
+    protect_host(&wb, SheetProtectionOptions::default());
+    write(&[(0, "5", Some(locked_bold), true), (1, "", Some(locked_bold), true), (2, "6", Some(locked_bold), false)])
+        .expect("a cut lands on unlocked cells");
+    assert_eq!(backing_value(&wb, backing, 0, 0), CellValue::Number(5.0), "the moved value landed");
+    let a1 = style_of(0);
+    assert!(a1.font.bold, "a MOVED cell keeps its bold on a protected host without Format Cells");
+    assert!(!a1.locked, "the moved cell keeps the destination's Locked flag (unlocked)");
+    let a2 = style_of(1);
+    assert!(a2.font.bold, "a MOVED blank keeps its bold on a protected host without Format Cells");
+    assert!(!a2.locked, "the moved blank stays unlocked");
+    let a3 = style_of(2);
+    assert!(!a3.font.bold && a3.font.italic, "a COPY still drops the source's format");
+
+    // (2) A blank that names no style keeps the cell's own format, with the
+    // option on, and unprotected.
+    protect_host(&wb, SheetProtectionOptions { allow_format_cells: true, ..SheetProtectionOptions::default() });
+    write(&[(3, "", None, false)]).expect("a blank on an unlocked cell");
+    assert_eq!(backing_value(&wb, backing, 3, 0), CellValue::Empty, "the blank cleared the value");
+    let a4 = style_of(3);
+    assert!(a4.font.italic && !a4.locked, "Format Cells on: a blank without a style keeps A4's own format");
+    wb.state.sheet_protection.write(&seed).unwrap().remove(&0);
+    write(&[(2, "", None, false)]).expect("an unprotected host");
+    assert_eq!(backing_value(&wb, backing, 2, 0), CellValue::Empty, "the blank cleared A3");
+    let a3 = style_of(2);
+    assert!(a3.font.italic && !a3.locked, "unprotected: a blank without a style keeps A3's own format");
+}
+
+/// Fill Down on a floating grid of a PROTECTED host follows the sheet's rule
+/// (`fill_range_core`, Excel [LIVE, protfill/probe1.ps1]): the source's format
+/// only with Format Cells allowed, and every filled cell keeps its Locked flag.
+#[test]
+fn fill_down_on_a_protected_hosts_grid_obeys_format_cells_and_keeps_every_lock() {
+    for allow_format_cells in [false, true] {
+        let wb = Workbook::new(1);
+        let (t, backing) = float1(&wb, 4, 3);
+        let seed = crate::document_effect::test_seed_effect();
+        let (unlocked_italic, locked_bold) = {
+            let mut styles = wb.state.style_registry.write(&seed).unwrap();
+            (
+                styles.get_or_create(CellStyle { locked: false, ..CellStyle::new().with_italic(true) }),
+                styles.get_or_create(CellStyle::new().with_bold(true)),
+            )
+        };
+        {
+            let mut grids = wb.state.grids.write(&seed).unwrap();
+            grids[backing].set_cell(0, 0, Cell { value: CellValue::Number(5.0), ast: None, style_index: locked_bold, rich_text: None });
+            for row in 1..3 {
+                for col in 0..2 {
+                    grids[backing].set_cell(row, col, Cell { value: CellValue::Number(1.0), ast: None, style_index: unlocked_italic, rich_text: None });
+                }
+            }
+        }
+        protect_host(&wb, SheetProtectionOptions { allow_format_cells, ..SheetProtectionOptions::default() });
+        super::fill_range_on_target(
+            &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, &t, (0, 0, 0, 1), (1, 0, 2, 1),
+        )
+        .unwrap_or_else(|e| panic!("Format Cells {allow_format_cells}: fill onto unlocked cells: {e}"));
+        let style_of = |row: u32, col: u32| -> (CellStyle, usize) {
+            let grids = wb.state.grids.read().unwrap();
+            let own = grids[backing].get_cell(row, col).map(|c| c.style_index).unwrap_or(0);
+            let idx = grids[backing].effective_style_index(row, col);
+            (wb.state.style_registry.read().unwrap().get(idx).clone(), own)
+        };
+        for row in 1..3 {
+            assert_eq!(backing_value(&wb, backing, row, 0), CellValue::Number(5.0), "the value landed");
+            let (cell, own) = style_of(row, 0);
+            assert!(!cell.locked, "Format Cells {allow_format_cells}: a fill cannot LOCK an unlocked cell");
+            if allow_format_cells {
+                assert!(cell.font.bold, "Format Cells allowed: the source's format landed");
+            } else {
+                assert_eq!(own, unlocked_italic, "Format Cells NOT allowed: the cell keeps its own format");
+            }
+            assert_eq!(backing_value(&wb, backing, row, 1), CellValue::Empty, "the empty B1 cleared the cell");
+            let (blank, own) = style_of(row, 1);
+            assert!(!blank.locked, "Format Cells {allow_format_cells}: a filled blank cannot lock the cell");
+            if !allow_format_cells {
+                assert_eq!(own, unlocked_italic, "Format Cells NOT allowed: the blank keeps its own format");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

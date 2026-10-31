@@ -300,7 +300,9 @@ fn the_push_asks_the_anchor_before_it_assembles_or_writes() {
     let cmds = source("src/calp_commands.rs");
     let publish = body_of(&cmds, "pub fn calp_publish(");
     let gate = publish.find("anchor_push_target(").expect("calp_publish no longer asks the anchor");
-    for later in ["assemble_publish_workbook(", "DocumentEffect::mutates(", "calp::publish::publish("] {
+    // The push's DocumentEffect is minted inside record_push_in_working_copy_link
+    // (round 15: the document-epoch check runs there before the link write).
+    for later in ["assemble_publish_workbook(", "record_push_in_working_copy_link(", "calp::publish::publish("] {
         let at = publish.find(later).unwrap_or_else(|| panic!("`{later}` moved"));
         assert!(gate < at, "the anchor gate runs after `{later}`");
     }

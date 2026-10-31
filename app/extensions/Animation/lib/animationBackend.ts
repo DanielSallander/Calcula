@@ -33,14 +33,92 @@ export interface AnimSnapshotResult {
  * Snapshot the given cells under `token` so a later {@link animRestore} can put
  * the model back exactly. One token per driver run.
  */
-export function animSnapshot(
+export async function animSnapshot(
   token: string,
   sheetIndex: number,
   cells: [number, number][],
 ): Promise<AnimSnapshotResult> {
-  return animationBackend.invoke<AnimSnapshotResult>("anim_snapshot", {
+  const res = await animationBackend.invoke<AnimSnapshotResult>("anim_snapshot", {
     params: { token, sheetIndex, cells },
   });
+  if (res?.success) noteBufferFiled(token, sheetIndex);
+  return res;
+}
+
+// ============================================================================
+// Restore buffers this webview filed, so none outlives the page that owns it
+// ============================================================================
+//
+// While an animation's restore buffer is on file in the backend, every what-if
+// command (Goal Seek, Data Table, Solver, a scenario) is refused until Stop puts
+// the cells back. A buffer whose page is GONE -- the webview reloaded, so the
+// clock that would press Stop no longer exists -- used to block them for the
+// rest of the session with a message ("Stop the animation") nothing could act
+// on. Every buffer this webview files is therefore noted in sessionStorage
+// (which survives a reload of the same window) until its restore returns, and
+// the extension restores whatever a previous page left on activation
+// (`releaseOrphanedBuffers`).
+
+const LEDGER_KEY = "calcula.animation.restoreBuffers";
+const ledger = new Map<string, number>();
+
+function persistLedger(): void {
+  try {
+    if (ledger.size === 0) sessionStorage.removeItem(LEDGER_KEY);
+    else sessionStorage.setItem(LEDGER_KEY, JSON.stringify(Array.from(ledger.entries())));
+  } catch {
+    /* storage unavailable: the in-memory ledger still covers this page */
+  }
+}
+
+function noteBufferFiled(token: string, sheetIndex: number): void {
+  ledger.set(token, sheetIndex);
+  persistLedger();
+}
+
+function noteBufferReleased(token: string): void {
+  if (ledger.delete(token)) persistLedger();
+}
+
+/** Buffers a PREVIOUS page of this window filed and never restored. */
+function inheritedBuffers(): [string, number][] {
+  try {
+    const raw = sessionStorage.getItem(LEDGER_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (e): e is [string, number] =>
+        Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "number",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Restore every restore buffer a previous page of this window filed and never
+ * put back (a reload mid-playback), so the cells it borrowed come back and the
+ * what-if commands are no longer refused. Called once on activation, before
+ * this page has filed any buffer of its own. Never throws.
+ */
+export async function releaseOrphanedBuffers(): Promise<number> {
+  const orphans = inheritedBuffers().filter(([token]) => !ledger.has(token));
+  let released = 0;
+  for (const [token, sheetIndex] of orphans) {
+    try {
+      const res = await animRestore(token, sheetIndex);
+      if (!res?.error) released++;
+    } catch (e) {
+      console.error("[Animation] could not restore an orphaned animation buffer", token, e);
+    }
+    // Whatever the answer, the backend holds it no longer (restored, dropped
+    // with its deleted sheet, or never there after File > New/Open).
+    noteBufferReleased(token);
+  }
+  // The stored ledger now lists this page's own buffers only.
+  persistLedger();
+  return released;
 }
 
 /**
@@ -64,10 +142,14 @@ export function animApplyFrame(
  * Restore (and drop) the named snapshot buffer, recalculating dependents. Safe to
  * call with an unknown token (no-op) so stop/cleanup is idempotent.
  */
-export function animRestore(token: string, sheetIndex: number): Promise<AnimationFrameResult> {
-  return animationBackend.invoke<AnimationFrameResult>("anim_restore", {
+export async function animRestore(token: string, sheetIndex: number): Promise<AnimationFrameResult> {
+  const res = await animationBackend.invoke<AnimationFrameResult>("anim_restore", {
     params: { token, sheetIndex },
   });
+  // The backend no longer holds the buffer once a restore has answered:
+  // restored, dropped with a deleted sheet, or never on file.
+  noteBufferReleased(token);
+  return res;
 }
 
 /** Result of one Monte Carlo trial (re-roll volatiles + read the outcome cell). */

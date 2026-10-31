@@ -1131,8 +1131,10 @@ fn every_outline_command_records_an_undo_entry() {
             .find("\n#[tauri::command]")
             .map(|i| i + 1)
             .unwrap_or(rest.len());
+        // An expand or a show-level records through the variant that also
+        // records the hand-hidden lines it showed (round 16, rev14C).
         assert!(
-            rest[..end].contains("with_outline_undo("),
+            rest[..end].contains("with_outline_undo(") || rest[..end].contains("with_outline_and_hand_undo("),
             "`{command}` mutates the outline without recording an undo entry"
         );
     }

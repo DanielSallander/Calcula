@@ -488,7 +488,7 @@ pub(crate) fn recalc_control_dependents_core(
         for ((src_name, _r, _c), deps) in cross.iter() {
             let Some(src_idx) = sheet_names
                 .iter()
-                .position(|n| n.eq_ignore_ascii_case(src_name))
+                .position(|n| identity::sheet_names_equal(n, src_name))
             else {
                 continue;
             };

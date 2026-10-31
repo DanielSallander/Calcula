@@ -60,6 +60,11 @@ export const TARGET_COMMANDS: readonly string[] = [
   "set_column_widths",
   "set_rows_hidden",
   "set_cols_hidden",
+  // BUG-0513: the style-INDEX write Format Painter, Paste Formatting and
+  // Paste (No Borders) assign a source cell's look with.
+  "set_cell_style",
+  // BUG-0514: which icons a column SHOWS, for Custom Sort's Cell Icon list.
+  "get_range_icons",
 ];
 
 /**

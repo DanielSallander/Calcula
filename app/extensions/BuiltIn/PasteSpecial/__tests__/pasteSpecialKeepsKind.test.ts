@@ -135,8 +135,14 @@ beforeEach(() => {
     h.log.push(`updateCell ${row},${col} ${value}`);
     return { cells: landedIn(row, col, destStyle) };
   });
-  h.setCellStyle.mockImplementation(async (row: number, col: number, index: number) => {
-    h.log.push(`setCellStyle ${row},${col} ${index}`);
+  h.setCellStyle.mockImplementation(async (row: number, col: number, index: number, opts?: { target?: unknown; checkArea?: { startRow: number; startCol: number; endRow: number; endCol: number } }) => {
+    // The whole-rectangle CHECK (`checkArea`) writes nothing: logged as "check".
+    const c = opts?.checkArea;
+    if (c) {
+      h.log.push(`check${opts?.target ? "@target" : ""} ${c.startRow},${c.startCol}:${c.endRow},${c.endCol}`);
+      return null;
+    }
+    h.log.push(`setCellStyle${opts?.target ? "@target" : ""} ${row},${col} ${index}`);
     return null;
   });
   h.applyFormatting.mockImplementation(async (rows: number[], cols: number[], fmt: Record<string, unknown>, opts?: { target?: unknown }) => {
@@ -264,32 +270,32 @@ describe("on a floating grid: Paste All + an operation pastes the source's style
     destStyle = 3;
   });
 
+  // BUG-0513: the style now arrives through a style-only write with the
+  // target (`setCellStyle`), exactly as `pasteAll` writes it on a sheet. It
+  // used to be carried by writing the cell's own content BACK with the style
+  // (no style-index write took a target), which could not reach a formula or
+  // rich text: those kept their old format, unlike Excel.
   it("text, a number with text copied onto it, and blank on blank keep their content and take the style", async () => {
     // Source: 1, "x", blank, 1. Destination: "abc", 5, blank, =A1.
     h.typedSheet.mockResolvedValue([typed(0, 4, "number", 1), typed(0, 5, "text", "x"), typed(0, 7, "number", 1)]);
     h.typedTarget.mockResolvedValue([typed(3, 0, "text", "abc"), typed(3, 1, "number", 5), typed(3, 3, "number", 5, "=A1")]);
     await paste(four(["1", "x", "", "1"]), "all", "add", REF, ROW3);
-    const [first] = h.batch.mock.calls[0] as [unknown[]];
-    expect(first).toEqual([
-      { row: 3, col: 0, value: "'abc", pasted: true, styleIndex: 4 },
-      { row: 3, col: 1, value: "5", invariant: true, pasted: true, styleIndex: 4 },
-      { row: 3, col: 2, value: "", pasted: true, styleIndex: 4 },
-      { row: 3, col: 3, value: "=(A1)+1", pasted: true, styleIndex: 4 },
+    expect(h.log).toEqual([
+      // Every cell that takes the style is CHECKED before any write (never half done).
+      "check@target 3,0:3,3",
+      `batch@target ${JSON.stringify([{ row: 3, col: 3, value: "=(A1)+1", pasted: true, styleIndex: 4 }])}`,
+      "setCellStyle@target 3,0 4",
+      "setCellStyle@target 3,1 4",
+      "setCellStyle@target 3,2 4",
     ]);
   });
 
-  it("a formula the operation leaves alone, and rich text, are not written back (as before)", async () => {
+  it("a formula the operation leaves alone, and rich text, keep their content and take the style (Excel)", async () => {
     h.typedSheet.mockResolvedValue([typed(0, 4, "text", "x"), typed(0, 5, "text", "y")]);
     h.typedTarget.mockResolvedValue([typed(3, 0, "number", 5, "=A1"), typed(3, 1, "text", "rich")]);
-    h.styledTarget.mockResolvedValue({
-      cells: [{ row: 3, col: 1, display: "rich", formula: null, styleIndex: 0, richText: [{ text: "ri" }, { text: "ch" }] }],
-      merges: [],
-      conditional: [],
-      styles: [],
-      rules: [],
-    });
     await paste(four(["x", "y"]), "all", "add", REF, { startRow: 3, startCol: 0, endRow: 3, endCol: 1, type: "cells" } as never);
-    expect(h.batch).not.toHaveBeenCalled();
+    expect(h.batch, "a content write re-entered the formula or flattened the rich text").not.toHaveBeenCalled();
+    expect(h.log).toEqual(["check@target 3,0:3,1", "setCellStyle@target 3,0 4", "setCellStyle@target 3,1 4"]);
   });
 
   it("Values + Add (no style travels) writes nothing back", async () => {
@@ -297,6 +303,7 @@ describe("on a floating grid: Paste All + an operation pastes the source's style
     h.typedTarget.mockResolvedValue([typed(3, 0, "text", "abc")]);
     await paste(four(["1"]), "values", "add", REF, { startRow: 3, startCol: 0, endRow: 3, endCol: 0, type: "cells" } as never);
     expect(h.batch).not.toHaveBeenCalled();
-    expect(h.styledTarget, "the styled read is only needed when the style travels").not.toHaveBeenCalled();
+    expect(h.setCellStyle, "Paste Values carries no style").not.toHaveBeenCalled();
+    expect(h.styledTarget, "no styled read is needed").not.toHaveBeenCalled();
   });
 });

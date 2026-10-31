@@ -1211,6 +1211,122 @@ fn remap_cross_sheet_dependency_indices(
     *dependencies = moved;
 }
 
+/// Whether a parser tree holds a 3-D span (`Sheet1:Sheet3!K20`) itself.
+fn ast_has_3d_ref(ast: &parser::ast::Expression) -> bool {
+    use parser::ast::Expression as E;
+    match ast {
+        E::Sheet3DRef { .. } => true,
+        E::Literal(_) | E::CellRef { .. } | E::ColumnRef { .. } | E::RowRef { .. } | E::NamedRef { .. } | E::TableRef { .. } => false,
+        E::BinaryOp { left, right, .. } => ast_has_3d_ref(left) || ast_has_3d_ref(right),
+        E::UnaryOp { operand, .. } | E::ImplicitIntersection { operand } => ast_has_3d_ref(operand),
+        E::FunctionCall { args, .. } => args.iter().any(ast_has_3d_ref),
+        E::Range { start, end, .. } => ast_has_3d_ref(start) || ast_has_3d_ref(end),
+        E::IndexAccess { target, index } => ast_has_3d_ref(target) || ast_has_3d_ref(index),
+        E::ArrayLiteral { rows } => rows.iter().flatten().any(ast_has_3d_ref),
+        E::ListLiteral { elements } => elements.iter().any(ast_has_3d_ref),
+        E::DictLiteral { entries } => entries.iter().any(|(k, v)| ast_has_3d_ref(k) || ast_has_3d_ref(v)),
+        E::SpillRef { cell, .. } => ast_has_3d_ref(cell),
+    }
+}
+
+/// RE-REGISTER EVERY 3-D SPAN READER after the sheet ORDER changed (a sheet
+/// added, copied, moved or deleted). Returns whether the workbook has one.
+///
+/// A span's cross-sheet edges are keyed per sheet it covers
+/// (`normalize_cross_sheet_refs` expands `Sheet1:Sheet3` against the sheet
+/// order of the moment), so they are a SNAPSHOT of that order: a sheet moved,
+/// copied or added into the middle of the span afterwards had no edge until the
+/// formula was edited, and its writes never recalculated
+/// `=SUM(Sheet1:Sheet3!K20)` -- while one moved OUT kept an edge it no longer
+/// meant (NEW-3d-span-edges-after-sheet-reorder). [LIVE] Excel 16 (round 19,
+/// misc19/probe2.ps1, automatic calculation): moving Sheet4 between Sheet1 and
+/// Sheet2 gives the sum Sheet4's K20 at once, its next edit updates it, moving
+/// it back out drops it, an inserted sheet's edit and a deletion each update it.
+///
+/// Every formula on every sheet whose tree reads a span (itself, or through a
+/// defined name, expanded as every registration expands it) gets the edges a
+/// fresh registration would give it -- the active sheet from the authoritative
+/// `grid`, the rest from `grids`. CANONICAL LOCK ORDER: `grid`, `grids`, then
+/// the name tables (released before the two cross-sheet maps, in the order
+/// `rebuild_all_dependencies_from_grid` takes them); both grids are held to the
+/// end, so no writer can change a tree between reading it and registering it.
+pub(crate) fn reregister_3d_span_edges(state: &AppState) -> bool {
+    let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap().clone();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut edges: Vec<((usize, u32, u32), rustc_hash::FxHashSet<(String, u32, u32)>)> = Vec::new();
+    {
+        let named_ranges = state.named_ranges.read().unwrap();
+        let tables = state.tables.read().unwrap();
+        let table_names = state.table_names.read().unwrap();
+        let name_tables = crate::name_resolution::NameTables {
+            named_ranges: &named_ranges,
+            tables: &tables,
+            table_names: &table_names,
+            sheet_names: &sheet_names,
+            spill_ranges: &state.spill_ranges,
+        };
+        for sheet in 0..grids.len() {
+            let sheet_grid: &engine::Grid = if sheet == active_sheet { &grid } else { &grids[sheet] };
+            for (&(row, col), cell) in &sheet_grid.cells {
+                let Some(ast) = &cell.ast else {
+                    continue;
+                };
+                if !ast_has_3d_ref(ast) && !crate::ast_has_named_refs(ast) {
+                    continue;
+                }
+                let expanded = crate::name_resolution::eval_ast(ast, &name_tables.at(sheet, row, col));
+                let refs = crate::extract_all_references(&expanded, sheet_grid);
+                if refs.cross_sheet_cells.iter().any(|(name, _, _)| name.contains(':')) {
+                    edges.push((
+                        (sheet, row, col),
+                        crate::normalize_cross_sheet_refs(&refs.cross_sheet_cells, &sheet_names),
+                    ));
+                }
+            }
+        }
+    }
+    if edges.is_empty() {
+        return false;
+    }
+    let mut dependents = state.cross_sheet_dependents.lock().unwrap();
+    let mut dependencies = state.cross_sheet_dependencies.lock().unwrap();
+    for (key, refs) in edges {
+        crate::update_cross_sheet_dependencies(key, refs, &mut dependencies, &mut dependents);
+    }
+    true
+}
+
+/// What a sheet MOVE or COPY owes the values: Excel recalculates a 3-D span
+/// when a sheet enters or leaves it (see [`reregister_3d_span_edges`] for the
+/// probe). The edges are re-registered (the impls already did; this is the
+/// same idempotent pass, which also answers whether any span exists) and, only
+/// when one does, every sheet is recalculated in order -- the treatment
+/// `delete_sheet_impl` gives the workbook after a delete. Runs with nothing
+/// held. A workbook with no span pays one scan and recalculates nothing.
+pub(crate) fn recalculate_3d_span_readers(
+    state: &AppState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+) {
+    if !reregister_3d_span_edges(state) {
+        return;
+    }
+    let sheet_count = state.sheet_names.read().unwrap().len();
+    for idx in 0..sheet_count {
+        crate::calculation::recalculate_sheet_values(
+            state,
+            user_files_state,
+            pivot_state,
+            idx,
+            Some((pane_control_state, ribbon_filter_state)),
+        );
+    }
+}
+
 /// Repair the `refers_to` formula of every defined name after a sheet is
 /// renamed or deleted, using the SAME repair the grid formulas go through.
 ///
@@ -1541,7 +1657,7 @@ pub(crate) fn rename_cross_sheet_dependency_keys(state: &AppState, old_name: &st
     let renamed: crate::CrossSheetDependentsMap = dependents
         .drain()
         .map(|((sheet, r, c), deps)| {
-            let sheet = if sheet.eq_ignore_ascii_case(old_name) {
+            let sheet = if identity::sheet_names_equal(&sheet, &old_name) {
                 new_name.to_string()
             } else {
                 sheet
@@ -1557,7 +1673,7 @@ pub(crate) fn rename_cross_sheet_dependency_keys(state: &AppState, old_name: &st
         let renamed: rustc_hash::FxHashSet<(String, u32, u32)> = refs
             .drain()
             .map(|(sheet, r, c)| {
-                let sheet = if sheet.eq_ignore_ascii_case(old_name) {
+                let sheet = if identity::sheet_names_equal(&sheet, &old_name) {
                     new_name.to_string()
                 } else {
                     sheet
@@ -2039,8 +2155,9 @@ pub(crate) async fn set_canvas_layout_refolding(
     patch: &crate::api_types::CanvasLayoutPatch,
 ) -> Result<CanvasLayoutDone, String> {
     let state = ctx.state;
+    let families = ObjectFamilyStores { slicers: ctx.slicer_state, timelines, pivots: ctx.pivot_state };
     if patch.interactions.is_none() {
-        let changed = set_canvas_layout_inner(state, ctx.file_state, sheet_index, patch)?;
+        let changed = set_canvas_layout_inner(state, ctx.file_state, &families, sheet_index, patch)?;
         return Ok(CanvasLayoutDone { changed, refreshed: Vec::new() });
     }
     let index = match sheet_index {
@@ -2056,7 +2173,7 @@ pub(crate) async fn set_canvas_layout_refolding(
     };
     let planned = current.as_ref().and_then(|c| patch.apply(c.clone()).ok());
     let (Some(current), Some(planned)) = (current, planned) else {
-        let changed = set_canvas_layout_inner(state, ctx.file_state, Some(index), patch)?;
+        let changed = set_canvas_layout_inner(state, ctx.file_state, &families, Some(index), patch)?;
         return Ok(CanvasLayoutDone { changed, refreshed: Vec::new() });
     };
     for pivot in affected_refold_pivots(ctx, index, &current.interactions, &planned.interactions)? {
@@ -2072,7 +2189,7 @@ pub(crate) async fn set_canvas_layout_refolding(
         (owned, point)
     };
     // 3. The layout.
-    let changed = match set_canvas_layout_inner(state, ctx.file_state, Some(index), patch) {
+    let changed = match set_canvas_layout_inner(state, ctx.file_state, &families, Some(index), patch) {
         Ok(changed) => changed,
         Err(e) => {
             if let Ok(mut undo_stack) = state.undo_stack.lock() {
@@ -2157,9 +2274,20 @@ fn canvas_step_description(
 /// the document clean.
 /// Recorded after the `sheet_kinds` guard drops: the undo stack is never
 /// taken while holding a store.
+///
+/// LOCK OBJECTS IS A BARRIER (BUG-0443). When this patch turns the page's
+/// `objects_locked` from false to true, the flag is written and `sheet_kinds`
+/// released, and THEN every object geometry store is acquired and released in
+/// turn ([`lock_objects_barrier`], holding nothing else). Every geometry door
+/// decides the lock while holding its own store ([`canvas_objects_locked_now`]),
+/// so a move that saw the page unlocked still holds its store when the barrier
+/// reaches it, and the toggle cannot return until that move has landed: a
+/// move racing the toggle is either refused or ordered BEFORE it, never after.
+/// `families` are the object stores that do not live in `AppState`.
 pub(crate) fn set_canvas_layout_inner(
     state: &AppState,
     file_state: &FileState,
+    families: &ObjectFamilyStores<'_>,
     sheet_index: Option<usize>,
     patch: &crate::api_types::CanvasLayoutPatch,
 ) -> Result<CanvasLayoutChanged, String> {
@@ -2202,6 +2330,10 @@ pub(crate) fn set_canvas_layout_inner(
     let mut kinds = kinds.authorize(&effect);
     kinds[index] = ::persistence::SheetKind::Canvas(next.clone());
     drop(kinds);
+    if next.objects_locked && !current.objects_locked {
+        // `sheet_kinds` is released above: the barrier holds nothing else.
+        lock_objects_barrier(state, families);
+    }
     if let Some(description) = canvas_step_description(&current, &next) {
         // Bound FIRST, so the `sheet_ids` guard drops here: in an `if let`
         // scrutinee (edition 2021) it would live through the whole body --
@@ -2595,41 +2727,132 @@ pub(crate) fn canvas_objects_locked_in(sheet_kinds: &[::persistence::SheetKind],
 /// whole object), and -- as before -- the per-object `locked` list, which
 /// stays a frontend rule.
 ///
-/// LOCK ORDER: takes ONLY the `sheet_kinds` read lock and releases it before
-/// returning -- the same leaf read `protection::check_sheet_action` already
-/// makes inside the slicer and timeline stores' `lock_pending` holds, so
-/// asking it there adds no new edge to the lock order.
+/// ASKED WHILE HOLDING THE DOOR'S OWN STORE (BUG-0443). Every door calls this
+/// (or [`canvas_objects_locked_now`]) between taking the store it writes the
+/// geometry into and releasing it -- the decision and the write are ONE
+/// critical section of that store. Together with the barrier
+/// `set_canvas_layout_inner` runs when the lock goes on
+/// ([`lock_objects_barrier`]) that closes the check-then-write window this
+/// gate used to leave open (a toggle landing between a door's check and its
+/// write let one move through on a page locked a moment earlier): a door that
+/// read "unlocked" still holds its store, and the toggle cannot return before
+/// the barrier has taken that store, i.e. before the move has landed.
+/// `cell_target`'s floating-grid line acts ask it early too, as a fast refusal
+/// before their structural edit; their window patch is decided again under the
+/// floating-range store by `update_floating_range_inner`.
 ///
-/// CHECK-THEN-WRITE, KNOWINGLY (review 2026-10-08). The read guard is released
-/// before the caller writes its store, so a `set_canvas_layout { objectsLocked:
-/// true }` landing in between lets ONE move through on a page that was locked
-/// a moment earlier. That is the TOCTOU shape CLAUDE.md forbids for
-/// PROTECTION gates, and it is accepted here because this is not one: Lock
-/// Objects is an authoring convenience that the same author toggles (a
-/// protected sheet's own gate is `protection::check_sheet_action`), and a
-/// move racing the toggle by microseconds has no "right" order a user could
-/// observe. Holding the `sheet_kinds` read guard across every door's store
-/// write would close it at a real cost: it adds a `sheet_kinds -> store`
-/// edge to eight doors while the slicer and timeline doors already take
-/// `store -> sheet_kinds`, and on an RwLock where a queued writer blocks new
-/// readers (std's makes no fairness promise either way) a
-/// `set_canvas_layout` writer queued between two such readers can deadlock
-/// them. A convenience lock must never be able to hang the app.
+/// LOCK ORDER: takes ONLY `sheet_kinds` and releases it before returning --
+/// the same leaf read `protection::check_sheet_action` already makes inside
+/// the slicer and timeline stores' `lock_pending` holds. Every geometry store
+/// therefore orders BEFORE `sheet_kinds`, and nothing takes a geometry store
+/// while holding `sheet_kinds`: the toggle releases it before its barrier, and
+/// the barrier takes each store alone. No new edge.
 pub(crate) fn ensure_canvas_objects_unlocked(state: &AppState, index: usize, action: &str) -> Result<(), String> {
-    let locked = {
-        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
-        canvas_objects_locked_in(&kinds, index)
-    };
-    if locked {
+    if canvas_objects_locked_now(state, index)? {
         Err(canvas_objects_locked_refusal(action))
     } else {
         Ok(())
     }
 }
 
+/// Is Lock Objects on for page `index` NOW -- the leaf read every geometry door
+/// makes while holding its own store (see [`ensure_canvas_objects_unlocked`]).
+/// The `sheet_kinds` guard is released before this returns.
+pub(crate) fn canvas_objects_locked_now(state: &AppState, index: usize) -> Result<bool, String> {
+    let locked = {
+        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        canvas_objects_locked_in(&kinds, index)
+    };
+    #[cfg(test)]
+    park_after_lock_decision_for_test();
+    Ok(locked)
+}
+
+/// The object stores that do not live in `AppState`, which the Lock Objects
+/// barrier must reach too (a slicer, a timeline and a canvas pivot box each
+/// keep their geometry in their own family state).
+pub(crate) struct ObjectFamilyStores<'a> {
+    pub slicers: &'a crate::slicer::SlicerState,
+    pub timelines: &'a crate::timeline_slicer::TimelineSlicerState,
+    pub pivots: &'a PivotState,
+}
+
+#[cfg(test)]
+impl ObjectFamilyStores<'static> {
+    /// EMPTY family stores, for a unit test that toggles a layout with no
+    /// slicer, timeline or pivot whose move could race it.
+    pub(crate) fn none_for_test() -> &'static ObjectFamilyStores<'static> {
+        static EMPTY: std::sync::OnceLock<(
+            crate::slicer::SlicerState,
+            crate::timeline_slicer::TimelineSlicerState,
+            PivotState,
+        )> = std::sync::OnceLock::new();
+        static STORES: std::sync::OnceLock<ObjectFamilyStores<'static>> = std::sync::OnceLock::new();
+        let (slicers, timelines, pivots) = EMPTY.get_or_init(|| {
+            (
+                crate::slicer::SlicerState::new(),
+                crate::timeline_slicer::TimelineSlicerState::new(),
+                PivotState::new(),
+            )
+        });
+        STORES.get_or_init(|| ObjectFamilyStores { slicers, timelines, pivots })
+    }
+}
+
+/// THE LOCK OBJECTS BARRIER (BUG-0443): acquire and release, one at a time,
+/// every store a geometry door decides the lock under -- charts, controls,
+/// floating ranges, object property bindings, slicers, timelines and pivot
+/// tables. Run by `set_canvas_layout_inner` after it has turned a page's lock
+/// on and released `sheet_kinds`, so it waits out exactly the doors that read
+/// "unlocked" and are still writing. CALLERS HOLD NO STATE LOCK; each guard
+/// here is dropped before the next is taken, so it adds no edge.
+fn lock_objects_barrier(state: &AppState, families: &ObjectFamilyStores<'_>) {
+    {
+        let _charts = state.charts.read();
+    }
+    {
+        let _controls = state.controls.read();
+    }
+    {
+        let _floating_ranges = state.floating_ranges.read();
+    }
+    {
+        let _object_bindings = state.object_bindings.read();
+    }
+    {
+        let _slicers = families.slicers.slicers.read();
+    }
+    {
+        let _timelines = families.timelines.timelines.read();
+    }
+    {
+        let _pivot_tables = families.pivots.pivot_tables.read();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook (BUG-0443's race test): when set on the calling thread, the
+    /// NEXT Lock Objects decision ([`canvas_objects_locked_now`]) reports
+    /// "decided" on the first channel and parks until the second one fires --
+    /// a door frozen between its decision and its write.
+    pub(crate) static PARK_AFTER_LOCK_DECISION_FOR_TEST: std::cell::RefCell<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn park_after_lock_decision_for_test() {
+    if let Some((decided, resume)) = PARK_AFTER_LOCK_DECISION_FOR_TEST.with(|h| h.borrow_mut().take()) {
+        let _ = decided.send(());
+        let _ = resume.recv();
+    }
+}
+
 /// The message [`ensure_canvas_objects_unlocked`] refuses with -- also used by
-/// the doors that decide the lock from a snapshot taken before their store
-/// lock (the control batch). Names the setting AND the remedy.
+/// the doors that ask [`canvas_objects_locked_now`] themselves (the control
+/// batch, a control property, an anchor move, a binding). Names the setting
+/// AND the remedy.
 pub(crate) fn canvas_objects_locked_refusal(action: &str) -> String {
     format!(
         "Cannot {}: the objects on this canvas page are locked (Canvas > View > Lock Objects). \
@@ -3121,6 +3344,11 @@ pub(crate) fn append_user_sheet(
     }
     }; // every lock above released here
 
+    // A new sheet can land inside a 3-D span (one whose end is an object sheet,
+    // or a `*` span): its writes must reach the span's readers. It is empty,
+    // so no value changes yet (`reregister_3d_span_edges`).
+    reregister_3d_span_edges(state);
+
     Ok(appended)
 }
 
@@ -3469,7 +3697,7 @@ pub(crate) fn delete_sheet_impl(
     // orphans them exactly as `delete_table` did.
     if let Some(sheet_tables) = tables.remove(&index) {
         for table in sheet_tables.values() {
-            table_names.remove(&table.name.to_uppercase());
+            table_names.remove(&crate::tables::table_name_key(&table.name));
             removed_sources.push(crate::object_deps::DeletedSource::table(table.id));
         }
     }
@@ -3664,7 +3892,7 @@ pub(crate) fn delete_sheet_impl(
         if let Some(sheet_tables) = tables.remove(&old_key) {
             let new_key = old_key - 1;
             for table in sheet_tables.values() {
-                if let Some(entry) = table_names.get_mut(&table.name.to_uppercase()) {
+                if let Some(entry) = table_names.get_mut(&crate::tables::table_name_key(&table.name)) {
                     entry.0 = new_key;
                 }
             }
@@ -3931,6 +4159,9 @@ pub(crate) fn delete_sheet_impl(
     // whose formulas it has just re-read. Runs LAST, after every lock above is
     // dropped and after the dependency rebuild, so the pass sees the finished
     // workbook.
+    // The 3-D spans first: the deleted sheet's edges go, and a span whose
+    // bookend the repair moved reads its new sheets (`reregister_3d_span_edges`).
+    reregister_3d_span_edges(state);
     let sheet_count = state.sheet_names.read().unwrap().len();
     for idx in 0..sheet_count {
         crate::calculation::recalculate_sheet_values(
@@ -4429,10 +4660,15 @@ pub fn move_sheet(
     slicer_state: State<'_, crate::slicer::SlicerState>,
     timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    // Injected by Tauri; needed only for the recalculation a move owes a 3-D
+    // span it changes (`recalculate_3d_span_readers`).
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     from_index: usize,
     to_index: usize,
 ) -> Result<SheetsResult, String> {
-    move_sheet_impl(
+    let result = move_sheet_impl(
         &state,
         &file_state,
         &slicer_state,
@@ -4440,7 +4676,9 @@ pub fn move_sheet(
         &ribbon_filter_state,
         from_index,
         to_index,
-    )
+    )?;
+    recalculate_3d_span_readers(&state, &user_files_state, &pivot_state, &pane_control_state, &ribbon_filter_state);
+    Ok(result)
 }
 
 /// `move_sheet` without the Tauri `State` wrappers, so tests can drive the
@@ -4690,6 +4928,10 @@ pub(crate) fn move_sheet_impl(
     // rotation above renumbered the sheets under every queued entry.
     invalidate_undo_history_for_sheet_structure(&state, "move a sheet");
 
+    // A sheet moved into or out of a 3-D span changes what the span reads
+    // (`reregister_3d_span_edges`); the command recalculates the values.
+    reregister_3d_span_edges(state);
+
     Ok(result)
 }
 
@@ -4701,10 +4943,15 @@ pub fn copy_sheet(
     slicer_state: State<'_, crate::slicer::SlicerState>,
     timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    // Injected by Tauri; needed only for the recalculation a copy owes a 3-D
+    // span it lands in (`recalculate_3d_span_readers`).
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     source_index: usize,
     new_name: Option<String>,
 ) -> Result<SheetsResult, String> {
-    copy_sheet_impl(
+    let result = copy_sheet_impl(
         &state,
         &file_state,
         &slicer_state,
@@ -4712,7 +4959,9 @@ pub fn copy_sheet(
         &ribbon_filter_state,
         source_index,
         new_name,
-    )
+    )?;
+    recalculate_3d_span_readers(&state, &user_files_state, &pivot_state, &pane_control_state, &ribbon_filter_state);
+    Ok(result)
 }
 
 /// `copy_sheet` without the Tauri `State` wrappers, so tests can drive the
@@ -4986,6 +5235,10 @@ pub(crate) fn copy_sheet_impl(
     // is INSERTED, so every index at or above the insertion point moved up by
     // one under every queued entry.
     invalidate_undo_history_for_sheet_structure(&state, "copy a sheet");
+
+    // A copy inserted inside a 3-D span is read by it
+    // (`reregister_3d_span_edges`); the command recalculates the values.
+    reregister_3d_span_edges(state);
 
     Ok(result)
 }

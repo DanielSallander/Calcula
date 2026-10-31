@@ -436,3 +436,85 @@ describe("a cut whose source refuses to be emptied is taken back whole (rev6A#5)
     expect(api.commitUndoTransaction.mock.calls).toEqual([[7]]);
   });
 });
+
+describe("the SAME-sheet move's relocation, and the move's announcement (round 10)", () => {
+  /** Every CELLS_MOVED announced while `run` runs. */
+  async function heardMoves(run: () => Promise<void>): Promise<unknown[]> {
+    const heard: unknown[] = [];
+    const listen = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener("app:cells-moved", listen);
+    try {
+      await run();
+    } finally {
+      window.removeEventListener("app:cells-moved", listen);
+    }
+    return heard;
+  }
+
+  /** Cut Sheet1!A1:A2 with Sheet1 on screen (the paste stays on Sheet1). */
+  async function cutOnSheet1(): Promise<void> {
+    model.cells.set("0,0", { display: "7", formula: null, styleIndex: 0 });
+    model.cells.set("1,0", { display: "7", formula: "=A1+B5", styleIndex: 0 });
+    await onSheet(0, "Sheet1", "S1");
+    book.activeIndex = 0;
+    await select(0, 0, 1, 0);
+    await act(async () => {
+      await hook.cut();
+    });
+    sys.text = sys.written.at(-1) ?? null;
+  }
+
+  it("rev8B: a relocation refused AFTER a same-sheet cut's source was cleared takes the whole move back", async () => {
+    await cutOnSheet1();
+    api.relocateCellReferences.mockRejectedValueOnce("The relocation could not be recorded; nothing was re-pointed.");
+    const heard = await heardMoves(() => pasteAt(2, 2));
+
+    // The same-sheet branch: per-cell clears on the active sheet, then the relocation.
+    expect(api.clearCell.mock.calls).toEqual([
+      [0, 0],
+      [1, 0],
+    ]);
+    expect(api.clearRangeWithOptions).not.toHaveBeenCalled();
+    expect(api.relocateCellReferences.mock.calls).toEqual([[0, 0, 1, 0, 2, 2]]);
+    expectTakenBack("the same-sheet relocation failed", "nothing was re-pointed");
+    expect(heard, "a move that was taken back was announced as moved").toEqual([]);
+  });
+
+  it("a committed Cut + Paste announces CELLS_MOVED: the block, the sheet it left and where it landed", async () => {
+    await cutSheet1A1A2();
+    await onSheet(1, "Sheet2", "S2");
+    const heard = await heardMoves(() => pasteAt(3, 3));
+    expect(api.commitUndoTransaction.mock.calls).toEqual([[7]]);
+    expect(heard).toEqual([
+      {
+        moves: [
+          {
+            kind: "move",
+            fromSheetIndex: 0,
+            fromStartRow: 0,
+            fromStartCol: 0,
+            fromEndRow: 1,
+            fromEndCol: 0,
+            toSheetIndex: 1,
+            toRow: 3,
+            toCol: 3,
+          },
+        ],
+        source: "edit",
+      },
+    ]);
+  });
+
+  it("a COPY's paste moves nothing and announces no move", async () => {
+    model.cells.set("0,0", { display: "7", formula: null, styleIndex: 0 });
+    await onSheet(0, "Sheet1", "S1");
+    await select(0, 0);
+    await act(async () => {
+      await hook.copy();
+    });
+    sys.text = sys.written.at(-1) ?? null;
+    const heard = await heardMoves(() => pasteAt(4, 4));
+    expect(api.updateCellsBatch).toHaveBeenCalledTimes(1);
+    expect(heard).toEqual([]);
+  });
+});

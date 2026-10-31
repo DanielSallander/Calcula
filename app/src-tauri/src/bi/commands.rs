@@ -3713,7 +3713,7 @@ pub async fn bi_insert_result(
                 sheet_name, col_letter, data_start_row, col_letter, data_end_row
             );
 
-            let key = range_name.to_uppercase();
+            let key = crate::name_resolution::name_key(&range_name);
             named_ranges.insert(
                 key,
                 NamedRange {
@@ -4296,7 +4296,7 @@ pub(crate) fn repoint_result_names(
             sheet_name, col_letter, data_start_row, col_letter, data_end_row
         );
 
-        let key = range_name.to_uppercase();
+        let key = crate::name_resolution::name_key(&range_name);
         named_ranges.insert(
             key,
             NamedRange {

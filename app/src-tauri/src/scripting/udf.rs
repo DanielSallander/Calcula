@@ -912,6 +912,7 @@ mod tests {
                     style_index: None,
                     invariant: Some(true),
                     pasted: None,
+                    moved: None,
                 }],
                 vec!["MYFN".to_string()],
                 Vec::new(),

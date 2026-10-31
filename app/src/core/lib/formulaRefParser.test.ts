@@ -128,6 +128,17 @@ describe("parseFormulaReferencesWithPositions", () => {
     expect(refs[0].sheetName).toBe("Sheet1");
     expect(refs[0].originalText).toBe("Sheet1!A1");
   });
+
+  it("reads a bare non-ASCII sheet name whole, as the parser and Excel do", () => {
+    // The ASCII-only grammar matched `versikt!A1` inside `Översikt!A1`: a
+    // phantom sheet "versikt", and a drag of it wrote `versikt!B2`.
+    const refs = parseFormulaReferencesWithPositions("=Översikt!A1+Straße!B2");
+    expect(refs.map((r) => r.sheetName)).toEqual(["Översikt", "Straße"]);
+    expect(refs[0].originalText).toBe("Översikt!A1");
+    // The writer leaves a non-ASCII name bare, as Excel and the Rust renderer
+    // do [LIVE, 2026-10-31] (it used to quote it).
+    expect(updateFormulaReference("=Översikt!A1", refs[0], 2, 2)).toBe("=Översikt!C3");
+  });
 });
 
 // ============================================================================

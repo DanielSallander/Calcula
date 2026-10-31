@@ -138,8 +138,9 @@ impl From<FrontendCustomObject> for calp::publish::PublishCustomObject {
 /// A reference to the author's OWN same-named sheet is untouched: in the
 /// package that name means the package's sheet, exactly as before.
 ///
-/// `renamed_for_publish` is the assembly's LOWERCASED local name -> published
-/// name map; matching is case-insensitive either way.
+/// `renamed_for_publish` is the assembly's local name -> published name map,
+/// keyed by `identity::sheet_name_key`; matching is by Excel's case rule
+/// either way (`SheetRenames` re-keys by the same fold).
 pub(crate) fn restore_published_sheet_references(
     workbook: &mut persistence::Workbook,
     sheet_indices: &[usize],
@@ -228,8 +229,9 @@ pub(crate) fn sheet_ids_and_names(state: &AppState) -> Result<(Vec<SheetId>, Vec
     Ok((ids.clone(), names.clone()))
 }
 
-/// A SUBSCRIBER's renames of `package_name`'s sheets, as the LOWERCASED local
-/// name -> the name `base` publishes the sheet under, for every application
+/// A SUBSCRIBER's renames of `package_name`'s sheets, as the local name's
+/// `identity::sheet_name_key` (Excel's case fold, the one key every
+/// sheet-name map uses) -> the name `base` publishes the sheet under, for every application
 /// sheet whose tab here is named differently (BUG-0151). Empty for a workbook
 /// that does not subscribe to it.
 ///
@@ -268,8 +270,8 @@ pub(crate) fn subscriber_published_names(
         // carries (the collision pass picks an untaken one), so its inverse
         // entry can never match a reference; only real local sheets matter.
         for (published, local) in &resolved.local_names {
-            if !local.eq_ignore_ascii_case(published) {
-                out.insert(local.to_lowercase(), published.clone());
+            if !identity::sheet_names_equal(local, published) {
+                out.insert(identity::sheet_name_key(local), published.clone());
             }
         }
     }
@@ -724,16 +726,11 @@ pub(crate) struct PublishAssembly {
 /// map does not know, so undoing only the tab name strands them — that case is
 /// refused instead.
 ///
-/// Case-insensitive, like every sheet-name comparison in the product.
+/// By Excel's sheet-name rule, and including a 31-character name whose stem
+/// the rename cut to fit the suffix -- the ONE shape test lives beside the
+/// rename that produces it (`calp::pull::is_collision_sheet_name`).
 fn is_collision_rename(local: &str, published: &str) -> bool {
-    let (local_l, published_l) = (local.to_ascii_lowercase(), published.to_ascii_lowercase());
-    if local_l == published_l {
-        return true;
-    }
-    let Some(rest) = local_l.strip_prefix(&published_l) else { return false };
-    let Some(rest) = rest.strip_prefix(" (") else { return false };
-    let Some(digits) = rest.strip_suffix(')') else { return false };
-    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+    calp::pull::is_collision_sheet_name(local, published)
 }
 
 /// THE FILTER, THEN THE RELEASE: what `assemble_publish_workbook` does to the
@@ -944,9 +941,11 @@ fn assemble_publish_snapshot(
     // filed under in THIS package (`ChartKeysFor::Package`,
     // `published_data_source_id`), so a chart this author created, kept from a
     // drill-through or re-pointed ships with the key a subscriber's pull,
-    // refresh and open re-bind it by. Never the connection's own package key:
-    // a checkout's connection was minted from the previous version's data
-    // source, which this push files under a new id (review RB-1).
+    // refresh and open re-bind it by. That id is the connection's STABLE key
+    // (its application data-source id, else its own id): a checkout's push
+    // files the data source under the same id the previous version did, so the
+    // chart, the pivots, the slicers and the ribbon filters all keep naming it
+    // (review RB-1, BUG-0589).
     //
     // `basis` is the sheet structure the body copied under its grid hold; the
     // door (`assemble_publish_workbook`) compares it after this attempt's last
@@ -1034,7 +1033,9 @@ fn assemble_publish_snapshot(
     // diff all see the same names — `assemble_publish_workbook` is the one door
     // all three go through.
     //
-    // Returns LOWERCASED local name -> published name for every sheet it
+    // Returns local name -> published name, KEYED BY `identity::sheet_name_key`
+    // of the local name (Excel's case fold -- not a lowercase, so look keys up
+    // through that function, never `to_lowercase`), for every sheet it
     // renamed, because anything else that refers to a sheet BY NAME has to
     // follow it, and every sheet-name comparison in this product is
     // case-insensitive. A case-sensitive key here silently dropped a pivot whose
@@ -1098,7 +1099,7 @@ fn assemble_publish_snapshot(
                     ));
                 }
 
-                renamed.insert(sheet.name.to_ascii_lowercase(), published.clone());
+                renamed.insert(identity::sheet_name_key(&sheet.name), published.clone());
                 sheet.name = published.clone();
             }
         }
@@ -1249,7 +1250,16 @@ fn assemble_publish_snapshot(
 
     // Capture active BI connections as data sources (+ their writeback-column
     // declarations for governed model-keyed submissions).
-    let (data_sources, model_writebacks) = capture_bi_data_sources(&state, bi_state)?;
+    let (mut data_sources, mut model_writebacks) = capture_bi_data_sources(&state, bi_state)?;
+
+    // ONE KEY, ONE APPLICATION: a model this workbook took from ANOTHER
+    // application (a subscription, or the working copy of a different one) is
+    // filed under THIS application's own id for it, and every carried store
+    // that names it follows -- so a subscriber to both never holds two
+    // connections under one key (see `data_source_rekeys_for_target`). Before
+    // the validation below, which must see the keys the package will carry.
+    let rekeys = data_source_rekeys_for_target(state, bi_state, registry_path, package_name)?;
+    rekey_carried_data_sources(&mut workbook, &mut data_sources, &mut model_writebacks, &rekeys);
 
     // Validate BI pivot definitions against the embedded model before publishing.
     // This catches mismatched field names (e.g., grid-style "Category" instead of
@@ -1358,8 +1368,9 @@ pub(crate) fn canonicalize_validation_list_sources(workbook: &mut persistence::W
 pub(crate) fn prune_unpublished_pivots(
     workbook: &mut persistence::Workbook,
     sheet_indices: &[usize],
-    // LOWERCASED local name -> the name the application publishes the sheet
-    // under (`assemble_publish_workbook`'s collision-rename restoration).
+    // Local name, keyed by `identity::sheet_name_key` -> the name the
+    // application publishes the sheet under (`assemble_publish_workbook`'s
+    // collision-rename restoration).
     renamed_for_publish: &std::collections::HashMap<String, String>,
 ) -> Vec<calp::publish::UnpublishedPivot> {
     let index_map: std::collections::HashMap<usize, usize> = sheet_indices
@@ -1367,24 +1378,25 @@ pub(crate) fn prune_unpublished_pivots(
         .enumerate()
         .map(|(package_idx, &wb_idx)| (wb_idx, package_idx))
         .collect();
-    // LOWERCASED, because every other sheet-name comparison in the product
-    // is `eq_ignore_ascii_case` — the lexer uppercases bare identifiers, so
-    // `Data` and `data` are one name to a formula. This set was matched
-    // case-SENSITIVELY, which silently DROPPED a pivot whose
-    // `destination_sheet` was recorded as `data` from an application whose
-    // tab is spelled `Data`. Found while closing the rename leak; the two
-    // are the same class of defect, a name compared one way here and
-    // another way everywhere else.
+    // KEYED BY EXCEL'S CASE RULE (`identity::sheet_name_key`), the one key
+    // every sheet-name map uses -- the lexer uppercases bare identifiers, so
+    // `Data` and `data` are one name to a formula, and so are `Ärende` and
+    // `ärende`. This set was first matched case-SENSITIVELY, which silently
+    // DROPPED a pivot whose `destination_sheet` was recorded as `data` from an
+    // application whose tab is spelled `Data`; it then folded ASCII only
+    // (`to_ascii_lowercase`), which still dropped one recorded as `ärende`
+    // beside the tab `Ärende` (rev10C). The same class of defect each time: a
+    // name compared one way here and another way everywhere else.
     let published_names: std::collections::HashSet<String> = sheet_indices
         .iter()
-        .filter_map(|&i| workbook.sheets.get(i).map(|s| s.name.to_ascii_lowercase()))
+        .filter_map(|&i| workbook.sheets.get(i).map(|s| identity::sheet_name_key(&s.name)))
         .collect();
     // Every tab name, for naming the sheet a pivot was left behind for.
     let tab_names: Vec<String> = workbook.sheets.iter().map(|s| s.name.clone()).collect();
     let tab_named = |stored: &str| -> String {
         tab_names
             .iter()
-            .find(|n| n.eq_ignore_ascii_case(stored))
+            .find(|n| identity::sheet_names_equal(n, stored))
             .cloned()
             .unwrap_or_else(|| stored.to_string())
     };
@@ -1405,16 +1417,16 @@ pub(crate) fn prune_unpublished_pivots(
         // sheet. The pull side already remaps both
         // (`restore_pulled_pivots`); the push side remapped one.
         //
-        // Looked up LOWERCASED: `renamed_for_publish` is keyed that way
-        // because a stored anchor's spelling can drift from its tab, and a
-        // case-sensitive miss here means the anchor is left stale and the
-        // `dest_ok` test three lines down then drops the pivot silently.
+        // Looked up by `identity::sheet_name_key`: `renamed_for_publish` is
+        // keyed that way because a stored anchor's spelling can drift from its
+        // tab, and a miss here means the anchor is left stale and the
+        // retention check below then drops the pivot silently.
         for anchor in ["destination_sheet", "source_sheet"] {
             let Some(local) = def
                 .definition
                 .get(anchor)
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_ascii_lowercase())
+                .map(identity::sheet_name_key)
             else {
                 continue;
             };
@@ -1442,7 +1454,7 @@ pub(crate) fn prune_unpublished_pivots(
             .and_then(|v| v.as_str())
             .map(str::to_string);
         if let Some(destination) = destination {
-            if !published_names.contains(&destination.to_ascii_lowercase()) {
+            if !published_names.contains(&identity::sheet_name_key(&destination)) {
                 unpublished.push(calp::publish::UnpublishedPivot {
                     id: def.id,
                     name: pivot_name(),
@@ -1765,21 +1777,10 @@ pub(crate) fn compute_publish_report(
     let workbook_protected = usize::from(wb.workbook_protection.is_some());
     item(&mut excluded, "workbookProtection", workbook_protected,
         "workbook structure protection is not carried (a governance feature, not yet distributed)");
-    // WORKBOOK-SCOPED GRID DEFAULTS. An application's sheets are APPENDED to the
-    // subscriber's existing workbook, and these two are one-per-workbook, so
-    // applying the publisher's values would silently re-size every sheet the
-    // subscriber already had. The published sheets' own explicit widths/heights
-    // DO travel (layout.json); only the fallback for columns and rows the author
-    // never touched reverts to the subscriber's default. Reported rather than
-    // dropped in silence, because an author who set a 30px default row is
-    // entitled to know their report will not open that way elsewhere.
-    let non_default_grid_defaults = usize::from(
-        (wb.default_row_height - ::persistence::DEFAULT_ROW_HEIGHT_PX).abs() > f64::EPSILON
-            || (wb.default_column_width - ::persistence::DEFAULT_COLUMN_WIDTH_PX).abs()
-                > f64::EPSILON,
-    );
-    item(&mut excluded, "gridDefaults", non_default_grid_defaults,
-        "your default row height / column width are workbook-wide, and the application's sheets are added to the subscriber's own workbook; explicitly sized rows and columns do travel");
+    // The standard row height / column width are PER SHEET (BUG-0352), so they
+    // travel with each published sheet's metadata.json and re-size nothing of
+    // the subscriber's own sheets. They were workbook-wide, excluded and
+    // reported here as 'gridDefaults'.
     // Per-connection "view as" RLS role selections. Deliberately not carried:
     // the selection is the PUBLISHER's impersonation of a role on their own
     // machine, and re-applying it on a subscriber would present that
@@ -1887,7 +1888,8 @@ pub(crate) fn publish_into_for_preview(
     // diff must be reconciled for that (`reconcile_unknowable_min_app_version`).
     frontend_custom_objects: Option<Vec<FrontendCustomObject>>,
     // A SUBSCRIBER's collision renames to undo in the carrier's references
-    // (LOWERCASED local name -> published name; empty for anything else). Its
+    // (local name keyed by `identity::sheet_name_key` -> published name; empty
+    // for anything else). Its
     // pulled references were rewritten to the local names (BUG-0151), and the
     // diff against the published version must compare them in the published
     // spelling, or every one reads as a change the reset would not make. A
@@ -2214,8 +2216,517 @@ pub(crate) fn unrecorded_link_refusal(
     ))
 }
 
+/// RECALCULATE BEFORE PUBLISHING (round 11): Excel's "Recalculate workbook
+/// before saving", on by default [LIVE: a fresh Excel 16 workbook,
+/// Calculation = manual, A1 edited under `B1 = A1*2`: CalculationState
+/// xlPending; SaveAs with CalculateBeforeSave = True recalculates, B1 shows
+/// the new answer and the state is xlDone].
+///
+/// When the calculation is incomplete (`calculation_state_impl` says
+/// "pending": a manual-calculation edit left formulas stale, or a cancelled
+/// pass left a remainder), the push runs the same full pass F9 runs
+/// (`run_calculation_pass_with`, `CalcScope::Workbook`, told whether the
+/// document is unedited -- the keep rule), which also resumes a cancelled
+/// remainder. A manual-mode author is never blocked. It ignores the
+/// calculate-before-save setting deliberately: a saved `.cala` can say
+/// "calculation incomplete" (`calc_state.json`), a package cannot, so a push
+/// never ships what that setting would let a save keep.
+///
+/// Refused only when the recalculation itself did not complete -- cancelled
+/// by the user, or stopped with cells still pending -- saying so.
+///
+/// AND ONLY OVER THE WORKBOOK THAT PUSHES (calpref2): `epoch` is the document
+/// epoch the push read at entry. The pass runs PINNED to it
+/// ([`crate::persistence::FileState::with_document_pinned`]): a File > Open /
+/// New that landed first refuses the push with nothing recalculated (under
+/// manual calculation a pass over the newly opened workbook would change its
+/// stale values -- a push mutating a document that never pushed), and one that
+/// lands during the pass waits for it before it resets a store.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recalculate_before_publish(
+    window: Option<tauri::Window>,
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    epoch: u64,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::types::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+) -> Result<(), String> {
+    file_state
+        .with_document_pinned(epoch, || {
+            recalculate_pinned_document_before_publish(
+                window,
+                state,
+                file_state,
+                user_files_state,
+                pivot_state,
+                pane_control_state,
+                ribbon_filter_state,
+            )
+        })
+        // The pin found the epoch moved: the pass never ran.
+        .unwrap_or_else(|| Err(document_replaced_refusal()))
+}
+
+/// [`recalculate_before_publish`]'s pass, run while the document is pinned.
+#[allow(clippy::too_many_arguments)]
+fn recalculate_pinned_document_before_publish(
+    window: Option<tauri::Window>,
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::types::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+) -> Result<(), String> {
+    if crate::calculation::calculation_state_impl(state) != "pending" {
+        return Ok(());
+    }
+    crate::calculation::run_calculation_pass_with(
+        crate::calculation::CalcScope::Workbook,
+        window,
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        None,
+        !file_state.is_dirty(),
+    )
+    .map_err(|e| format!("Cannot publish: the recalculation before publishing failed: {e}"))?;
+    if crate::calculation::calculation_state_impl(state) == "pending" {
+        let remainder = state
+            .pending_recalc
+            .read()
+            .ok()
+            .and_then(|p| p.as_ref().map(|p| p.cells.len()))
+            .unwrap_or(0);
+        return Err(if remainder > 0 {
+            format!(
+                "Cannot publish: the recalculation before publishing was cancelled, and {} \
+                 cell(s) still hold values from before it. Nothing was published. Publish again \
+                 and let the calculation finish.",
+                remainder
+            )
+        } else {
+            "Cannot publish: the recalculation before publishing did not complete, so some \
+             formulas may still hold values from before the last edits. Nothing was published. \
+             Press F9, then publish."
+                .to_string()
+        });
+    }
+    Ok(())
+}
+
+/// The structured code a push refuses with, or warns with, when File > Open /
+/// New replaced the workbook while the push was running (rev13A).
+pub(crate) const CALP_PUSH_DOCUMENT_REPLACED: &str = "CALP_PUSH_DOCUMENT_REPLACED";
+
+/// rev13A: `calp_publish` is `(async)`, and File > Open / New are main-thread
+/// commands, so a push can outlive the workbook it started on. `epoch` is the
+/// [`crate::persistence::FileState::document_epoch`] the push read at entry;
+/// asked after the shipped carrier's last store read, an unmoved epoch proves
+/// the carrier -- and every gate before it -- was the starting workbook's
+/// (the open moves the epoch BEFORE it resets a single store). Nothing has
+/// been written when this refuses.
+pub(crate) fn refuse_push_if_document_replaced(
+    file_state: &crate::persistence::FileState,
+    epoch: u64,
+) -> Result<(), String> {
+    if file_state.document_replaced_since(epoch) {
+        return Err(document_replaced_refusal());
+    }
+    Ok(())
+}
+
+/// The refusal of a push whose workbook was replaced before anything shipped.
+fn document_replaced_refusal() -> String {
+    format!(
+        "{CALP_PUSH_DOCUMENT_REPLACED}: Another workbook was opened (or a new one started) while \
+         this one was being pushed. Nothing was published. Open the working copy again and push \
+         from it."
+    )
+}
+
+/// rev13A: the recalculation before publishing settles the workbook, but the
+/// push is `(async)`, so under manual calculation an edit can land between that
+/// pass and the snapshot the carrier is assembled from -- and the carrier would
+/// ship the edited precedent beside dependents calculated before it, looking
+/// calculated. The carrier's own `calculation_incomplete` is read under its
+/// snapshot hold (`build_workbook_for_save`), so it describes exactly the
+/// values that would ship. A package carries no "calculation incomplete" mark,
+/// so the push refuses, with nothing published, rather than ship them.
+pub(crate) fn refuse_push_on_stale_carrier(
+    workbook: &persistence::Workbook,
+) -> Result<(), String> {
+    if workbook.calculation_incomplete {
+        return Err(
+            "Cannot publish: the workbook was edited while it was being published, and under manual \
+             calculation that edit left some formulas holding values from before it. Nothing was \
+             published. Publish again."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Record a push that LANDED in the workbook's working-copy link -- unless the
+/// workbook was replaced since the push began (`epoch`, rev13A), in which case
+/// the link on screen belongs to another workbook and nothing is written or
+/// dirtied: returns `Ok(false)` and the push says so. The epoch is asked while
+/// the link's lock is held, and File > Open / New move the epoch before their
+/// reset takes that lock, so the question and the write are one critical
+/// section: an open that lands after the question clears what was written.
+///
+/// The link's TARGET is asked in the same critical section (rev15B): the
+/// Publish dialog is non-modal and the push `(async)`, so Collaboration > Open
+/// Application for Editing can re-point this workbook's link at another
+/// application Y mid-push without moving the epoch. Recording X's version and
+/// X's published sheet names on Y's link would make Y's working copy name a
+/// base Y never had, and its next push be refused or restore the wrong names.
+/// A link that no longer targets the pushed application is left as it is, and
+/// the push says so ([`PushLinkRecord::LinkRepointed`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_push_in_working_copy_link(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    epoch: u64,
+    registry_path: &str,
+    package_name: &str,
+    kind: &str,
+    version: &str,
+    now: &str,
+    published_sheets: Vec<calp::WorkingCopySheetRef>,
+    shipped: calp::WorkingCopyContent,
+) -> Result<PushLinkRecord, String> {
+    let pending = state.working_copy_link.lock_pending().map_err(|e| e.to_string())?;
+    if file_state.document_replaced_since(epoch) {
+        return Ok(PushLinkRecord::DocumentReplaced);
+    }
+    if let Some(existing) = pending.as_ref() {
+        if !existing.targets(registry_path, package_name) {
+            return Ok(PushLinkRecord::LinkRepointed { now_targets: existing.package_name.clone() });
+        }
+    }
+    // A push CHANGES what this workbook is (its base version moved), which is
+    // saved state -- so this is the push's one `mutates` arm, taken only after
+    // the workspace accepted the version and the workbook is still the one
+    // that pushed it.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut link = pending.authorize(&effect);
+    match link.as_mut() {
+        Some(existing) => existing.record_push(version, now, published_sheets, shipped),
+        None => {
+            let mut fresh = calp::WorkingCopyLink::new(
+                registry_path,
+                package_name,
+                kind,
+                version,
+                now,
+                published_sheets.clone(),
+            );
+            fresh.record_push(version, now, published_sheets, shipped);
+            *link = Some(fresh);
+        }
+    }
+    Ok(PushLinkRecord::Recorded)
+}
+
+/// What [`record_push_in_working_copy_link`] did with a push that LANDED.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PushLinkRecord {
+    /// The workbook's link now names the pushed version as its base.
+    Recorded,
+    /// File > Open / New replaced the workbook mid-push: nothing written.
+    DocumentReplaced,
+    /// The link was re-pointed at ANOTHER application (`now_targets`) mid-push:
+    /// nothing written, that application's link left as it was.
+    LinkRepointed { now_targets: String },
+}
+
+impl PushLinkRecord {
+    /// The warning the push's response carries when nothing was recorded.
+    fn warning(&self, package_name: &str, version: &str) -> Option<String> {
+        match self {
+            PushLinkRecord::Recorded => None,
+            PushLinkRecord::DocumentReplaced => Some(push_not_recorded_warning(package_name, version)),
+            PushLinkRecord::LinkRepointed { now_targets } => Some(format!(
+                "Version {version} of '{package_name}' was published, but while it was being pushed this \
+                 workbook was opened for editing as '{now_targets}', so the push was not recorded in it. \
+                 '{now_targets}' keeps its own base version. To push '{package_name}' again, open it for \
+                 editing (Collaboration > Open Application for Editing) first."
+            )),
+        }
+    }
+}
+
+/// The warning a push that LANDED gives when the workbook was replaced before
+/// its link could be recorded ([`record_push_in_working_copy_link`]).
+fn push_not_recorded_warning(package_name: &str, version: &str) -> String {
+    format!(
+        "{CALP_PUSH_DOCUMENT_REPLACED}: Version {version} of '{package_name}' was published, but another \
+         workbook was opened (or a new one started) while it was being pushed, so the push was not \
+         recorded in any workbook. The working copy you pushed from still names its old base version: \
+         open the application for editing again (Collaboration > Open Application for Editing) before \
+         your next push."
+    )
+}
+
+/// Record a push that LANDED in the audit trail of the workbook that pushed it
+/// (publish is egress, so it is always recorded). The audit trail is
+/// DOCUMENT-scoped -- it is saved inside the `.cala` -- so when File > Open /
+/// New replaced that workbook mid-push (`epoch` moved, rev13A), the row has
+/// no workbook to go to: the one on screen never pushed, and a row in ITS
+/// trail would be saved into it as if it had (calpref2; round 15 wrote it
+/// there flagged `pushedFromReplacedWorkbook`). It goes to this SESSION's log
+/// instead, with every field the row would have carried, beside the push's
+/// own `CALP_PUSH_DOCUMENT_REPLACED` warning to the user and the workspace's
+/// signed version list, which records the version itself. Returns whether the
+/// row reached the workbook's trail.
+///
+/// The epoch is asked with the document PINNED
+/// ([`crate::persistence::FileState::with_document_pinned`]), so an open
+/// cannot reset the trail between the question and the write.
+pub(crate) fn record_push_audit_row(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    epoch: u64,
+    description: &str,
+    user: &str,
+    now: &str,
+    extra: std::collections::HashMap<String, serde_json::Value>,
+) -> bool {
+    let session_copy = extra.clone();
+    let recorded = file_state.with_document_pinned(epoch, || {
+        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::AuditTrail,
+        )) {
+            audit.record_with_extra(calp::audit::AuditEvent::Published, description, user, now, extra);
+        }
+    });
+    if recorded.is_none() {
+        let mut fields: Vec<String> =
+            session_copy.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        fields.sort();
+        crate::log_warn!(
+            "CALP",
+            "AUDIT (session): {} by {} at {} -- the workbook that pushed was replaced by File > Open / New \
+             before the push finished, so no workbook's trail holds this row [{}]",
+            description,
+            user,
+            now,
+            fields.join(", ")
+        );
+    }
+    recorded.is_some()
+}
+
+/// The push preview's word on an incomplete calculation (rev11A). The push
+/// itself finishes the calculation before it assembles what it ships
+/// ([`recalculate_before_publish`]); the preview is a dry run and must change
+/// nothing, so it does not recalculate -- it says that the values it describes
+/// may not be the ones the push will publish. `None` when the calculation is
+/// complete.
+pub(crate) fn incomplete_calculation_preview_warning(state: &AppState) -> Option<String> {
+    (crate::calculation::calculation_state_impl(state) == "pending").then(|| {
+        "The workbook has not been recalculated since its last edits (manual calculation), so some \
+         formulas still hold older values. Publishing recalculates the workbook first, as Excel \
+         recalculates before saving, so the values published can differ from the ones this \
+         preview describes. Press F9 to see them now."
+            .to_string()
+    })
+}
+
+/// The push's WORKSPACE-FACT gates, asked BEFORE the recalculation before
+/// publishing (rev11A): mode (create vs update), base version, monotonic
+/// version and immutability -- core `publish()`'s gates 1, 2, 3 and 6, each
+/// refused with core's own `CalpError` text. Key continuity is not repeated:
+/// the developer-anchor gate (`anchor_push_target`) has already required the
+/// proved root to authorise this computer's key.
+///
+/// ADVISORY, NOT AUTHORITATIVE. Core asks every one of these again under the
+/// workspace lock, where the read and the write it authorises share one
+/// critical section; this early read only spares a push the workspace is bound
+/// to refuse a full workbook pass first. A refused push must not have
+/// recalculated a manual-calculation author's workbook: the author left those
+/// values for F9, and a push that published nothing has no business changing
+/// them. Like a save, a push that is going to fail fails before it computes.
+pub(crate) fn preflight_workspace_gates(
+    registry: &dyn calp::transport::WorkspaceTransport,
+    package: &str,
+    mode: &PushMode,
+    version: &SemVer,
+) -> Result<(), String> {
+    let existing = registry.get_application_manifest(package).ok();
+    match (mode, &existing) {
+        (PushMode::CreateNew, Some(_)) => {
+            return Err(calp::CalpError::ApplicationAlreadyExists(package.to_string()).to_string());
+        }
+        (PushMode::Update { .. }, None) => {
+            return Err(calp::CalpError::ApplicationNotFound(package.to_string()).to_string());
+        }
+        _ => {}
+    }
+    if let (PushMode::Update { expected_base }, Some(manifest)) = (mode, &existing) {
+        if let Some(head) = calp::head_version(manifest) {
+            if head != *expected_base {
+                let latest_published_by = manifest
+                    .versions
+                    .iter()
+                    .find(|e| e.version == head.to_string())
+                    .map(|e| e.published_by.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "another publisher".to_string());
+                return Err(calp::CalpError::BaseVersionStale {
+                    package: package.to_string(),
+                    expected_base: expected_base.to_string(),
+                    actual_latest: head.to_string(),
+                    latest_published_by,
+                }
+                .to_string());
+            }
+            if *version <= head {
+                let mut suggested = head.clone();
+                suggested.patch += 1;
+                return Err(calp::CalpError::VersionNotGreater {
+                    package: package.to_string(),
+                    version: version.to_string(),
+                    latest: head.to_string(),
+                    suggested: suggested.to_string(),
+                }
+                .to_string());
+            }
+        }
+    }
+    if registry.version_exists(package, &version.to_string()) {
+        return Err(calp::CalpError::VersionAlreadyPublished {
+            package: package.to_string(),
+            version: version.to_string(),
+        }
+        .to_string());
+    }
+    Ok(())
+}
+
+/// The push's CARRIER gates -- what the author added is what they read, the
+/// buttons' code, and a button whose macro the push does not ship. Each reads
+/// the assembled carrier's CODE (scripts, button actions, macro links), never
+/// a cell value, so `calp_publish` can ask them of a carrier assembled before
+/// the recalculation before publishing as well as of the one it ships. Each
+/// refusal leaves its always-on audit row.
+fn refuse_push_on_carrier(
+    state: &AppState,
+    assembly: &PublishAssembly,
+    sheet_indices: &[usize],
+    params: &PublishParams,
+) -> Result<(), String> {
+    // GATE: WHAT THE AUTHOR ADDED IS WHAT THEY READ. Every "Include in
+    // application" names the hash of the code the push dialog showed; the
+    // filter kept only exact matches, and anything the request asked for that
+    // the carrier does not hold exactly so -- code edited since, an item now
+    // another application's, one that is gone -- refuses the push by name
+    // rather than shipping or dropping it quietly. It goes out under the
+    // pusher's key. Before core publish, before any effect; audited always.
+    crate::held_button_code::refuse_push_on_changed_inclusion(
+        state,
+        assembly,
+        &params.include_in_application,
+        &params.registry_path,
+        &params.package_name,
+    )?;
+
+    // GATE: THE BUTTONS' CODE (BUG-0257). Held code that cannot be proved to be
+    // the application's -- a stamp naming another application, a sheet the base
+    // never had, bytes the signed base does not carry -- refuses the push by
+    // name: a working copy is a `.cala`, and a crafted one can carry any held
+    // bytes with any stamp. And code the signed base does not have goes out
+    // under the pusher's key only once the request has acknowledged each piece
+    // by hash, which the push dialog asks for with the code on screen. Both
+    // before core publish, before any effect.
+    // Each refusal leaves an always-on audit row naming the cells.
+    crate::held_button_code::refuse_push_on_button_code(
+        state,
+        &assembly.button_code,
+        &params.acknowledged_button_code,
+        &params.registry_path,
+        &params.package_name,
+    )?;
+
+    // GATE: A BUTTON THAT RUNS A MACRO THIS PUSH DOES NOT PUBLISH. Every
+    // subscriber would get a button that does nothing -- or, worse, one whose
+    // click finds a macro of THEIRS under that id. The link is judged on the
+    // RELEASED carrier (restored held links included) against the macros the
+    // push actually ships, after the BUG-0261 filter and the inclusions above,
+    // and each refusal names its remedy: include your own macro, unlink
+    // another application's, restore a missing one. It used to be a warning
+    // core publish printed after the version was already written.
+    crate::held_button_code::refuse_push_on_unshipped_macros(
+        state,
+        assembly,
+        sheet_indices,
+        &params.registry_path,
+        &params.package_name,
+    )?;
+    Ok(())
+}
+
+/// The carrier gates ([`refuse_push_on_carrier`]) asked of a carrier
+/// assembled BEFORE the recalculation before publishing -- `calp_publish` calls
+/// this only when a recalculation is coming, so a push those gates refuse
+/// recalculates nothing (rev11A). The same selection, the same assembly and
+/// the same gates as the shipping carrier; the carrier itself is dropped, its
+/// values being the ones the pass is about to replace.
+#[allow(clippy::too_many_arguments)]
+fn refuse_push_before_recalculation(
+    state: &AppState,
+    bi_state: &BiState,
+    pivot_state: &crate::pivot::types::PivotState,
+    script_state: &crate::scripting::types::ScriptState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    user_files_state: &crate::persistence::UserFilesState,
+    timeline_slicer_state: &crate::timeline_slicer::TimelineSlicerState,
+    params: &PublishParams,
+) -> Result<(), String> {
+    let requested = RequestedSheets::from_wire(params.sheet_ids.clone(), params.sheet_indices.clone());
+    let selection = resolve_publish_selection(
+        state,
+        slicer_state,
+        timeline_slicer_state,
+        pivot_state,
+        &params.kind,
+        requested,
+        "published",
+    )?;
+    let PublishedCarrier { assembly, sheet_indices, .. } = assemble_publish_workbook(
+        state,
+        bi_state,
+        pivot_state,
+        script_state,
+        slicer_state,
+        ribbon_filter_state,
+        pane_control_state,
+        user_files_state,
+        timeline_slicer_state,
+        &selection.ids,
+        &params.registry_path,
+        &params.package_name,
+        &params.include_in_application,
+        "published",
+    )?;
+    refuse_push_on_carrier(state, &assembly, &sheet_indices, params)
+}
+
 /// Publish selected sheets to a local workspace.
-#[tauri::command]
+///
+/// `(async)`: off the UI thread, so the recalculation before publishing --
+/// a full F9 pass on a large manual-calculation workbook -- can be stopped
+/// with the existing `cancel_calculation` (the window's Esc), and the push
+/// then refuses, saying so, with nothing published. As a sync command the
+/// cancel queued behind the very pass it was meant to stop.
+#[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
 pub fn calp_publish(
     state: State<AppState>,
@@ -2232,6 +2743,15 @@ pub fn calp_publish(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // WHICH WORKBOOK THIS PUSH IS OF (rev13A). `(async)`: a File > Open / New
+    // on the main thread can replace the workbook mid-push. Read before the
+    // first gate looks at the workbook; asked again after the shipped
+    // carrier's last read and, under the link's lock, before the link write.
+    // SETTLED (round 18): read under the document pin, so a File > Open / New
+    // that is still restoring its stores is waited for -- the push judges the
+    // outgoing workbook or the whole opened one, never one half restored.
+    let document_epoch = file_state.settled_document_epoch();
 
     // ---- PHASE A: the gates only this layer can run ------------------------
     // Workspace-fact gates (mode, base version, monotonic version, key
@@ -2324,26 +2844,8 @@ pub fn calp_publish(
         }
     }
 
-    // A CANCELLED RECALCULATION MUST NOT BE PUBLISHED.
-    //
-    // This is a hard refusal, unlike the save path, and the asymmetry is
-    // deliberate. Saving a half-calculated workbook keeps the mess on the
-    // author's own machine, where the status bar is still saying "Calculate"
-    // and they can fix it. Publishing SENDS it: every subscriber pulls cells
-    // that look authoritative and are silently stale, with no indicator,
-    // because the pending set is session state that does not travel. A report
-    // nobody can tell is wrong is a data-correctness bug in the distribution
-    // story, not a UI nicety — so the author is told to finish the calculation
-    // (F9) rather than being allowed to ship it by accident.
-    if let Ok(pending) = state.pending_recalc.read() {
-        if let Some(p) = pending.as_ref().filter(|p| !p.is_empty()) {
-            return Err(format!(
-                "Cannot publish: {} cell(s) still hold values from before a cancelled \
-                 recalculation. Press F9 to finish calculating, then publish.",
-                p.cells.len()
-            ));
-        }
-    }
+    // (An incomplete calculation is not refused here: the push RECALCULATES
+    // first, after the workspace gates below -- `recalculate_before_publish`.)
 
     let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
@@ -2388,8 +2890,68 @@ pub fn calp_publish(
         return Err(crate::calp_inspector::developer_refusal_text(&refused));
     }
 
+    // EVERY GATE THAT CAN STILL REFUSE RUNS BEFORE THE RECALCULATION (rev11A):
+    // a push that publishes nothing must not have recalculated a
+    // manual-calculation author's workbook. The version string, the identity
+    // rule, the workspace's own facts and the carrier's code gates first.
     let version = SemVer::parse(&params.version)
         .map_err(|e| e.to_string())?;
+
+    // THE IDENTITY RULE (identity phase 1): the dialog's choice, or the base
+    // version's -- read from the VERIFIED base, never the unsigned listing.
+    let identity_policy = resolve_identity_policy(params.require_verified_identity, &push_mode, || {
+        let calp::PushMode::Update { expected_base } = &push_mode else {
+            return Ok(None);
+        };
+        crate::calp_inspector::open_authorized_content(
+            &params.registry_path,
+            &params.package_name,
+            &format!("={expected_base}"),
+            false,
+            None,
+        )
+        .map(|(_registry, _version, manifest)| manifest.identity_policy)
+    })?;
+
+    preflight_workspace_gates(registry.as_ref(), &params.package_name, &push_mode, &version)?;
+
+    // The carrier gates read code, never values, so when a recalculation is
+    // coming they are asked first of a carrier assembled NOW -- a push they
+    // refuse then recalculates nothing -- and asked again below of the carrier
+    // that ships. An already-calculated workbook assembles once.
+    if crate::calculation::calculation_state_impl(&state) == "pending" {
+        refuse_push_before_recalculation(
+            &state,
+            &bi_state,
+            &pivot_state,
+            &script_state,
+            &slicer_state,
+            &ribbon_filter_state,
+            &pane_control_state,
+            &user_files_state,
+            &timeline_slicer_state,
+            &params,
+        )?;
+    }
+
+    // RECALCULATE BEFORE PUBLISHING -- Excel's "Recalculate workbook before
+    // saving". A package carries no "calculation incomplete" mark, so values a
+    // manual-calculation edit or a cancelled pass left stale would reach every
+    // subscriber looking calculated; the push finishes the calculation instead
+    // (the full F9 pass, with its keep rule) and refuses only when that pass
+    // itself does not complete -- cancelled with `cancel_calculation` included.
+    // After every gate that can refuse, before the shipped carrier is
+    // assembled.
+    recalculate_before_publish(
+        Some(window.clone()),
+        &state,
+        &file_state,
+        document_epoch,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+    )?;
 
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -2414,7 +2976,7 @@ pub fn calp_publish(
     // wins over any positions: a tab moved since the dialog read the list is
     // still the sheet the author ticked, and one deleted since refuses the push
     // by name rather than handing its tick to a neighbour.
-    let requested = RequestedSheets::from_wire(params.sheet_ids, params.sheet_indices);
+    let requested = RequestedSheets::from_wire(params.sheet_ids.clone(), params.sheet_indices.clone());
     let selection = resolve_publish_selection(
         &state,
         &slicer_state,
@@ -2445,56 +3007,18 @@ pub fn calp_publish(
         &params.include_in_application,
         "published",
     )?;
+    // THE CARRIER IS THIS WORKBOOK'S, AND CALCULATED (rev13A). Both asked after
+    // its last store read and before core publish: a File > Open / New that
+    // landed mid-push, or a manual-calculation edit that landed after the
+    // recalculation above, refuses with nothing published.
+    refuse_push_if_document_replaced(&file_state, document_epoch)?;
+    refuse_push_on_stale_carrier(&assembly.workbook)?;
     let report =
         compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments, &selection);
 
-    // GATE: WHAT THE AUTHOR ADDED IS WHAT THEY READ. Every "Include in
-    // application" names the hash of the code the push dialog showed; the
-    // filter kept only exact matches, and anything the request asked for that
-    // the carrier does not hold exactly so -- code edited since, an item now
-    // another application's, one that is gone -- refuses the push by name
-    // rather than shipping or dropping it quietly. It goes out under the
-    // pusher's key. Before core publish, before any effect; audited always.
-    crate::held_button_code::refuse_push_on_changed_inclusion(
-        &state,
-        &assembly,
-        &params.include_in_application,
-        &params.registry_path,
-        &params.package_name,
-    )?;
-
-    // GATE: THE BUTTONS' CODE (BUG-0257). Held code that cannot be proved to be
-    // the application's -- a stamp naming another application, a sheet the base
-    // never had, bytes the signed base does not carry -- refuses the push by
-    // name: a working copy is a `.cala`, and a crafted one can carry any held
-    // bytes with any stamp. And code the signed base does not have goes out
-    // under the pusher's key only once the request has acknowledged each piece
-    // by hash, which the push dialog asks for with the code on screen. Both
-    // before core publish, before any effect.
-    // Each refusal leaves an always-on audit row naming the cells.
-    crate::held_button_code::refuse_push_on_button_code(
-        &state,
-        &assembly.button_code,
-        &params.acknowledged_button_code,
-        &params.registry_path,
-        &params.package_name,
-    )?;
-
-    // GATE: A BUTTON THAT RUNS A MACRO THIS PUSH DOES NOT PUBLISH. Every
-    // subscriber would get a button that does nothing -- or, worse, one whose
-    // click finds a macro of THEIRS under that id. The link is judged on the
-    // RELEASED carrier (restored held links included) against the macros the
-    // push actually ships, after the BUG-0261 filter and the inclusions above,
-    // and each refusal names its remedy: include your own macro, unlink
-    // another application's, restore a missing one. It used to be a warning
-    // core publish printed after the version was already written.
-    crate::held_button_code::refuse_push_on_unshipped_macros(
-        &state,
-        &assembly,
-        &sheet_indices,
-        &params.registry_path,
-        &params.package_name,
-    )?;
+    // THE CARRIER GATES (see `refuse_push_on_carrier`), on the carrier that
+    // ships. Before core publish, before any effect; audited always.
+    refuse_push_on_carrier(&state, &assembly, &sheet_indices, &params)?;
 
     let PublishAssembly {
         workbook,
@@ -2524,21 +3048,7 @@ pub fn calp_publish(
         params.custom_objects,
     );
 
-    // THE IDENTITY RULE (identity phase 1): the dialog's choice, or the base
-    // version's -- read from the VERIFIED base, never the unsigned listing.
-    let identity_policy = resolve_identity_policy(params.require_verified_identity, &push_mode, || {
-        let calp::PushMode::Update { expected_base } = &push_mode else {
-            return Ok(None);
-        };
-        crate::calp_inspector::open_authorized_content(
-            &params.registry_path,
-            &params.package_name,
-            &format!("={expected_base}"),
-            false,
-            None,
-        )
-        .map(|(_registry, _version, manifest)| manifest.identity_policy)
-    })?;
+    // (The identity rule was resolved above, before the recalculation.)
     // WARN, NEVER REFUSE: a workspace where senders can never be verified.
     let storage_warning = writeback_storage_warning(writeback_regions.as_ref(), &params.registry_path);
 
@@ -2586,6 +3096,7 @@ pub fn calp_publish(
     // The push landed. Record it in the workbook's own link, so the NEXT push
     // knows its base — and so a standalone workbook that just created an application
     // becomes that application's working copy without a separate step.
+    let link_recorded: PushLinkRecord;
     {
         // THE NAMES THAT WERE ACTUALLY PUBLISHED, read back off the assembled
         // carrier — never off `state.sheet_names`.
@@ -2617,31 +3128,27 @@ pub fn calp_publish(
                 })
             })
             .collect();
-        // A push CHANGES what this workbook is (its base version moved), which
-        // is saved state — so this is the command's one `mutates` arm, taken
-        // only after the workspace has actually accepted the version.
-        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut link = state.working_copy_link.write(&effect).map_err(|e| e.to_string())?;
-        match link.as_mut() {
-            Some(existing) => existing.record_push(&result.version, &now, published_sheets, shipped),
-            None => {
-                let mut fresh = calp::WorkingCopyLink::new(
-                    &params.registry_path,
-                    &result.package_name,
-                    &request.kind,
-                    &result.version,
-                    &now,
-                    published_sheets.clone(),
-                );
-                fresh.record_push(&result.version, &now, published_sheets, shipped);
-                *link = Some(fresh);
-            }
-        }
+        // The command's one `mutates` arm lives in the helper, taken only after
+        // the workspace accepted the version AND only while the workbook is
+        // still the one that pushed it (rev13A).
+        link_recorded = record_push_in_working_copy_link(
+            &state,
+            &file_state,
+            document_epoch,
+            &params.registry_path,
+            &result.package_name,
+            &request.kind,
+            &result.version,
+            &now,
+            published_sheets,
+            shipped,
+        )?;
     }
     // A push or a first publish changes which version the author's own
     // regions are read from (and a first publish creates the link): the
     // author's BI writeback tables follow.
     crate::bi::writeback_source::invalidate_writeback_bi();
+    let not_recorded_warning: Option<String> = link_recorded.warning(&result.package_name, &result.version);
 
     // THE APPLICATION'S CREATOR is remembered now that the workspace has
     // accepted this computer's version (a new application's, or the first push
@@ -2651,11 +3158,14 @@ pub fn calp_publish(
     let anchor_warnings: Vec<String> =
         anchor_after_push(&profile, registry.as_ref(), &scope, &result.package_name).into_iter().collect();
 
-    // Audit — always recorded (publish is egress; see AuditEvent docs).
+    // Audit — always recorded (publish is egress; see AuditEvent docs), in the
+    // trail of the workbook that pushed -- or, when File > Open / New replaced
+    // it mid-push, in this session's log, never the workbook now on screen
+    // (`record_push_audit_row`).
     {
         let user = audit_user(&state);
-        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
-            let mut extra = std::collections::HashMap::new();
+        let mut extra = std::collections::HashMap::new();
+        {
             extra.insert(
                 "package".to_string(),
                 serde_json::Value::String(result.package_name.clone()),
@@ -2675,17 +3185,19 @@ pub fn calp_publish(
                 "registry".to_string(),
                 serde_json::Value::String(params.registry_path.clone()),
             );
-            audit.record_with_extra(
-                calp::audit::AuditEvent::Published,
-                &format!(
-                    "Published {} v{} ({} sheets)",
-                    result.package_name, result.version, result.sheets_published
-                ),
-                &user,
-                &now,
-                extra,
-            );
         }
+        record_push_audit_row(
+            &state,
+            &file_state,
+            document_epoch,
+            &format!(
+                "Published {} v{} ({} sheets)",
+                result.package_name, result.version, result.sheets_published
+            ),
+            &user,
+            &now,
+            extra,
+        );
     }
 
     Ok(PublishResponse {
@@ -2714,6 +3226,7 @@ pub fn calp_publish(
             ))
             .chain(anchor_warnings)
             .chain(storage_warning)
+            .chain(not_recorded_warning)
             .collect(),
     })
 }
@@ -2908,16 +3421,29 @@ pub fn calp_publish_model(
     let now = chrono::Utc::now().to_rfc3339();
 
     // Capture ONLY the requested connection as an application data source (the
-    // capture serializes the live engine model, credential-free).
-    let (all_sources, all_model_writebacks) = capture_bi_data_sources(&state, &bi_state)?;
-    let data_sources: Vec<calp::publish::PublishDataSource> = all_sources
-        .into_iter()
-        .filter(|ds| ds.id == params.connection_id)
-        .collect();
-    let model_writebacks: Vec<calp::writeback::ModelWritebackDeclaration> = all_model_writebacks
-        .into_iter()
-        .filter(|d| d.data_source_id == params.connection_id)
-        .collect();
+    // capture serializes the live engine model, credential-free). Selected by
+    // the CONNECTION, never by comparing the filed id with the connection's
+    // uuid: a data source is filed under its stable key, which for a
+    // connection minted from an application is that application's data-source
+    // id, not the session uuid the caller names (BUG-0589).
+    let requested = identity::EntityId::parse(&params.connection_id);
+    let (mut data_sources, mut model_writebacks) = match requested.as_ref() {
+        Some(id) => capture_bi_data_sources_of(&state, &bi_state, Some(id))?,
+        None => (Vec::new(), Vec::new()),
+    };
+    // A dataset is always a NEW application: a model a subscription or a
+    // checkout brought in is filed under the dataset's own id for it, never
+    // the source application's (`data_source_rekeys_for_target`).
+    {
+        let rekeys =
+            data_source_rekeys_for_target(&state, &bi_state, &params.registry_path, &params.package_name)?;
+        rekey_carried_data_sources(
+            &mut persistence::Workbook::new(),
+            &mut data_sources,
+            &mut model_writebacks,
+            &rekeys,
+        );
+    }
     if data_sources.is_empty() {
         // capture_bi_data_sources silently skips a busy engine — distinguish
         // that from a genuinely missing connection so the error is actionable.
@@ -3300,6 +3826,10 @@ pub fn calp_publish_preview(
         assembly.writeback_regions.as_ref(),
         params.registry_path.as_deref().unwrap_or(&link_target.0),
     ));
+    // The push recalculates an incomplete calculation first; a dry run must
+    // not, so it SAYS that the values it describes may not be the ones the
+    // push ships (rev11A).
+    warnings.extend(incomplete_calculation_preview_warning(&state));
     let sheet_names = sheet_indices
         .iter()
         .filter_map(|&i| assembly.workbook.sheets.get(i).map(|s| s.name.clone()))
@@ -3473,7 +4003,18 @@ fn evaluate_push_gates(
 ///   (the incoming one is skipped + logged). To customize distributed content, copy
 ///   it to a NEW id. `modules`/`notebooks` are already stamped source_package =
 ///   package_name at pull. Notebooks arrive run-clean (exec metadata stripped at pull).
+///
+/// THE LIBRARY WRITE AND ITS FORGET ARE ONE STEP (rev10B). A merge that changes
+/// a Custom Functions library forgets what every redefined function answered
+/// (`bi::cube::forget_redefined_custom_functions`, rev8A) and holds the changed
+/// names until the page re-installs (`hold_custom_functions_until_reinstalled`)
+/// HERE, right after the script store's lock is released and before anything
+/// below can still fail. The callers used to do it after this function and
+/// after their whole per-payload loop, so an update whose SECOND payload failed
+/// returned with the first payload's new code in the library and every memo
+/// still holding the old code's answers -- served by F9 and the save as current.
 fn materialize_distributed_scripts(
+    state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
     script_state: &crate::scripting::types::ScriptState,
     package_name: &str,
@@ -3498,10 +4039,14 @@ fn materialize_distributed_scripts(
     let mut applied_modules: Vec<(String, String)> = Vec::new();
     let mut applied_notebooks: Vec<(String, String)> = Vec::new();
     let custom_functions_changed;
+    // The library's definitions around the merge, read under the same lock.
+    let custom_function_definitions_before;
+    let custom_function_definitions_after;
 
     {
         use crate::scripting::types::{ScriptScope, WorkbookScript};
         let mut scripts = script_state.workbook_scripts.write(effect).map_err(|e| e.to_string())?;
+        custom_function_definitions_before = crate::bi::cube::custom_function_definitions_in(&scripts);
         let new_ids: HashSet<&str> = modules.iter().map(|m| m.id.as_str()).collect();
         // Removal-on-refresh: drop this application's prior modules it no longer
         // ships. The reserved Custom Functions record is exempt: it is
@@ -3564,6 +4109,25 @@ fn materialize_distributed_scripts(
                 },
             );
         }
+        custom_function_definitions_after = crate::bi::cube::custom_function_definitions_in(&scripts);
+    }
+    // The script store's lock is released: canonical order, `grid` then
+    // `grids` (reads) inside the forget and the hold. Before the notebooks
+    // below and before the caller's next payload, either of which can fail.
+    if custom_function_definitions_before != custom_function_definitions_after {
+        crate::bi::cube::forget_redefined_custom_functions(
+            state,
+            &custom_function_definitions_before,
+            &custom_function_definitions_after,
+        );
+        // ...and nothing the page's OLD realm serves before it re-installs is
+        // filed (rev10 cache2 residual): held until it reports the generation
+        // the caller's `custom-functions:refresh` event carries.
+        crate::bi::cube::hold_custom_functions_until_reinstalled(
+            state,
+            &custom_function_definitions_before,
+            &custom_function_definitions_after,
+        );
     }
 
     {
@@ -4238,7 +4802,7 @@ fn materialize_pulled_tables(
         let Some(&idx) = map.get(&saved.sheet_id) else {
             continue; // the table's sheet wasn't pulled
         };
-        let name_key = saved.name.to_uppercase();
+        let name_key = crate::tables::table_name_key(&saved.name);
         if table_names.contains_key(&name_key) {
             continue; // don't clobber a table the subscriber already has
         }
@@ -5117,13 +5681,13 @@ pub(crate) fn resolve_publish_sheet_indices(
             calp::chart_refs::ChartSourceSheet::Id(id) => index_of_id(id),
             calp::chart_refs::ChartSourceSheet::Index(i) => (*i < sheet_names.len()).then_some(*i),
             calp::chart_refs::ChartSourceSheet::Name(name) => {
-                sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
+                sheet_names.iter().position(|n| identity::sheet_names_equal(&n, &name))
             }
         }
     };
     let sheet_label = |i: usize| sheet_names.get(i).cloned().unwrap_or_default();
     let index_of_name =
-        |name: &str| sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name));
+        |name: &str| sheet_names.iter().position(|n| identity::sheet_names_equal(&n, &name));
     // The sheets a pivot needs: its destination and its grid source, by the
     // anchors the pruning checks (by name, case-insensitively -- the rule
     // `collect_pivot_definitions` resolves with), plus the sheet its output
@@ -6278,10 +6842,15 @@ fn materialize_pulled_ribbon_filters(
         // back to the publisher's connection uuid — which IS the application
         // data-source id when the publisher authored on a local connection
         // (the bi_pivot_metadata precedent in collect_pivot_definitions).
-        let effective_ds_id = saved
-            .data_source_id
-            .clone()
-            .unwrap_or_else(|| saved.connection_id.to_string());
+        // A stamped id the package does not embed falls back to the carried
+        // connection uuid as well -- the model-slicer rule
+        // (`remap_slicer_bi_connections`) -- so the two families answer one
+        // package the same way (BUG-0589).
+        let by_connection = saved.connection_id.to_string();
+        let effective_ds_id = match saved.data_source_id.as_deref() {
+            Some(ds) if pulled_data_source_ids.contains(ds) => ds.to_string(),
+            _ => by_connection,
+        };
         if !pulled_data_source_ids.contains(&effective_ds_id) {
             crate::log_warn!(
                 "CALP",
@@ -6957,6 +7526,16 @@ pub fn calp_pull(
         &result.notebooks,
         &result.object_scripts,
     )?;
+    // ...nor bring a model under an id this workbook already serves (one key,
+    // one connection) or one another subscription's ledger claims even with no
+    // connection serving it. Also before the effect.
+    refuse_data_source_already_served(
+        &bi_state,
+        &result.data_sources,
+        &result.package_name,
+        &std::collections::HashSet::new(),
+        &current_data_source_claims(&state)?,
+    )?;
 
     // ONE EFFECT, constructed after every refusal that precedes a write.
     //
@@ -7054,6 +7633,15 @@ pub(crate) fn materialize_pull_result(
         &result.module_scripts,
         &result.notebooks,
         &result.object_scripts,
+    )?;
+    // ...and the inner door for one key, one connection (the doors refuse it
+    // before their effect).
+    refuse_data_source_already_served(
+        bi_state,
+        &result.data_sources,
+        &result.package_name,
+        &std::collections::HashSet::new(),
+        &current_data_source_claims(state)?,
     )?;
     // S5 phase 2: capture the origin/trust outcome before `result` is consumed.
     let publisher_name = result.publisher_name.clone();
@@ -7447,12 +8035,12 @@ pub(crate) fn materialize_pull_result(
 
     // Materialize pulled named ranges. Pull is ADDITIVE (unlike .cala load): the
     // subscriber's own names are kept; a pulled name is added only if absent.
-    // Keyed by the UPPERCASED name (the case-insensitive lookup invariant);
+    // Keyed by the defined-name key (`name_resolution::name_key`) (the case-insensitive lookup invariant);
     // PublishedNamedRange.sheet_id is the APPLICATION id, mapped to the local index.
     if !result.named_ranges.is_empty() {
         let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
         for nr in &result.named_ranges {
-            let key = nr.name.to_uppercase();
+            let key = crate::name_resolution::name_key(&nr.name);
             if names.contains_key(&key) {
                 continue; // don't clobber a name the subscriber already defined
             }
@@ -7631,8 +8219,15 @@ pub(crate) fn materialize_pull_result(
     // released inside `materialize_distributed_scripts`), then media, then
     // controls, then the cell types -- one at a time, never nested (pinned by
     // `button_cells::tests::both_doors_materialize_scripts_before_controls_and_cell_types_one_lock_at_a_time`).
+    //
+    // A merged library changes the workbook's custom functions: the results
+    // cache forgets what a redefined function answered (rev8A) and holds the
+    // changed names for the page's re-install INSIDE the materialization, as
+    // one step with the library write (rev10B) -- BEFORE the installed sheets
+    // are seeded with the new code's saved values below.
     let (applied_modules, applied_notebooks, custom_functions_changed) =
         materialize_distributed_scripts(
+            &state,
             &effect,
             &script_state,
             &result.package_name,
@@ -7869,9 +8464,16 @@ pub(crate) fn materialize_pull_result(
     // they always did.
     if custom_functions_changed {
         // Re-install the live UDF registry NOW — without this, the pulled
-        // report's custom-function formulas stay #NAME? until a reopen.
+        // report's custom-function formulas stay #NAME? until a reopen. The
+        // payload names the library generation the page then installs.
         if let Some(window) = window {
-            let _ = tauri::Emitter::emit(window, "custom-functions:refresh", ());
+            let _ = tauri::Emitter::emit(
+                window,
+                "custom-functions:refresh",
+                crate::bi::cube::CustomFunctionsRefresh {
+                    generation: crate::bi::cube::custom_function_library_generation(),
+                },
+            );
         }
     }
     for (id, name) in &applied_modules {
@@ -8101,7 +8703,7 @@ pub(crate) fn materialize_pull_result(
         let own_names: std::collections::HashMap<String, String> = result
             .named_ranges
             .iter()
-            .map(|nr| (nr.name.to_uppercase(), nr.refers_to.clone()))
+            .map(|nr| (crate::name_resolution::name_key(&nr.name), nr.refers_to.clone()))
             .collect();
         crate::bi::cube::remember_installed_call_results(
             state,
@@ -8520,7 +9122,9 @@ pub fn calp_checkout(
     let mut base_content = calp::WorkingCopyContent {
         script_ids: result.module_scripts.iter().map(|s| s.id.clone()).collect(),
         notebook_ids: result.notebooks.iter().map(|n| n.id.clone()).collect(),
-        named_range_keys: result.named_ranges.iter().map(|nr| nr.name.to_uppercase()).collect(),
+        // Keyed by Excel's defined-name rule, as the live name map and every
+        // ledger are (`name_resolution::name_key`).
+        named_range_keys: result.named_ranges.iter().map(|nr| crate::name_resolution::name_key(&nr.name)).collect(),
         pane_control_ids: result.pane_controls.iter().map(|pc| pc.id.to_string()).collect(),
         // Filled AFTER the materializer, from what its per-function merge
         // actually applied (see below).
@@ -8597,6 +9201,16 @@ pub fn calp_checkout(
         &script_state,
         &params.package_name,
         result,
+    )?;
+    // ...and no model of the application may arrive under an id this workbook
+    // already serves -- a subscription to the same application, or to another
+    // that files its model under the same id (one key, one connection).
+    refuse_data_source_already_served(
+        &bi_state,
+        &result.data_sources,
+        &params.package_name,
+        &std::collections::HashSet::new(),
+        &current_data_source_claims(&state)?,
     )?;
 
     // ADMITTED: every gate above passed, so the checkout goes ahead, and only
@@ -11338,6 +11952,9 @@ pub fn calp_refresh_apply(
     // reserved script id -- both BEFORE the effect, both read-only.
     let mut payloads = payloads;
     let sheet_names_by_payload = prepare_refresh_payloads(&state, &mut payloads)?;
+    // ...and refuse a model that would land under an id another connection
+    // already serves (one key, one connection) -- also before the effect.
+    refuse_refreshed_data_sources_already_served(&state, &bi_state, &payloads)?;
 
     // NOTHING TO DO IS NOT A MUTATION. `DocumentEffect::mutates` dirties at
     // construction, and this command used to build it as its first statement —
@@ -11839,7 +12456,7 @@ pub(crate) fn apply_refresh_payloads(
                             }
                         },
                     };
-                    let key = nr.name.to_uppercase();
+                    let key = crate::name_resolution::name_key(&nr.name);
                     names.insert(
                         key.clone(),
                         crate::named_ranges::NamedRange {
@@ -12053,7 +12670,7 @@ pub(crate) fn apply_refresh_payloads(
                         sheet_tables.retain(|id, t| {
                             let keep = !owned.contains(&id.to_string());
                             if !keep {
-                                table_names.remove(&t.name.to_uppercase());
+                                table_names.remove(&crate::tables::table_name_key(&t.name));
                             }
                             keep
                         });
@@ -12115,9 +12732,17 @@ pub(crate) fn apply_refresh_payloads(
     // with `payloads`, for the button admissions below.
     let mut applied_modules_by_payload: Vec<std::collections::HashSet<String>> = Vec::new();
     let mut module_script_entries: Vec<(String, Vec<calp::manifest::SubscribedObject>)> = Vec::new();
+    // An update that changes a library changes the workbook's custom
+    // functions: the results cache forgets what a redefined function answered
+    // (rev8A) and holds the changed names for the page's re-install, BEFORE
+    // the refreshed sheets are seeded with the new code's saved values
+    // (`remember_installed_call_results`, below). Both happen INSIDE each
+    // payload's materialization, as one step with its library write (rev10B):
+    // a later payload that fails can no longer return past them.
     for payload in &payloads {
         let pkg = &payload.pull_result.package_name;
         let (applied_modules, applied_notebooks, cf_changed) = materialize_distributed_scripts(
+            &state,
             &effect,
             &script_state,
             pkg,
@@ -12597,6 +13222,19 @@ pub(crate) fn apply_refresh_payloads(
     // dataset (model-only) subscription refresh advanced the version while
     // silently serving the old model. Existing dataSource ledger entries
     // carry over in the merge below; only newly-added ones are appended.
+    //
+    // WHICH CONNECTIONS WERE LIVE BEFORE THIS REFRESH MINTED ANY (rev14B):
+    // read before the loop below, because a connection that loop mints for ONE
+    // payload is that payload's subscription's -- it must never keep ANOTHER
+    // subscription's carried claim on the id alive (see
+    // `data_source_claim_carries`).
+    let live_before_refresh: std::collections::HashSet<String> = bi_state
+        .connections
+        .lock()
+        .map_err(|e| e.to_string())?
+        .values()
+        .filter_map(|c| c.package_data_source_id.clone())
+        .collect();
     for payload in &payloads {
         let added = refresh_embedded_data_sources(
             &payload.pull_result.data_sources,
@@ -12610,6 +13248,32 @@ pub(crate) fn apply_refresh_payloads(
                 entries.push(ledger_entry("dataSource", id, name));
             }
         }
+    }
+
+    // WHICH CARRIED dataSource CLAIMS STAY TRUE (rev12C). A refreshed
+    // subscription keeps a ledger dataSource row only while its new version
+    // still carries that id or a connection that was live BEFORE this refresh
+    // is still filed under it (`data_source_claim_carries`; one minted above
+    // for another payload is that payload's, rev14B). A
+    // row for neither -- the copy that was re-published under its own id, whose
+    // old id was never connected because the open found it shared -- would go on
+    // claiming the original's id for ever, and one key, one application
+    // (`refuse_refreshed_data_sources_already_served`, the open's
+    // `materialize_verified_application_connections`) would keep the original
+    // disconnected after the very update that ended the sharing. Every payload
+    // gets a ledger entry here so the merge below runs for it.
+    let version_data_sources: std::collections::HashMap<usize, std::collections::HashSet<String>> =
+        payloads
+            .iter()
+            .map(|p| {
+                (
+                    p.subscription_index,
+                    p.pull_result.data_sources.iter().map(|ds| ds.definition.id.clone()).collect(),
+                )
+            })
+            .collect();
+    for payload in &payloads {
+        refresh_ledgers.entry(payload.subscription_index).or_default();
     }
 
     // Re-bind the just-refreshed ribbon filters + BI-sourced slicers (Wave A)
@@ -12662,7 +13326,7 @@ pub(crate) fn apply_refresh_payloads(
             let own_names: std::collections::HashMap<String, String> = payloads
                 .iter()
                 .flat_map(|p| p.pull_result.named_ranges.iter())
-                .map(|nr| (nr.name.to_uppercase(), nr.refers_to.clone()))
+                .map(|nr| (crate::name_resolution::name_key(&nr.name), nr.refers_to.clone()))
                 .collect();
             let mut seeded: Vec<usize> = refreshed_indices.iter().copied().collect();
             seeded.sort_unstable();
@@ -12992,15 +13656,23 @@ pub(crate) fn apply_refresh_payloads(
                     // would duplicate every surviving pivot AND resurrect a
                     // ledger row for one the v2 deletion just removed, which is
                     // the same defect the pane-control comment above describes.
-                    o.kind == "dataSource" || o.kind == "extensionData"
+                    // A dataSource row only while it is still true (above).
+                    (o.kind == "dataSource"
+                        && data_source_claim_carries(
+                            &o.id,
+                            version_data_sources.get(&sub_idx),
+                            &live_before_refresh,
+                        ))
+                        || o.kind == "extensionData"
                 })
                 .cloned()
                 .collect();
             for entry in new_entries {
-                if entry.kind == "extensionData"
-                    && objects
-                        .iter()
-                        .any(|o| o.kind == "extensionData" && o.id == entry.id)
+                // A same-key fresh row duplicates a carried one: extension data
+                // re-seeded after a local delete, or a data source minted now
+                // whose row was carried because the open never connected it.
+                if (entry.kind == "extensionData" || entry.kind == "dataSource")
+                    && objects.iter().any(|o| o.kind == entry.kind && o.id == entry.id)
                 {
                     continue;
                 }
@@ -13084,9 +13756,16 @@ pub(crate) fn apply_refresh_payloads(
     applied_script_entries.extend(module_script_entries);
     if any_custom_functions_changed {
         // Re-install the live UDF registry NOW — without this, refreshed
-        // custom-function formulas stay stale/#NAME? until a reopen.
+        // custom-function formulas stay stale/#NAME? until a reopen. The
+        // payload names the library generation the page then installs.
         if let Some(window) = window {
-            let _ = tauri::Emitter::emit(window, "custom-functions:refresh", ());
+            let _ = tauri::Emitter::emit(
+                window,
+                "custom-functions:refresh",
+                crate::bi::cube::CustomFunctionsRefresh {
+                    generation: crate::bi::cube::custom_function_library_generation(),
+                },
+            );
         }
     }
 
@@ -13351,7 +14030,31 @@ pub(crate) fn apply_refresh_payloads(
             &written,
             Some((&*pane_control_state, &*ribbon_filter_state)),
         );
+        // BUG-0613: the subscriber's OWN sheets that read a refreshed cell
+        // recalculate too, as every reader of a changed cell does in Excel --
+        // never left holding the previous version's numbers for a save to keep.
+        crate::whatif_recalc::recalc_readers_of_installed_sheets(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            Some((&*pane_control_state, &*ribbon_filter_state)),
+            &refreshed_indices,
+        );
     }
+
+    // The open's "model not connected" rows are re-asked now that the ledgers
+    // and connections changed (rev12C): a model an update un-shared is
+    // connected, and the Subscriptions pane re-lists from rows that are true.
+    // No guard is held here.
+    reconnect_application_models_after_refresh_in(
+        &state,
+        &effect,
+        &bi_state,
+        &pivot_state,
+        &ribbon_filter_state,
+        &slicer_state,
+        &calcula_profile_dir(),
+    );
 
     // ANNOUNCE THE SHEET COLLECTION. This command APPENDS sheets — `grids.push`
     // / `sheet_names.push` / `sheet_ids.push` above — and emitted nothing at all
@@ -13837,7 +14540,7 @@ pub(crate) fn detach_sheet_inner(
         .filter(|(_, (def, _))| {
             def.destination_sheet
                 .as_deref()
-                .is_some_and(|dest| dest.eq_ignore_ascii_case(&sheet_name))
+                .is_some_and(|dest| identity::sheet_names_equal(&dest, &sheet_name))
         })
         .map(|(id, _)| id.to_string())
         .collect();
@@ -14880,7 +15583,7 @@ pub(crate) fn dev_refresh_inner(
             sheet_tables.retain(|id, t| {
                 let keep = !owned_tables.contains(&id.to_string());
                 if !keep {
-                    table_names.remove(&t.name.to_uppercase());
+                    table_names.remove(&crate::tables::table_name_key(&t.name));
                 }
                 keep
             });
@@ -24249,14 +24952,30 @@ fn refresh_embedded_data_sources(
 ) -> Vec<(String, String)> {
     let mut newly_created: Vec<(String, String)> = Vec::new();
     for ds in data_sources {
+        // THE connection for this id -- never "the first one the map yields":
+        // with two, either model could be swapped under the other's pivots.
+        // The door refused that before its effect
+        // (`refuse_refreshed_data_sources_already_served`); here it is left
+        // untouched rather than guessed.
         let conn_id = {
             let conns = bi_state.connections.lock().unwrap();
-            conns
+            let serving: Vec<crate::bi::types::ConnectionId> = conns
                 .iter()
-                .find(|(_, c)| {
+                .filter(|(_, c)| {
                     c.package_data_source_id.as_deref() == Some(ds.definition.id.as_str())
                 })
                 .map(|(id, _)| *id)
+                .collect();
+            if serving.len() > 1 {
+                crate::log_warn!(
+                    "CALP",
+                    "refresh: {} connections serve data source {}; none was swapped",
+                    serving.len(),
+                    ds.definition.id
+                );
+                continue;
+            }
+            serving.first().copied()
         };
         let Some(conn_id) = conn_id else {
             // Added in this version — materialize like a first pull.
@@ -24370,8 +25089,10 @@ pub struct ApplicationConnectionRestoreSkip {
     pub package_name: String,
     pub registry_url: String,
     /// One of: `unreachable`, `notPinned`, `publisherChanged`, `badManifest`,
-    /// `appTooOld`, `unsupportedTransport`, `unknown`. The first five come from
-    /// [`calp_skip_reason`], shared with the writeback rebuild.
+    /// `appTooOld`, `unsupportedTransport`, `sharedDataSource`, `unknown`. The
+    /// first five come from [`calp_skip_reason`], shared with the writeback
+    /// rebuild; `sharedDataSource` is a model whose id another subscription claims
+    /// too ([`materialize_verified_application_connections`]).
     pub reason: String,
     /// The underlying error text, for the pane's tooltip / details line.
     pub detail: String,
@@ -24436,6 +25157,12 @@ pub struct ApplicationConnectionRestoreSkip {
 /// Every non-silent skip is recorded in `state.application_connection_restore_skips`
 /// and surfaced by `calp_get_application_connection_skips`.
 ///
+/// * **Two subscriptions claim one data-source id** (a document written before
+///   each application filed its model under its own id) -- NEITHER model is
+///   connected under it and each claimant is recorded as `sharedDataSource`
+///   ([`materialize_verified_application_connections`]), rather than serving
+///   one application's model to the other's pivots.
+///
 /// ADDITIVE, like `restore_local_bi_connections`: a data source that already has
 /// a live connection is left alone, so this can never double-materialize.
 pub(crate) fn restore_application_bi_connections(
@@ -24444,17 +25171,37 @@ pub(crate) fn restore_application_bi_connections(
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     slicer_state: &crate::slicer::SlicerState,
 ) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
+    restore_application_bi_connections_in(
+        state,
+        bi_state,
+        ribbon_filter_state,
+        slicer_state,
+        &calcula_profile_dir(),
+    )
+}
+
+/// [`restore_application_bi_connections`] against an explicit trust profile
+/// (the pins), so a test can run the real restore over a temporary one.
+pub(crate) fn restore_application_bi_connections_in(
+    state: &AppState,
+    bi_state: &BiState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    profile_dir: &std::path::Path,
+) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
     // CLONED, not held: the walk below is workspace I/O and manifest hashing.
     let subscriptions = match state.subscriptions.read() {
         Ok(s) => s.subscriptions.clone(),
         Err(_) => return std::collections::HashMap::new(),
     };
 
-    let mut ds_to_conn: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
-        std::collections::HashMap::new();
     let mut skips: Vec<ApplicationConnectionRestoreSkip> = Vec::new();
+    // (subscription index, its raw workspace location, its VERIFIED data
+    // sources): minted only once every subscription is read, because whether a
+    // data-source id is SHARED is a question about all of them.
+    let mut verified: Vec<(usize, String, Vec<calp::pull::PulledDataSource>)> = Vec::new();
 
-    for sub in &subscriptions {
+    for (index, sub) in subscriptions.iter().enumerate() {
         if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
@@ -24497,7 +25244,7 @@ pub(crate) fn restore_application_bi_connections(
             &sub.package_name,
             &sub.resolved_version,
             &scope,
-            &calcula_profile_dir(),
+            profile_dir,
         ) {
             Ok(d) => d,
             Err(e) => {
@@ -24519,33 +25266,17 @@ pub(crate) fn restore_application_bi_connections(
             }
         };
 
-        // Don't double-materialize: a data source that already owns a live
-        // connection (another subscription in this workbook embeds the same
-        // one, or this function ran twice) keeps it.
-        let already: std::collections::HashSet<String> = match bi_state.connections.lock() {
-            Ok(conns) => conns
-                .values()
-                .filter_map(|c| c.package_data_source_id.clone())
-                .collect(),
-            Err(_) => continue,
-        };
-        let wanted: Vec<calp::pull::PulledDataSource> = data_sources
-            .into_iter()
-            .filter(|ds| !already.contains(&ds.definition.id))
-            .collect();
-        if wanted.is_empty() {
-            continue;
-        }
-
-        for (ds_id, conn_id) in load_embedded_data_sources(
-            &wanted,
-            bi_state,
-            ribbon_filter_state,
-            slicer_state,
-        ) {
-            ds_to_conn.insert(ds_id, conn_id);
-        }
+        verified.push((index, registry_path.to_string(), data_sources));
     }
+
+    let ds_to_conn = materialize_verified_application_connections(
+        &subscriptions,
+        verified,
+        bi_state,
+        ribbon_filter_state,
+        slicer_state,
+        &mut skips,
+    );
 
     if let Ok(mut s) = state.application_connection_restore_skips.lock() {
         *s = skips;
@@ -24601,6 +25332,157 @@ pub(crate) fn restore_application_bi_connections(
     }
 
     ds_to_conn
+}
+
+/// The minting half of [`restore_application_bi_connections`], once every
+/// subscription's data sources are verified: `verified` pairs a subscription's
+/// index in `subscriptions` with its raw workspace location and its verified
+/// data sources.
+///
+/// ONE KEY, ONE APPLICATION (calpkey remaining, rev10B). A data-source id that
+/// TWO subscriptions claim -- by their ledger's `dataSource` entries or by what
+/// they verified -- is a document written before each application filed its
+/// model under its own id (`data_source_key_for_application`). Every reader of
+/// that key (pivots, slicers, ribbon filters, charts, bindings) asks for THE
+/// connection under it, so minting either model would silently serve one
+/// application's model to the other's objects. Nothing is minted under such a
+/// key, and each claimant that verified a model is recorded as skipped with the
+/// reason `sharedDataSource` (detail `CALP_DATA_SOURCE_SHARED: ...`), the same
+/// refusal a subscribe, a checkout or a refresh gives
+/// ([`refuse_data_source_already_served`]). Its other, unshared data sources
+/// are minted as usual. Dev subscriptions claim nothing: they never mint.
+///
+/// ADDITIVE otherwise: a data source that already has a live connection keeps
+/// it, so this can never double-materialize.
+pub(crate) fn materialize_verified_application_connections(
+    subscriptions: &[calp::manifest::Subscription],
+    verified: Vec<(usize, String, Vec<calp::pull::PulledDataSource>)>,
+    bi_state: &BiState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    skips: &mut Vec<ApplicationConnectionRestoreSkip>,
+) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+
+    // key -> the subscriptions (by index) that claim it.
+    let mut claimants: HashMap<String, BTreeSet<usize>> = HashMap::new();
+    for (index, sub) in subscriptions.iter().enumerate() {
+        if calp::dev_mode::is_dev_subscription(sub) {
+            continue;
+        }
+        for object in sub.objects.iter().filter(|o| o.kind == "dataSource") {
+            claimants.entry(object.id.clone()).or_default().insert(index);
+        }
+    }
+    for (index, _, data_sources) in &verified {
+        for ds in data_sources {
+            claimants.entry(ds.definition.id.clone()).or_default().insert(*index);
+        }
+    }
+
+    let mut ds_to_conn: HashMap<String, crate::bi::types::ConnectionId> = HashMap::new();
+    for (index, registry_path, data_sources) in verified {
+        let Some(sub) = subscriptions.get(index) else { continue };
+        let (shared, unshared): (Vec<calp::pull::PulledDataSource>, Vec<calp::pull::PulledDataSource>) =
+            data_sources
+                .into_iter()
+                .partition(|ds| claimants.get(&ds.definition.id).map_or(false, |c| c.len() > 1));
+        if !shared.is_empty() {
+            let others: BTreeSet<&str> = shared
+                .iter()
+                .flat_map(|ds| claimants[&ds.definition.id].iter())
+                .filter(|&&i| i != index)
+                .filter_map(|&i| subscriptions.get(i).map(|s| s.package_name.as_str()))
+                .collect();
+            let detail = format!(
+                "CALP_DATA_SOURCE_SHARED: '{}' files its model{} {} under the data-source id{} {}, \
+                 which {} also claim{}. One id can serve only one model, and every pivot, slicer, \
+                 filter and chart under it would read whichever happened to be found first, so \
+                 neither was connected. Unsubscribe from one of them, or have the application \
+                 that copied the id published again (this version of Calcula gives it its own \
+                 data-source id) and update that subscription: the other model is then \
+                 connected.",
+                sub.package_name,
+                if shared.len() == 1 { "" } else { "s" },
+                shared.iter().map(|ds| format!("'{}'", ds.definition.name)).collect::<Vec<_>>().join(", "),
+                if shared.len() == 1 { "" } else { "s" },
+                shared.iter().map(|ds| ds.definition.id.as_str()).collect::<Vec<_>>().join(", "),
+                others.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "),
+                if others.len() == 1 { "s" } else { "" },
+            );
+            crate::log_warn!("CALP", "application connections: {}", detail);
+            skips.push(ApplicationConnectionRestoreSkip {
+                package_name: sub.package_name.clone(),
+                registry_url: registry_path.clone(),
+                reason: "sharedDataSource".to_string(),
+                detail,
+            });
+        }
+
+        // Don't double-materialize: a data source that already owns a live
+        // connection (this function ran twice) keeps it.
+        let already: HashSet<String> = match bi_state.connections.lock() {
+            Ok(conns) => conns.values().filter_map(|c| c.package_data_source_id.clone()).collect(),
+            Err(_) => continue,
+        };
+        let wanted: Vec<calp::pull::PulledDataSource> =
+            unshared.into_iter().filter(|ds| !already.contains(&ds.definition.id)).collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        for (ds_id, conn_id) in load_embedded_data_sources(&wanted, bi_state, ribbon_filter_state, slicer_state) {
+            ds_to_conn.insert(ds_id, conn_id);
+        }
+    }
+    ds_to_conn
+}
+
+/// AFTER A REFRESH, the open's "could not connect" rows are re-asked (rev12C).
+///
+/// `application_connection_restore_skips` used to be written only when the
+/// workbook was opened, so after an update that ended a shared data-source id
+/// -- the copy re-published under its own id -- the pane went on saying that
+/// neither model was connected, and the original application's model stayed
+/// disconnected until the workbook was reopened. Whenever the open left a row,
+/// the open's own restore runs again: it re-verifies every subscription,
+/// mints what is now unshared and not yet connected (additive -- a live
+/// connection is never minted twice), and REPLACES the rows with what is true
+/// now. The pivots of a model connected here are re-bound to it under the
+/// refresh's own effect. Nothing at all happens when the open left no row.
+pub(crate) fn reconnect_application_models_after_refresh_in(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    bi_state: &BiState,
+    pivot_state: &crate::pivot::types::PivotState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    profile_dir: &std::path::Path,
+) {
+    let any_row = state
+        .application_connection_restore_skips
+        .lock()
+        .map(|rows| !rows.is_empty())
+        .unwrap_or(false);
+    if !any_row {
+        return;
+    }
+    let ds_to_conn = restore_application_bi_connections_in(
+        state,
+        bi_state,
+        ribbon_filter_state,
+        slicer_state,
+        profile_dir,
+    );
+    if ds_to_conn.is_empty() {
+        return;
+    }
+    if let Ok(mut bi_meta) = pivot_state.bi_metadata.write(effect) {
+        for meta in bi_meta.values_mut() {
+            if let Some(conn_id) = meta.data_source_id.as_deref().and_then(|ds| ds_to_conn.get(ds)) {
+                meta.connection_id = *conn_id;
+            }
+        }
+    }
 }
 
 /// Every subscription whose APPLICATION BI connections could not be restored when
@@ -24844,7 +25726,7 @@ pub(crate) fn apply_refreshed_pivots(
             let dest_name = def.destination_sheet.as_deref().unwrap_or("");
             let Some(dest_sheet_idx) = workbook_names
                 .iter()
-                .position(|n| n.eq_ignore_ascii_case(dest_name))
+                .position(|n| identity::sheet_names_equal(&n, &dest_name))
             else {
                 crate::log_warn!(
                     "CALP",
@@ -24886,7 +25768,7 @@ pub(crate) fn apply_refreshed_pivots(
             let source_idx = def
                 .source_sheet
                 .as_deref()
-                .and_then(|n| workbook_names.iter().position(|s| s.eq_ignore_ascii_case(n)));
+                .and_then(|n| workbook_names.iter().position(|s| identity::sheet_names_equal(&s, &n)));
             let mut cache = match source_idx.and_then(|i| grids.get(i)) {
                 Some(source_grid) => match build_cache_from_grid(
                     source_grid,
@@ -25051,7 +25933,10 @@ pub(crate) fn apply_refreshed_pivots(
                 .as_deref()
                 .and_then(|id| ds_to_conn.get(id))
                 .copied()
-                .or_else(|| ds_to_conn.values().next().copied())
+                // Unkeyed (or naming nothing): only an application with ONE
+                // data source has an answer -- never an arbitrary pick among
+                // several (BUG-0589).
+                .or_else(|| sole_connection(ds_to_conn))
                 .unwrap_or_default();
             bi_meta.insert(
                 saved.pivot_id,
@@ -25277,7 +26162,7 @@ pub(crate) fn restore_pulled_pivots(
         // disagreed about which pivots were even shippable.
         let Some(dest_sheet_idx) = sheet_names
             .iter()
-            .position(|n| n.eq_ignore_ascii_case(dest_sheet_name))
+            .position(|n| identity::sheet_names_equal(&n, &dest_sheet_name))
         else {
             crate::log_warn!(
                 "CALP",
@@ -25392,16 +26277,17 @@ pub(crate) fn restore_pulled_pivots(
         if let Ok(mut bi_meta) = pivot_state.bi_metadata.write(effect) {
             for meta_json in bi_pivot_metadata {
                 if let Ok(saved) = serde_json::from_value::<SavedBiPivotMetadata>(meta_json.clone()) {
-                    // Route each pivot to ITS application data source. Applications
-                    // published before data_source_id existed fall back to
-                    // the first embedded connection (single-source applications
-                    // are unaffected; multi-source ones should republish).
+                    // Route each pivot to ITS application data source. A pivot
+                    // with no id (or one naming nothing embedded) falls back to
+                    // the embedded connection only when there is exactly ONE --
+                    // with several, an arbitrary pick would query the wrong
+                    // model with no error (BUG-0589).
                     let conn_id = saved
                         .data_source_id
                         .as_deref()
                         .and_then(|id| embedded_connection_ids.get(id))
                         .copied()
-                        .or_else(|| embedded_connection_ids.values().next().copied())
+                        .or_else(|| sole_connection(embedded_connection_ids))
                         .unwrap_or_default();
                     crate::log_info!("CALP-DIAG", "  BI metadata: pivot_id={}, tables={}, measures={}, data_source_id={:?}, assigned connection_id={}",
                         saved.pivot_id, saved.model_tables.len(), saved.measures.len(), saved.data_source_id, conn_id);
@@ -25433,17 +26319,438 @@ pub(crate) fn restore_pulled_pivots(
 // ============================================================================
 
 /// The id a live BI connection's data source is filed under in a package this
-/// workbook publishes or pushes: the connection's OWN id (its `EntityId`),
-/// for an application connection as for a local one. ONE function, because
-/// two things in the same package must agree on it: the embedded data source
-/// ([`capture_bi_data_sources`]) and the `packageDataSourceId` a design-query
-/// chart carries (`persistence::published_chart_connection_keys`). They used
-/// not to: the carrier stamped the connection's PACKAGE key, which after a
-/// checkout names the previous version's data source, so an existing
-/// subscriber's refresh bound the chart to the connection still serving that
-/// version's model (review RB-1, 2026-10-23).
-pub(crate) fn published_data_source_id(connection_id: &crate::bi::types::ConnectionId) -> String {
-    connection_id.to_string()
+/// workbook publishes or pushes: its STABLE key -- the application data-source
+/// id the connection was minted from (`package_data_source_id`) when it has
+/// one, else the connection's own id (a model authored in this workbook, whose
+/// `EntityId` is saved with it). The same rule every other family already keys
+/// by: pivots (`collect_pivot_definitions` / `create_pivot_from_bi_model`),
+/// model slicers, ribbon filters, grid reports (`connection_data_source_id`)
+/// and binding measure keys (`model_key_of`).
+///
+/// ONE function, because everything in a package that names a data source must
+/// agree on it: the embedded data source and its writeback declarations
+/// ([`capture_bi_data_sources`]), the `packageDataSourceId` a design-query
+/// chart carries (`persistence::published_chart_connection_keys`) and the
+/// model-only publish ([`calp_publish_model`]). It used to be the connection's
+/// own id for every connection (BUG-0589): a checkout mints a fresh connection
+/// per data source, so EVERY working-copy push re-keyed every data source,
+/// although a working copy cannot edit the model -- and every subscriber lost
+/// the application's ribbon filters, an existing one kept a second connection
+/// on the previous version's model for its pivots and slicers, and a reopen
+/// left those pivots with no model at all.
+///
+/// This is the key in THIS WORKBOOK. A package for an application other than
+/// the one a subscribed or checked-out connection came from files it under a
+/// key of its own: [`data_source_rekeys_for_target`] decides which, and
+/// [`rekey_carried_data_sources`] rewrites the whole carrier to match.
+pub(crate) fn published_data_source_id(connection: &crate::bi::types::Connection) -> String {
+    match connection.package_data_source_id.as_deref() {
+        Some(key) if !key.is_empty() => key.to_string(),
+        _ => connection.id.to_string(),
+    }
+}
+
+/// The id application `package_name` files a data source under when the model
+/// came from ANOTHER application whose id for it is `source_key`.
+///
+/// Deterministic, so every publish of that application from any workbook that
+/// holds the same source model files it under the same id (a re-key that
+/// changed on every push would re-mint every subscriber's connection, the
+/// BUG-0589 symptoms). Distinct per application, so two applications never
+/// share a data-source id unless they share one connection. A UUID-shaped
+/// string (RFC 9562 version 8, from SHA-256) because ids name directories in
+/// the package (`models/{id}/`).
+pub(crate) fn data_source_key_for_application(package_name: &str, source_key: &str) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"calcula.calp.data-source\0");
+    hasher.update(package_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_key.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80; // version 8 (custom)
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 9562 variant
+    identity::EntityId::from_bytes(bytes).to_string()
+}
+
+/// WHICH DATA SOURCES A PACKAGE FOR (`registry_path`, `package_name`) FILES
+/// UNDER A KEY OF ITS OWN: stable key -> the key in that package.
+///
+/// A connection a subscribe or a checkout minted carries the SOURCE
+/// application's data-source id (`package_data_source_id`). Re-using it is
+/// right for exactly one target: the application the connection was checked
+/// out from, pushed from its working copy (BUG-0589 -- every push must keep the
+/// id the previous version used). Anything else -- a NEW application published
+/// from a workbook that subscribes to the source, a model-only dataset, a
+/// working copy pushing a model another SUBSCRIPTION brought in -- would file a
+/// second application's model under the first one's id, and a subscriber to
+/// both would hold two connections under one key: refresh, remap and every
+/// key lookup then pick whichever the connection map returns first, and each
+/// application's pivots, slicers and ribbon filters can end up on the other's
+/// model with nothing reporting it. So those are re-keyed
+/// ([`data_source_key_for_application`]).
+///
+/// "Checked out from the target" is: the working-copy link targets it, and no
+/// subscription's ledger lists the data source (a subscription's model is that
+/// subscription's application's, never the working copy's -- a workbook cannot
+/// both subscribe to and develop one application, §2.3). A connection
+/// authored in this workbook (no package id) keeps its own id everywhere.
+pub(crate) fn data_source_rekeys_for_target(
+    state: &AppState,
+    bi_state: &BiState,
+    registry_path: &str,
+    package_name: &str,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let developing_target = state
+        .working_copy_link
+        .read()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .is_some_and(|l| l.targets(registry_path, package_name));
+    let subscribed: std::collections::HashSet<String> = state
+        .subscriptions
+        .read()
+        .map_err(|e| e.to_string())?
+        .subscriptions
+        .iter()
+        .flat_map(|s| s.objects.iter())
+        .filter(|o| o.kind == "dataSource")
+        .map(|o| o.id.clone())
+        .collect();
+    let keys: Vec<String> = bi_state
+        .connections
+        .lock()
+        .map_err(|e| e.to_string())?
+        .values()
+        .filter_map(|c| c.package_data_source_id.clone().filter(|k| !k.is_empty()))
+        .collect();
+    Ok(keys
+        .into_iter()
+        .filter(|key| !developing_target || subscribed.contains(key))
+        .map(|key| {
+            let own = data_source_key_for_application(package_name, &key);
+            (key, own)
+        })
+        .collect())
+}
+
+/// Rewrite every data-source key the carrier names through `rekeys`
+/// ([`data_source_rekeys_for_target`]): the embedded data sources, their
+/// writeback declarations, and every store that names a model by its stable
+/// key -- slicers, ribbon filters, BI pivot metadata and definitions, charts
+/// (`packageDataSourceId`), object bindings, the "view as" roles, pane
+/// controls, cell controls and types, cell behaviours and extension data
+/// (grid reports, drill-through definitions, page filters). The opaque JSON
+/// payloads are walked whole, values and object keys, matching a key EXACTLY:
+/// a data-source key is an opaque id that names one model and nothing else.
+pub(crate) fn rekey_carried_data_sources(
+    workbook: &mut persistence::Workbook,
+    data_sources: &mut [calp::publish::PublishDataSource],
+    model_writebacks: &mut [calp::writeback::ModelWritebackDeclaration],
+    rekeys: &std::collections::HashMap<String, String>,
+) {
+    if rekeys.is_empty() {
+        return;
+    }
+    fn swap(key: &mut String, rekeys: &std::collections::HashMap<String, String>) {
+        if let Some(own) = rekeys.get(key.as_str()) {
+            *key = own.clone();
+        }
+    }
+    fn swap_opt(key: &mut Option<String>, rekeys: &std::collections::HashMap<String, String>) {
+        if let Some(k) = key.as_mut() {
+            swap(k, rekeys);
+        }
+    }
+    fn walk(value: &mut serde_json::Value, rekeys: &std::collections::HashMap<String, String>) {
+        match value {
+            serde_json::Value::String(s) => swap(s, rekeys),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|v| walk(v, rekeys)),
+            serde_json::Value::Object(map) => {
+                let renamed: Vec<String> =
+                    map.keys().filter(|k| rekeys.contains_key(k.as_str())).cloned().collect();
+                for old in renamed {
+                    if let Some(v) = map.remove(&old) {
+                        map.insert(rekeys[&old].clone(), v);
+                    }
+                }
+                map.values_mut().for_each(|v| walk(v, rekeys));
+            }
+            _ => {}
+        }
+    }
+    for ds in data_sources.iter_mut() {
+        swap(&mut ds.id, rekeys);
+    }
+    for wb in model_writebacks.iter_mut() {
+        swap(&mut wb.data_source_id, rekeys);
+    }
+    for s in workbook.slicers.iter_mut() {
+        swap_opt(&mut s.data_source_id, rekeys);
+    }
+    for f in workbook.ribbon_filters.iter_mut() {
+        swap_opt(&mut f.data_source_id, rekeys);
+    }
+    for b in workbook.object_bindings.iter_mut() {
+        swap_opt(&mut b.model, rekeys);
+    }
+    for r in workbook.bi_connection_roles.iter_mut() {
+        swap(&mut r.connection_key, rekeys);
+    }
+    workbook.bi_pivot_metadata.iter_mut().for_each(|v| walk(v, rekeys));
+    workbook.pivot_definitions.iter_mut().for_each(|p| walk(&mut p.definition, rekeys));
+    workbook.charts.iter_mut().for_each(|c| walk(&mut c.spec, rekeys));
+    for p in workbook.pane_controls.iter_mut() {
+        walk(&mut p.config, rekeys);
+        walk(&mut p.value, rekeys);
+    }
+    workbook.controls.iter_mut().for_each(|c| walk(&mut c.controls, rekeys));
+    workbook.cell_types.iter_mut().for_each(|c| walk(&mut c.cells, rekeys));
+    workbook.cell_behaviors.iter_mut().for_each(|c| walk(&mut c.binding, rekeys));
+    workbook.extension_data.values_mut().for_each(|v| walk(v, rekeys));
+}
+
+/// THE SUBSCRIBER'S SIDE OF ONE KEY, ONE CONNECTION: refuse to bring in a data
+/// source whose id this workbook already serves from a connection that is not
+/// the one this act re-uses.
+///
+/// Every reader of a model key -- pivots, model slicers, ribbon filters, grid
+/// reports, bindings, design-query charts, the refresh below -- finds THE
+/// connection for a key. Two connections under one key (two applications that
+/// file their models under one id, or a checkout of an application this
+/// workbook already subscribes to) leave each of them answering with whichever
+/// the connection map returns first, silently. So the second one is refused,
+/// by name, before anything is written.
+///
+/// `owned`: the data-source ids the refreshing subscription's own ledger
+/// lists -- its single existing connection is the one a refresh re-uses. A
+/// subscribe and a checkout pass none. A connection authored in this workbook
+/// whose own id is the key counts as serving it (`model_key_of` /
+/// `resolve_model` answer to it first).
+///
+/// `claimed_elsewhere`: data-source id -> the OTHER subscriptions (by
+/// application name) whose ledgers claim it ([`data_source_claims`]). An id in
+/// it is refused EVEN WHEN NO CONNECTION SERVES IT (rev12C): the open of a
+/// document in which two subscriptions claim one id connects neither
+/// ([`materialize_verified_application_connections`]), so counting live
+/// connections alone let the next refresh or subscribe mint one model under
+/// the shared id -- and the other application's pivots, slicers, filters and
+/// charts, all keyed by that id, silently read it.
+pub(crate) fn refuse_data_source_already_served(
+    bi_state: &BiState,
+    data_sources: &[calp::pull::PulledDataSource],
+    package_name: &str,
+    owned: &std::collections::HashSet<String>,
+    claimed_elsewhere: &DataSourceClaims,
+) -> Result<(), String> {
+    for ds in data_sources {
+        let key = ds.definition.id.as_str();
+        if let Some(others) = claimed_elsewhere.get(key) {
+            return Err(format!(
+                "CALP_DATA_SOURCE_SHARED: '{}' brings the model '{}' under the data-source id {}, \
+                 which {} also claim{} in this workbook. One id can serve only one model, and \
+                 every pivot, slicer, filter and chart under it would read whichever model was \
+                 connected, so nothing was changed. The application that keeps this id must be \
+                 unsubscribed, or the other one published again under its own id (this version \
+                 of Calcula gives each application its own data-source id) and updated first.",
+                package_name,
+                ds.definition.name,
+                key,
+                others.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "),
+                if others.len() == 1 { "s" } else { "" },
+            ));
+        }
+    }
+    let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
+    for ds in data_sources {
+        let key = ds.definition.id.as_str();
+        let serving: Vec<&str> = connections
+            .values()
+            .filter(|c| match c.package_data_source_id.as_deref() {
+                Some(k) => k == key,
+                None => c.id.to_string() == key,
+            })
+            .map(|c| c.name.as_str())
+            .collect();
+        let allowed = if owned.contains(key) { 1 } else { 0 };
+        if serving.len() > allowed {
+            return Err(format!(
+                "CALP_DATA_SOURCE_SHARED: '{}' brings the model '{}' under the data-source id {}, \
+                 and this workbook already has a connection for that id ({}). Two connections \
+                 under one id would leave every pivot, slicer, filter and chart reading whichever \
+                 one happened to be found first, so nothing was changed. If the model comes from \
+                 another application this workbook subscribes to, ask the publisher of '{}' to \
+                 publish it again (this version of Calcula gives each application its own \
+                 data-source id); if it is an application this workbook already subscribes to or \
+                 develops, open it from that subscription or working copy instead.",
+                package_name,
+                ds.definition.name,
+                key,
+                serving.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "),
+                package_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Data-source id -> the applications (by name) whose subscription ledgers
+/// claim it. See [`data_source_claims`].
+pub(crate) type DataSourceClaims =
+    std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+
+/// Every data-source id the subscriptions' ledgers claim, and by which
+/// application -- the claims a subscribe or a checkout must not land on
+/// (`except` = `None`), or that a refresh of subscription `except` must not
+/// (its own ledger is the one connection it may re-use).
+pub(crate) fn data_source_claims(
+    subscriptions: &[calp::manifest::Subscription],
+    except: Option<usize>,
+) -> DataSourceClaims {
+    let mut claims = DataSourceClaims::new();
+    for (index, sub) in subscriptions.iter().enumerate() {
+        if Some(index) == except {
+            continue;
+        }
+        for object in sub.objects.iter().filter(|o| o.kind == "dataSource") {
+            claims.entry(object.id.clone()).or_default().insert(sub.package_name.clone());
+        }
+    }
+    claims
+}
+
+/// [`data_source_claims`] of the workbook's current subscriptions, for a
+/// subscribe or a checkout (which records no subscription before its gates).
+pub(crate) fn current_data_source_claims(state: &AppState) -> Result<DataSourceClaims, String> {
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+    Ok(data_source_claims(&subs.subscriptions, None))
+}
+
+/// Does a refreshed subscription's CARRIED ledger claim on data-source `id`
+/// stay true? Only while its new version (`version`, the ids it carries)
+/// still carries the id, or a connection that was live BEFORE the refresh is
+/// filed under it -- the one rule the ledger merge in
+/// [`apply_refresh_payloads`] and the gate
+/// [`refuse_refreshed_data_sources_already_served`] both apply.
+///
+/// WHY "BEFORE" (rev14B): a connection the refresh mints is the MINTING
+/// payload's. Asked after the payloads ran, a Refresh-all of the original and
+/// its re-keyed copy kept the copy's stale claim on the shared id alive on
+/// the original's freshly minted connection, so the original's next refresh
+/// was refused again and the next open connected neither. A connection live
+/// before the refresh is claimed by at most one subscription, because the
+/// open connects no id two ledgers claim and the subscribe and refresh gates
+/// refuse a second claimant.
+pub(crate) fn data_source_claim_carries(
+    id: &str,
+    version: Option<&std::collections::HashSet<String>>,
+    live_before_refresh: &std::collections::HashSet<String>,
+) -> bool {
+    version.is_some_and(|ids| ids.contains(id)) || live_before_refresh.contains(id)
+}
+
+/// [`refuse_data_source_already_served`] for every payload of a refresh: each
+/// subscription may re-use the ONE connection its own ledger lists for a data
+/// source, and nothing else. A data source whose id ANOTHER subscription
+/// claims is refused whether or not any connection serves it -- the open of a
+/// two-claimant document connects neither, and a refresh that then minted one
+/// would hand the other application's objects a model that is not theirs
+/// (rev12C). So are two payloads of one refresh that carry the same id.
+///
+/// WHAT ANOTHER SUBSCRIPTION CLAIMS, during a refresh that updates it too, is
+/// what it will claim AFTERWARDS: its new version's data sources, plus the
+/// ledger ids a connection served before the refresh (the ledger merge in
+/// [`apply_refresh_payloads`] keeps exactly those, [`data_source_claim_carries`]).
+/// Otherwise the copy that was
+/// re-published under its own id would keep blocking the original's update
+/// in the very refresh that re-keys it.
+pub(crate) fn refuse_refreshed_data_sources_already_served(
+    state: &AppState,
+    bi_state: &BiState,
+    payloads: &[calp::refresh::RefreshPayload],
+) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet};
+    // (application name, its ledger's data-source ids), released before the
+    // connections map is taken.
+    let ledgers: Vec<(String, HashSet<String>)> = {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        subs.subscriptions
+            .iter()
+            .map(|s| {
+                (
+                    s.package_name.clone(),
+                    s.objects
+                        .iter()
+                        .filter(|o| o.kind == "dataSource")
+                        .map(|o| o.id.clone())
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    // The connections as they stand BEFORE the refresh (this gate runs before
+    // its effect), so -- as in the ledger merge -- an id the refresh mints for
+    // one payload can never count as another subscription's live claim.
+    let live_before_refresh: HashSet<String> = bi_state
+        .connections
+        .lock()
+        .map_err(|e| e.to_string())?
+        .values()
+        .filter_map(|c| c.package_data_source_id.clone())
+        .collect();
+    let incoming: HashMap<usize, HashSet<String>> = payloads
+        .iter()
+        .map(|p| {
+            (
+                p.subscription_index,
+                p.pull_result.data_sources.iter().map(|ds| ds.definition.id.clone()).collect(),
+            )
+        })
+        .collect();
+    // What each subscription claims once this refresh has run.
+    let effective: Vec<(String, HashSet<String>)> = ledgers
+        .iter()
+        .enumerate()
+        .map(|(index, (name, ledger))| {
+            let claims = match incoming.get(&index) {
+                Some(version) => version
+                    .iter()
+                    .cloned()
+                    .chain(
+                        ledger
+                            .iter()
+                            .filter(|id| data_source_claim_carries(id, Some(version), &live_before_refresh))
+                            .cloned(),
+                    )
+                    .collect(),
+                None => ledger.clone(),
+            };
+            (name.clone(), claims)
+        })
+        .collect();
+    for payload in payloads {
+        let index = payload.subscription_index;
+        let owned = ledgers.get(index).map(|(_, l)| l.clone()).unwrap_or_default();
+        let mut claimed_elsewhere = DataSourceClaims::new();
+        for (other, (name, claims)) in effective.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            for id in claims {
+                claimed_elsewhere.entry(id.clone()).or_default().insert(name.clone());
+            }
+        }
+        refuse_data_source_already_served(
+            bi_state,
+            &payload.pull_result.data_sources,
+            &payload.pull_result.package_name,
+            &owned,
+            &claimed_elsewhere,
+        )?;
+    }
+    Ok(())
 }
 
 /// Extract active BI connections from BiState as publishable data sources.
@@ -25466,12 +26773,38 @@ pub(crate) fn capture_bi_data_sources(
     ),
     String,
 > {
+    capture_bi_data_sources_of(state, bi_state, None)
+}
+
+/// [`capture_bi_data_sources`], or -- with `only` -- the ONE connection a
+/// model-only publish names ([`calp_publish_model`]), so that publish neither
+/// serialises every other model nor is refused over connections it does not
+/// carry.
+pub(crate) fn capture_bi_data_sources_of(
+    state: &AppState,
+    bi_state: &BiState,
+    only: Option<&crate::bi::types::ConnectionId>,
+) -> Result<
+    (
+        Vec<calp::publish::PublishDataSource>,
+        Vec<calp::writeback::ModelWritebackDeclaration>,
+    ),
+    String,
+> {
     let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
 
     let mut data_sources = Vec::new();
     let mut model_writebacks: Vec<calp::writeback::ModelWritebackDeclaration> = Vec::new();
+    // The stable key each captured data source is filed under, and the name of
+    // the connection that claimed it: two live connections of ONE application
+    // data source would file two models under one id, and which one a
+    // subscriber got would depend on hash order -- refused instead (BUG-0589).
+    let mut filed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     for conn in connections.values() {
+        if only.is_some_and(|wanted| *wanted != conn.id) {
+            continue;
+        }
         // Get the engine and serialize the model. Connections without a
         // loaded engine have nothing to embed. Materialized calculated
         // tables also snapshot their cached data (Arrow IPC) so subscribers
@@ -25541,9 +26874,18 @@ pub(crate) fn capture_bi_data_sources(
             parsed_database
         };
 
-        // The connection's EntityId (canonical UUID string) is the data source's id
-        // in this package -- the one a design-query chart's key names too.
-        let ds_id = published_data_source_id(&conn.id);
+        // The connection's STABLE key is the data source's id in this package
+        // -- the one a design-query chart's key, a pivot, a model slicer and a
+        // ribbon filter name too (BUG-0589).
+        let ds_id = published_data_source_id(conn);
+        if let Some(other) = filed.insert(ds_id.clone(), conn.name.clone()) {
+            return Err(format!(
+                "Two connections in this workbook (\"{}\" and \"{}\") serve the same application data \
+                 source, so the application cannot say which model it carries. Remove one of them in \
+                 Data > Connections, then try again.",
+                other, conn.name
+            ));
+        }
 
         // Convert bindings
         let bindings: Vec<calp::TableBinding> = conn.bindings.iter().map(|b| {
@@ -25599,6 +26941,19 @@ pub(crate) fn capture_bi_data_sources(
     }
 
     Ok((data_sources, model_writebacks))
+}
+
+/// The connection of an application's ONLY data source, for a pivot whose
+/// metadata names no data source the package embeds; `None` when there are
+/// several (or none), where any pick would be arbitrary (BUG-0589).
+pub(crate) fn sole_connection(
+    ds_to_conn: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
+) -> Option<crate::bi::types::ConnectionId> {
+    let mut connections = ds_to_conn.values();
+    match (connections.next(), connections.next()) {
+        (Some(only), None) => Some(*only),
+        _ => None,
+    }
 }
 
 /// Map an engine writeback column to its .calp governance declaration.
@@ -27177,7 +28532,7 @@ mod c8_materialize_tests {
     #[test]
     fn materializes_modules_and_notebooks_into_script_state() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "x")]).unwrap();
+        materialize_distributed_scripts(&crate::create_app_state(), &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "x")]).unwrap();
         let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "v1");
         assert_eq!(scripts.get("m1").unwrap().source_package.as_deref(), Some("pkg"));
@@ -27187,8 +28542,8 @@ mod c8_materialize_tests {
     #[test]
     fn same_package_refresh_replaces_the_prior_version() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "old")]).unwrap();
-        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v2-updated")], &[mk_notebook("pkg", "n1", "new")]).unwrap();
+        materialize_distributed_scripts(&crate::create_app_state(), &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "old")]).unwrap();
+        materialize_distributed_scripts(&crate::create_app_state(), &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "v2-updated")], &[mk_notebook("pkg", "n1", "new")]).unwrap();
         let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.len(), 1, "same id replaces, not duplicates");
         assert_eq!(scripts.get("m1").unwrap().source, "v2-updated");
@@ -27198,9 +28553,9 @@ mod c8_materialize_tests {
     #[test]
     fn removal_on_refresh_drops_a_module_the_package_no_longer_ships() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "a"), mk_module("pkg", "m2", "b")], &[]).unwrap();
+        materialize_distributed_scripts(&crate::create_app_state(), &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "a"), mk_module("pkg", "m2", "b")], &[]).unwrap();
         // The next version ships only m1 -> m2 must be removed.
-        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "a2")], &[]).unwrap();
+        materialize_distributed_scripts(&crate::create_app_state(), &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "a2")], &[]).unwrap();
         let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.len(), 1);
         assert!(scripts.contains_key("m1"));
@@ -27223,7 +28578,7 @@ mod c8_materialize_tests {
             },
         );
         // An application ships its own "m1" -> the local one is preserved, application skipped.
-        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "upstream")], &[]).unwrap();
+        materialize_distributed_scripts(&crate::create_app_state(), &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "upstream")], &[]).unwrap();
         let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "my local edit");
         assert_eq!(scripts.get("m1").unwrap().source_package, None);
@@ -27232,9 +28587,9 @@ mod c8_materialize_tests {
     #[test]
     fn does_not_let_one_package_shadow_anothers_same_id() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg-a", &[mk_module("pkg-a", "m1", "from-a")], &[]).unwrap();
+        materialize_distributed_scripts(&crate::create_app_state(), &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg-a", &[mk_module("pkg-a", "m1", "from-a")], &[]).unwrap();
         // A second application reuses the id -> the first application keeps ownership.
-        materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg-b", &[mk_module("pkg-b", "m1", "from-b")], &[]).unwrap();
+        materialize_distributed_scripts(&crate::create_app_state(), &crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg-b", &[mk_module("pkg-b", "m1", "from-b")], &[]).unwrap();
         let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "from-a");
         assert_eq!(scripts.get("m1").unwrap().source_package.as_deref(), Some("pkg-a"));
@@ -27256,7 +28611,7 @@ mod c8_materialize_tests {
     #[test]
     fn a_published_module_cannot_claim_the_hosts_reserved_id_namespace() {
         let st = ScriptState::new();
-        let res = materialize_distributed_scripts(
+        let res = materialize_distributed_scripts(&crate::create_app_state(),
             &effect(),
             &st,
             "pkg",
@@ -27291,7 +28646,7 @@ mod c8_materialize_tests {
     #[test]
     fn a_published_notebook_cannot_claim_it_either() {
         let st = ScriptState::new();
-        let res = materialize_distributed_scripts(
+        let res = materialize_distributed_scripts(&crate::create_app_state(),
             &effect(),
             &st,
             "pkg",
@@ -27318,7 +28673,7 @@ mod c8_materialize_tests {
     #[test]
     fn one_reserved_id_refuses_the_whole_application() {
         let st = ScriptState::new();
-        let res = materialize_distributed_scripts(
+        let res = materialize_distributed_scripts(&crate::create_app_state(),
             &effect(),
             &st,
             "pkg",
@@ -27350,7 +28705,7 @@ mod c8_materialize_tests {
     fn the_custom_functions_library_is_still_admitted() {
         let st = ScriptState::new();
         let lib = r#"{"functions":[{"name":"DOUBLEIT","body":"return x*2;"}]}"#;
-        let (_, _, changed) = materialize_distributed_scripts(
+        let (_, _, changed) = materialize_distributed_scripts(&crate::create_app_state(),
             &effect(),
             &st,
             "pkg",
@@ -27375,7 +28730,7 @@ mod c8_materialize_tests {
     #[test]
     fn an_ordinary_id_is_unaffected_by_the_reserved_namespace_gate() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(
+        materialize_distributed_scripts(&crate::create_app_state(),
             &effect(),
             &st,
             "pkg",
@@ -28174,8 +29529,6 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
     ("properties", "EXCLUDED: reported 'documentProperties'"),
     ("sheet_protections", "EXCLUDED: reported 'protection'"),
     ("workbook_protection", "EXCLUDED: reported 'workbookProtection'"),
-    ("default_row_height", "EXCLUDED: reported 'gridDefaults'"),
-    ("default_column_width", "EXCLUDED: reported 'gridDefaults'"),
     ("bi_connection_roles", "EXCLUDED: reported 'biRoleSelections'"),
     (
         "bi_connections",
@@ -28200,10 +29553,33 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
     ),
     (
         "pending_recalc",
-        "SILENT: publish REFUSES outright when this is non-empty \
-         (calp_publish's first gate), so a package can never carry one. Shipping \
-         half-calculated cells would send a subscriber numbers that look \
-         authoritative and are stale, with no indicator anywhere.",
+        "SILENT: publish RESUMES a cancelled recalculation before it assembles \
+         anything (calp_publish -> recalculate_before_publish, the full F9 pass) \
+         and refuses when that pass does not complete, so a package can never \
+         carry one. Shipping half-calculated cells would send a subscriber \
+         numbers that look authoritative and are stale, with no indicator anywhere.",
+    ),
+    (
+        "calculation_incomplete",
+        "SILENT: publish RECALCULATES first while calculation is incomplete \
+         (calp_publish -> recalculate_before_publish, Excel's 'Recalculate \
+         workbook before saving') and refuses only when that pass does not \
+         complete -- and refuses a carrier whose own snapshot is still \
+         incomplete, an edit having landed after the pass \
+         (refuse_push_on_stale_carrier) -- so a package never holds values a \
+         manual-calculation edit left un-recalculated and no subscriber can be \
+         shown them as calculated; there is nothing to carry.",
+    ),
+    (
+        "calculation_manual",
+        "SILENT: the calculation mode is the APPLICATION's, set by the workbook \
+         a user OPENS (Excel's rule, adopt_cala_calculation_mode); only save_file \
+         and auto_recover_save record it (record_session_calculation_mode), never \
+         the shared assembly a package is built from. A package's \
+         sheets are installed into the subscriber's own open workbook, and an \
+         install never changes the subscriber's mode, so the publisher's mode \
+         has nothing to set on the other side and nothing the subscriber relies \
+         on is lost.",
     ),
     (
         "format_version",

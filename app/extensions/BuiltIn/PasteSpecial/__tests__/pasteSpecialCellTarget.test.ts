@@ -6,8 +6,9 @@
 //          relative shift on the grid's coordinates) plus number formats
 //          through `applyFormatting(.., { target })` -- never a per-cell write
 //          to the active sheet. Paste Link names its source. What has no route
-//          onto a grid's cells (a style-only paste, column widths) is refused
-//          in one sentence with nothing written.
+//          onto a grid's cells (column widths) is refused in one sentence with
+//          nothing written; Paste Formatting writes each source style index
+//          through `setCellStyle(.., { target })` (BUG-0513).
 // CONTEXT: The selection owner is REAL (@api/selectionOwner), shaped like the
 //          floating grid's.
 
@@ -47,6 +48,7 @@ vi.mock("@api/lib", async (importOriginal) => {
   return {
     ...real,
     getInternalClipboard: () => h.clipboard,
+    settledInternalClipboard: async () => h.clipboard,
     getCell: write("getCell"),
     getStyle: vi.fn(async (index: number) => ({ numberFormat: `fmt-${index}` })),
     updateCell: write("updateCell"),
@@ -216,11 +218,21 @@ describe("the paste variants on a floating grid's cells", () => {
     expect(h.writes).not.toHaveBeenCalled();
   });
 
-  it("Paste Formatting / Keep Source Column Widths have no route onto the grid: refused, nothing written", async () => {
+  it("Paste Formatting lands on the grid's cells: each source style index through the target, no content (BUG-0513)", async () => {
     await handlers.get(CoreCommands.PASTE_FORMATTING)!();
+    expect(h.alert, "Paste Formatting was refused on the grid").not.toHaveBeenCalled();
+    expect(h.batch, "a style-only paste wrote content").not.toHaveBeenCalled();
+    expect(h.writes.mock.calls).toEqual([
+      // ONE check of every cell the paste formats, before the first is written.
+      ["setCellStyle", 3, 0, 0, { target: REF, checkArea: { startRow: 3, startCol: 0, endRow: 3, endCol: 1 } }],
+      ["setCellStyle", 3, 0, 2, { target: REF }],
+      ["setCellStyle", 3, 1, 5, { target: REF }],
+    ]);
+  });
+
+  it("Keep Source Column Widths has no route onto the grid: refused, nothing written", async () => {
     await handlers.get(CoreCommands.PASTE_KEEP_SOURCE_COLUMN_WIDTHS)!();
     expect(h.alert.mock.calls.map((c) => c[0])).toEqual([
-      pasteRefusalSentence.notOnFloatingGrid("Paste Formatting"),
       pasteRefusalSentence.notOnFloatingGrid("Paste (Keep Source Column Widths)"),
     ]);
     expect(h.batch).not.toHaveBeenCalled();

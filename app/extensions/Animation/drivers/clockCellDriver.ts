@@ -42,7 +42,10 @@ export function createClockCellDriver(cfg: ClockCellConfig): Driver {
     frameCount,
 
     async snapshot(): Promise<void> {
-      await animSnapshot(token, cfg.sheetIndex, [[cfg.row, cfg.col]]);
+      // A refused snapshot (a what-if run is going) files no restore buffer, so
+      // no frame could be applied: fail here, and the clock stops and says why.
+      const res = await animSnapshot(token, cfg.sheetIndex, [[cfg.row, cfg.col]]);
+      if (!res.success) throw new Error(res.error ?? "The animation could not start.");
     },
 
     async applyFrame(t: number): Promise<void> {

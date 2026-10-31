@@ -53,6 +53,7 @@ import {
 } from "./lib/packageConsentSet";
 import type { ConsentArtifact, PackageCommand, PackageMacro } from "./lib/packageConsentSet";
 import { collectMacroButtons } from "./lib/consentMacroButtons";
+import { resetOptionsForAfterOpen } from "./lib/afterOpenReset";
 import { toConsentButtonActions } from "./lib/consentButtonActions";
 import { buttonCommandConsentKey, listHeldButtonActions, type HeldButtonAction } from "@api/heldButtonCode";
 import { emitAppEvent, onAppEvent } from "@api/events";
@@ -1263,11 +1264,15 @@ async function activate(context: ExtensionContext): Promise<void> {
 
   // ---- Re-load scripts when a workbook is opened ----
   cleanupFunctions.push(
-    onAppEvent(AppEvents.AFTER_OPEN, async () => {
+    onAppEvent(AppEvents.AFTER_OPEN, async (payload: unknown) => {
       // The outgoing workbook's schedule is gone (Rust replaced the registry
       // during open_file); stop ticking for it until the new one is loaded.
       stopSchedulerPump();
-      resetObjectScriptManager();
+      // A File > Open has already set the calculation mode: a script's
+      // manual-calculation debt is forgotten, never restored over it. An Open
+      // Application for Editing replaces no document and sets no mode, so the
+      // debt is PAID there (lib/afterOpenReset.ts).
+      resetObjectScriptManager(resetOptionsForAfterOpen(payload));
       // The remembered screens belong to the previous workbook too. A grant
       // arriving after the swap must not be able to record the OLD workbook's
       // artifacts into the NEW one.

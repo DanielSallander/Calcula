@@ -124,6 +124,21 @@ function setInputValue(el: HTMLInputElement, v: string): void {
   });
 }
 
+/** Drive an <input type=color> the way WebView2's picker does: one `input`
+ *  per step (a drag or a keyboard nudge), then ONE `change` when it closes. */
+function stepThenCommit(el: HTMLInputElement, steps: string[], final: string): void {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  for (const s of [...steps, final]) {
+    act(() => {
+      setter?.call(el, s);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+  act(() => {
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 function flyout(): HTMLElement | null {
   return document.querySelector("[data-section-flyout]");
 }
@@ -326,6 +341,14 @@ describe("ColorSwatch — native", () => {
     render(<ColorSwatch native color="#123456" onChange={onChange} label="Colour" />);
     setInputValue(container.querySelector<HTMLInputElement>('input[type="color"]')!, "#abcdef");
     expect(onChange).toHaveBeenCalledWith("#abcdef");
+  });
+
+  it("a pick that steps N times commits ONCE, on the closing change (BUG-0536)", () => {
+    const onChange = vi.fn();
+    render(<ColorSwatch native color="#123456" onChange={onChange} label="Colour" />);
+    const input = container.querySelector<HTMLInputElement>('input[type="color"]')!;
+    stepThenCommit(input, ["#200000", "#400000", "#600000", "#800000"], "#a00000");
+    expect(onChange.mock.calls).toEqual([["#a00000"]]);
   });
 
   it("a colour the input cannot speak falls back to black instead of throwing", () => {
@@ -539,7 +562,11 @@ describe("ColorPopover — picking", () => {
     expect(flyout()!.textContent).not.toContain("Automatic");
   });
 
-  it("More Colors...: an inline <input type=color> that reports live and keeps the popover open", async () => {
+  // Changed deliberately 2026-10-30 (BUG-0536 / BUG-0372, owner rule "Excel
+  // wins"): this used to pin "reports live and keeps the popover open". Excel's
+  // More Colors... is a modal dialog that applies ONCE, on OK, and closes the
+  // palette; WebView2's picker fires many `input` steps before its one `change`.
+  it("More Colors...: an inline <input type=color> that commits ONCE per pick and closes", async () => {
     const onChange = vi.fn();
     render(<ColorSwatch color="#ff0000" onChange={onChange} label="Font colour" />);
     await click(container.querySelector("button")!);
@@ -547,9 +574,39 @@ describe("ColorPopover — picking", () => {
     const custom = flyout()!.querySelector<HTMLInputElement>('input[type="color"]')!;
     expect(custom.getAttribute("aria-label")).toBe("More Colors...");
     expect(custom.value).toBe("#ff0000");
-    setInputValue(custom, "#336699");
-    expect(onChange).toHaveBeenCalledWith("#336699");
-    expect(flyout()).not.toBeNull();
+    stepThenCommit(custom, ["#330000", "#331100", "#335566"], "#336699");
+    expect(onChange.mock.calls).toEqual([["#336699"]]);
+    expect(flyout()).toBeNull();
+  });
+
+  it("More Colors... applies a pick equal to the shown colour (a pick is a pick, like a swatch)", async () => {
+    // A split button's `color` is the REMEMBERED colour, not the cell's, so a
+    // pick of that same colour must still reach the caller.
+    const onChange = vi.fn();
+    render(<ColorSwatch color="#ff0000" onChange={onChange} label="Font colour" />);
+    await click(container.querySelector("button")!);
+    await settle();
+    const custom = flyout()!.querySelector<HTMLInputElement>('input[type="color"]')!;
+    stepThenCommit(custom, ["#fe0000"], "#ff0000");
+    expect(onChange.mock.calls).toEqual([["#ff0000"]]);
+  });
+
+  it("a typed hex draft followed by a swatch press applies the SWATCH only, once (BUG-0344)", async () => {
+    // Chromium's order: mousedown on the swatch, the hex field's blur, click.
+    const onChange = vi.fn();
+    render(<ColorSwatch color="#000000" onChange={onChange} label="Font colour" />);
+    await click(container.querySelector("button")!);
+    await settle();
+    const hex = flyout()!.querySelector<HTMLInputElement>('input[aria-label="Hex colour"]')!;
+    act(() => hex.focus());
+    setInputValue(hex, "12ab34");
+    const red = swatchNamed("Red");
+    act(() => {
+      red.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+    act(() => red.focus());
+    await click(red);
+    expect(onChange.mock.calls).toEqual([["#ff0000"]]);
   });
 
   it("customLabel renames the custom row", async () => {

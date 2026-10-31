@@ -19,10 +19,12 @@
 import { promptAsync } from "@api/dialogs";
 
 /**
- * Ask for a sheet's new name. Resolves the TRIMMED name, or null when the user
- * cancelled, answered blank, or kept the name (nothing to rename). The backend
- * still applies Excel's naming rule (`validate_sheet_name`); this only decides
- * whether there is anything to send.
+ * Ask for a sheet's new name. Resolves the name EXACTLY as typed, or null when
+ * the user cancelled, answered empty, or kept the name (nothing to rename).
+ * NOT trimmed: Excel keeps a leading or trailing space, and a name of spaces
+ * only -- its Rename UI names a sheet ` Data ` when that is typed [LIVE, Excel
+ * 16, 2026-10-31]. The backend applies Excel's naming rule
+ * (`validate_sheet_name`); this only decides whether there is anything to send.
  */
 export async function promptForSheetName(currentName: string): Promise<string | null> {
   const answer = await promptAsync("Enter new sheet name:", {
@@ -30,7 +32,6 @@ export async function promptForSheetName(currentName: string): Promise<string | 
     defaultValue: currentName,
   });
   if (typeof answer !== "string") return null;
-  const trimmed = answer.trim();
-  if (trimmed === "" || trimmed === currentName) return null;
-  return trimmed;
+  if (answer === "" || answer === currentName) return null;
+  return answer;
 }

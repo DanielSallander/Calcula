@@ -211,21 +211,103 @@ pub fn formula_a1_to_r1c1(formula: &str, base_row: u32, base_col: u32) -> String
     result
 }
 
-/// Convert A1 cell references within a non-string segment of a formula.
-fn convert_segment_a1_to_r1c1(segment: &str, base_row: u32, base_col: u32, re: &Regex) -> String {
-    re.replace_all(segment, |caps: &regex::Captures| {
-        let matched = caps.get(0).unwrap().as_str();
-        // Verify this looks like a valid cell ref and not part of a function name
-        // by checking that the character before (if any) is not a letter
-        let start = caps.get(0).unwrap().start();
-        if start > 0 {
-            let prev_char = segment.as_bytes()[start - 1] as char;
-            if prev_char.is_ascii_alphabetic() || prev_char == '_' {
-                return matched.to_string();
+/// A character of an IDENTIFIER, by the formula lexer's own class (`is_letter`
+/// in core/parser/src/lexer.rs: any Unicode alphabetic character, `_`, `\`),
+/// plus the digits. A reference-shaped run touching one is the middle of a
+/// name (`År2024`, `Data2024`), never a reference.
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphabetic() || ch.is_ascii_digit() || matches!(ch, '_' | '\\')
+}
+
+/// Does the text right BEFORE a reference-shaped match end inside a name? A
+/// name character does; so does a `.` that follows one (`Q1.A1` is a dotted
+/// name), but not the trim-reference dot after a colon (`A1:.A8`).
+fn ends_identifier(before: &str) -> bool {
+    let mut chars = before.chars().rev();
+    match chars.next() {
+        Some('.') => chars.next().is_some_and(is_identifier_char),
+        Some(c) => is_identifier_char(c),
+        None => false,
+    }
+}
+
+/// Does the text right after a reference-shaped match make it part of
+/// something longer? A letter, digit, `_` or `\` continues a name, `(` makes it
+/// a function (`LOG10(`), `!` a sheet qualifier, and a `.` continues a name
+/// only when a name character follows it (the lexer's rule) -- a lone dot
+/// before `:` is the trim-reference operator (`A1.:A8`).
+fn continues_identifier(after: &str) -> bool {
+    let mut chars = after.chars();
+    match chars.next() {
+        Some('.') => chars.next().is_some_and(|c| c.is_alphabetic() || c.is_ascii_digit() || c == '_'),
+        Some(c) => c.is_alphabetic() || c.is_ascii_digit() || matches!(c, '_' | '\\' | '(' | '!'),
+        None => false,
+    }
+}
+
+/// Run `convert` over every part of `segment` OUTSIDE a single-quoted sheet
+/// name: `'Q1 2024'!A1` names a sheet, and its `Q1` is no reference.
+fn outside_quoted_names(segment: &str, mut convert: impl FnMut(&str) -> String) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut rest = segment;
+    while let Some(open) = rest.find('\'') {
+        out.push_str(&convert(&rest[..open]));
+        // The name ends at the first `'` that is not doubled (`''` escapes).
+        let after = &rest[open + 1..];
+        let mut close = None;
+        let mut i = 0;
+        let bytes = after.as_bytes();
+        while i < bytes.len() {
+            if bytes[i] == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                close = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        match close {
+            Some(c) => {
+                out.push_str(&rest[open..open + 1 + c + 1]);
+                rest = &after[c + 1..];
+            }
+            None => {
+                // A half-typed name: the rest is copied as written.
+                out.push_str(&rest[open..]);
+                return out;
             }
         }
-        a1_to_r1c1(matched, base_row, base_col)
-    }).to_string()
+    }
+    out.push_str(&convert(rest));
+    out
+}
+
+/// Convert A1 cell references within a non-string segment of a formula.
+///
+/// The edges are checked by CHARACTER with the lexer's identifier class. The
+/// old check read one UTF-8 BYTE before the match (`as_bytes()[start - 1] as
+/// char`), and a continuation byte is never an ASCII letter, so the `r2024` in
+/// `År2024!A1` was converted -- the sheet name came back as `ÅR[..]C[..]`. And
+/// with no check AFTER the match, `LOG10(` converted as column LOG, row 10.
+fn convert_segment_a1_to_r1c1(segment: &str, base_row: u32, base_col: u32, re: &Regex) -> String {
+    outside_quoted_names(segment, |part| {
+        re.replace_all(part, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap();
+            let matched = m.as_str();
+            if ends_identifier(&part[..m.start()]) {
+                return matched.to_string();
+            }
+            // A following identifier character, `(` (a function such as
+            // LOG10) or `!` (a sheet named like a cell) ends no reference.
+            if continues_identifier(&part[m.end()..]) {
+                return matched.to_string();
+            }
+            a1_to_r1c1(matched, base_row, base_col)
+        })
+        .to_string()
+    })
 }
 
 /// Convert an entire formula from R1C1 notation to A1 notation.
@@ -269,31 +351,25 @@ pub fn formula_r1c1_to_a1(formula: &str, base_row: u32, base_col: u32) -> String
 
 /// Convert R1C1 cell references within a non-string segment.
 fn convert_segment_r1c1_to_a1(segment: &str, base_row: u32, base_col: u32, re: &Regex) -> String {
-    re.replace_all(segment, |caps: &regex::Captures| {
-        let matched = caps.get(0).unwrap().as_str();
-        let start = caps.get(0).unwrap().start();
-
-        // Avoid matching R or C that are part of function names or identifiers.
-        // Check char before: must not be a letter, digit, or underscore.
-        if start > 0 {
-            let prev_char = segment.as_bytes()[start - 1] as char;
-            if prev_char.is_ascii_alphanumeric() || prev_char == '_' {
+    outside_quoted_names(segment, |part| {
+        re.replace_all(part, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap();
+            let matched = m.as_str();
+            // Avoid matching R or C that are part of function names or
+            // identifiers -- by CHARACTER, with the lexer's identifier class
+            // (a byte read made `ÅRC` look like a reference after `Å`).
+            if ends_identifier(&part[..m.start()]) {
                 return matched.to_string();
             }
-        }
-
-        // Also check the char after the match to ensure we're not in the middle
-        // of a longer identifier (e.g., "ROUND" starting with "R").
-        let end = caps.get(0).unwrap().end();
-        if end < segment.len() {
-            let next_char = segment.as_bytes()[end] as char;
-            if next_char.is_ascii_alphabetic() || next_char == '_' {
+            // Nor in the middle of a longer identifier ("ROUND" starts with
+            // "R"), a function call, or a sheet qualifier.
+            if continues_identifier(&part[m.end()..]) {
                 return matched.to_string();
             }
-        }
-
-        r1c1_to_a1(matched, base_row, base_col)
-    }).to_string()
+            r1c1_to_a1(matched, base_row, base_col)
+        })
+        .to_string()
+    })
 }
 
 // ============================================================================
@@ -451,6 +527,22 @@ mod tests {
         let result = formula_a1_to_r1c1("IF(A1>0,\"A1\",\"B2\")", 0, 0);
         assert!(result.contains("\"A1\""));
         assert!(result.contains("\"B2\""));
+    }
+
+    /// rev13C minor: the edge checks read one UTF-8 BYTE, so the `r2024` after
+    /// the `Å` of a bare `År2024` qualifier (a name Excel writes bare [LIVE])
+    /// was converted and the sheet name came back mangled. A quoted name shaped
+    /// like a cell, a function ending in digits and the trim dot ride along.
+    #[test]
+    fn a_reference_shaped_run_inside_a_name_is_not_converted() {
+        assert_eq!(formula_a1_to_r1c1("År2024!A1+B1", 0, 0), "År2024!RC+RC[1]");
+        // The same name used as a defined name: only the BEFORE edge sees it.
+        assert_eq!(formula_a1_to_r1c1("År2024+A1", 0, 0), "År2024+RC");
+        assert_eq!(formula_a1_to_r1c1("'Q1 2024'!A1", 0, 0), "'Q1 2024'!RC");
+        assert_eq!(formula_a1_to_r1c1("LOG10(A1)", 0, 0), "LOG10(RC)");
+        assert_eq!(formula_a1_to_r1c1("SUM(A1:.A8)", 0, 0), "SUM(RC:.R[7]C)");
+        assert_eq!(formula_r1c1_to_a1("ÅRC+RC", 0, 0), "ÅRC+A1");
+        assert_eq!(formula_r1c1_to_a1("'RC Data'!RC", 0, 0), "'RC Data'!A1");
     }
 
     #[test]

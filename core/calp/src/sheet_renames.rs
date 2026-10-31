@@ -60,6 +60,10 @@ pub struct SheetRenames {
     /// one becomes `#REF!` (see "A sheet that is GONE" above). Disjoint from
     /// `by_upper` by construction.
     gone: HashSet<String>,
+    /// [`Self::exact_spelling`]: `by_upper` is keyed by the EXACT old name, and
+    /// a name matches only spelled exactly so -- in a formula, only in a
+    /// spelling no bare identifier can produce ([`spelling_survives_the_lexer`]).
+    exact: bool,
 }
 
 /// What one sheet-qualified reference becomes.
@@ -196,7 +200,7 @@ fn walk_sheet_slots(expr: &mut Expression, f: &mut dyn FnMut(&mut String) -> Slo
 fn comparable_formula(text: &str) -> Option<String> {
     let mut ast = *engine::Cell::new_formula(text.to_string()).ast?;
     walk_sheet_slots(&mut ast, &mut |name| {
-        let upper = name.to_uppercase();
+        let upper = identity::sheet_name_key(name);
         if upper == *name {
             SlotEdit::Keep
         } else {
@@ -252,7 +256,7 @@ pub fn comparable_reference(reference: &str) -> String {
     match crate::publish::split_sheet_reference(reference) {
         Some((name, rest)) if !name.is_empty() => format!(
             "{}!{}",
-            engine::ast_render::quote_sheet_name(&name.to_uppercase()),
+            engine::ast_render::quote_sheet_name(&identity::sheet_name_key(&name)),
             rest.trim().to_uppercase()
         ),
         _ => reference.to_string(),
@@ -293,7 +297,34 @@ pub struct PulledRules<'a> {
 }
 
 fn key(name: &str) -> String {
-    name.to_uppercase()
+    identity::sheet_name_key(name)
+}
+
+/// Whether a sheet qualifier read out of a PARSED formula is, in its exact
+/// spelling, evidence of which sheet the formula meant (rev10C).
+///
+/// The lexer folds a BARE identifier to its key (`identity::sheet_name_key`,
+/// one character for one -- `core/parser/src/lexer.rs`), so a bare `=Data!A1`,
+/// `=data!A1` and `=DATA!A1` are all stored as `DATA`, and the renderer writes
+/// an identifier-shaped name back bare -- so across a save and load, such a
+/// name's case is gone. A stored `DATA` therefore says nothing about whether
+/// the author meant the tab `Data` or the tab `DATA`. Only a spelling no bare
+/// identifier can produce -- one that is not its own key (`ärende`, `data`),
+/// or one the parser would not read bare (it was quoted, and quotes keep
+/// case) -- is evidence.
+///
+/// Decided by the PARSER rather than a copy of its grammar: the spelling is
+/// ambiguous exactly when it is already its own key and `=<it>!A1` parses back
+/// to a reference qualified by that same spelling.
+pub fn spelling_survives_the_lexer(spelling: &str) -> bool {
+    if key(spelling) != spelling {
+        return true;
+    }
+    let parsed = engine::Cell::new_formula(format!("={}!A1", spelling)).ast;
+    !matches!(
+        parsed.as_deref(),
+        Some(Expression::CellRef { sheet: Some(s), .. }) if s == spelling
+    )
 }
 
 impl SheetRenames {
@@ -314,7 +345,35 @@ impl SheetRenames {
             }
             by_upper.insert(key(from), to.to_string());
         }
-        SheetRenames { by_upper, gone: HashSet::new() }
+        SheetRenames { by_upper, gone: HashSet::new(), exact: false }
+    }
+
+    /// The renames a LOAD makes when a file holds two sheet names Excel's rule
+    /// calls one (`Ärende` beside `ärende`; the host's
+    /// `sheet_names::dedupe_loaded_sheet_names`). The rule cannot tell such a
+    /// reference's two candidates apart, so the EXACT spelling is the only
+    /// evidence: a name is renamed only when spelled exactly as the old name
+    /// (case-sensitively) and, inside a formula, only when that spelling
+    /// survives the lexer ([`spelling_survives_the_lexer`]: a bare `=Data!A1`
+    /// is stored `DATA` whatever was typed, so `DATA` is no evidence). A raw
+    /// name or A1 reference string (a chart source, a dropdown range, a page
+    /// target) keeps its case as written, so its exact spelling is evidence.
+    /// Anything else stays with the sheet that kept the name.
+    pub fn exact_spelling<I, K, V>(pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut by_exact = HashMap::new();
+        for (from, to) in pairs {
+            let (from, to) = (from.as_ref(), to.as_ref());
+            if from.is_empty() || from == to {
+                continue;
+            }
+            by_exact.insert(from.to_string(), to.to_string());
+        }
+        SheetRenames { by_upper: by_exact, gone: HashSet::new(), exact: true }
     }
 
     /// Also turn every reference to these sheets into `#REF!`: sheets of the
@@ -347,7 +406,20 @@ impl SheetRenames {
     /// The name `name` is renamed to, case-insensitively; `None` when it is not
     /// renamed.
     pub fn target(&self, name: &str) -> Option<&str> {
+        if self.exact {
+            return self.by_upper.get(name).map(String::as_str);
+        }
         self.by_upper.get(&key(name)).map(String::as_str)
+    }
+
+    /// [`Self::target`] for a sheet name read out of a PARSED formula: in
+    /// exact mode, a spelling the lexer can have produced from a bare name is
+    /// no evidence and matches nothing.
+    fn swap_lexed(&self, sheet: &mut String) -> bool {
+        if self.exact && !spelling_survives_the_lexer(sheet) {
+            return false;
+        }
+        self.swap(sheet)
     }
 
     fn swap(&self, sheet: &mut String) -> bool {
@@ -370,7 +442,7 @@ impl SheetRenames {
         walk_sheet_slots(expr, &mut |sheet| {
             if self.is_gone(sheet) {
                 SlotEdit::Gone
-            } else if self.swap(sheet) {
+            } else if self.swap_lexed(sheet) {
                 SlotEdit::Changed
             } else {
                 SlotEdit::Keep

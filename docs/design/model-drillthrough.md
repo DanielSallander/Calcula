@@ -338,15 +338,19 @@ through `data_source_id`, slicers self-healed, charts did neither. Fix, in two h
   design-query source whose `connectionId` names a LIVE connection is keyed, and a uuid that names no live
   connection is left as it is. WHICH key is the file's (`ChartKeysFor`): the `.cala` save writes the application
   data-source id the connection was minted from (removed for a local connection), which the next open answers to;
-  the `.calp` carrier writes the id the data source is filed under in THAT package, the connection's own id, through
-  the one `published_data_source_id` the capture of the data sources uses too. They differ after a checkout, which
-  mints its connections from the previous version's data sources while the push files them under new ids: stamping
-  the package key on the carrier bound an existing subscriber's chart to the connection still serving the previous
-  version (verification round, section 7). Applied to the saved copy only, never to `state.charts`. What this does NOT
-  fix is BUG-0589: a working-copy push files the data SOURCE under that new id too, while pivots, model slicers and
-  ribbon filters keep the previous key -- so at an existing subscriber the charts follow the new version while those
-  stay on the previous one (and page slicers stop filtering the charts), and every subscriber loses the ribbon
-  filters. The stable published id that fixes it is filed with its change list (open-items 2.aq). This is what makes a key exist on a chart no TypeScript writer stamped (the
+  the `.calp` carrier writes the id the data source is filed under in THAT package, through the one
+  `published_data_source_id` the capture of the data sources uses too: the connection's STABLE key -- its
+  application data-source id when it was minted from one, else its own id (BUG-0589, 2026-10-30). The verification
+  round (section 7) had made both the connection's own id, which kept chart and data source agreeing but re-keyed
+  every data source on every working-copy push while pivots, model slicers and ribbon filters kept the previous key;
+  now the push files the data source under the id the previous version did, so all of them, and the chart, keep
+  naming one connection. The two arms of `ChartKeysFor` now differ only for a connection authored in the publishing
+  workbook (no key in the `.cala`, its own id in the package). Round 11: a package for an application OTHER than the
+  one the connection was checked out from (a new application published from a subscribing workbook, a model-only
+  dataset) files the model under that application's own deterministic id, and `rekey_carried_data_sources` rewrites
+  the carrier -- the data source, the chart's key and every other store -- so the chart and the data source still
+  agree and two applications never share an id. Applied to the saved copy only, never to
+  `state.charts`. This is what makes a key exist on a chart no TypeScript writer stamped (the
   drill's result chart, Insert Chart, a script, the AI) and what keeps a stale key from re-binding a chart the user
   re-pointed to a local connection. The TypeScript writers keep or clear the key on a connection change
   (`Charts/lib/designQuerySource.ts`), so the in-session store never carries a stale one either.
@@ -401,7 +405,7 @@ pub(crate) const SHEETS_CHANGED_UNDER_THE_DELETE: &str;
 
 // app/src-tauri/src/persistence.rs, calp_commands.rs
 pub enum ChartKeysFor { Document, Package }  // build_workbook_for_save(state, files, bi_state, chart_keys_for)
-pub(crate) fn published_data_source_id(connection_id: &ConnectionId) -> String;  // capture AND carrier keys
+pub(crate) fn published_data_source_id(connection: &Connection) -> String;  // capture AND carrier keys: package key, else own id (BUG-0589)
 pub(crate) struct EphemeralUserSheet { pub sheet: NewUserSheet, pub refusal: &'static str }
 ```
 
@@ -537,7 +541,8 @@ the same day, each new or strengthened test seen failing with its fix broken:
 - the `.calp` carrier stamped a chart with its connection's PACKAGE key, which after a checkout names the previous
   version's data source while the push files the data source under the connection's own id: an existing
   subscriber's refresh bound the chart to the connection still serving the previous version (major; fixed by
-  `ChartKeysFor::Package` and one `published_data_source_id`, 2.10);
+  `ChartKeysFor::Package` and one `published_data_source_id`, 2.10; that id became the stable key -- the package
+  key, else the connection's own id -- with BUG-0589, so the push no longer files the data source under a new id);
 - the discard's id lookup and the delete's locks had a window an MCP move could fall into, deleting a user sheet
   (fixed: `expected_sheet_id` checked under the delete's pending locks, 2.5);
 - the door's discard could land between a strip flow's two steps; conversely a Move or Copy started while a

@@ -13,8 +13,16 @@ import { createMonteCarloDriver } from "../drivers/monteCarloDriver";
 import { mcReset, mcDeactivate } from "./monteCarloStore";
 import { toA1 } from "./a1";
 import type { AnimationSpec, ChartParamSpec, ScenarioSpec, MonteCarloSpec } from "../types";
+import { showToast } from "@api/notifications";
 
-const clock = createPlaybackClock();
+// Why playback could not start or stopped early -- above all, the backend's
+// refusal while a what-if run (Data Table, Goal Seek, Solver, a scenario) is
+// writing trials -- is shown to the user, not only logged.
+const clock = createPlaybackClock({
+  onError: (message) => {
+    showToast(message, { variant: "warning" });
+  },
+});
 
 /** What a GIF export should capture for the current driver. */
 export type ExportSourceHint = { kind: "chart"; chartId: string } | { kind: "grid" } | null;
@@ -65,6 +73,10 @@ export const playbackEngine = {
 
   /** Load a saved AnimationSpec into the engine (restores any prior driver). */
   async loadSpec(spec: AnimationSpec): Promise<void> {
+    // Its driver cell was deleted (#REF!, BUG-0614): there is no cell to drive.
+    if (spec.refDeleted) {
+      throw new Error(`The cell "${spec.name}" drives was deleted (#REF!). Edit the animation to choose a cell.`);
+    }
     if (spec.driver === "clockCell" && spec.clockCell) {
       mcDeactivate();
       exportSource = { kind: "grid" };

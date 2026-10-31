@@ -124,6 +124,16 @@ pub struct UndoResult {
     /// geometry change, a whole-sheet snapshot, an opaque custom payload -- and
     /// there it means "do not move the user", never "select nothing".
     pub restored_range: Option<RestoredRange>,
+    /// The coordinate changes this restore made, IN THE ORDER MADE, as a
+    /// follower must apply them: for an Undo the INVERSE of each recorded
+    /// change, newest first (an undone insert reads as the delete that took
+    /// its lines back); for a Redo each change again, oldest first. Every
+    /// change a step recorded is here -- a grouped step (a macro holding
+    /// several inserts) lists each, an Insert / Delete Cells its band, a
+    /// cut-paste its move -- from the step itself (the
+    /// `structural_delta` CustomRestore), never from its description. Empty for a step that
+    /// moved no coordinates.
+    pub structural_deltas: Vec<crate::api_types::StructuralDelta>,
 }
 
 /// A single cell coordinate on the active sheet. A struct rather than a tuple
@@ -1183,6 +1193,7 @@ fn rollback_answer_without_restore(state: &AppState, refusal: Option<&str>) -> U
         active_sheet_name,
         restored_anchor: None,
         restored_range: None,
+        structural_deltas: Vec::new(),
     }
 }
 
@@ -1583,7 +1594,7 @@ fn apply_changes_with(
                     // off-sheet cascade below.
                     override_edits.push((*row, *col, current.clone(), previous.clone()));
                 } else {
-                    report.wrote_sheet(*sheet);
+                    report.wrote_cell(*sheet, *row, *col);
                 }
                 inverse_transaction.add_change(CellChange::SetCell {
                     sheet: *sheet,
@@ -1999,7 +2010,51 @@ fn apply_changes_with(
         } else {
             report.sheets_rewritten.iter().copied().collect()
         };
-        if !sheets.is_empty() {
+        // UNDER MANUAL CALCULATION an off-sheet restore recalculates NOTHING,
+        // as the same restore on the active sheet does (its bulk-rewrite
+        // cascade below returns at the mode): Excel leaves an undone
+        // precedent's dependents stale for Calculate, and says so (xlPending)
+        // [LIVE, Excel 16, round 12: manual, `B1 = A1*2`, A1 typed 5 and
+        // calculated, then Ctrl+Z -> A1 = 1, B1 still 10, xlPending; manual
+        // calculation recalculates on no sheet]. This whole-sheet pass ran whatever the
+        // mode, so undoing an edit on a sheet the user was not looking at
+        // recalculated that sheet and every reader of it behind their back.
+        // The restored sheets' values are marked possibly stale instead, so
+        // the state reads pending and a save does not vouch for them -- but
+        // only when a formula actually READS what was restored, as on the
+        // active sheet (`note_manual_write_left_formulas_uncalculated`).
+        // Excel [LIVE, Excel 16, round 15: manual, Sheet1!A1 = Sheet2!B1*2;
+        // Sheet2!Z99 typed 5, Ctrl+PgUp to Sheet1, Ctrl+Z -> xlDone; Sheet2!B1
+        // typed 7, F9, Ctrl+PgUp, Ctrl+Z -> xlPending]. Marking every restored
+        // sheet turned an undo nothing reads into "Calculate" and stamped the
+        // next save calc_state.json (v12) for values that were not stale.
+        let manual = state
+            .calculation_mode
+            .lock()
+            .map(|m| *m != "automatic")
+            .unwrap_or(false);
+        if !sheets.is_empty() && manual {
+            let stale: Vec<usize> = sheets
+                .iter()
+                .copied()
+                .filter(|&sheet| {
+                    report.workbook_recalc
+                        || report.sheets_rewritten_whole.contains(&sheet)
+                        || off_sheet_restore_left_formulas_uncalculated(
+                            state,
+                            sheet,
+                            report.cells_rewritten.get(&sheet).map(Vec::as_slice).unwrap_or(&[]),
+                        )
+                })
+                .collect();
+            if let Ok(grids) = state.grids.read() {
+                for sheet in stale {
+                    if let Some(g) = grids.get(sheet) {
+                        g.call_memo().note_values_may_be_stale();
+                    }
+                }
+            }
+        } else if !sheets.is_empty() {
             crate::commands::data::recalc_after_off_sheet_write(
                 state,
                 user_files_state,
@@ -2176,6 +2231,14 @@ fn apply_changes_with(
             end_row,
             end_col,
         });
+    // What a follower applies now: an undo visits the step newest first and
+    // applies each change's inverse; a redo visits the inverse step, whose
+    // markers are in undo order, newest first, so oldest first again.
+    let structural_deltas: Vec<crate::api_types::StructuralDelta> = report
+        .structural_deltas
+        .iter()
+        .map(|d| if is_undo { d.inverse() } else { d.clone() })
+        .collect();
     let restored_anchor = restored_range.map(|r| RestoredAnchor {
         row: r.start_row,
         col: r.start_col,
@@ -2203,6 +2266,7 @@ fn apply_changes_with(
         active_sheet_name,
         restored_anchor,
         restored_range,
+        structural_deltas,
     }
 }
 
@@ -2229,11 +2293,210 @@ pub(crate) struct RestoreReport {
     /// undoing a name definition left every formula using it stale. The only
     /// honest trigger is a whole-workbook re-evaluation.
     pub workbook_recalc: bool,
+    /// The coordinate changes the step recorded (`structural_delta`), as
+    /// RECORDED (forward), in the order this restore visited them.
+    pub structural_deltas: Vec<crate::api_types::StructuralDelta>,
+    /// Sheets a WHOLE-region or whole-sheet restore rewrote ([`Self::wrote_sheet`]):
+    /// no cell list says what changed on them.
+    pub sheets_rewritten_whole: std::collections::BTreeSet<usize>,
+    /// The CELLS an off-sheet `SetCell` restore put back, per sheet
+    /// ([`Self::wrote_cells`]) -- what manual calculation asks "does a formula
+    /// read these?" of before it marks the sheet stale (rev13A).
+    pub cells_rewritten: std::collections::BTreeMap<usize, Vec<(u32, u32)>>,
 }
 
 impl RestoreReport {
     fn wrote_sheet(&mut self, sheet_index: usize) {
         self.sheets_rewritten.insert(sheet_index);
+        self.sheets_rewritten_whole.insert(sheet_index);
+    }
+
+    /// One cell an off-sheet `SetCell` restore put back.
+    fn wrote_cell(&mut self, sheet_index: usize, row: u32, col: u32) {
+        self.sheets_rewritten.insert(sheet_index);
+        self.cells_rewritten.entry(sheet_index).or_default().push((row, col));
+    }
+}
+
+/// Under MANUAL calculation: did putting `cells` back on the BACKGROUND sheet
+/// `sheet` leave a formula un-recalculated? The off-sheet twin of
+/// `commands::data::note_manual_write_left_formulas_uncalculated` (the active
+/// sheet's question, asked of its dependency maps): the single-sheet maps
+/// describe only the active sheet, so the background sheet's own formulas are
+/// asked directly -- a formula on it that reads a restored cell (by cell, whole
+/// column or row, through a name or a table, or by its own sheet name), or a
+/// volatile formula on it (Excel: with a volatile formula on the sheet any
+/// entry is pending) -- and every OTHER sheet's formulas are asked the same
+/// question of their parsed references (a whole column or row qualified with
+/// the restored sheet's name, a 3D span that includes it: neither is an edge
+/// in the cross-sheet dependents map, rev15B), with that map (rebuilt for the
+/// restored sheets just before this is asked) kept as the last word.
+/// A restored cell's own formula is not its own reader. (rev13A.)
+///
+/// Takes, holding nothing on entry, `grids` then `sheet_names` and the name
+/// tables, then `cross_sheet_dependents` -- the order `rebuild_all_dependencies`
+/// uses after its grid.
+pub(crate) fn off_sheet_restore_left_formulas_uncalculated(
+    state: &AppState,
+    sheet: usize,
+    cells: &[(u32, u32)],
+) -> bool {
+    if cells.is_empty() {
+        return false;
+    }
+    let restored: std::collections::HashSet<(u32, u32)> = cells.iter().copied().collect();
+    // The ACTIVE sheet's formulas are read from its mirror, which is current
+    // (its `grids` slot is synced only at a switch): canonical order, `grid`
+    // then `grids`, then the active index.
+    let Ok(mirror) = state.grid.read() else { return true };
+    let Ok(grids) = state.grids.read() else { return true };
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(usize::MAX);
+    let Some(grid) = grids.get(sheet) else { return false };
+    let grid: &engine::Grid = if sheet == active { &mirror } else { grid };
+    let sheet_names = state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+    let Some(sheet_name) = sheet_names.get(sheet).cloned() else { return true };
+    let target = RestoredCells { sheet, sheet_name: &sheet_name, sheet_names: &sheet_names, cells: &restored };
+    let read = {
+        let named_ranges = state.named_ranges.read().unwrap();
+        let tables = state.tables.read().unwrap();
+        let table_names = state.table_names.read().unwrap();
+        let name_tables = crate::name_resolution::NameTables {
+            named_ranges: &named_ranges,
+            tables: &tables,
+            table_names: &table_names,
+            sheet_names: &sheet_names,
+            spill_ranges: &state.spill_ranges,
+        };
+        // The restored sheet's own formulas: a volatile one, or one that reads
+        // a restored cell (an unqualified reference is its own sheet's).
+        let same_sheet = grid.cells.iter().any(|(&(row, col), cell)| {
+            let Some(ast) = cell.ast.as_ref() else { return false };
+            if restored.contains(&(row, col)) {
+                return false;
+            }
+            if engine::volatility::contains_volatile_call(ast) {
+                return true;
+            }
+            let expanded = crate::name_resolution::eval_ast(ast, &name_tables.at(sheet, row, col));
+            target.read_by(&expanded, true)
+        });
+        // Every OTHER sheet's formulas, asked of the parsed reference itself.
+        // The cross-sheet dependents map below holds only qualified CELL and
+        // range edges and a 3D reference's two bookend sheets: a whole column
+        // or row on another sheet (`=SUM(Sheet2!G:G)`) and a sheet in the
+        // middle of a 3D span (`=SUM(Sheet1:Sheet3!B2)` read on Sheet2) are not
+        // in it, and their readers were left stale while the state said done
+        // (rev15B).
+        same_sheet
+            || grids.iter().enumerate().any(|(other, other_grid)| {
+                let other_grid: &engine::Grid = if other == active { &mirror } else { other_grid };
+                other != sheet
+                    && other_grid.cells.iter().any(|(&(row, col), cell)| {
+                        let Some(ast) = cell.ast.as_ref() else { return false };
+                        let expanded = crate::name_resolution::eval_ast(ast, &name_tables.at(other, row, col));
+                        target.read_by(&expanded, false)
+                    })
+            })
+    };
+    drop(grids);
+    drop(mirror);
+    if read {
+        return true;
+    }
+    let Ok(dependents) = state.cross_sheet_dependents.lock() else { return true };
+    cells.iter().any(|&(row, col)| crate::cross_sheet_readers(&dependents, &sheet_name, row, col).is_some())
+}
+
+/// The cells an off-sheet restore put back, as a question a parsed formula can
+/// be asked: "do you read one of these?" -- by cell, range, whole column or
+/// row, qualified with the restored sheet's name or (on the restored sheet
+/// itself) unqualified, or through a 3D span that includes the sheet. Asked of
+/// the reference as PARSED, so `=SUM(Sheet3!G:G)` on the restored sheet is not
+/// taken for a reader of its own column G, which the flattened
+/// [`crate::ExtractedRefs`] column set could not tell apart (rev15B).
+struct RestoredCells<'a> {
+    sheet: usize,
+    sheet_name: &'a str,
+    sheet_names: &'a [String],
+    cells: &'a std::collections::HashSet<(u32, u32)>,
+}
+
+impl RestoredCells<'_> {
+    /// Whether a reference with this sheet qualifier, in a formula that is
+    /// (`on_target`) or is not on the restored sheet, points at the restored sheet.
+    fn names_target(&self, qualifier: &Option<String>, on_target: bool) -> bool {
+        match qualifier {
+            Some(name) => name == "*" || name.eq_ignore_ascii_case(self.sheet_name),
+            None => on_target,
+        }
+    }
+
+    /// Whether the 3D span `start:end` (by sheet ORDER, as Excel reads it)
+    /// includes the restored sheet. A bookend that names no sheet reads nothing.
+    fn span_includes_target(&self, start: &str, end: &str) -> bool {
+        if start == "*" || end == "*" {
+            return true;
+        }
+        let position = |name: &str| self.sheet_names.iter().position(|s| s.eq_ignore_ascii_case(name));
+        match (position(start), position(end)) {
+            (Some(a), Some(b)) => (a.min(b)..=a.max(b)).contains(&self.sheet),
+            _ => false,
+        }
+    }
+
+    fn any_in(&self, rows: (u32, u32), cols: (u32, u32)) -> bool {
+        self.cells
+            .iter()
+            .any(|&(r, c)| r >= rows.0 && r <= rows.1 && c >= cols.0 && c <= cols.1)
+    }
+
+    fn read_by(&self, expr: &engine::Expression, on_target: bool) -> bool {
+        use engine::Expression as E;
+        match expr {
+            E::Literal(_) | E::NamedRef { .. } | E::TableRef { .. } => false,
+            E::CellRef { sheet, col, row, .. } => {
+                let c = crate::col_letter_to_index(col);
+                let r = row.saturating_sub(1);
+                self.names_target(sheet, on_target) && self.cells.contains(&(r, c))
+            }
+            E::Range { sheet, start, end, .. } => match (start.as_ref(), end.as_ref()) {
+                (
+                    E::CellRef { sheet: start_sheet, col: sc, row: sr, .. },
+                    E::CellRef { col: ec, row: er, .. },
+                ) => {
+                    let qualifier = if sheet.is_some() { sheet } else { start_sheet };
+                    let (sc, ec) = (crate::col_letter_to_index(sc), crate::col_letter_to_index(ec));
+                    let (sr, er) = (sr.saturating_sub(1), er.saturating_sub(1));
+                    self.names_target(qualifier, on_target)
+                        && self.any_in((sr.min(er), sr.max(er)), (sc.min(ec), sc.max(ec)))
+                }
+                _ => {
+                    let on = if sheet.is_some() { self.names_target(sheet, on_target) } else { on_target };
+                    self.read_by(start, on) || self.read_by(end, on)
+                }
+            },
+            E::ColumnRef { sheet, start_col, end_col, .. } => {
+                let (sc, ec) = (crate::col_letter_to_index(start_col), crate::col_letter_to_index(end_col));
+                self.names_target(sheet, on_target) && self.any_in((0, u32::MAX), (sc.min(ec), sc.max(ec)))
+            }
+            E::RowRef { sheet, start_row, end_row, .. } => {
+                let (sr, er) = (start_row.saturating_sub(1), end_row.saturating_sub(1));
+                self.names_target(sheet, on_target) && self.any_in((sr.min(er), sr.max(er)), (0, u32::MAX))
+            }
+            E::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
+                self.span_includes_target(start_sheet, end_sheet) && self.read_by(reference, true)
+            }
+            E::BinaryOp { left, right, .. } => self.read_by(left, on_target) || self.read_by(right, on_target),
+            E::UnaryOp { operand, .. } | E::ImplicitIntersection { operand } => self.read_by(operand, on_target),
+            E::FunctionCall { args, .. } => args.iter().any(|a| self.read_by(a, on_target)),
+            E::IndexAccess { target, index } => self.read_by(target, on_target) || self.read_by(index, on_target),
+            E::ArrayLiteral { rows } => rows.iter().flatten().any(|e| self.read_by(e, on_target)),
+            E::ListLiteral { elements } => elements.iter().any(|e| self.read_by(e, on_target)),
+            E::DictLiteral { entries } => {
+                entries.iter().any(|(k, v)| self.read_by(k, on_target) || self.read_by(v, on_target))
+            }
+            E::SpillRef { cell, .. } => self.read_by(cell, on_target),
+        }
     }
 }
 
@@ -2309,7 +2572,7 @@ struct RestoreSpec {
 fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_comment_restore(s, e, d, inv); }
 fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_note_restore(s, e, d, inv); }
 fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_hyperlink_restore(s, e, d, inv); }
-fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_default_dimension_restore(s, e, k, d, inv); }
+fn r_sheet_default_size(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { crate::commands::dimensions::apply_sheet_default_size_restore(s, e, d, inv); }
 fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { if let Some(sheet) = apply_pivot_definition_restore(s, p, rf, pc, uf, e, d, inv) { rp.wrote_sheet(sheet); } }
 fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { if let Some(sheet) = apply_pivot_create_restore(s, p, d, inv, e) { rp.wrote_sheet(sheet); } }
 fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_delete_restore(s, p, rf, pc, uf, d, inv, e); }
@@ -2327,6 +2590,7 @@ fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf:
 fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pane_control_delete_restore(pc, d, inv); }
 fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_object_swap_restore(s, e, k, d, inv, rp); }
 fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_script_grid_cells_restore(s, e, d, inv, rp); }
+fn r_structural_delta(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, _e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_structural_delta_marker(k, d, inv, rp); }
 fn r_sheet_merge_regions(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_sheet_merge_regions_restore(s, e, d, inv, rp); }
 fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_sheet_structural_restore(s, e, d, inv, rp); }
 fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_report_restore(s, e, d, inv, rp); }
@@ -2353,7 +2617,9 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     m.insert("comment", RestoreSpec { restore: r_comment, domains: MutationDomains::of(Annotations), defer: false });
     m.insert("note", RestoreSpec { restore: r_note, domains: MutationDomains::of(Annotations), defer: false });
     m.insert("hyperlink", RestoreSpec { restore: r_hyperlink, domains: MutationDomains::of(Hyperlinks), defer: false });
-    // Default row height / column width. `Dimensions`, NOT `NONE`.
+    // A sheet's standard row height / column width (per sheet since BUG-0352;
+    // it was two workbook-wide kinds, `default_row_height` and
+    // `default_column_width`). `Dimensions`, NOT `NONE`.
     //
     // The comment that used to sit here said "geometry, re-read through the
     // dimension refresh the frontend already runs" — and that refresh does not
@@ -2365,8 +2631,11 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // so undoing a default row height wrote the old value into the backend and
     // left the new one on screen — the grid and the file disagreeing, silently,
     // until something unrelated forced a re-read.
-    m.insert("default_row_height", RestoreSpec { restore: r_default_dim, domains: MutationDomains::of(Dimensions), defer: false });
-    m.insert("default_column_width", RestoreSpec { restore: r_default_dim, domains: MutationDomains::of(Dimensions), defer: false });
+    //
+    // DEFERRED: the size lives on the sheet's `engine::Grid`, so the restore
+    // takes `grid` and `grids`, which the inline pass holds (std's locks are
+    // not reentrant).
+    m.insert(crate::commands::dimensions::SHEET_DEFAULT_SIZE_RESTORE_KIND, RestoreSpec { restore: r_sheet_default_size, domains: MutationDomains::of(Dimensions), defer: true });
     // A pivot auto-fit's column resize (BUG-0014). Geometry, like the two
     // above — and so the same `Dimensions` domain, for the same reason: the
     // frontend does NOT re-read dimensions on an undo unless it is told.
@@ -2420,7 +2689,13 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // extension re-read its rules, and never did.
     for (k, extra) in [
         ("obj_chart", NONE), ("obj_sparklines", NONE), ("obj_table", NONE),
-        ("obj_autofilter", NONE),
+        // An AutoFilter's store carries the rows it HIDES, so its restore is a
+        // visibility change too: `hidden_changed` both re-reads the hidden sets
+        // and re-runs SUBTOTAL/AGGREGATE (`recalc_visibility_after_undo`), as
+        // the filter itself does on hide. Undoing a resize that showed the
+        // filtered-out rows, or an Apply, re-hid them and left the totals
+        // counting them (rev15C).
+        ("obj_autofilter", MutationDomains::of(Hidden)),
         ("obj_validation", MutationDomains::of(Validations)),
         ("obj_named_range", NONE), ("obj_freeze", NONE), ("obj_extension_data", NONE),
         ("obj_cell_types", NONE), ("obj_cell_behaviors", NONE),
@@ -2473,6 +2748,12 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // structural snapshot restores (Insert/Delete Cells). Deferred: the spill
     // maps are LAST in the lock order, and it must land before the cascade
     // re-evaluates the restored origins.
+    // A coordinate change the step made (an insert / delete of lines or of a
+    // band of cells, a cut-paste move), recorded beside its snapshot so an
+    // Undo / Redo can report it (`UndoResult::structural_deltas`). It
+    // restores NOTHING -- the snapshot beside it does -- and takes no lock, so
+    // it runs inline, in the visit order the report keeps.
+    m.insert(STRUCTURAL_DELTA_RESTORE_KIND, RestoreSpec { restore: r_structural_delta, domains: NONE, defer: false });
     m.insert(SPILL_CLAIMS_RESTORE_KIND, RestoreSpec { restore: r_spill_claims, domains: OBJ, defer: true });
     // Grid reports: cell-based restore of the report cells + definitions + region.
     // Tagged Objects so the frontend fires grid:refresh on undo/redo.
@@ -3262,44 +3543,6 @@ fn apply_hyperlink_restore(
     }
 }
 
-/// Restore default row height or column width for undo/redo.
-fn apply_default_dimension_restore(
-    state: &AppState,
-    effect: &crate::document_effect::DocumentEffect,
-    kind: &str,
-    data: &[u8],
-    inverse_transaction: &mut Transaction,
-) {
-    let value: f64 = match serde_json::from_slice(data) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[undo] Failed to deserialize default dimension: {}", e);
-            return;
-        }
-    };
-
-    match kind {
-        "default_row_height" => {
-            let mut h = state.default_row_height.write(effect).unwrap();
-            let current = *h;
-            inverse_transaction.add_change(CellChange::CustomRestore {
-                kind: kind.to_string(),
-                data: serde_json::to_vec(&current).unwrap_or_default(),
-            });
-            *h = value;
-        }
-        "default_column_width" => {
-            let mut w = state.default_column_width.write(effect).unwrap();
-            let current = *w;
-            inverse_transaction.add_change(CellChange::CustomRestore {
-                kind: kind.to_string(),
-                data: serde_json::to_vec(&current).unwrap_or_default(),
-            });
-            *w = value;
-        }
-        _ => {}
-    }
-}
 
 /// Recalculate SUBTOTAL/AGGREGATE after an undo/redo that moved ROW
 /// VISIBILITY.
@@ -3320,17 +3563,50 @@ pub(crate) fn recalc_visibility_after_undo(
     ribbon_filter_state: &RibbonFilterState,
     result: &UndoResult,
 ) {
-    if !result.success || !result.hidden_changed {
-        return;
-    }
-    crate::commands::dimensions::recalc_visibility_after_row_change(
-        app,
+    use tauri::Emitter;
+    // The state-only half decides and recalculates; this half only tells the
+    // frontend to refetch, as `dimensions::recalc_visibility_after_row_change`.
+    if let Some(cells) = recalc_visibility_after_undo_core(
         state,
         user_files_state,
         pivot_state,
         pane_control_state,
         ribbon_filter_state,
-    );
+        result,
+    ) {
+        if !cells.is_empty() {
+            let _ = app.emit("grid:refresh", ());
+        }
+    }
+}
+
+/// The state-only half of [`recalc_visibility_after_undo`]: the gate and the
+/// SUBTOTAL/AGGREGATE pass, with no `AppHandle`, so a test drives the undo's
+/// follow-up exactly as the command runs it. `None` when the gate skipped the
+/// pass or the pass failed (logged; the undo itself already succeeded).
+pub(crate) fn recalc_visibility_after_undo_core(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &PaneControlState,
+    ribbon_filter_state: &RibbonFilterState,
+    result: &UndoResult,
+) -> Option<Vec<CellData>> {
+    if !result.success || !result.hidden_changed {
+        return None;
+    }
+    match crate::calculation::recalc_visibility_dependents_core(
+        state,
+        user_files_state,
+        pivot_state,
+        Some((pane_control_state, ribbon_filter_state)),
+    ) {
+        Ok(cells) => Some(cells),
+        Err(e) => {
+            crate::log_warn!("CMD", "visibility recalc after undo failed: {}", e);
+            None
+        }
+    }
 }
 
 /// Take the inverse of undone entry `seq` back OFF the redo stack -- for an
@@ -3480,6 +3756,7 @@ pub fn undo(
                     active_sheet_name,
                     restored_anchor: None,
                     restored_range: None,
+                    structural_deltas: Vec::new(),
                 };
         }
 
@@ -3510,6 +3787,7 @@ pub fn undo(
                     active_sheet_name,
                     restored_anchor: None,
                     restored_range: None,
+                    structural_deltas: Vec::new(),
                 };
             }
         }
@@ -3564,6 +3842,7 @@ pub fn redo(
                     active_sheet_name,
                     restored_anchor: None,
                     restored_range: None,
+                    structural_deltas: Vec::new(),
                 };
             }
         }
@@ -5267,7 +5546,7 @@ fn apply_object_swap_restore(
             let sheet_tables = tables.entry(snap.sheet_index).or_default();
             let current = sheet_tables.remove(&snap.table_id);
             if let Some(ref t) = current {
-                table_names.remove(&t.name.to_uppercase());
+                table_names.remove(&crate::tables::table_name_key(&t.name));
             }
             push_obj_inverse(inverse_transaction, kind, &TableObjSnapshot {
                 sheet_index: snap.sheet_index,
@@ -5275,7 +5554,7 @@ fn apply_object_swap_restore(
                 previous: current,
             });
             if let Some(t) = snap.previous {
-                table_names.insert(t.name.to_uppercase(), (snap.sheet_index, snap.table_id));
+                table_names.insert(crate::tables::table_name_key(&t.name), (snap.sheet_index, snap.table_id));
                 sheet_tables.insert(snap.table_id, t);
             }
         }
@@ -6144,6 +6423,7 @@ fn refused_history_move(
         active_sheet_name,
         restored_anchor: None,
         restored_range: None,
+        structural_deltas: Vec::new(),
     }
 }
 
@@ -6558,8 +6838,7 @@ mod restore_registry_tests {
             // default row height left the undone value painted while the backend
             // and the saved file said otherwise. `Dimensions` fans out to the
             // same bare `dimensions:refresh` every forward dimension route fires.
-            ("default_row_height", false, MutationDomains::of(Dimensions)),
-            ("default_column_width", false, MutationDomains::of(Dimensions)),
+            (crate::commands::dimensions::SHEET_DEFAULT_SIZE_RESTORE_KIND, true, MutationDomains::of(Dimensions)),
             // DEFERRED, unlike the two geometry kinds above it: `apply_changes`
             // holds `column_widths` for the whole inline pass, so an inline
             // handler that writes it deadlocks against its own caller.
@@ -6589,7 +6868,7 @@ mod restore_registry_tests {
             ("obj_chart", true, OBJ),
             ("obj_sparklines", true, OBJ),
             ("obj_table", true, OBJ),
-            ("obj_autofilter", true, OBJ),
+            ("obj_autofilter", true, obj_plus(Hidden)),
             ("obj_validation", true, obj_plus(Validations)),
             ("obj_named_range", true, OBJ),
             ("obj_freeze", true, OBJ),
@@ -6630,6 +6909,10 @@ mod restore_registry_tests {
             // User hide/unhide: inline (only touches the user_hidden_* sublocks)
             // and its own domain so the frontend re-reads the sets.
             ("user_hidden", false, MutationDomains::of(Hidden)),
+            // A step's coordinate change (BUG-0614, round 10): restores nothing,
+            // only reports itself (UndoResult::structural_deltas); inline, so the
+            // report keeps the order the step recorded.
+            ("structural_delta", false, MutationDomains::none()),
             // Sheet hide/unhide/tab colour (BUG-0050). `Sheets`, because what
             // changed is the sheet collection as the tab strip sees it;
             // DEFERRED, because putting the user back on an unhidden sheet goes
@@ -6728,6 +7011,9 @@ mod restore_registry_tests {
                 // pass holds (the pivot_col_widths reason, which the `pivot_`
                 // prefix happens to cover).
                 || *kind == crate::commands::dimensions::LINE_SIZES_RESTORE_KIND
+                // A sheet's standard size lives on its grid: the restore takes
+                // `grid` and `grids`, which the inline pass holds.
+                || *kind == crate::commands::dimensions::SHEET_DEFAULT_SIZE_RESTORE_KIND
                 || *kind == "report_restore"
                 || *kind == "calp_reset"
                 // The outline is its own per-sheet store, taken after the grid
@@ -6797,6 +7083,51 @@ pub(crate) fn coord_stores_snapshot_bytes(
 // ============================================================================
 
 /// CustomRestore `kind` for one sheet's row/column outline.
+/// The CustomRestore kind of a step's COORDINATE CHANGE marker (see
+/// [`record_structural_delta`]).
+pub(crate) const STRUCTURAL_DELTA_RESTORE_KIND: &str = "structural_delta";
+
+/// Record, in the step being built, WHERE its lines or cells moved: the
+/// `structural_delta` marker an Undo / Redo reports back
+/// (`UndoResult::structural_deltas`) so the frontend stores whose
+/// coordinates the backend never holds -- Watch Window entries, cell
+/// bookmarks, a pending Copy's source -- follow the undo as they followed
+/// the edit. Only inside an OPEN step, like `record_snapshot`: a marker on
+/// its own would be an undo step that restores nothing.
+pub(crate) fn record_structural_delta(undo_stack: &mut engine::UndoStack, delta: &crate::api_types::StructuralDelta) {
+    if undo_stack.current_transaction_mut().is_none() {
+        return;
+    }
+    match serde_json::to_vec(delta) {
+        Ok(bytes) => undo_stack.record_custom_restore(STRUCTURAL_DELTA_RESTORE_KIND.to_string(), bytes, "Structural change"),
+        Err(err) => eprintln!("[undo] could not record a structural change: {}", err),
+    }
+}
+
+/// A whole-line edit (`calp::writeback::StructuralEdit`) on `sheet_index`,
+/// as the marker's delta.
+pub(crate) fn line_edit_delta(sheet_index: usize, edit: calp::writeback::StructuralEdit) -> crate::api_types::StructuralDelta {
+    use crate::api_types::StructuralDelta as D;
+    use calp::writeback::StructuralEdit as SE;
+    match edit {
+        SE::RowInsert { at, count } => D::RowInsert { sheet_index, at, count, band: None },
+        SE::RowDelete { at, count } => D::RowDelete { sheet_index, at, count, band: None },
+        SE::ColInsert { at, count } => D::ColInsert { sheet_index, at, count, band: None },
+        SE::ColDelete { at, count } => D::ColDelete { sheet_index, at, count, band: None },
+    }
+}
+
+/// Undo / redo of a `structural_delta` marker: nothing to restore (the
+/// snapshot beside it does that). It reports the change it carries and goes
+/// into the inverse step unchanged, so the redo reports it again.
+fn apply_structural_delta_marker(kind: &str, data: &[u8], inverse_transaction: &mut Transaction, report: &mut RestoreReport) {
+    match serde_json::from_slice::<crate::api_types::StructuralDelta>(data) {
+        Ok(delta) => report.structural_deltas.push(delta),
+        Err(err) => eprintln!("[undo] unreadable structural change marker: {}", err),
+    }
+    inverse_transaction.add_change(CellChange::CustomRestore { kind: kind.to_string(), data: data.to_vec() });
+}
+
 pub(crate) const OUTLINE_RESTORE_KIND: &str = "outline";
 
 /// Snapshot for the `"outline"` CustomRestore — one sheet's WHOLE outline
@@ -6839,6 +7170,16 @@ pub(crate) fn record_outline_undo(
         serde_json::to_vec(&snap).unwrap_or_default(),
         description,
     );
+}
+
+/// The [`OUTLINE_RESTORE_KIND`] payload for a caller that records it inside a
+/// transaction it already holds (a batch resize that expands collapsed groups
+/// records the outline in the SAME owned step as the sizes it set).
+pub(crate) fn outline_snapshot_bytes(
+    sheet_index: usize,
+    previous: Option<crate::grouping::SheetOutline>,
+) -> Vec<u8> {
+    serde_json::to_vec(&OutlineSnapshot { sheet_index, previous }).unwrap_or_default()
 }
 
 // ============================================================================

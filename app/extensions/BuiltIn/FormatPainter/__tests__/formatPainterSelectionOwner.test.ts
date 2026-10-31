@@ -20,7 +20,10 @@ const h = vi.hoisted(() => ({
 vi.mock("@api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api")>()),
   getCell: (...a: unknown[]) => h.getCell(...a),
-  setCellStyle: (...a: unknown[]) => h.setCellStyle(...a),
+  // The stroke's whole-rectangle CHECK (`checkArea`, writes nothing) is not a
+  // paint: only the cell writes are counted here.
+  setCellStyle: async (...a: unknown[]) =>
+    (a[3] as { checkArea?: unknown } | undefined)?.checkArea ? null : h.setCellStyle(...a),
   beginUndoTransaction: (...a: unknown[]) => h.begin(...a),
   commitUndoTransaction: (...a: unknown[]) => h.commit(...a),
   cancelUndoTransaction: vi.fn(),

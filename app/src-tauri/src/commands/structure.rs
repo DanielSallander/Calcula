@@ -32,12 +32,21 @@ pub(crate) mod structure_cells;
 // shifter that used it, the sheet-blind `relocate_references_in_formula`; every
 // cell pass now matches a cell WITH its range partner -- `CELL_REF_OR_RANGE_RE`
 // below, or `QUALIFIED_REF_RE` on the sheet-aware paths.)
+//
+// THE LEAD IS "NOT AN IDENTIFIER CHARACTER" BY THE LEXER'S OWN CLASS
+// (`is_letter` in core/parser/src/lexer.rs: any Unicode ALPHABETIC character,
+// `_` and `\`, plus the digits and the name dot), not by ASCII. Since the
+// lexer reads `=Översikt!$B$1` bare, an ASCII lead let `Ö` stand as the
+// delimiter, so the qualifier read `versikt` -- and `Straße!A1` read `e`.
+// Defined names and bindings keep that text verbatim, so a row insert on
+// Översikt silently stopped moving them (Excel [LIVE] moves them).
 static ROW_RANGE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(^|[^A-Za-z0-9_.:$])(\$?)(\d+):(\$?)(\d+)").unwrap());
-static COL_RANGE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(^|[^A-Za-z0-9_.:])(\$?)([A-Za-z]{1,3}):(\$?)([A-Za-z]{1,3})").unwrap());
+    Lazy::new(|| Regex::new(r"(^|[^\p{Alphabetic}0-9_.\\:$])(\$?)(\d+):(\$?)(\d+)").unwrap());
+static COL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(^|[^\p{Alphabetic}0-9_.\\:])(\$?)([A-Za-z]{1,3}):(\$?)([A-Za-z]{1,3})").unwrap()
+});
 static CELL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(^|[^A-Za-z0-9_.])(\$?)([A-Za-z]{1,3})(\$?)(\d+):(\$?)([A-Za-z]{1,3})(\$?)(\d+)")
+    Regex::new(r"(^|[^\p{Alphabetic}0-9_.\\])(\$?)([A-Za-z]{1,3})(\$?)(\d+):(\$?)([A-Za-z]{1,3})(\$?)(\d+)")
         .unwrap()
 });
 /// A cell reference WITH ITS RANGE PARTNER, when it has one — one match for
@@ -59,7 +68,7 @@ static CELL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
 /// `QUALIFIED_REF_RE` already did on the sheet-aware path.
 static CELL_REF_OR_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(^|[^A-Za-z0-9_.])(\$?)([A-Za-z]{1,3})(\$?)(\d+)(?::(\$?)([A-Za-z]{1,3})(\$?)(\d+))?",
+        r"(^|[^\p{Alphabetic}0-9_.\\])(\$?)([A-Za-z]{1,3})(\$?)(\d+)(?::(\$?)([A-Za-z]{1,3})(\$?)(\d+))?",
     )
     .unwrap()
 });
@@ -545,7 +554,7 @@ fn shift_table_boundaries_for_row_delete(state: &AppState, effect: &crate::docum
         // Remove from name registry
         for id in &to_remove {
             if let Some(table) = sheet_tables.get(id) {
-                table_names.remove(&table.name.to_uppercase());
+                table_names.remove(&crate::tables::table_name_key(&table.name));
             }
         }
 
@@ -594,7 +603,7 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, effect: &crate::docum
         // Remove from name registry
         for id in &to_remove {
             if let Some(table) = sheet_tables.get(id) {
-                table_names.remove(&table.name.to_uppercase());
+                table_names.remove(&crate::tables::table_name_key(&table.name));
             }
         }
 
@@ -1708,6 +1717,12 @@ pub(crate) fn insert_rows_impl(
     // Record snapshot for undo
     let owned_txn = undo_stack.begin_owned_transaction(format!("Insert {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // WHERE the lines moved, for the stores the backend never holds (an
+    // Undo / Redo reports it back: UndoResult::structural_deltas).
+    crate::undo_commands::record_structural_delta(
+        &mut undo_stack,
+        &crate::undo_commands::line_edit_delta(active_sheet, calp::writeback::StructuralEdit::RowInsert { at: row, count }),
+    );
     // ...and the spill claims the snapshot does not carry (see the helper).
     record_spill_claims_for_undo(&state, &mut undo_stack, active_sheet);
     // Past every refusal gate above (sheet-protection options + the writeback
@@ -2233,6 +2248,12 @@ pub(crate) fn insert_columns_impl(
     // Record snapshot for undo
     let owned_txn = undo_stack.begin_owned_transaction(format!("Insert {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // WHERE the lines moved, for the stores the backend never holds (an
+    // Undo / Redo reports it back: UndoResult::structural_deltas).
+    crate::undo_commands::record_structural_delta(
+        &mut undo_stack,
+        &crate::undo_commands::line_edit_delta(active_sheet, calp::writeback::StructuralEdit::ColInsert { at: col, count }),
+    );
     // ...and the spill claims the snapshot does not carry (see the helper).
     record_spill_claims_for_undo(&state, &mut undo_stack, active_sheet);
     // Past every refusal gate above (sheet-protection options + the writeback
@@ -2908,6 +2929,15 @@ pub(crate) fn shift_formula_internal_with_tables(
     col_delta: i32,
     tables: Option<&dyn TableColumns>,
 ) -> String {
+    // A LET / LAMBDA NAME IS NOT A COLUMN HERE EITHER. Fill Right, Fill Down
+    // and Copy+Paste of `=LET(b,2,SUM(B:B)*b)` keep `b:b` [LIVE, Excel 16,
+    // round 20, parsefix/probe1.ps1: FillRight, FillDown and Range.Copy all
+    // leave `SUM(b:b)` and `b:D`, while `=LET(b,2,SUM(A:B))` goes to `B:C`
+    // and `=LET(x,2,SUM(B:B)*x)` to `C:C`]. The regex passes below cannot see
+    // a binder's scope, so such a range is held out of the text, exactly as
+    // the structural shift does (`shift_formula_cols_sheet_aware`).
+    let (held_formula, held) = hold_parameter_column_ranges(formula);
+    let formula = held_formula.as_str();
     // Structured references first, off the PRISTINE text: the A1 passes below
     // skip bracket spans entirely, so they neither see nor disturb this.
     let mut result = match tables {
@@ -2927,7 +2957,7 @@ pub(crate) fn shift_formula_internal_with_tables(
 
     // Normalize any ranges that became inverted after shifting.
     // Example: I10:$I$11 shifted by +3 rows --> I13:$I$11 --> $I$11:I13
-    normalize_inverted_ranges(&result)
+    release_parameter_column_ranges(normalize_inverted_ranges(&result), &held)
 }
 
 // ============================================================================
@@ -3143,7 +3173,7 @@ impl TableColumns for WorkbookTableColumns<'_> {
         };
         let found = match table {
             Some(name) => names
-                .get(&name.to_uppercase())
+                .get(&crate::tables::table_name_key(name))
                 .and_then(|(sheet, id)| tables.get(sheet).and_then(|m| m.get(id))),
             None => self.anchor.and_then(|(row, col)| {
                 tables
@@ -3754,6 +3784,12 @@ pub(crate) fn delete_rows_impl(
     // Record snapshot for undo
     let owned_txn = undo_stack.begin_owned_transaction(format!("Delete {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // WHERE the lines moved, for the stores the backend never holds (an
+    // Undo / Redo reports it back: UndoResult::structural_deltas).
+    crate::undo_commands::record_structural_delta(
+        &mut undo_stack,
+        &crate::undo_commands::line_edit_delta(active_sheet, calp::writeback::StructuralEdit::RowDelete { at: row, count }),
+    );
     // ...and the spill claims the snapshot does not carry (see the helper).
     record_spill_claims_for_undo(&state, &mut undo_stack, active_sheet);
     // BUG-0054: restores for the pivots this delete removes outright, INSIDE
@@ -4332,6 +4368,12 @@ pub(crate) fn delete_columns_impl(
     // Record snapshot for undo
     let owned_txn = undo_stack.begin_owned_transaction(format!("Delete {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // WHERE the lines moved, for the stores the backend never holds (an
+    // Undo / Redo reports it back: UndoResult::structural_deltas).
+    crate::undo_commands::record_structural_delta(
+        &mut undo_stack,
+        &crate::undo_commands::line_edit_delta(active_sheet, calp::writeback::StructuralEdit::ColDelete { at: col, count }),
+    );
     // ...and the spill claims the snapshot does not carry (see the helper).
     record_spill_claims_for_undo(&state, &mut undo_stack, active_sheet);
     // BUG-0054: restores for the pivots this delete removes outright — see the
@@ -4949,7 +4991,7 @@ pub(crate) struct CellMove<'a> {
 
 impl CellMove<'_> {
     fn same_sheet(&self) -> bool {
-        self.source_sheet.eq_ignore_ascii_case(self.dest_sheet)
+        identity::sheet_names_equal(&self.source_sheet, &self.dest_sheet)
     }
 
     /// Where a reference on the SOURCE sheet goes (`end == start` for a
@@ -5129,7 +5171,7 @@ pub(crate) fn relocate_references_for_move(
     home_sheet: &str,
     mv: &CellMove,
 ) -> String {
-    let rehomed = !read_sheet.eq_ignore_ascii_case(home_sheet);
+    let rehomed = !identity::sheet_names_equal(&read_sheet, &home_sheet);
     if mv.same_sheet() && mv.delta_row == 0 && mv.delta_col == 0 && !rehomed {
         return formula.to_string();
     }
@@ -5156,7 +5198,7 @@ pub(crate) fn relocate_references_for_move(
         let qualified = quoted.is_some() || bare.is_some();
         if same_sheet && qualified {
             qualifier_prefix(quoted, bare)
-        } else if qualified || !mv.dest_sheet.eq_ignore_ascii_case(home_sheet) {
+        } else if qualified || !identity::sheet_names_equal(&mv.dest_sheet, &home_sheet) {
             format!("{}!", engine::ast_render::quote_sheet_name(mv.dest_sheet))
         } else {
             String::new()
@@ -5389,16 +5431,26 @@ pub(crate) fn names_a_sheet(expr: &engine::Expression) -> bool {
 /// ambiguous and left as it is. Records one `obj_named_ranges` undo entry when
 /// anything moved and returns the names it rewrote, for
 /// `recalc_after_name_change`.
-fn relocate_named_ranges(
+pub(crate) fn relocate_named_ranges(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
     sheet_names: &[String],
     mv: &CellMove,
 ) -> Vec<String> {
-    // The name store is released BEFORE the undo stack is taken: the name
-    // writers hold `named_ranges` while they record their step (after `grid`
-    // and `grids`), so holding the stack here while taking the store closed a
-    // cycle with them (no_function_holds_the_undo_stack_and_a_name_store_...).
+    // THE NAME WRITERS' ORDER, held until the step is recorded (round-9
+    // review rev8B): `grid`, `grids`, then the registry, then the undo stack
+    // -- the order create / update / delete / rename take (they hold `grid`
+    // and the registry until their step is recorded). Releasing the registry
+    // before the stack let a name writer run whole in between, and the
+    // whole-registry snapshot recorded here -- taken BEFORE that writer --
+    // would then undo its change too. The grid locks come first so no
+    // grid-holding writer can be holding the stack while it waits for the
+    // registry; they are only HELD here (the caller released them, and this
+    // writes no cell). The stack is still never held while the registry is
+    // taken, which was the cycle `no_function_holds_the_undo_stack_and_a_name_store_...`
+    // fixed.
+    let _grid = state.grid.lock_pending().unwrap();
+    let _grids = state.grids.lock_pending().unwrap();
     let mut store = match state.named_ranges.write(effect) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -5418,7 +5470,6 @@ fn relocate_named_ranges(
             changed_names.push(nr.name.clone());
         }
     }
-    drop(store);
     if !changed_names.is_empty() {
         changed_names.sort();
         let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -5428,6 +5479,7 @@ fn relocate_named_ranges(
             "Move named ranges",
         );
     }
+    drop(store);
     changed_names
 }
 
@@ -5467,6 +5519,15 @@ fn relocate_named_ranges(
 /// own guards are dropped; a rewritten formula on another sheet recalculates
 /// its sheet (`recalc_after_off_sheet_write`), and a rewritten name its readers
 /// (`recalc_after_name_change`).
+///
+/// `record_move` (default true): the step records the block as MOVED (the
+/// `structural_delta` marker), so an Undo / Redo tells the frontend's cell
+/// followers (a watch, a bookmark) to move it back and forth. No frontend
+/// caller passes false: a drag of whole rows or columns is a block move too --
+/// it overwrites the lines it lands on, and the lines it passes over stay
+/// where they are [LIVE 2026-10-30: Range("3:4").Cut Range("A10") moves the
+/// watches on C3/C4 to C10/C11, keeps C6's, removes C10's and C11's]. False
+/// remains for a caller that re-points references without moving any cell.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn relocate_cell_references(
@@ -5483,8 +5544,9 @@ pub fn relocate_cell_references(
     dest_start_row: u32,
     dest_start_col: u32,
     src_sheet_index: Option<usize>,
+    record_move: Option<bool>,
 ) -> Result<Vec<CellData>, String> {
-    relocate_cell_references_core(
+    relocate_cell_references_recording(
         state.inner(),
         file_state.inner(),
         user_files_state.inner(),
@@ -5498,11 +5560,12 @@ pub fn relocate_cell_references(
         dest_start_row,
         dest_start_col,
         src_sheet_index,
+        record_move.unwrap_or(true),
     )
 }
 
 /// The body of [`relocate_cell_references`], over plain references so the
-/// tests drive it with no Tauri runtime.
+/// tests drive it with no Tauri runtime; the step records the block as moved.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn relocate_cell_references_core(
     state: &AppState,
@@ -5518,6 +5581,43 @@ pub(crate) fn relocate_cell_references_core(
     dest_start_row: u32,
     dest_start_col: u32,
     src_sheet_index: Option<usize>,
+) -> Result<Vec<CellData>, String> {
+    relocate_cell_references_recording(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        src_start_row,
+        src_start_col,
+        src_end_row,
+        src_end_col,
+        dest_start_row,
+        dest_start_col,
+        src_sheet_index,
+        true,
+    )
+}
+
+/// [`relocate_cell_references_core`], choosing whether the step records the
+/// block as MOVED (see `record_move` on the command).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn relocate_cell_references_recording(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &crate::UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    src_start_row: u32,
+    src_start_col: u32,
+    src_end_row: u32,
+    src_end_col: u32,
+    dest_start_row: u32,
+    dest_start_col: u32,
+    src_sheet_index: Option<usize>,
+    record_move: bool,
 ) -> Result<Vec<CellData>, String> {
     // Cut/paste relocation re-evaluates the formulas it rewrites and WRITES the
     // results, so it is an Interactive surface: same ceiling as typing them.
@@ -5574,6 +5674,27 @@ pub(crate) fn relocate_cell_references_core(
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+
+    // WHERE the block went, in the paste's own step (the caller holds it open),
+    // so its Undo / Redo can tell the stores the backend never holds (a Watch
+    // Window entry, a cell bookmark) to move back and forth with it, as
+    // Excel's do [LIVE: a watch on a cut-pasted cell follows it, and Undo
+    // moves it back].
+    if record_move {
+        crate::undo_commands::record_structural_delta(
+            &mut undo_stack,
+            &crate::api_types::StructuralDelta::Move {
+                from_sheet_index: source_sheet,
+                from_start_row: src_min_row,
+                from_start_col: src_min_col,
+                from_end_row: src_max_row,
+                from_end_col: src_max_col,
+                to_sheet_index: active_sheet,
+                to_row: dest_start_row,
+                to_col: dest_start_col,
+            },
+        );
+    }
 
     let block = (src_min_row, src_min_col, src_max_row, src_max_col);
     // The sheet the block landed on (the active one) and the one it left.
@@ -5767,8 +5888,9 @@ pub(crate) fn relocate_cell_references_core(
     drop(grid);
     drop(sheet_names);
 
-    // 3. DEFINED NAMES: the name store, released, then the undo stack -- never
-    // both at once (the name writers take the store before the stack).
+    // 3. DEFINED NAMES, after every guard above is released: `grid`, `grids`,
+    // the name store and then the undo stack, held until the step is recorded
+    // -- the name writers' own order (see `relocate_named_ranges`).
     let changed_names = relocate_named_ranges(state, &effect, &names_of_sheets, &mv);
 
     recalc_after_active_sheet_bulk_rewrite(
@@ -6134,7 +6256,7 @@ mod structural_formula_shift_tests {
     /// A COLUMN NAME THAT LOOKS LIKE A CELL ADDRESS USED TO BE REWRITTEN.
     ///
     /// The shifters are A1 regexes over formula TEXT. `CELL_REF_OR_RANGE_RE`'s leading
-    /// class `[^A-Za-z0-9_.]` admits `[`, and `replace_all_guarded`'s trailing
+    /// class `[^\p{Alphabetic}0-9_.\\]` admits `[`, and `replace_all_guarded`'s trailing
     /// guard does not block `]` — so `Table1[Q1]` filled one row down became
     /// `Table1[Q2]`. Quarter and half-year names are exactly that shape, which
     /// makes this the common case rather than a corner: `resolve_column_range`
@@ -6152,7 +6274,7 @@ mod structural_formula_shift_tests {
     /// A DOTTED RANGE USED TO STOP TRACKING ITS DATA, SILENTLY.
     ///
     /// Every shifter here is an A1 regex over formula TEXT, and `CELL_REF_OR_RANGE_RE`'s
-    /// leading class `[^A-Za-z0-9_.]` excludes `.` on purpose — so that a dotted
+    /// leading class `[^\p{Alphabetic}0-9_.\\]` excludes `.` on purpose — so that a dotted
     /// defined name like `Q1.Sales` is not read as a reference. The `.` operator
     /// puts a dot in exactly that position, so each dot froze the end it touched:
     ///
@@ -7021,9 +7143,16 @@ mod range_string_shift_tests {
 /// its A1 attributed to Sheet2 but its A10 to the formula's own sheet — a
 /// structural edit then shifted one endpoint and not the other, silently
 /// resizing the range.
+///
+/// A BARE QUALIFIER IS READ WITH THE LEXER'S LETTER CLASS (any Unicode
+/// alphabetic character, `_`, `\`), and so is the lead. Excel writes
+/// `=Översikt!$B$1` bare -- in the formula bar and in an .xlsx defined name --
+/// and the lexer reads it; with an ASCII class the `Ö` became the LEAD and the
+/// qualifier `versikt`, so the reference stopped following its sheet's row and
+/// column edits (and `Straße!A1` read as sheet `E`).
 static QUALIFIED_REF_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(^|[^A-Za-z0-9_.])(?:(?:'([^']*)'|([A-Za-z_][A-Za-z0-9_.]*))!)?(\$?)([A-Za-z]{1,3})(\$?)(\d+)(?::(\$?)([A-Za-z]{1,3})(\$?)(\d+))?",
+        r"(^|[^\p{Alphabetic}0-9_.\\])(?:(?:'([^']*)'|([\p{Alphabetic}_\\][\p{Alphabetic}0-9_.\\]*))!)?(\$?)([A-Za-z]{1,3})(\$?)(\d+)(?::(\$?)([A-Za-z]{1,3})(\$?)(\d+))?",
     )
     .unwrap()
 });
@@ -7036,7 +7165,7 @@ static QUALIFIED_REF_RE: Lazy<Regex> = Lazy::new(|| {
 /// names 1-3 letters) from being renumbered as a column range.
 static QUALIFIED_COL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(^|[^A-Za-z0-9_.:])(?:(?:'([^']*)'|([A-Za-z_][A-Za-z0-9_.]*))!)?(\$?)([A-Za-z]{1,3}):(\$?)([A-Za-z]{1,3})",
+        r"(^|[^\p{Alphabetic}0-9_.\\:])(?:(?:'([^']*)'|([\p{Alphabetic}_\\][\p{Alphabetic}0-9_.\\]*))!)?(\$?)([A-Za-z]{1,3}):(\$?)([A-Za-z]{1,3})",
     )
     .unwrap()
 });
@@ -7047,7 +7176,7 @@ static QUALIFIED_COL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
 /// tail of an already-rewritten `$A$1` cannot seed a bogus match.
 static QUALIFIED_ROW_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(^|[^A-Za-z0-9_.:$])(?:(?:'([^']*)'|([A-Za-z_][A-Za-z0-9_.]*))!)?(\$?)(\d+):(\$?)(\d+)",
+        r"(^|[^\p{Alphabetic}0-9_.\\:$])(?:(?:'([^']*)'|([\p{Alphabetic}_\\][\p{Alphabetic}0-9_.\\]*))!)?(\$?)(\d+):(\$?)(\d+)",
     )
     .unwrap()
 });
@@ -7069,9 +7198,11 @@ fn replace_all_guarded(
     for caps in re.captures_iter(input) {
         let m = caps.get(0).unwrap();
         out.push_str(&input[last..m.start()]);
+        // By CHARACTER, with the lexer's letter class: `A1ä` is one name to
+        // the lexer, so its `A1` is no reference.
         let blocked = matches!(
-            input[m.end()..].bytes().next(),
-            Some(b) if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'(' || b == b'!'
+            input[m.end()..].chars().next(),
+            Some(c) if c.is_ascii_digit() || c.is_alphabetic() || matches!(c, '_' | '\\' | '.' | '(' | '!')
         );
         if blocked {
             out.push_str(m.as_str());
@@ -7092,7 +7223,7 @@ fn replace_all_guarded(
 /// quote, per Excel.)
 ///
 /// THE BRACKET HALF, AND WHY IT IS NOT COSMETIC. The shifters are A1 REGEXES
-/// over formula TEXT, and `CELL_REF_OR_RANGE_RE`'s leading class `[^A-Za-z0-9_.]` admits
+/// over formula TEXT, and `CELL_REF_OR_RANGE_RE`'s leading class `[^\p{Alphabetic}0-9_.\\]` admits
 /// `[` while `replace_all_guarded`'s trailing guard does not block `]`. So a
 /// table column whose NAME LOOKS LIKE A CELL ADDRESS was rewritten as if it were
 /// one — and quarter and half-year names are exactly that:
@@ -7199,7 +7330,7 @@ fn rewrite_outside_strings(formula: &str, mut rewrite: impl FnMut(&str) -> Strin
 /// the text, then puts them back on the same colons.
 ///
 /// WHY, MEASURED. Every shifter in this file is an A1 regex over formula TEXT,
-/// and `CELL_REF_OR_RANGE_RE`'s leading class `[^A-Za-z0-9_.]` excludes `.` — deliberately,
+/// and `CELL_REF_OR_RANGE_RE`'s leading class `[^\p{Alphabetic}0-9_.\\]` excludes `.` — deliberately,
 /// so a dotted defined name like `Q1.Sales` is not mistaken for a reference. The
 /// dot operator puts a `.` in exactly that position, and the result was a range
 /// that silently stopped moving:
@@ -7248,8 +7379,11 @@ fn shift_with_trim_dots_lifted(segment: &str, rewrite: &mut impl FnMut(&str) -> 
             i = colon + 1 + usize::from(trailing);
             continue;
         }
-        clean.push(bytes[i] as char);
-        i += 1;
+        // A whole CHARACTER: `bytes[i] as char` read each UTF-8 byte of `Ö`
+        // as a Latin-1 character, so `=Översikt!A1:.A8` came back mangled.
+        let ch = segment[i..].chars().next().unwrap_or('\u{FFFD}');
+        clean.push(ch);
+        i += ch.len_utf8();
     }
     if marks.is_empty() {
         return rewrite(segment);
@@ -7425,8 +7559,8 @@ fn qualifier_is_edited_sheet(
     edited_sheet: &str,
 ) -> bool {
     match quoted.as_deref().or(bare.as_deref()) {
-        Some(q) => lifted_sheet_name(q).eq_ignore_ascii_case(edited_sheet),
-        None => formula_sheet.eq_ignore_ascii_case(edited_sheet),
+        Some(q) => identity::sheet_names_equal(&lifted_sheet_name(q), &edited_sheet),
+        None => identity::sheet_names_equal(&formula_sheet, &edited_sheet),
     }
 }
 
@@ -7672,7 +7806,16 @@ pub(crate) fn shift_formula_cols_sheet_aware(
         structural_span(shift_col_to_index(a), shift_col_to_index(b), from_col, delta, false)
             .map(|(x, y)| (shift_index_to_col(x), shift_index_to_col(y)))
     };
-    rewrite_outside_strings(formula, |segment| {
+    // A LET / LAMBDA NAME IS NOT A COLUMN. `=LET(b,2,SUM(B:B)*b)` reads the
+    // name `b` twice (the parser binds it: `parser::bind_parameter_column_ranges`),
+    // and [LIVE] Excel 16 (round 19, misc19/probe1.ps1) leaves it alone under
+    // Insert Column before B -- `SUM(b:b)` stays, and so does `b:D`, while
+    // `$B:$B`, `B5` and an unbound `=LET(x,2,SUM(B:B)*x)` follow the column.
+    // The regexes below cannot see a binder's scope, so such a range is held
+    // out of the text here and put back after.
+    let (held_formula, held) = hold_parameter_column_ranges(formula);
+    let formula = held_formula.as_str();
+    let shifted = rewrite_outside_strings(formula, |segment| {
         // Pass 1: cell refs and cell ranges.
         let pass1 = replace_all_guarded(&QUALIFIED_REF_RE, segment, |caps| {
             let lead = &caps[1];
@@ -7757,7 +7900,262 @@ pub(crate) fn shift_formula_cols_sheet_aware(
                 _ => format!("{}{}", lead, REF_ERROR),
             }
         })
-    })
+    });
+    release_parameter_column_ranges(shifted, &held)
+}
+
+/// The first of the placeholder characters [`hold_parameter_column_ranges`]
+/// puts in place of a held range: Supplementary Private Use Area-A, which no
+/// formula, sheet name or shifter pattern uses (the lifts above use U+0001 and
+/// U+0002), so no pattern can match, split or move one.
+const HELD_RANGE_BASE: u32 = 0xF0000;
+
+/// Replace every bare whole-column range that a LET / LAMBDA name in scope
+/// spells -- by the parser's rule, `parser::bind_parameter_column_ranges`:
+/// unqualified, neither side `$`, and the START letters a bound name (then the
+/// end is a name too, `b:D`, or R1C1's own column / row) -- with one
+/// placeholder character each. Returns the held text and the
+/// ranges, in order, for [`release_parameter_column_ranges`].
+///
+/// THE SCOPE RULE, as the parser applies it: a LET name is bound in every LATER
+/// value and in the calculation, never in its own value
+/// (`=LET(b,SUM(B:B),b)` sums column B); a LAMBDA parameter is bound in the
+/// body. Strings, quoted sheet names and `[...]` brackets are skipped whole, and
+/// `{...}` is its own frame so an array constant's commas count no arguments.
+fn hold_parameter_column_ranges(formula: &str) -> (String, Vec<String>) {
+    let spans = parameter_column_range_spans(formula);
+    if spans.is_empty() {
+        return (formula.to_string(), Vec::new());
+    }
+    let mut out = String::with_capacity(formula.len());
+    let mut held: Vec<String> = Vec::with_capacity(spans.len());
+    let mut last = 0usize;
+    for (start, end) in spans {
+        let Some(mark) = char::from_u32(HELD_RANGE_BASE + held.len() as u32) else {
+            break;
+        };
+        out.push_str(&formula[last..start]);
+        out.push(mark);
+        held.push(formula[start..end].to_string());
+        last = end;
+    }
+    out.push_str(&formula[last..]);
+    (out, held)
+}
+
+/// Put back what [`hold_parameter_column_ranges`] held, exactly as written.
+fn release_parameter_column_ranges(text: String, held: &[String]) -> String {
+    if held.is_empty() {
+        return text;
+    }
+    let mut out = String::with_capacity(text.len() + held.iter().map(String::len).sum::<usize>());
+    for ch in text.chars() {
+        let code = ch as u32;
+        match code.checked_sub(HELD_RANGE_BASE).map(|i| i as usize) {
+            Some(i) if i < held.len() => out.push_str(&held[i]),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// The byte spans of the ranges [`hold_parameter_column_ranges`] holds.
+fn parameter_column_range_spans(formula: &str) -> Vec<(usize, usize)> {
+    #[derive(PartialEq)]
+    enum Kind {
+        Let,
+        Lambda,
+        Other,
+    }
+    struct Frame {
+        kind: Kind,
+        arg: usize,
+        /// The argument so far is exactly one identifier: this one.
+        slot_ident: Option<String>,
+        slot_tokens: usize,
+        /// A LET name waiting for its value to end.
+        pending: Option<String>,
+        bound: Vec<String>,
+    }
+    fn note_token(stack: &mut [Frame], ident: Option<String>) {
+        if let Some(top) = stack.last_mut() {
+            top.slot_ident = if top.slot_tokens == 0 { ident } else { None };
+            top.slot_tokens += 1;
+        }
+    }
+    let chars: Vec<(usize, char)> = formula.char_indices().collect();
+    let n = chars.len();
+    let byte_at = |k: usize| if k < n { chars[k].0 } else { formula.len() };
+    let is_ident_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '\\');
+    let letters_at = |k: usize| -> usize {
+        let mut j = k;
+        while j < n && j - k < 4 && chars[j].1.is_ascii_alphabetic() {
+            j += 1;
+        }
+        j - k
+    };
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut last_ident: Option<String> = None;
+    let mut prev_sig: Option<char> = None;
+    let mut k = 0usize;
+    while k < n {
+        let c = chars[k].1;
+        if c.is_whitespace() {
+            last_ident = None;
+            k += 1;
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                // A string literal or a quoted sheet name, its doubled quote an
+                // escape: one token, never formula text.
+                let mut j = k + 1;
+                while j < n {
+                    if chars[j].1 == c {
+                        if j + 1 < n && chars[j + 1].1 == c {
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+                note_token(&mut stack, None);
+                last_ident = None;
+                prev_sig = Some(c);
+                k = j + 1;
+                continue;
+            }
+            '[' => {
+                let mut depth = 0usize;
+                let mut j = k;
+                while j < n {
+                    match chars[j].1 {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                note_token(&mut stack, None);
+                last_ident = None;
+                prev_sig = Some(']');
+                k = j + 1;
+                continue;
+            }
+            '(' | '{' => {
+                let kind = match (c, last_ident.as_deref()) {
+                    ('(', Some(name)) => {
+                        let upper = name.to_ascii_uppercase();
+                        match upper.strip_prefix("_XLFN.").unwrap_or(&upper) {
+                            "LET" => Kind::Let,
+                            "LAMBDA" => Kind::Lambda,
+                            _ => Kind::Other,
+                        }
+                    }
+                    _ => Kind::Other,
+                };
+                note_token(&mut stack, None);
+                stack.push(Frame { kind, arg: 0, slot_ident: None, slot_tokens: 0, pending: None, bound: Vec::new() });
+                last_ident = None;
+                prev_sig = Some(c);
+                k += 1;
+                continue;
+            }
+            ')' | '}' => {
+                stack.pop();
+                last_ident = None;
+                prev_sig = Some(c);
+                k += 1;
+                continue;
+            }
+            ',' => {
+                if let Some(top) = stack.last_mut() {
+                    match top.kind {
+                        Kind::Let => {
+                            if top.arg % 2 == 0 {
+                                top.pending = top.slot_ident.take();
+                            } else if let Some(name) = top.pending.take() {
+                                top.bound.push(name);
+                            }
+                        }
+                        Kind::Lambda => {
+                            if let Some(name) = top.slot_ident.take() {
+                                top.bound.push(name);
+                            }
+                        }
+                        Kind::Other => {}
+                    }
+                    top.arg += 1;
+                    top.slot_ident = None;
+                    top.slot_tokens = 0;
+                }
+                last_ident = None;
+                prev_sig = Some(',');
+                k += 1;
+                continue;
+            }
+            _ => {}
+        }
+        // A bare whole-column range: `$?L{1,3}:$?L{1,3}`, not the tail of a
+        // qualifier (`Sheet2!B:B`) or a span (`Jan:Mar`), and not the front of
+        // a longer name (`Jan:Mar!A1`, `B:B2`).
+        if (c == '$' || c.is_ascii_alphabetic()) && !matches!(prev_sig, Some('!') | Some(':')) {
+            let abs1 = c == '$';
+            let s1 = if abs1 { k + 1 } else { k };
+            let l1 = letters_at(s1);
+            if (1..=3).contains(&l1) && s1 + l1 < n && chars[s1 + l1].1 == ':' {
+                let after_colon = s1 + l1 + 1;
+                let abs2 = after_colon < n && chars[after_colon].1 == '$';
+                let s2 = if abs2 { after_colon + 1 } else { after_colon };
+                let l2 = letters_at(s2);
+                let end = s2 + l2;
+                let blocked = end < n && (is_ident_char(chars[end].1) || matches!(chars[end].1, '(' | '!'));
+                if (1..=3).contains(&l2) && !blocked {
+                    let first: String = chars[s1..s1 + l1].iter().map(|(_, ch)| *ch).collect();
+                    let is_bound = |letters: &str| {
+                        stack.iter().any(|f| f.bound.iter().any(|b| b.eq_ignore_ascii_case(letters)))
+                    };
+                    // The FIRST half decides, as in the parser: `A:B` under
+                    // `LET(b,..)` is columns A:B [LIVE, Excel 16, round 20,
+                    // parsefix/probe1.ps1: Insert Column before A turns
+                    // `=LET(b,2,SUM(A:B))` into `SUM(B:C)`, and a Fill Right
+                    // does the same], while `b:D` is held whole.
+                    if !abs1 && !abs2 && is_bound(&first) {
+                        spans.push((byte_at(k), byte_at(end)));
+                    }
+                    note_token(&mut stack, None);
+                    last_ident = None;
+                    prev_sig = Some('r');
+                    k = end;
+                    continue;
+                }
+            }
+        }
+        if c.is_alphabetic() || c == '_' || c == '\\' {
+            let mut j = k;
+            while j < n && is_ident_char(chars[j].1) {
+                j += 1;
+            }
+            let ident: String = chars[k..j].iter().map(|(_, ch)| *ch).collect();
+            note_token(&mut stack, Some(ident.clone()));
+            last_ident = Some(ident);
+            prev_sig = Some('a');
+            k = j;
+            continue;
+        }
+        note_token(&mut stack, None);
+        last_ident = None;
+        prev_sig = Some(c);
+        k += 1;
+    }
+    spans
 }
 
 /// A `QUALIFIED_REF_RE` match that is the END of a 3-D span: `:Sheet4!A5` in
@@ -7850,6 +8248,72 @@ mod sheet_aware_shift_tests {
             shift_formula_cols_sheet_aware("=SUM(Sheet2!B:B)", "Sheet1", "Sheet2", 0, 1),
             "=SUM(Sheet2!C:C)"
         );
+    }
+
+    /// NEW-structural-shift-rewrites-let-bound-column-range (misc19, round 19).
+    /// Inside LET / LAMBDA a bare `B:B` whose letters name a binder in scope is
+    /// that NAME twice (the parser binds it), and the column shift rewrote it to
+    /// `C:C`, so the formula started reading column C. [LIVE] Excel 16 (round
+    /// 19, misc19/probe1.ps1), Insert Column before B, formula text read back
+    /// with Formula2: `=LET(b,2,SUM(b:b)*b)`, `=LET(b,A1:A3,SUM(b:b))`,
+    /// `=LET(b,A1:A3,SUM(b:D))` and `=LAMBDA(b,SUM(b:b))(A1:A2)` unchanged;
+    /// `=LET(x,2,SUM(B:B)*x)` -> `C:C`; `=LET(b,2,SUM(b:b))+SUM(B:B)` -> the
+    /// outer one only; `$B:$B` and `B5` under a bound `b` follow the column.
+    ///
+    /// SABOTAGE: make `parameter_column_range_spans` return no spans -- fails at
+    /// "a LET name was shifted as a column".
+    #[test]
+    fn a_let_or_lambda_name_spelled_as_a_column_range_is_never_shifted() {
+        let ins = |f: &str| shift_formula_cols_sheet_aware(f, "Sheet1", "Sheet1", 1, 1);
+        let del = |f: &str| shift_formula_cols_sheet_aware(f, "Sheet1", "Sheet1", 0, -1);
+        assert_eq!(ins("=LET(b,2,SUM(B:B)*b)"), "=LET(b,2,SUM(B:B)*b)", "a LET name was shifted as a column");
+        assert_eq!(del("=LET(b,2,SUM(B:B)*b)"), "=LET(b,2,SUM(B:B)*b)", "a LET name was shifted by a delete");
+        assert_eq!(ins("=LET(b,B1:B3,SUM(B:D))"), "=LET(b,C1:C3,SUM(B:D))", "b:D is two names to Excel; the value's range still moves");
+        assert_eq!(ins("=LAMBDA(b,SUM(B:B))(A1:A2)"), "=LAMBDA(b,SUM(B:B))(A1:A2)", "a LAMBDA parameter was shifted");
+        assert_eq!(ins("=_xlfn.LET(b,2,SUM(B:B))"), "=_xlfn.LET(b,2,SUM(B:B))");
+        // Only what a binder in scope names is held.
+        assert_eq!(ins("=LET(x,2,SUM(B:B)*x)"), "=LET(x,2,SUM(C:C)*x)", "an unbound column range must follow");
+        assert_eq!(ins("=LET(b,2,SUM(B:B))+SUM(B:B)"), "=LET(b,2,SUM(B:B))+SUM(C:C)", "the range OUTSIDE the LET is a column");
+        assert_eq!(ins("=LET(b,SUM(B:B),b)"), "=LET(b,SUM(C:C),b)", "a name is not bound in its own value");
+        assert_eq!(ins("=LET(b,2,SUM($B:$B)*b)"), "=LET(b,2,SUM($C:$C)*b)", "an absolute range is a column");
+        assert_eq!(ins("=LET(b,2,SUM(B5)*b)"), "=LET(b,2,SUM(C5)*b)");
+        assert_eq!(ins("=LET(b,2,SUM(Sheet1!B:B)*b)"), "=LET(b,2,SUM(Sheet1!C:C)*b)", "a qualified range is a column");
+        // The scanner's own edges: an array constant's commas, a string's.
+        assert_eq!(ins("=LET(a,{1,2},b,3,SUM(B:B))"), "=LET(a,{1,2},b,3,SUM(B:B))");
+        assert_eq!(ins("=LET(b,\"x,y\",SUM(B:B)&\"B:B\")"), "=LET(b,\"x,y\",SUM(B:B)&\"B:B\")");
+        assert_eq!(ins("=LET(b,2,c,SUM(B:B),c)"), "=LET(b,2,c,SUM(B:B),c)", "b is bound in a LATER value");
+        // Two held ranges come back in their own places.
+        assert_eq!(ins("=LET(b,2,c,3,SUM(B:B)+SUM(C:C)+D1)"), "=LET(b,2,c,3,SUM(B:B)+SUM(C:C)+E1)");
+    }
+
+    /// Only the FIRST half makes a bare column range a name range, as in the
+    /// parser. [LIVE, Excel 16, round 20, parsefix/probe1.ps1: Insert Column
+    /// before A turns `=LET(b,2,SUM(A:B))` into `SUM(B:C)` = 165 and
+    /// `=LET(b,2,SUM(A:B)*b)+0` into `SUM(B:C)*b`.] The hold used to take a range
+    /// whose SECOND half was bound, so the columns stayed A:B.
+    #[test]
+    fn a_column_range_whose_second_half_is_a_let_name_still_follows_the_columns() {
+        let ins = |f: &str| shift_formula_cols_sheet_aware(f, "Sheet1", "Sheet1", 0, 1);
+        assert_eq!(ins("=LET(b,2,SUM(A:B))"), "=LET(b,2,SUM(B:C))", "A:B is two columns to Excel");
+        assert_eq!(ins("=LET(b,2,SUM(A:B)*b)+0"), "=LET(b,2,SUM(B:C)*b)+0");
+        assert_eq!(ins("=LET(c,2,SUM(A:C)*c)"), "=LET(c,2,SUM(B:D)*c)");
+        // The first half bound: held whole, as before.
+        assert_eq!(ins("=LET(a,1,SUM(A:B)+a)"), "=LET(a,1,SUM(A:B)+a)");
+    }
+
+    /// The relative shift behind Fill and Copy+Paste holds the same names
+    /// [LIVE, parsefix/probe1.ps1; the command-level twin is
+    /// `data::let_name_fill_tests`].
+    #[test]
+    fn the_fill_shift_never_moves_a_let_name_spelled_as_a_column_range() {
+        use super::shift_formula_internal;
+        assert_eq!(shift_formula_internal("=LET(b,2,SUM(B:B)*b)", 0, 1), "=LET(b,2,SUM(B:B)*b)", "a LET name was shifted as a column");
+        assert_eq!(shift_formula_internal("=LET(b,2,SUM(B:B)*b)", 40, 2), "=LET(b,2,SUM(B:B)*b)");
+        assert_eq!(shift_formula_internal("=LET(b,A1:A3,SUM(B:D))", 0, 1), "=LET(b,B1:B3,SUM(B:D))");
+        assert_eq!(shift_formula_internal("=LET(b,2,SUM(A:B))", 0, 1), "=LET(b,2,SUM(B:C))");
+        assert_eq!(shift_formula_internal("=LET(x,2,SUM(B:B)*x)", 0, 1), "=LET(x,2,SUM(C:C)*x)");
+        assert_eq!(shift_formula_internal("=LET(b,SUM(B:B),b)", 0, 2), "=LET(b,SUM(D:D),b)");
+        assert_eq!(shift_formula_internal("=LAMBDA(b,SUM(B:B))(A1:A2)", 1, 1), "=LAMBDA(b,SUM(B:B))(B2:B3)");
     }
 
     // A 3-D sheet span (Jan:Mar!A1) must not be renumbered as a column range.
@@ -8576,6 +9040,8 @@ pub(crate) fn off_sheet_structural_edit(
             crate::undo_commands::sheet_structural_snapshot_bytes(&snapshot),
             &description,
         );
+        // WHERE the lines moved, on the target sheet (see the on-sheet paths).
+        crate::undo_commands::record_structural_delta(&mut undo_stack, &crate::undo_commands::line_edit_delta(target, edit));
         // BUG-0054: restores for the pivots this delete removes outright —
         // cascade first (reverse replay recreates the pivot before its
         // slicers), then one `pivot_delete` per pivot, all in THIS transaction.

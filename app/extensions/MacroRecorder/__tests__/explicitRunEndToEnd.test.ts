@@ -45,6 +45,8 @@ const h = vi.hoisted(() => ({
   refuseRunCheck: false,
   toasts: [] as string[],
   writes: [] as Array<[number, number, string]>,
+  /** The clears the realm's api.clearRange reached the backend with (BUG-0616 #2). */
+  clears: [] as Array<{ rect: number[]; applyTo: string; sheetIndex: number | undefined }>,
   undo: [] as string[],
   /** The Rust button door's answer to a click (`run_control_action`). */
   door: null as unknown,
@@ -188,6 +190,29 @@ vi.mock("@api/lib", async (orig) => ({
   updateCellsBatch: async (updates: Array<{ row: number; col: number; value: string }>) => {
     for (const u of updates) h.write(u.row, u.col, u.value);
     return [];
+  },
+  // A CONTENTS clear (BUG-0616 #2), sheet-addressed or not: every held cell of
+  // the rectangle goes, recorded into the open transaction like a write, and is
+  // answered back the way the backend answers (the cells it changed, tagged
+  // with their sheet off the active one).
+  clearRangeWithOptions: async (
+    r0: number,
+    c0: number,
+    r1: number,
+    c1: number,
+    applyTo: string,
+    sheetIndex?: number,
+  ) => {
+    h.clears.push({ rect: [r0, c0, r1, c1], applyTo, sheetIndex });
+    const updatedCells: Array<Record<string, unknown>> = [];
+    for (const key of [...h.cells.keys()]) {
+      const [row, col] = key.split(",").map(Number);
+      if (row < r0 || row > r1 || col < c0 || col > c1) continue;
+      if (h.slot !== null) h.slotChanges.push({ key, prev: h.cells.get(key) });
+      h.cells.delete(key);
+      updatedCells.push({ row, col, display: "", styleIndex: 0, sheetIndex: sheetIndex ?? null });
+    }
+    return { count: updatedCells.length, updatedCells };
   },
   beginUndoTransaction: async () => h.begin(),
   commitUndoTransaction: async (ticket?: number | null) => h.close(ticket, "commit"),
@@ -401,6 +426,7 @@ beforeEach(() => {
   h.refuseRunCheck = false;
   h.toasts.length = 0;
   h.writes.length = 0;
+  h.clears.length = 0;
   h.undo.length = 0;
   h.door = null;
   h.cells.clear();
@@ -746,6 +772,129 @@ describe("a person's click on the application's button runs its recorded macro W
 function TRIGGER_OF(row: number, col: number, kind: "buttonControl" | "buttonCell") {
   return { kind, sheetIndex: 0, row, col };
 }
+
+// ---------------------------------------------------------------------------
+// BUG-0616 #2: CLEARING cells is cell access. VBA's Range.ClearContents works in
+// a macro, so a recorded clear -- here the recorder's own output for a grouped
+// Delete that reached Sheet2!A1:A2, which replays as a sheet-addressed
+// api.clearRange -- runs under the grant, with the same guarantees as a write:
+// the trail names every cell it changed, and a run that fails is taken back.
+// ---------------------------------------------------------------------------
+
+/** What the recorder saves for a Delete that reached Sheet2!A1:A2 (a grouped sheet). */
+const RECORDED_CLEARS = generateMacroSource(
+  [
+    {
+      seq: 1,
+      sheetIndex: 0,
+      event: { kind: "clearRange", startRow: 0, startCol: 0, endRow: 1, endCol: 0, applyTo: "contents", sheetIndex: 1 },
+    },
+  ] as Parameters<typeof generateMacroSource>[0],
+  { target: "objectScript", wrapper: "objectScript", name: "Owner B clears", recordedAt: "T" },
+).source;
+
+const CLEARS: StoredScript = {
+  id: "macro-owner-b-clears",
+  name: "Owner B clears",
+  description: OBJECT_SCRIPT,
+  source: RECORDED_CLEARS,
+  sourcePackage: "Sales",
+};
+
+describe("a run with cell access may CLEAR cell contents (BUG-0616 #2)", () => {
+  // SABOTAGE: drop "api.clearRange" from EXPLICIT_RUN_CELL_METHODS -> the
+  // pre-flight names it and the run is refused before anything is cleared.
+  it("Developer > Macros > Run clears Sheet2!A1:A2, as ONE undo step, and the trail names both cells", async () => {
+    expect(RECORDED_CLEARS, "fixture: the recorder's sheet-addressed contents clear").toContain(
+      'await api.clearRange(0, 0, 1, 0, { applyTo: "contents" }, 1);',
+    );
+    h.store.set(CLEARS.id, CLEARS);
+    h.cells.set("0,0", "X");
+    h.cells.set("1,0", "Y");
+
+    const result = await runFromMacrosDialog(CLEARS);
+
+    expect(result.type, `${JSON.stringify(result)} toasts: ${JSON.stringify(h.toasts)}`).toBe("success");
+    expect(ShimWorker.all[0].spec?.explicitRunCells).toBe(true);
+    expect(h.clears).toEqual([{ rect: [0, 0, 1, 0], applyTo: "contents", sheetIndex: 1 }]);
+    expect(h.cells.size, "the clear left a cell").toBe(0);
+    expect(h.undo).toEqual(["begin", "join", "commit"]);
+    // SABOTAGE: drop the recordScriptWrite loop in executeClearRange (host.ts)
+    // -> the report names no sheet.
+    await vi.waitFor(() => expect(h.reports).toHaveLength(1));
+    expect(h.reports[0]).toEqual({
+      grantId: h.grantSeq,
+      completed: true,
+      rolledBack: false,
+      failedCalls: 0,
+      countsCapped: false,
+      sheets: [{ sheet: 1, cellsModified: 2, firstRow: 0, lastRow: 1, firstCol: 0, lastCol: 0 }],
+    });
+  });
+
+  it("a clearing run that fails part-way is taken back whole: the cleared cells come back", async () => {
+    const throws: StoredScript = {
+      ...CLEARS,
+      id: "macro-owner-b-clears-throws",
+      source: RECORDED_CLEARS.replace(
+        "await api.commitBatch();",
+        'throw new Error("stopped on purpose after the clear");\n    await api.commitBatch();',
+      ),
+    };
+    expect(throws.source).toContain("stopped on purpose after the clear");
+    h.store.set(throws.id, throws);
+    h.cells.set("0,0", "X");
+    h.cells.set("1,0", "Y");
+
+    const result = await runFromMacrosDialog(throws);
+
+    // POSITIVE CONTROL: the clear really landed before the throw.
+    expect(h.clears).toHaveLength(1);
+    expect(result.type).toBe("error");
+    expect(h.cells.get("0,0")).toBe("X");
+    expect(h.cells.get("1,0")).toBe("Y");
+    expect(h.undo).toEqual(["begin", "join", "rollback", "commit"]);
+    await vi.waitFor(() => expect(h.reports).toHaveLength(1));
+    expect(h.reports[0]).toMatchObject({
+      completed: false,
+      rolledBack: true,
+      sheets: [{ sheet: 1, cellsModified: 2 }],
+    });
+  });
+
+  it("a run a SCRIPT starts may not clear: restricted as before, nothing cleared", async () => {
+    h.store.set(CLEARS.id, CLEARS);
+    h.cells.set("0,0", "X");
+    await expect(
+      runObjectScriptOnce({
+        name: "Driver",
+        source: `function setup(context) { return context.api.runMacro("${CLEARS.id}"); }\n`,
+      }),
+    ).rejects.toThrow(NEEDS_CELL_ACCESS);
+    // POSITIVE CONTROL: the macro's realm was mounted -- restricted.
+    expect(ShimWorker.all).toHaveLength(2);
+    expect(ShimWorker.all[1].spec?.source).toBe(CLEARS.source);
+    expect(ShimWorker.all[1].spec?.explicitRunCells).toBeUndefined();
+    expect(h.clears).toEqual([]);
+    expect(h.cells.get("0,0")).toBe("X");
+    expect(h.reports).toEqual([]);
+  });
+
+  it("a macro that clears FORMATS too (Clear All) is refused before anything runs, naming the call", async () => {
+    const clearAll: StoredScript = {
+      ...CLEARS,
+      id: "macro-owner-b-clear-all",
+      source: RECORDED_CLEARS.replace('{ applyTo: "contents" }', '{ applyTo: "all" }'),
+    };
+    expect(clearAll.source).toContain('{ applyTo: "all" }');
+    h.store.set(clearAll.id, clearAll);
+    const result = await runFromMacrosDialog(clearAll);
+    expect(result.type).toBe("error");
+    if (result.type === "error") expect(result.message).toContain("api.clearRange");
+    expect(ShimWorker.all).toHaveLength(0);
+    expect(h.clears).toEqual([]);
+  });
+});
 
 describe("nothing else changes", () => {
   it("a recorded macro that also FORMATS is refused before anything runs, naming the call", async () => {

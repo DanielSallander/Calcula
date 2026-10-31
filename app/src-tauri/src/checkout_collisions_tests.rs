@@ -168,6 +168,52 @@ fn this_applications_own_leftover_is_replaced_unless_another_subscription_claims
     );
 }
 
+/// A NAME IS THE SAME NAME BY EXCEL'S DEFINED-NAME RULE, on both sides. The
+/// workbook's names are read from the live store (keyed by
+/// `name_resolution::name_key`) and the application's are keyed the same way,
+/// because the materializer skips an incoming name whose `name_key` is taken.
+/// Excel [LIVE, defined_name_case.rs] holds `Pæresalg` / `pæresalg` / `PAERESALG` and
+/// `Straße` / `STRAẞE` / `STRASSE` as ONE name each, and `qµ` / `qμ` as two.
+/// Keyed with `to_uppercase` on the incoming side, the ligature spellings never
+/// met the store's key, the checkout went ahead, the materializer kept the
+/// author's definition and the application's formulas read it.
+///
+/// SABOTAGE: key the incoming names with `name.name.to_uppercase()` again.
+#[test]
+fn a_name_the_workbook_holds_collides_by_excels_defined_name_rule() {
+    let state = crate::create_app_state();
+    let scripts = crate::scripting::types::ScriptState::new();
+    let effect = test_seed_effect();
+    for name in ["Pæresalg", "Straße", "qµ"] {
+        state.named_ranges.write(&effect).unwrap().insert(
+            crate::name_resolution::name_key(name),
+            crate::named_ranges::NamedRange {
+                name: name.to_string(),
+                sheet_index: None,
+                refers_to: "=Sheet1!$B$9".to_string(),
+                comment: None,
+                folder: None,
+            },
+        );
+    }
+    let workbook = WorkbookHolds::read(&state, &scripts).expect("read the stores");
+    let names = [
+        published_name("pæresalg", "=1"),
+        published_name("STRAẞE", "=2"),
+        published_name("qμ", "=3"),
+    ];
+    let incoming = Incoming { modules: &[], notebooks: &[], names: &names };
+    let found = find_checkout_collisions(PKG, &incoming, &workbook, &[]);
+    let mut got: Vec<(&str, &str)> = found.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![("PAERESALG", "Pæresalg"), ("STRASSE", "Straße")],
+        "a ligature-spelled name the workbook holds must collide; qµ / qμ are two names"
+    );
+    assert!(found.iter().all(|c| c.holder == Holder::Yours), "{found:?}");
+}
+
 // ============================================================================
 // 2. What the refusal says
 // ============================================================================
@@ -305,7 +351,7 @@ fn below_the_gate_a_checkout_keeps_the_workbooks_item_and_drops_the_applications
     let prof = TempDir::new().unwrap();
     let pulled = published_application(&dir, prof.path());
     let recorded_as_the_applications: Vec<String> =
-        pulled.named_ranges.iter().map(|n| n.name.to_uppercase()).collect();
+        pulled.named_ranges.iter().map(|n| crate::name_resolution::name_key(&n.name)).collect();
     let recorded_scripts: Vec<String> = pulled.module_scripts.iter().map(|s| s.id.clone()).collect();
 
     let (state, scripts) = authors_workbook();

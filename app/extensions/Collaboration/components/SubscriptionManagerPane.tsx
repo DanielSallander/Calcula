@@ -158,6 +158,14 @@ const CONNECTION_SKIP_NOTICE: Record<string, { tone: "warn" | "danger"; text: st
       "This application is served over HTTP, which does not yet provide a local model " +
       "file, so its data model is not connected. Its report cells are unaffected.",
   },
+  sharedDataSource: {
+    tone: "danger",
+    text:
+      "This application files its data model under the same id as another application this " +
+      "workbook subscribes to, so neither model was connected (one id can serve only one model). " +
+      "Unsubscribe from one of them, or have the application that copied the id published " +
+      "again (it then gets its own id) and update that subscription.",
+  },
 };
 
 const connSkipKey = (s: ApplicationConnectionRestoreSkip) => `${s.packageName}@${s.registryUrl}`;

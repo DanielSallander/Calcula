@@ -134,3 +134,34 @@ describe("splitTextToColumns", () => {
     expect(mockCommitUndoTransaction).not.toHaveBeenCalled();
   });
 });
+
+// Round 11 (lane clip3): a split that LANDED ends the clipboard mode, a copy's
+// and a cut's, as Excel's Text to Columns does [LIVE 2026-10-30, COM
+// Range.TextToColumns: CutCopyMode 0]; Core's clipboard listens for
+// DATA_COMMAND_APPLIED. A refused split changed nothing and announces nothing.
+describe("a split announces DATA_COMMAND_APPLIED (the clipboard mode ends)", () => {
+  function announcements(): unknown[] {
+    const seen: unknown[] = [];
+    window.addEventListener("app:data-command-applied", (e) => seen.push((e as CustomEvent).detail));
+    return seen;
+  }
+
+  it("a split that landed announces it once, after the commit", async () => {
+    const seen = announcements();
+    mockGetViewportCells.mockResolvedValue(viewportCellsFor(["a;b"], 0, 0));
+    await splitTextToColumns({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, delimiters: [";"] });
+    expect(seen, "the split did not announce DATA_COMMAND_APPLIED: a pending copy survives it").toEqual([
+      { command: "textToColumns" },
+    ]);
+  });
+
+  it("a refused split announces nothing", async () => {
+    const seen = announcements();
+    mockGetViewportCells.mockResolvedValue(viewportCellsFor(["a;b"], 0, 0));
+    mockUpdateCellsBatch.mockRejectedValue(new Error("Cell B1 is locked (sheet protection)"));
+    await expect(
+      splitTextToColumns({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, delimiters: [";"] }),
+    ).rejects.toThrow(/locked/);
+    expect(seen).toEqual([]);
+  });
+});

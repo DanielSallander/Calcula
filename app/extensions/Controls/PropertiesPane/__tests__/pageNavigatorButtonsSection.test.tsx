@@ -243,9 +243,17 @@ describe("a write is one serialised override list", () => {
     await expand("id-1");
     const swatch = el<HTMLInputElement>("nav-buttons-fill-id-1");
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    // WebView2's picker: an `input` per step, then ONE `change` when it closes
+    // (BUG-0536). Only the closing change writes -- one write, one undo step.
+    for (const step of ["#110000", "#221100", "#335566", "#336699"]) {
+      await act(async () => {
+        setter.call(swatch, step);
+        swatch.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+    expect(writes).toEqual([]);
     await act(async () => {
-      setter.call(swatch, "#336699");
-      swatch.dispatchEvent(new Event("input", { bubbles: true }));
+      swatch.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(writes).toEqual([[{ sheetId: "id-1", sheetName: "Overview", fill: "#336699" }]]);
 

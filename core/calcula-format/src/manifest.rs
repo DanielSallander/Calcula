@@ -2,7 +2,6 @@
 //! Manifest (manifest.json) — the root descriptor of a .cala file.
 
 use identity::SheetId;
-use persistence::{DEFAULT_COLUMN_WIDTH_PX, DEFAULT_ROW_HEIGHT_PX};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -65,7 +64,27 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 /// v11 adds HIDDEN LINES ON A FLOATING GRID -- `hiddenRows` / `hiddenCols` on
 /// the rows of `floating_ranges.json`
 /// (`FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION`).
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 11;
+///
+/// v12 adds the INCOMPLETE-CALCULATION mark -- `calc_state.json`
+/// (`CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION`), Excel's `calcCompleted="0"`.
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 12;
+
+/// Minimum `.cala` format version a reader must be to handle
+/// `calc_state.json` -- the workbook was saved with values that may be stale
+/// for their formulas (`Workbook::calculation_incomplete`, BUG-0615#2): a
+/// manual-calculation workbook edited and saved without recalculating. Excel
+/// writes the same fact as `<calcPr calcCompleted="0">` and marks the dirty
+/// cells, reopens the stale values as they are and reports the workbook as
+/// needing calculation (`Application.CalculationState` = xlPending) until F9
+/// [LIVE, Excel 16, 2026-10-30].
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes,
+/// the lie class CLAUDE.md names first -- "a stale workbook that comes back
+/// looking calculated": an older reader ignores the file, vouches for the
+/// stale values, and its Calculate Now keeps a stale cube or custom-function
+/// value as current. Stamped ONLY when the mark is set, so a calculated
+/// workbook keeps the lowest version that can express it.
+pub const CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION: u32 = 12;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -251,6 +270,29 @@ pub const FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION: u32 = 11;
 /// metadata.json, so a manifest that forgot the id loses nothing.
 pub const CANVAS_WALLPAPER_FEATURE: &str = "canvas_wallpaper";
 
+/// Manifest FEATURE ID declared when the workbook was saved under MANUAL
+/// calculation (`Workbook::calculation_manual`, `calc_mode.json`) -- Excel's
+/// `<calcPr calcMode="manual"/>`, which the opening application adopts.
+///
+/// DELIBERATELY NO LINK IN THE FORMAT-VERSION CHAIN. An older reader ignores
+/// the file and opens the workbook in whatever mode its session has: it LOSES
+/// the author's mode, which the user sees at once (Formulas > Calculation
+/// Options, and an edit that does or does not recalculate), but no value is
+/// shown as something it is not -- whether the values are current is the
+/// separate `calc_state.json` mark, which has its own link (12). The READ is
+/// unconditional, so a manifest that forgot the id loses nothing.
+pub const CALCULATION_MODE_FEATURE: &str = "calculation_mode";
+
+/// A sheet carries its own STANDARD row height and/or column width
+/// (`defaultRowHeight` / `defaultColumnWidth` in its metadata.json): Excel's
+/// per-sheet `<sheetFormatPr>`, what Select All + Row Height and Format >
+/// Default Width set (BUG-0352/0353). A feature id, NOT a version link: an
+/// older reader ignores the two fields and shows the sheet at the standard
+/// sizes -- geometry visibly lost, never a value misread or hidden content
+/// shown (rows and columns the author HID stay hidden; they are their own
+/// authority).
+pub const SHEET_DEFAULT_SIZES_FEATURE: &str = "sheet_default_sizes";
+
 /// Manifest FEATURE ID declared when some canvas has LOCK OBJECTS on
 /// (`CanvasLayout::objects_locked`, Power BI's View > Lock objects).
 ///
@@ -308,6 +350,17 @@ pub const RIBBON_FILTER_VISUAL_TARGETS_FEATURE: &str = "ribbon_filter_visual_tar
 /// nothing.
 pub const PAGE_NAVIGATOR_FEATURE: &str = "page_navigator";
 
+/// Manifest FEATURE ID declared when some sparkline group holds more than one
+/// AREA (a `moreAreas` entry in a sheet's opaque `groups_json`): a structural
+/// edit that parts a group's sparklines keeps them ONE group, as Excel does
+/// (app/src-tauri/src/chart_range_shift.rs, GROUP IDENTITY).
+///
+/// DELIBERATELY NO LINK IN THE FORMAT-VERSION CHAIN: an older build draws the
+/// group's first area only -- the other sparklines are missing, a visible
+/// loss, never a lie (no cell shows a sparkline it does not have). The READ is
+/// unconditional: `sparklines.json` carries the groups as opaque text.
+pub const SPARKLINE_GROUP_AREAS_FEATURE: &str = "sparkline_group_areas";
+
 /// Manifest FEATURE ID declared when some object carries a VISUAL CONTAINER
 /// (D-FORMAT: padding, title, subtitle, divider, background, border, shadow)
 /// -- a slicer / timeline / floating grid `container`, a canvas pivot's
@@ -361,18 +414,10 @@ pub struct Manifest {
     /// Declares which optional feature sections are present in the archive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
-    /// Default row height in pixels (omitted when `DEFAULT_ROW_HEIGHT_PX`).
-    #[serde(default = "default_row_height", skip_serializing_if = "is_default_row_height")]
-    pub default_row_height: f64,
-    /// Default column width in pixels (omitted when `DEFAULT_COLUMN_WIDTH_PX`).
-    #[serde(default = "default_column_width", skip_serializing_if = "is_default_column_width")]
-    pub default_column_width: f64,
+    // The standard row height / column width are PER SHEET (each sheet's
+    // metadata.json, `SHEET_DEFAULT_SIZES_FEATURE`), as in Excel. They were two
+    // workbook-wide fields here (BUG-0352).
 }
-
-fn default_row_height() -> f64 { DEFAULT_ROW_HEIGHT_PX }
-fn default_column_width() -> f64 { DEFAULT_COLUMN_WIDTH_PX }
-fn is_default_row_height(v: &f64) -> bool { (*v - DEFAULT_ROW_HEIGHT_PX).abs() < f64::EPSILON }
-fn is_default_column_width(v: &f64) -> bool { (*v - DEFAULT_COLUMN_WIDTH_PX).abs() < 1e-6 }
 
 /// Entry for a single sheet in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,8 +460,6 @@ impl Manifest {
             sheets,
             active_sheet,
             features: Vec::new(),
-            default_row_height: DEFAULT_ROW_HEIGHT_PX,
-            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
         }
     }
 
@@ -444,8 +487,6 @@ impl Manifest {
             sheets,
             active_sheet,
             features: Vec::new(),
-            default_row_height: DEFAULT_ROW_HEIGHT_PX,
-            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
         }
     }
 }

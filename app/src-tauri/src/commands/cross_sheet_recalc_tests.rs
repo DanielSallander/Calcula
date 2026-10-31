@@ -1183,7 +1183,7 @@ fn every_cascade_path_uses_the_shared_cross_sheet_walk() {
     // two hops short of another. This fails the moment a third copy appears.
     const DATA_RS: &str = include_str!("data.rs");
 
-    for command in ["update_cell_impl", "update_cells_batch_core", "fill_range"] {
+    for command in ["update_cell_impl", "update_cells_batch_core", "fill_range_core"] {
         let body = body_of(DATA_RS, command);
         assert!(
             body.contains("cascade_cross_sheet_dependents("),
@@ -1442,4 +1442,224 @@ fn after_a_load_an_unvisited_sheet_follows_the_active_sheet() {
     crate::floating_range::register_object_sheet_edges(&wb.state);
     wb.set(0, 0, "3");
     assert_eq!(wb.number(1, 0, 1), 30.0, "the load installer must register the unvisited sheet's edges (BUG-0540)");
+}
+
+// ---------------------------------------------------------------------------
+// whatif4 NEW-grouped-edit-two-undo-steps: a grouped entry is ONE undo step
+// ---------------------------------------------------------------------------
+
+/// The two backend doors a grouped entry goes through -- `update_cell` for the
+/// edit's own sheet, `update_cell_on_sheets` for the rest -- each record their
+/// own step when no transaction is open, so a value typed with Sheet1+Sheet2
+/// grouped took TWO Ctrl+Z, the first undoing only Sheet2 and moving there.
+/// Excel [LIVE, whatif4 round 16, Excel 16 + SendKeys]: ONE Ctrl+Z undoes every
+/// grouped sheet and lands on the sheet that was active at the entry. Since
+/// round 19 the entry is ONE call that opens that transaction itself
+/// (`update_cell_grouped`, pinned by
+/// `a_grouped_entry_is_one_call_that_closes_its_own_undo_step` below); this
+/// pins what it relies on: inside one open transaction both doors join it,
+/// and its undo restores both sheets and activates the edit's own.
+#[test]
+fn a_grouped_entry_in_one_transaction_is_one_undo_step_that_lands_on_the_edits_sheet() {
+    let write_group = |wb: &Workbook, value: &str| {
+        wb.set(0, 0, value); // Sheet1!A1, the edit's own sheet (active)
+        let wrote = update_cell_on_sheets_inner(
+            &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters,
+            vec![1], 0, 0, value.to_string(), None, None, None,
+        )
+        .expect("the grouped write");
+        assert_eq!(wrote, vec![1]);
+    };
+    let depth = |wb: &Workbook| wb.state.undo_stack.lock().unwrap().undo_depth();
+
+    // The defect's cause: unwrapped, the two doors are two steps.
+    let wb = Workbook::new(2);
+    write_group(&wb, "7");
+    assert_eq!(depth(&wb), 2, "the premise: each door records its own step when none is open");
+
+    // The fix's shape: one transaction around both, as commitEdit opens it.
+    let wb = Workbook::new(2);
+    let ticket = crate::undo_commands::open_or_join_undo_transaction(&wb.state, |stack| {
+        stack.begin_transaction_from_caller("Typing on grouped sheets".to_string())
+    });
+    assert!(ticket.is_some(), "the entry opened the transaction");
+    write_group(&wb, "7");
+    assert!(crate::undo_commands::commit_undo_transaction_core(&wb.state, ticket));
+    assert_eq!(depth(&wb), 1, "a grouped entry was more than one undo step");
+
+    let result = undo_once(&wb);
+    assert_eq!(wb.value(0, 0, 0), CellValue::Empty, "Ctrl+Z restored the edit's own sheet");
+    assert_eq!(wb.value(1, 0, 0), CellValue::Empty, "and every other grouped sheet, in the same step");
+    assert_eq!(result.active_sheet_index, 0, "Excel lands on the sheet that was active at the entry");
+    assert_eq!(depth(&wb), 0);
+}
+
+/// calcref: A WHOLE COLUMN OR ROW, OR A 3D SPAN, READ FROM ANOTHER SHEET, under
+/// AUTOMATIC calculation. `extract_references_recursive` dropped the sheet of a
+/// qualified `ColumnRef` / `RowRef` into the formula's OWN sheet's stripe sets,
+/// and tagged a 3D reference only with its two bookend sheets, so no
+/// cross-sheet edge reached `Sheet1!A1 = SUM(Sheet2!G:G)` from Sheet2!G5 and
+/// the sum stayed stale -- and a write on Sheet1's own column G recalculated
+/// it for nothing. Excel recalculates every one of these at once [LIVE, round
+/// 18, COM, automatic: Sheet2!G5, M9 and K20 each update Sheet1's sum].
+///
+/// SABOTAGE: in `extract_references_recursive`, put a qualified column back
+/// into the formula's own column set (the G:G assertion fails).
+#[test]
+fn a_whole_column_row_or_3d_span_on_another_sheet_recalculates_on_an_edit() {
+    let wb = Workbook::new(3);
+    wb.set(0, 0, "=SUM(Sheet2!G:G)"); // Sheet1!A1
+    wb.set(0, 1, "=SUM(Sheet2!9:9)"); // Sheet1!B1
+    wb.set(0, 2, "=SUM(Sheet1:Sheet3!K20)"); // Sheet1!C1, Sheet2 in the middle
+    wb.set(0, 3, "=SUM(Sheet2:Sheet3!D:D)"); // Sheet1!D1, a 3D column span
+    // Sheet1!G1 reads A1 and sits in Sheet1's column G, which A1 does NOT read:
+    // no circular reference (A1 used to pick up its own sheet's column G).
+    wb.set(0, 6, "=A1+1");
+    assert_eq!(wb.number(0, 0, 6), 1.0, "=A1+1 beside =SUM(Sheet2!G:G) was taken for a circular reference");
+    // A whole column qualified with the formula's OWN sheet still reads it.
+    wb.set(0, 4, "=SUM(Sheet1!F:F)"); // Sheet1!E1
+    wb.set(4, 5, "4"); // Sheet1!F5
+    assert_eq!(wb.number(0, 0, 4), 4.0, "=SUM(Sheet1!F:F) on Sheet1 did not see Sheet1!F5");
+    wb.switch_to(1);
+    wb.set(4, 6, "5"); // Sheet2!G5
+    assert_eq!(wb.number(0, 0, 0), 5.0, "=SUM(Sheet2!G:G) did not see Sheet2!G5");
+    assert_eq!(wb.number(0, 0, 6), 6.0, "and its reader Sheet1!G1 = A1+1");
+    wb.set(8, 12, "7"); // Sheet2!M9
+    assert_eq!(wb.number(0, 0, 1), 7.0, "=SUM(Sheet2!9:9) did not see Sheet2!M9");
+    wb.set(19, 10, "11"); // Sheet2!K20
+    assert_eq!(wb.number(0, 0, 2), 11.0, "=SUM(Sheet1:Sheet3!K20) did not see the middle sheet's K20");
+    wb.set(2, 3, "13"); // Sheet2!D3
+    assert_eq!(wb.number(0, 0, 3), 13.0, "=SUM(Sheet2:Sheet3!D:D) did not see Sheet2!D3");
+    // A cell written AFTER the formula, in a column nothing else on Sheet2 used.
+    wb.set(99, 6, "1"); // Sheet2!G100
+    assert_eq!(wb.number(0, 0, 0), 6.0, "a new cell in Sheet2!G:G was not seen");
+    // The formula's own sheet's column G is not what it reads.
+    wb.switch_to(0);
+    wb.set(9, 6, "100"); // Sheet1!G10
+    assert_eq!(wb.number(0, 0, 0), 6.0, "=SUM(Sheet2!G:G) read Sheet1's own column G");
+    // And the chain continues on the far side: a reader of the sum.
+    wb.set(1, 0, "=A1*2"); // Sheet1!A2
+    wb.switch_to(1);
+    wb.set(4, 6, "8"); // Sheet2!G5
+    assert_eq!(wb.number(0, 0, 0), 9.0);
+    assert_eq!(wb.number(0, 1, 0), 18.0, "the sum's own same-sheet reader was not recalculated");
+}
+
+/// misc19 NEW-3d-span-edges-after-sheet-reorder: a span's edges were expanded
+/// against the sheet order of the moment the formula was registered, so a
+/// sheet moved or copied INTO `Sheet1:Sheet3` afterwards had no edge (its
+/// edits never recalculated the sum) and one moved OUT kept one. [LIVE] Excel
+/// 16 (round 19, misc19/probe2.ps1, automatic): Sheet4!K20=5 moved between
+/// Sheet1 and Sheet2 gives `=SUM(Sheet1:Sheet3!K20)` 5 at once; its edit to 7
+/// gives 7; moved back out, 0; a copy inside the span counts, and a delete
+/// updates the sum. The formula's sheet is never revisited here, so nothing
+/// but the sheet operation itself can re-register it.
+///
+/// SABOTAGE: make `reregister_3d_span_edges` return false before it scans --
+/// fails at "a sheet moved INTO the span".
+#[test]
+fn a_sheet_moved_or_copied_into_a_3d_span_is_read_by_it_and_one_moved_out_is_not() {
+    let wb = Workbook::new(4);
+    wb.set(0, 0, "=SUM(Sheet1:Sheet3!K20)"); // Sheet1!A1
+    wb.switch_to(3);
+    wb.set(19, 10, "5"); // Sheet4!K20, outside the span
+    assert_eq!(wb.number(0, 0, 0), 0.0, "precondition: Sheet4 is outside the span");
+
+    let recalc = |wb: &Workbook| {
+        crate::sheets::recalculate_3d_span_readers(&wb.state, &wb.files, &wb.pivots, &wb.pane, &wb.filters)
+    };
+    // Move Sheet4 (active) between Sheet1 and Sheet2, as the command does.
+    crate::sheets::move_sheet_impl(&wb.state, &wb.file, &wb.slicer, &wb.timeline, &wb.filters, 3, 1)
+        .expect("move Sheet4 into the span");
+    recalc(&wb);
+    assert_eq!(wb.state.sheet_names.read().unwrap()[1], "Sheet4");
+    assert_eq!(wb.number(0, 0, 0), 5.0, "a sheet moved INTO the span was not read at once");
+    wb.set(19, 10, "7"); // Sheet4!K20, now inside the span (Sheet4 is still active)
+    assert_eq!(wb.number(0, 0, 0), 7.0, "a sheet moved INTO the span: its edit did not recalculate the sum");
+
+    // Back out, to the end.
+    crate::sheets::move_sheet_impl(&wb.state, &wb.file, &wb.slicer, &wb.timeline, &wb.filters, 1, 3)
+        .expect("move Sheet4 out of the span");
+    recalc(&wb);
+    assert_eq!(wb.number(0, 0, 0), 0.0, "a sheet moved OUT of the span was still summed");
+    wb.set(19, 10, "9");
+    assert_eq!(wb.number(0, 0, 0), 0.0, "a sheet moved OUT of the span still recalculated it");
+
+    // A copy of Sheet2 lands inside the span (right after its source).
+    wb.switch_to(1);
+    wb.set(19, 10, "2"); // Sheet2!K20
+    assert_eq!(wb.number(0, 0, 0), 2.0);
+    let copied = crate::sheets::copy_sheet_impl(&wb.state, &wb.file, &wb.slicer, &wb.timeline, &wb.filters, 1, None)
+        .expect("copy Sheet2");
+    recalc(&wb);
+    let copy_index = copied.active_index;
+    assert_eq!(copy_index, 2, "the copy sits inside Sheet1:Sheet3");
+    assert_eq!(wb.number(0, 0, 0), 4.0, "a copy inside the span was not summed");
+    wb.switch_to(copy_index);
+    wb.set(19, 10, "3");
+    assert_eq!(wb.number(0, 0, 0), 5.0, "a copy inside the span: its edit did not recalculate the sum");
+}
+
+/// misc19 (round 19): a grouped entry is ONE backend call that opens and closes
+/// its own undo step. The frontend held `begin_undo_transaction` open across
+/// `await update_cell`, an event emit and `await update_cell_on_sheets`, so a
+/// write landing in that window (a scheduled job, a script, an AI tool) joined
+/// "Typing on grouped sheets" and one Ctrl+Z undid it too. Now nothing is open
+/// once the call returns, so the next writer records its own step; the entry
+/// is one step that lands on the edit's sheet (Excel [LIVE, whatif4 round
+/// 16]); and a refused replication still leaves the edit's own sheet written
+/// and is answered in `group_error`.
+///
+/// SABOTAGE: drop `update_cell_grouped`'s `commit_owned` -- fails at "the
+/// grouped entry's step was left open".
+#[test]
+fn a_grouped_entry_is_one_call_that_closes_its_own_undo_step() {
+    let grouped = |wb: &Workbook, value: &str, others: Vec<usize>| {
+        update_cell_grouped(
+            &wb.state, &wb.file, &wb.files, &wb.slicer, &wb.pivots, &wb.pane, &wb.filters,
+            0, 0, value.to_string(), None, None, None, others, None,
+        )
+        .expect("the grouped entry")
+    };
+    let depth = |wb: &Workbook| wb.state.undo_stack.lock().unwrap().undo_depth();
+    let open = |wb: &Workbook| wb.state.undo_stack.lock().unwrap().has_open_transaction();
+
+    let wb = Workbook::new(3);
+    let result = grouped(&wb, "7", vec![1, 2]);
+    assert_eq!(result.group_written, Some(vec![1, 2]), "both other grouped sheets were written");
+    assert!(result.group_error.is_none());
+    assert!(!open(&wb), "the grouped entry's step was left open");
+    assert_eq!(depth(&wb), 1, "a grouped entry was more than one undo step");
+    assert_eq!(wb.number(1, 0, 0), 7.0);
+    assert_eq!(wb.number(2, 0, 0), 7.0);
+
+    // The next writer is a step of its own, never part of the entry.
+    wb.set(5, 5, "1"); // Sheet1!F6, a later, unrelated write
+    assert_eq!(depth(&wb), 2, "a later write joined the grouped entry's step");
+    undo_once(&wb); // the later write
+    let landed = undo_once(&wb); // the grouped entry, whole
+    assert_eq!(wb.value(0, 0, 0), CellValue::Empty);
+    assert_eq!(wb.value(1, 0, 0), CellValue::Empty);
+    assert_eq!(wb.value(2, 0, 0), CellValue::Empty);
+    assert_eq!(landed.active_sheet_index, 0, "the undo lands on the edit's own sheet");
+
+    // A refused replication: the edit's own sheet is written, the reason said.
+    let wb = Workbook::new(2);
+    wb.state.sheet_protection.write(&crate::document_effect::test_seed_effect()).unwrap().insert(
+        1,
+        crate::protection::SheetProtection {
+            protected: true,
+            password_hash: None,
+            password_salt: None,
+            options: crate::protection::SheetProtectionOptions::default(),
+            allow_edit_ranges: Vec::new(),
+        },
+    );
+    let result = grouped(&wb, "9", vec![1]);
+    assert_eq!(wb.number(0, 0, 0), 9.0, "the edit's own sheet is written");
+    assert_eq!(wb.value(1, 0, 0), CellValue::Empty, "the protected grouped sheet is not");
+    assert!(result.group_error.is_some(), "a refused replication is said, not swallowed");
+    assert!(result.group_written.is_none());
+    assert!(!open(&wb), "a refused replication left the step open");
+    assert_eq!(depth(&wb), 1);
 }

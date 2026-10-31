@@ -1,15 +1,18 @@
 //! FILENAME: app/extensions/Solver/components/SolverDialog.tsx
 // PURPOSE: Solver dialog - configure objective, variables, constraints, and method.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
 import {
   solverSolve,
+  cancelCalculation,
   columnToLetter,
   DialogExtensions,
 } from "@api";
+import { getActiveSheet } from "@api/lib";
 import { parseNumber } from "@api/locale";
+import { emitAppEvent, AppEvents } from "@api/events";
 import type {
   SolverObjective,
   SolverMethod,
@@ -281,6 +284,21 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
 
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // The run in flight, and whether Stop was already asked of it -- both set
+  // SYNCHRONOUSLY, so a key or click that arrives before the re-render sees
+  // them. ONE Esc stops a run: the backend then clears the stop and writes
+  // the best point as a real recalculation, and the dialog still shows the run
+  // as going while it does -- a second Esc raised the stop again and cut that
+  // final write short, leaving #LIMIT! in the answer's dependents.
+  const runningRef = useRef(false);
+  const stopAskedRef = useRef(false);
+  // MODAL WHILE A RUN IS GOING, like the Data Table and Goal Seek dialogs and
+  // Excel's own Solver: X and Close do nothing until the run answers. Closing
+  // mid-run unmounted the dialog, which took the Esc-to-stop path with it,
+  // while the run went on and later opened its result dialog from nowhere.
+  const closeUnlessRunning = useCallback(() => {
+    if (!runningRef.current) onClose();
+  }, [onClose]);
 
   // Pre-fill objective cell
   useEffect(() => {
@@ -290,12 +308,19 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
     setObjectiveCellRef(formatCellRef(activeRow, activeCol));
   }, []);
 
-  // Keyboard handler
+  // Keyboard handler. Esc DURING a run stops it, as Excel's Solver does: the
+  // backend returns the best point found so far ("Solver stopped at user's
+  // request") and the result dialog offers Keep / Restore.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.stopPropagation();
-        if (showAddConstraint) {
+        if (isLoading || runningRef.current) {
+          if (!stopAskedRef.current) {
+            stopAskedRef.current = true;
+            void cancelCalculation();
+          }
+        } else if (showAddConstraint) {
           setShowAddConstraint(false);
         } else {
           onClose();
@@ -304,7 +329,7 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
     }
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [onClose, showAddConstraint]);
+  }, [onClose, showAddConstraint, isLoading]);
 
   const handleAddConstraint = useCallback(() => {
     if (!newConstraintCell.trim()) return;
@@ -330,6 +355,7 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
   }, []);
 
   const handleSolve = useCallback(async () => {
+    if (runningRef.current) return;
     setValidationError(null);
 
     // Validate objective cell
@@ -392,11 +418,17 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
       solverConstraints.push(constraint);
     }
 
+    runningRef.current = true;
+    stopAskedRef.current = false;
     setIsLoading(true);
 
     try {
+      // Solver works on the ACTIVE sheet, as Excel's does: the objective, the
+      // variable cells and the constraints are addresses on it. This sent
+      // sheet 0 whatever sheet was active, so a run from Sheet3 wrote Sheet1.
+      const sheetIndex = await getActiveSheet();
       const result = await solverSolve({
-        sheetIndex: 0,
+        sheetIndex,
         objectiveRow: objCell.row,
         objectiveCol: objCell.col,
         objective: objectiveType,
@@ -412,19 +444,23 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
         return;
       }
 
-      // Refresh grid
+      // Refresh grid. The run leaves the workbook calculated (Excel, under
+      // manual calculation too), so the cells are announced and the status bar
+      // asks the calculation state again.
       window.dispatchEvent(new CustomEvent("grid:refresh"));
+      emitAppEvent(AppEvents.CELLS_UPDATED);
 
       // Show result dialog
       DialogExtensions.openDialog("solver-result", {
         result,
-        sheetIndex: 0,
+        sheetIndex,
       });
 
       onClose();
     } catch (err) {
       setValidationError(`Solver failed: ${err}`);
     } finally {
+      runningRef.current = false;
       setIsLoading(false);
     }
   }, [
@@ -508,7 +544,7 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
       <div ref={win.ref} style={{ ...styles.dialog, position: "relative", ...win.style }}>
         <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Solver Parameters</span>
-          <button style={styles.closeBtn} onClick={onClose}>
+          <button style={styles.closeBtn} onClick={closeUnlessRunning}>
             X
           </button>
         </div>
@@ -634,7 +670,7 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
         </div>
 
         <div style={styles.footer}>
-          <button style={styles.btn} onClick={onClose}>
+          <button style={styles.btn} onClick={closeUnlessRunning}>
             Close
           </button>
           <button

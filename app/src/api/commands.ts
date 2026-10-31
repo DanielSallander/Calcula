@@ -15,6 +15,8 @@ export const CoreCommands = {
   // Clipboard
   CUT: "core.clipboard.cut",
   COPY: "core.clipboard.copy",
+  // Takes an optional { at: { row, col } }: paste with that cell as the
+  // top-left instead of at the selection (Insert Copied Cells' own paste).
   PASTE: "core.clipboard.paste",
   PASTE_SPECIAL: "core.clipboard.pasteSpecial",
   PASTE_VALUES: "core.clipboard.pasteValues",

@@ -5,9 +5,9 @@
 // CONTEXT: Home tab 2026-10-04 (rust-followup lane). The batch takes the span
 //          as inclusive RUNS -- Select All is `[[0, 16383]]`, not 16,384
 //          indices -- merged and ordered before they are sent. The macro
-//          recorder keeps seeing the per-line `rowHeight` / `columnWidth`
-//          events the one-line wrappers report (its codegen replays them), and
-//          only for a call the backend accepted. Only Tauri's `invoke` is
+//          recorder sees ONE `rowHeights` / `columnWidths` event per call with
+//          the runs as sent (its codegen replays api.setRowHeights /
+//          setColumnWidths), and only for a call the backend accepted. Only Tauri's `invoke` is
 //          doubled; the module under test is real.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -63,15 +63,39 @@ describe("setRowHeights / setColumnWidths", () => {
     ]);
   });
 
-  it("the macro recorder sees the same per-line events the one-line wrappers report", async () => {
+  // NEW-recorder-select-all (round 15): ONE event per call, the runs AS SENT
+  // (Excel records Rows("5:6").RowHeight = 32, never row by row). It used to
+  // be one rowHeight event per line: 1,048,576 for Select All.
+  it("the macro recorder sees ONE event per call, with the runs as sent", async () => {
     setGridRecorderHook((e) => recorded.push(e));
-    await setRowHeights([[4, 5]], 32);
+    await setRowHeights([[5, 4], [9, 9]], 32);
     await setColumnWidths([[2, 2]], 75);
     expect(recorded).toEqual([
-      { kind: "rowHeight", row: 4, height: 32 },
-      { kind: "rowHeight", row: 5, height: 32 },
-      { kind: "columnWidth", col: 2, width: 75 },
+      { kind: "rowHeights", runs: [[4, 5], [9, 9]], height: 32 },
+      { kind: "columnWidths", runs: [[2, 2]], width: 75 },
     ]);
+  });
+
+  it("Select All records ONE event, not a million", async () => {
+    setGridRecorderHook((e) => recorded.push(e));
+    await setRowHeights([[0, 1_048_575]], 40);
+    expect(recorded).toEqual([{ kind: "rowHeights", runs: [[0, 1_048_575]], height: 40 }]);
+  });
+
+  // Under filter mode the backend replies with the runs the size REACHED (it
+  // passes over the hidden rows of runs that hold a visible one). The replay is
+  // run-based now -- api.setRowHeights reaches the same command and applies
+  // the same rule -- so the recorder keeps the runs the user SENT (Excel's
+  // recorder writes the selection), and a Select All under a filter replays as
+  // a Select All (the sheet's standard), not as explicit heights.
+  it("records the runs as sent, whatever the backend says the size reached", async () => {
+    setGridRecorderHook((e) => recorded.push(e));
+    invoke.mockImplementationOnce(async () => [
+      [4, 4],
+      [6, 7],
+    ]);
+    await setRowHeights([[4, 7]], 30);
+    expect(recorded).toEqual([{ kind: "rowHeights", runs: [[4, 7]], height: 30 }]);
   });
 
   it("with the recorder uninstalled, nothing is recorded", async () => {

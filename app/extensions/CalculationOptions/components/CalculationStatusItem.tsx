@@ -2,7 +2,9 @@
 // PURPOSE: The user-visible half of calculation cancellation — a status-bar
 //          item that shows recalculation progress with a Cancel button, and
 //          afterwards shows Excel's "Calculate" marker when a cancelled pass
-//          left cells un-recalculated.
+//          left cells un-recalculated -- and whenever else the backend says
+//          calculation is incomplete (`get_calculation_state`: a
+//          manual-calculation edit, or a workbook saved that way).
 // CONTEXT: This is Calcula's answer to VBA's Ctrl+Break. The backend half made
 //          it POSSIBLE (calculate_now moved off the WebView2 UI thread, so the
 //          webview can still paint and dispatch a click while a recalculation
@@ -21,6 +23,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelCalculation,
+  getCalculationState,
   getPendingRecalc,
   listenForEvent,
   onAppEvent,
@@ -62,6 +65,7 @@ export function CalculationStatusItem(): React.ReactElement | null {
   const [progress, setProgress] = useState<CalcProgressPayload | null>(null);
   const [visible, setVisible] = useState(false);
   const [staleCells, setStaleCells] = useState(0);
+  const [calcPending, setCalcPending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const showTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -127,17 +131,47 @@ export function CalculationStatusItem(): React.ReactElement | null {
     };
   }, [clearShowTimer]);
 
+  // The backend's whole answer to "is calculation complete?" -- Excel's
+  // CalculationState. "pending" also covers what has no cell count: a
+  // manual-calculation edit a formula depends on, and a workbook saved that
+  // way and reopened ([LIVE] Excel 16 says xlPending, and "Calculate", for
+  // all three). A failed read claims nothing either way. The sequence number
+  // keeps a slow answer from overwriting a newer one.
+  const stateReadSeq = useRef(0);
+  const refreshCalculationState = useCallback(() => {
+    const seq = ++stateReadSeq.current;
+    void getCalculationState()
+      .then((s) => {
+        if (seq === stateReadSeq.current) setCalcPending(s === "pending");
+      })
+      .catch(() => {});
+  }, []);
+
   // A completed recalculation settles the workbook, so the stale marker goes.
   useEffect(() => {
     return onAppEvent(AppEvents.RECALCULATION_COMPLETED, () => {
       void getPendingRecalc().then((p) => setStaleCells(p ? p.cells.length : 0));
+      refreshCalculationState();
     });
-  }, []);
+  }, [refreshCalculationState]);
+
+  // An edit (manual calculation leaves its dependents as they were), a save
+  // and an open can each change the answer.
+  useEffect(() => {
+    const offs = [
+      AppEvents.CELL_VALUES_CHANGED,
+      AppEvents.CELLS_UPDATED,
+      AppEvents.AFTER_SAVE,
+      AppEvents.AFTER_OPEN,
+    ].map((event) => onAppEvent(event, refreshCalculationState));
+    return () => offs.forEach((off) => off());
+  }, [refreshCalculationState]);
 
   // Initial read, so a workbook opened after a cancelled session still says so.
   useEffect(() => {
     void getPendingRecalc().then((p) => setStaleCells(p ? p.cells.length : 0));
-  }, []);
+    refreshCalculationState();
+  }, [refreshCalculationState]);
 
   // ESC and Ctrl+Break, bound to the SAME command as the button.
   //
@@ -206,6 +240,20 @@ export function CalculationStatusItem(): React.ReactElement | null {
         style={{ fontWeight: 600 }}
       >
         Calculate ({formatCount(staleCells)})
+      </span>
+    );
+  }
+
+  if (calcPending) {
+    // Excel's word, with nothing to count: under manual calculation an edit
+    // leaves its dependents as they were, and no cell list is kept.
+    return (
+      <span
+        data-testid="calc-stale"
+        title="Some formulas have not been recalculated since the last changes. Press F9 to calculate."
+        style={{ fontWeight: 600 }}
+      >
+        Calculate
       </span>
     );
   }

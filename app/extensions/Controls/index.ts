@@ -205,6 +205,7 @@ import {
 } from "./lib/controlContainer";
 import { shapeRecipePaint } from "./Shape/shapeRecipe";
 import { CONTROL_SIDE_STATE_HOOKS, followStructuralEditsElsewhere } from "./lib/controlSideState";
+import { resyncShapeScriptBadges } from "./lib/shapeScriptBadges";
 import { structuralAnchorShift } from "@api/scriptHost/embeddedFormPlacements";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
 import { isEmbeddedControl, forgetInCellButtons, noteControlAt } from "./lib/heldEmbeddedButtons";
@@ -918,9 +919,10 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
-  // Undo of a structural edit carries no coordinates, so the only correct
-  // response is to re-read the anchors from the backend — which is what this
-  // does now: drop the active sheet's store entries and reload them from
+  // Undo of a structural edit: its payload's `deltas` (StructuralUndoPayload)
+  // say what moved, but the anchors live in the backend, which already moved
+  // them back, so the correct response is to re-read them rather than replay
+  // the deltas -- drop the active sheet's store entries and reload them from
   // metadata (cache invalidation alone left the frontend anchored one row off).
   cleanupFns.push(
     context.events.on(AppEvents.STRUCTURAL_UNDO, () => {
@@ -929,6 +931,10 @@ function activate(context: ExtensionContext): void {
         removeFloatingControlsForSheet(sheetIndex);
         await loadFloatingControls();
         repositionPinnedControls(sheetIndex, cellOriginPixels);
+        // The undo moved each shape's script binding back too: re-read which
+        // shapes carry a script, or a restored shape loses its badge
+        // (BUG-0615#5, lib/shapeScriptBadges.ts).
+        await resyncShapeScriptBadges();
 
         invalidateAllFloatingButtonCaches();
         invalidateAllShapeCaches();
@@ -1310,6 +1316,8 @@ function activate(context: ExtensionContext): void {
       // `loadFloatingControls` reads the ACTIVE sheet and records which one it
       // loaded, so the index stays owned by one function.
       await loadFloatingControls();
+      // An undone deletion restores the shape's script with it (BUG-0615#5).
+      await resyncShapeScriptBadges();
       syncFloatingControlRegions();
       emitAppEvent(AppEvents.GRID_REFRESH);
     }).catch((err) => {

@@ -56,6 +56,17 @@ export interface StructureMenuRow {
   showShortcut?: boolean;
   /** A rule (MenuSeparator) goes above this row. */
   ruleAbove?: boolean;
+  /**
+   * The row's words as they are when the menu OPENS, or null for `label`:
+   * Excel renames Insert Cells... to "Insert Copied Cells..." while a copy is
+   * pending [LIVE]. Read each time the menu opens (its rows mount then).
+   */
+  liveLabel?: () => string | null;
+}
+
+/** A row's words, read when the menu opens (see StructureMenuRow.liveLabel). */
+function RowLabel({ row }: { row: StructureMenuRow }): React.ReactElement {
+  return <>{row.liveLabel?.() ?? row.label}</>;
 }
 
 export interface StructureSplitButtonProps extends HomeItemProps {
@@ -109,7 +120,7 @@ export function StructureSplitButton({
             shortcutCommandId={row.showShortcut ? row.commandId : undefined}
             onSelect={() => void runCommand(row.commandId)}
           >
-            {row.label}
+            <RowLabel row={row} />
           </MenuItem>
         </React.Fragment>
       ))}

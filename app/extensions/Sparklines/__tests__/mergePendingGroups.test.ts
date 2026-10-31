@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/Sparklines/__tests__/mergePendingGroups.test.ts
 // PURPOSE: revF#3 -- the merge of a PENDING sparkline change with groups the
-//          backend rewrote on its own (a structural edit moved, split or
-//          removed them, or an undo put them back): by group id, each field
+//          backend rewrote on its own (a structural edit moved them, gave
+//          them more areas or removed them, or an undo put them back): by
+//          group id, each field
 //          the change touched keeping the change.
 
 import { describe, it, expect } from "vitest";
@@ -26,9 +27,10 @@ describe("mergeSparklineGroups (revF#3)", () => {
     ]);
   });
 
-  it("a group the change created is kept, under a fresh id when the backend's split took its id", () => {
+  it("a group the change created is kept, under a fresh id when a group the backend has took its id", () => {
     const base = [group(1, range(1, 4, 4, 4), range(1, 0, 4, 2))];
-    // The change created group 2; the backend split group 1 and gave the second part id 2.
+    // The change created group 2; the backend holds a group 2 of its own (one an
+    // undo put back -- a structural edit never makes a second group, BUG-0616#4).
     const current = [...base, group(2, range(1, 7, 4, 7), range(1, 0, 4, 2), "#00ff00")];
     const stored = [group(1, range(1, 4, 1, 4), range(1, 0, 1, 2)), group(2, range(2, 4, 4, 4), range(3, 0, 5, 2))];
     const merged = mergeSparklineGroups(current, base, stored);

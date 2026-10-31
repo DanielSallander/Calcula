@@ -306,12 +306,12 @@ pub fn chart_data_sheet(
         return match sheet {
             calp::chart_refs::ChartSourceSheet::Id(id) => ids.iter().position(|s| *s == id),
             calp::chart_refs::ChartSourceSheet::Index(i) => (i < names.len()).then_some(i),
-            calp::chart_refs::ChartSourceSheet::Name(n) => names.iter().position(|s| s.eq_ignore_ascii_case(&n)),
+            calp::chart_refs::ChartSourceSheet::Name(n) => names.iter().position(|s| identity::sheet_names_equal(&s, &n)),
         };
     }
     let name = named_ranges.get(&defined_name_key(data)?)?;
     match name_definition_sheet(&name.refers_to, name.sheet_index)? {
-        NameSheet::Named(sheet) => names.iter().position(|s| s.eq_ignore_ascii_case(&sheet)),
+        NameSheet::Named(sheet) => names.iter().position(|s| identity::sheet_names_equal(&s, &sheet)),
         NameSheet::Scope(index) => (index < names.len()).then_some(index),
     }
 }
@@ -325,12 +325,10 @@ fn spells_every_sheet(text: &str, uses: &HashMap<String, usize>) -> bool {
 }
 
 /// A sheet name as a reference prefix spells it.
+/// The renderer's one rule (Excel's quoting), so the message spells the sheet
+/// the way the formula bar would.
 fn quote_sheet(name: &str) -> String {
-    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.starts_with(|c: char| c.is_ascii_digit()) {
-        name.to_string()
-    } else {
-        format!("'{}'", name.replace('\'', "''"))
-    }
+    engine::ast_render::quote_sheet_name(name)
 }
 
 /// The qualification walk (rule 2). A `Range` carries its sheet on the range
@@ -352,7 +350,7 @@ impl Qualify<'_> {
     fn canonical(&self, name: &str) -> Result<String, String> {
         self.sheet_names
             .iter()
-            .find(|s| s.eq_ignore_ascii_case(name))
+            .find(|s| identity::sheet_names_equal(s, name))
             .cloned()
             .ok_or_else(|| format!("There is no sheet named '{name}' in this workbook."))
     }
@@ -734,11 +732,12 @@ pub fn is_indirect_call(func: &BuiltinFunction, args: &[Expression]) -> bool {
 }
 
 /// Names in FUNCTION position (`=MyLambda(1)` or a JS UDF): a name only when the
-/// workbook defines it.
+/// workbook defines it. Keyed by `name_resolution::name_key`, the key
+/// `collect_names` and the name map use, so the two sets can be compared.
 fn function_position_names(expr: &Expression, out: &mut HashSet<String>) {
     if let Expression::FunctionCall { func, .. } = expr {
         if let Some(name) = func.user_definable_name() {
-            out.insert(name.to_uppercase());
+            out.insert(crate::name_resolution::name_key(name));
         }
     }
     for child in children(expr) {
@@ -755,7 +754,7 @@ struct Flags {
 }
 
 fn sheet_index(names: &[String], name: &str) -> Option<usize> {
-    names.iter().position(|s| s.eq_ignore_ascii_case(name))
+    names.iter().position(|s| identity::sheet_names_equal(&s, &name))
 }
 
 /// The Calcula all-sheets wildcard (`'*'!A1`), which the evaluator expands to a

@@ -63,8 +63,11 @@ export function computeComboLayout(
   const layout = computeCartesianLayout(width, height, spec, data, theme);
   const opts = (spec.markOptions ?? {}) as ComboMarkOptions;
 
-  // Add space for secondary Y axis if enabled
-  if (opts.secondaryYAxis) {
+  // Room for the secondary (right) value axis only when some series is ON it
+  // (BUG-0445: the flag alone reserved a 46px strip with no axis in it). The
+  // same answer the frame draws the axis from, so the strip and the axis
+  // cannot disagree.
+  if (comboSecondarySeries(opts, data.series.length).length > 0) {
     const extraRight = 46;
     layout.margin.right += extraRight;
     layout.plotArea.width = Math.max(layout.plotArea.width - extraRight, 10);
@@ -147,11 +150,83 @@ export function comboDefaultSeriesMark(si: number, count: number, stacked: boole
   return si === 0 ? "bar" : "line";
 }
 
+// ---- The secondary value axis (Excel: Change Chart Type > Combo > "Secondary
+// Axis" per series) ------------------------------------------------------------
+//
+// THE ONE READER and THE WRITERS of which series sit on the right-hand axis.
+// Excel's switch is per SERIES: ticking it for one series plots THAT series
+// against a second value axis on the right, and the axis exists exactly while
+// some series is on it. The spec keeps the old pair (`secondaryYAxis` +
+// `secondaryAxisSeries`); the writers keep them in step so the flag is true
+// exactly when the list is non-empty (BUG-0445: the UI wrote only the flag, so
+// no series ever moved and the layout reserved an empty strip).
+
+/** The series (valid indices < `count`, ascending, unique) plotted on the
+ *  secondary axis. Empty unless `secondaryYAxis` is on -- and empty when the
+ *  list would leave NO series on the primary axis: Excel never draws a chart
+ *  whose every series is on the secondary axis (moving the last primary series
+ *  there puts every series back on primary, and a one-series chart's only
+ *  series stays primary -- [LIVE] Excel 16, Series.AxisGroup), so a stored or
+ *  scripted spec that says otherwise is drawn the way Excel would draw it. */
+export function comboSecondarySeries(opts: ComboMarkOptions, count: number): number[] {
+  if (!opts.secondaryYAxis) return [];
+  const out = new Set<number>();
+  for (const si of opts.secondaryAxisSeries ?? []) {
+    if (Number.isInteger(si) && si >= 0 && si < count) out.add(si);
+  }
+  if (out.size >= count) return [];
+  return [...out].sort((a, b) => a - b);
+}
+
+/** `opts` with exactly `indices` on the secondary axis (flag and list in step). */
+export function withComboSecondarySeries(opts: ComboMarkOptions, indices: Iterable<number>): ComboMarkOptions {
+  const list = [...new Set(indices)].filter((i) => Number.isInteger(i) && i >= 0).sort((a, b) => a - b);
+  return { ...opts, secondaryYAxis: list.length > 0, secondaryAxisSeries: list };
+}
+
+/** `opts` with series `si` put on (or taken off) the secondary axis.
+ *
+ *  Excel's rule ([LIVE] Excel 16, Series.AxisGroup = xlSecondary): putting the
+ *  LAST primary series on the secondary axis puts EVERY series back on the
+ *  primary axis and removes the secondary one, and a one-series chart's only
+ *  series stays on primary. A chart therefore always keeps at least one series
+ *  on the left-hand axis. */
+export function setComboSeriesSecondary(
+  opts: ComboMarkOptions,
+  count: number,
+  si: number,
+  on: boolean,
+): ComboMarkOptions {
+  const next = new Set(comboSecondarySeries(opts, count));
+  if (on && Number.isInteger(si) && si >= 0 && si < count) next.add(si);
+  else next.delete(si);
+  if (on && next.size >= count) return withComboSecondarySeries(opts, []);
+  return withComboSecondarySeries(opts, next);
+}
+
+/**
+ * The series the Chart Design band's one "2nd axis" switch moves: Excel's
+ * "Clustered Column - Line on Secondary Axis" preset -- every LINE / AREA
+ * series on the right, the columns on the left. A combo of columns only moves
+ * its last series (with two or more), so the switch is never a no-op. Per-series
+ * control is the chart dialog's Design tab, as in Excel's Combo dialog.
+ */
+export function comboSwitchSecondarySeries(opts: ComboMarkOptions, count: number): number[] {
+  const stacked = opts.stackMode === "stacked";
+  const marks = opts.seriesMarks ?? {};
+  const nonColumns: number[] = [];
+  for (let si = 0; si < count; si++) {
+    if ((marks[si] ?? comboDefaultSeriesMark(si, count, stacked)) !== "bar") nonColumns.push(si);
+  }
+  if (nonColumns.length > 0 && nonColumns.length < count) return nonColumns;
+  return count >= 2 ? [count - 1] : [];
+}
+
 function comboFrame(data: ParsedChartData, spec: ChartSpec, layout: ChartLayout): ComboFrame {
   const { plotArea } = layout;
   const opts = (spec.markOptions ?? {}) as ComboMarkOptions;
   const seriesMarks = opts.seriesMarks ?? {};
-  const secondaryAxisSeries = new Set(opts.secondaryAxisSeries ?? []);
+  const secondaryAxisSeries = new Set(comboSecondarySeries(opts, data.series.length));
   // Only "stacked" stacks: a percent mode is refused by the schema, and a
   // leftover one from a 100% column must not silently become something else.
   const stacked = opts.stackMode === "stacked";
@@ -178,7 +253,7 @@ function comboFrame(data: ParsedChartData, spec: ChartSpec, layout: ChartLayout)
   );
 
   let yScaleSecondary: LinearScale | null = null;
-  if (opts.secondaryYAxis && secondaryIndices.length > 0) {
+  if (secondaryIndices.length > 0) {
     const [secMin, secMax] = axisExtent(data, secondaryIndices, barSet, stacked);
     const secAxis = opts.secondaryAxis;
     yScaleSecondary = createScaleFromSpec(

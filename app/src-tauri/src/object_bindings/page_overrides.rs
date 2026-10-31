@@ -163,10 +163,7 @@ impl ReportPages {
                 .pages
                 .iter()
                 .find(|p| p.name == name)
-                .or_else(|| {
-                    let folded = name.to_lowercase();
-                    self.pages.iter().find(|p| p.name.to_lowercase() == folded)
-                }),
+                .or_else(|| self.pages.iter().find(|p| identity::sheet_names_equal(&p.name, name))),
             None => self.pages.iter().find(|p| p.sheet_id == page_key),
         }
     }
@@ -189,8 +186,7 @@ pub fn match_entry(list: &[PageOverrideWire], page: &LivePage, pages: &ReportPag
     if let Some(i) = list.iter().position(|o| orphan(o) && o.sheet_name == page.name) {
         return Some(i);
     }
-    let folded = page.name.to_lowercase();
-    list.iter().position(|o| orphan(o) && o.sheet_name.to_lowercase() == folded)
+    list.iter().position(|o| orphan(o) && identity::sheet_names_equal(&o.sheet_name, &page.name))
 }
 
 // ---------------------------------------------------------------------------

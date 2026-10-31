@@ -399,6 +399,124 @@ where
     result
 }
 
+/// The hand-hidden sets an expand or a show-level changed, as they were BEFORE
+/// (`None`: that axis was not touched) -- the undo record of
+/// [`show_hand_hidden_in_details`].
+#[derive(Debug, Default)]
+pub(crate) struct HandHiddenBefore {
+    pub rows: Option<Vec<u32>>,
+    pub cols: Option<Vec<u32>>,
+}
+
+/// [`with_outline_undo`] for a mutation that may also SHOW hand-hidden lines
+/// (an expand, a show-level): the outline and the hand-hidden set as they were
+/// are ONE undo step, so one Ctrl+Z collapses the group and hides the lines
+/// again.
+fn with_outline_and_hand_undo<F>(state: &AppState, description: &str, f: F) -> GroupResult
+where
+    F: FnOnce() -> (GroupResult, HandHiddenBefore),
+{
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let previous = state.outlines.read().unwrap().get(&active_sheet).cloned();
+    let (result, hand) = f();
+    if !result.success {
+        return result;
+    }
+    if hand.rows.is_none() && hand.cols.is_none() {
+        crate::undo_commands::record_outline_undo(state, active_sheet, previous, description);
+    } else {
+        crate::undo_commands::record_restores_joining_open_transaction(
+            state,
+            description,
+            vec![
+                (
+                    crate::undo_commands::OUTLINE_RESTORE_KIND,
+                    crate::undo_commands::outline_snapshot_bytes(active_sheet, previous),
+                ),
+                (
+                    crate::undo_commands::USER_HIDDEN_RESTORE_KIND,
+                    crate::undo_commands::user_hidden_snapshot_bytes(active_sheet, hand.rows, hand.cols),
+                ),
+            ],
+        );
+    }
+    result
+}
+
+/// The DETAIL lines of a group -- its span less its summary line, which the
+/// group never hides.
+fn detail_span(start: u32, end: u32, summary: u32) -> Option<(u32, u32)> {
+    let (lo, hi) = if summary == end && end > start {
+        (start, end - 1)
+    } else if summary == start && end > start {
+        (start + 1, end)
+    } else if summary != start && summary != end {
+        (start, end)
+    } else {
+        return None;
+    };
+    Some((lo, hi))
+}
+
+/// SHOW the hand-hidden lines inside the detail of the groups an expand or a
+/// show-level leaves expanded (`spans`), except those a still-collapsed group
+/// hides (`still_hidden`), as Excel's do: Excel keeps ONE hidden flag per line,
+/// and ShowDetail = True / ShowLevels clears it on every detail line they show
+/// [LIVE 2026-10-31, misc16/probe-outline.ps1, Excel 16: rows 13:15 grouped,
+/// row 14 hidden by hand, collapse then expand -> 13, 14 and 15 all shown;
+/// ShowLevels(2) over a hand-hidden 14 shows it; and the rev14C case -- a
+/// collapsed group partly resized, which leaves its other lines hidden, then
+/// collapsed and expanded again -> every line shown]. Calcula keeps hand hides
+/// in a set of their own, and an expand that only flipped `collapsed` left them
+/// hidden for good: the lines a batch resize keeps hidden when it expands a
+/// group it only partly covers (`plan_line_visibility`'s `keep_hidden`) never
+/// came back (rev14C, round 16).
+///
+/// Takes the hand-hidden set AFTER the outline guard is released (its order
+/// is the user-hidden set, then the outline -- `set_line_sizes_core`), under
+/// its own guard from the decision through the write. Returns the set as it
+/// was (when anything changed) and the lines it showed, ascending.
+pub(crate) fn show_hand_hidden_in_details(
+    state: &AppState,
+    effect: &DocumentEffect,
+    rows: bool,
+    spans: &[(u32, u32)],
+    still_hidden: &HashSet<u32>,
+) -> (Option<Vec<u32>>, Vec<u32>) {
+    if spans.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut spans = spans.to_vec();
+    spans.sort_unstable();
+    // Merged, so one binary search answers "is this line in a span?".
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(spans.len());
+    for (lo, hi) in spans {
+        match merged.last_mut() {
+            Some(last) if lo <= last.1.saturating_add(1) => last.1 = last.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    let in_spans = |line: u32| {
+        let i = merged.partition_point(|&(lo, _)| lo <= line);
+        i > 0 && line <= merged[i - 1].1
+    };
+    let store = if rows { &state.user_hidden_rows } else { &state.user_hidden_cols };
+    let pending = store.lock_pending().unwrap();
+    let mut shown: Vec<u32> = pending.iter().copied().filter(|&l| in_spans(l) && !still_hidden.contains(&l)).collect();
+    if shown.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut before: Vec<u32> = pending.iter().copied().collect();
+    before.sort_unstable();
+    let mut hidden = pending.authorize(effect);
+    for l in &shown {
+        hidden.remove(l);
+    }
+    drop(hidden);
+    shown.sort_unstable();
+    (Some(before), shown)
+}
+
 /// Group rows (create or increment outline level)
 #[tauri::command]
 pub fn group_rows(
@@ -734,18 +852,22 @@ pub fn expand_row_group(
     file_state: State<FileState>,
     row: u32,
 ) -> GroupResult {
-    let result = with_outline_undo(&state, "Expand row group", || {
-        expand_row_group_inner(&state, &file_state, row)
-    });
+    let result = expand_row_group_core(&state, &file_state, row);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
+}
+
+/// [`expand_row_group`] without the app handle: the expand and its ONE undo
+/// step (the outline, and the hand-hidden rows it showed).
+pub(crate) fn expand_row_group_core(state: &AppState, file_state: &FileState, row: u32) -> GroupResult {
+    with_outline_and_hand_undo(state, "Expand row group", || expand_row_group_inner(state, file_state, row))
 }
 
 pub(crate) fn expand_row_group_inner(
     state: &AppState,
     file_state: &FileState,
     row: u32,
-) -> GroupResult {
+) -> (GroupResult, HandHiddenBefore) {
     let active_sheet = *state.active_sheet.read().unwrap();
     // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
     // written only by the save path. Collapsed-ness rides inside that blob, so
@@ -756,19 +878,20 @@ pub(crate) fn expand_row_group_inner(
     // the "is there an outline here at all?" question is answered under a READ guard:
     // a command that refuses must leave the document exactly as clean as it was.
     if !state.outlines.read().unwrap().contains_key(&active_sheet) {
-        return GroupResult::err("No outline exists for this sheet");
+        return (GroupResult::err("No outline exists for this sheet"), HandHiddenBefore::default());
     }
     let effect = DocumentEffect::mutates(&file_state);
     let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
-        None => return GroupResult::err("No outline exists for this sheet"),
+        None => return (GroupResult::err("No outline exists for this sheet"), HandHiddenBefore::default()),
     };
 
     let before_hidden = outline.get_hidden_rows();
 
     let mut found = false;
+    let mut details: Vec<(u32, u32)> = Vec::new();
     for group in &mut outline.row_groups {
         let is_button = match outline.settings.summary_row_position {
             SummaryPosition::BelowRight => group.end_row == row,
@@ -777,17 +900,26 @@ pub(crate) fn expand_row_group_inner(
         if is_button && group.collapsed {
             group.collapsed = false;
             found = true;
+            details.extend(detail_span(group.start_row, group.end_row, row));
         }
     }
 
     if !found {
-        return GroupResult::err("No collapsible group at this row");
+        return (GroupResult::err("No collapsible group at this row"), HandHiddenBefore::default());
     }
 
     let after_hidden = outline.get_hidden_rows();
-    let newly_visible: Vec<u32> = before_hidden.difference(&after_hidden).cloned().collect();
+    let mut newly_visible: Vec<u32> = before_hidden.difference(&after_hidden).cloned().collect();
+    let snapshot = outline.clone();
+    drop(outlines);
+    // ...and the rows the user hid by hand inside it come back too (Excel's
+    // ShowDetail; see `show_hand_hidden_in_details`).
+    let (before, shown) = show_hand_hidden_in_details(state, &effect, true, &details, &after_hidden);
+    newly_visible.extend(shown);
+    newly_visible.sort_unstable();
+    newly_visible.dedup();
 
-    GroupResult::ok_with_changes(outline.clone(), newly_visible, Vec::new())
+    (GroupResult::ok_with_changes(snapshot, newly_visible, Vec::new()), HandHiddenBefore { rows: before, cols: None })
 }
 
 /// Collapse a column group.
@@ -852,7 +984,13 @@ pub fn expand_column_group(
     file_state: State<FileState>,
     col: u32,
 ) -> GroupResult {
-    with_outline_undo(&state, "Expand column group", || {
+    expand_column_group_core(&state, &file_state, col)
+}
+
+/// [`expand_column_group`]: the expand and its ONE undo step (the outline,
+/// and the hand-hidden columns it showed).
+pub(crate) fn expand_column_group_core(state: &AppState, file_state: &FileState, col: u32) -> GroupResult {
+    with_outline_and_hand_undo(state, "Expand column group", || {
         let active_sheet = *state.active_sheet.read().unwrap();
         // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
         // written only by the save path. Collapsed-ness rides inside that blob, so
@@ -863,19 +1001,20 @@ pub fn expand_column_group(
         // the "is there an outline here at all?" question is answered under a READ guard:
         // a command that refuses must leave the document exactly as clean as it was.
         if !state.outlines.read().unwrap().contains_key(&active_sheet) {
-            return GroupResult::err("No outline exists for this sheet");
+            return (GroupResult::err("No outline exists for this sheet"), HandHiddenBefore::default());
         }
         let effect = DocumentEffect::mutates(&file_state);
         let mut outlines = state.outlines.write(&effect).unwrap();
 
         let outline = match outlines.get_mut(&active_sheet) {
             Some(o) => o,
-            None => return GroupResult::err("No outline exists for this sheet"),
+            None => return (GroupResult::err("No outline exists for this sheet"), HandHiddenBefore::default()),
         };
 
         let before_hidden = outline.get_hidden_cols();
 
         let mut found = false;
+        let mut details: Vec<(u32, u32)> = Vec::new();
         for group in &mut outline.column_groups {
             let is_button = match outline.settings.summary_col_position {
                 SummaryPosition::BelowRight => group.end_col == col,
@@ -884,17 +1023,25 @@ pub fn expand_column_group(
             if is_button && group.collapsed {
                 group.collapsed = false;
                 found = true;
+                details.extend(detail_span(group.start_col, group.end_col, col));
             }
         }
 
         if !found {
-            return GroupResult::err("No collapsible group at this column");
+            return (GroupResult::err("No collapsible group at this column"), HandHiddenBefore::default());
         }
 
         let after_hidden = outline.get_hidden_cols();
-        let newly_visible: Vec<u32> = before_hidden.difference(&after_hidden).cloned().collect();
+        let mut newly_visible: Vec<u32> = before_hidden.difference(&after_hidden).cloned().collect();
+        let snapshot = outline.clone();
+        drop(outlines);
+        // ...and the columns the user hid by hand inside it (Excel's ShowDetail).
+        let (before, shown) = show_hand_hidden_in_details(state, &effect, false, &details, &after_hidden);
+        newly_visible.extend(shown);
+        newly_visible.sort_unstable();
+        newly_visible.dedup();
 
-        GroupResult::ok_with_changes(outline.clone(), Vec::new(), newly_visible)
+        (GroupResult::ok_with_changes(snapshot, Vec::new(), newly_visible), HandHiddenBefore { rows: None, cols: before })
     })
 }
 
@@ -907,11 +1054,22 @@ pub fn show_outline_level(
     row_level: Option<u8>,
     col_level: Option<u8>,
 ) -> GroupResult {
-    let result = with_outline_undo(&state, "Show outline level", || {
-        show_outline_level_inner(&state, &file_state, row_level, col_level)
-    });
+    let result = show_outline_level_core(&state, &file_state, row_level, col_level);
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
     result
+}
+
+/// [`show_outline_level`] without the app handle: the levels and their ONE
+/// undo step (the outline, and the hand-hidden lines they showed).
+pub(crate) fn show_outline_level_core(
+    state: &AppState,
+    file_state: &FileState,
+    row_level: Option<u8>,
+    col_level: Option<u8>,
+) -> GroupResult {
+    with_outline_and_hand_undo(state, "Show outline level", || {
+        show_outline_level_inner(state, file_state, row_level, col_level)
+    })
 }
 
 pub(crate) fn show_outline_level_inner(
@@ -919,7 +1077,7 @@ pub(crate) fn show_outline_level_inner(
     file_state: &FileState,
     row_level: Option<u8>,
     col_level: Option<u8>,
-) -> GroupResult {
+) -> (GroupResult, HandHiddenBefore) {
     let active_sheet = *state.active_sheet.read().unwrap();
     // Outlines are persisted (`workbook.outlines`, one opaque JSON blob per sheet) and
     // written only by the save path. Collapsed-ness rides inside that blob, so
@@ -930,14 +1088,14 @@ pub(crate) fn show_outline_level_inner(
     // the "is there an outline here at all?" question is answered under a READ guard:
     // a command that refuses must leave the document exactly as clean as it was.
     if !state.outlines.read().unwrap().contains_key(&active_sheet) {
-        return GroupResult::err("No outline exists for this sheet");
+        return (GroupResult::err("No outline exists for this sheet"), HandHiddenBefore::default());
     }
     let effect = DocumentEffect::mutates(&file_state);
     let mut outlines = state.outlines.write(&effect).unwrap();
 
     let outline = match outlines.get_mut(&active_sheet) {
         Some(o) => o,
-        None => return GroupResult::err("No outline exists for this sheet"),
+        None => return (GroupResult::err("No outline exists for this sheet"), HandHiddenBefore::default()),
     };
 
     let before_row_hidden = outline.get_hidden_rows();
@@ -960,16 +1118,56 @@ pub(crate) fn show_outline_level_inner(
     let after_row_hidden = outline.get_hidden_rows();
     let after_col_hidden = outline.get_hidden_cols();
 
-    let row_changes: Vec<u32> = before_row_hidden
+    let mut row_changes: Vec<u32> = before_row_hidden
         .symmetric_difference(&after_row_hidden)
         .cloned()
         .collect();
-    let col_changes: Vec<u32> = before_col_hidden
+    let mut col_changes: Vec<u32> = before_col_hidden
         .symmetric_difference(&after_col_hidden)
         .cloned()
         .collect();
 
-    GroupResult::ok_with_changes(outline.clone(), row_changes, col_changes)
+    // The detail of every group the levels leave EXPANDED, on each axis they
+    // set: its hand-hidden lines are shown too (Excel's ShowLevels [LIVE], see
+    // `show_hand_hidden_in_details`).
+    let row_details: Vec<(u32, u32)> = if row_level.is_some() {
+        let below = matches!(outline.settings.summary_row_position, SummaryPosition::BelowRight);
+        outline
+            .row_groups
+            .iter()
+            .filter(|g| !g.collapsed)
+            .filter_map(|g| detail_span(g.start_row, g.end_row, if below { g.end_row } else { g.start_row }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let col_details: Vec<(u32, u32)> = if col_level.is_some() {
+        let right = matches!(outline.settings.summary_col_position, SummaryPosition::BelowRight);
+        outline
+            .column_groups
+            .iter()
+            .filter(|g| !g.collapsed)
+            .filter_map(|g| detail_span(g.start_col, g.end_col, if right { g.end_col } else { g.start_col }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let snapshot = outline.clone();
+    drop(outlines);
+    // The hand-hidden sets in their own order: rows, then columns.
+    let (rows_before, rows_shown) = show_hand_hidden_in_details(state, &effect, true, &row_details, &after_row_hidden);
+    let (cols_before, cols_shown) = show_hand_hidden_in_details(state, &effect, false, &col_details, &after_col_hidden);
+    row_changes.extend(rows_shown);
+    row_changes.sort_unstable();
+    row_changes.dedup();
+    col_changes.extend(cols_shown);
+    col_changes.sort_unstable();
+    col_changes.dedup();
+
+    (
+        GroupResult::ok_with_changes(snapshot, row_changes, col_changes),
+        HandHiddenBefore { rows: rows_before, cols: cols_before },
+    )
 }
 
 /// Get outline info for a viewport

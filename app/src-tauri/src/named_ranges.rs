@@ -213,7 +213,7 @@ pub(crate) fn recalc_after_name_change(
     {
         return;
     }
-    let changed_keys: HashSet<String> = changed.iter().map(|n| n.to_uppercase()).collect();
+    let changed_keys: HashSet<String> = changed.iter().map(|n| identity::defined_name_key(n)).collect();
 
     // OFF-SHEET half first, mirroring `apply_changes`: the active-sheet cascade
     // below then reads values the other sheets have already settled on.
@@ -337,7 +337,7 @@ pub(crate) fn create_named_range_impl(
         };
     }
 
-    let key = name.to_uppercase();
+    let key = identity::defined_name_key(&name);
 
     // THE LOCKS, IN THE RENAME'S EXACT ORDER (rev3B#6, rev5C#1): `grid`, then
     // `grids`, then the registry, then the undo stack. All three are held
@@ -489,7 +489,7 @@ pub(crate) fn update_named_range_core(
     comment: Option<String>,
     folder: Option<String>,
 ) -> NamedRangeResult {
-    let key = name.to_uppercase();
+    let key = identity::defined_name_key(&name);
     let named_range = NamedRange {
         name: name.clone(),
         sheet_index,
@@ -611,7 +611,7 @@ pub(crate) fn delete_named_range_core(
     // are `create_named_range_impl`'s): released before the record, a rename
     // could land its "Rename name" step between this delete and its own. The
     // block ENDS every guard before the recalculation.
-    let key = name.to_uppercase();
+    let key = identity::defined_name_key(&name);
     // The ids of the scripts the prune took, announced once every guard is
     // released (see `rename_named_range_impl`'s announcement).
     let mut pruned_ids: Vec<String> = Vec::new();
@@ -654,7 +654,7 @@ pub(crate) fn delete_named_range_core(
                     s.object_type == persistence::ScriptableObjectType::NamedRange
                         && s.instance_id
                             .as_deref()
-                            .map(|id| id.eq_ignore_ascii_case(&name))
+                            .map(|id| identity::defined_names_equal(id, &name))
                             .unwrap_or(false)
                 }),
                 Err(_) => Vec::new(),
@@ -740,7 +740,7 @@ pub fn get_named_range(
     name: String,
 ) -> Option<NamedRange> {
     let named_ranges = state.named_ranges.read().unwrap();
-    let key = name.to_uppercase();
+    let key = identity::defined_name_key(&name);
     named_ranges.get(&key).cloned()
 }
 
@@ -824,7 +824,7 @@ fn range_matches_selection(
             }
             // Sheet must match (None means current sheet)
             if let Some(s) = sheet {
-                if !s.eq_ignore_ascii_case(current_sheet_name) {
+                if !identity::sheet_names_equal(&s, &current_sheet_name) {
                     return false;
                 }
             }
@@ -834,7 +834,7 @@ fn range_matches_selection(
         }
         parser::ast::Expression::Range { sheet, start, end, .. } => {
             if let Some(s) = sheet {
-                if !s.eq_ignore_ascii_case(current_sheet_name) {
+                if !identity::sheet_names_equal(&s, &current_sheet_name) {
                     return false;
                 }
             }
@@ -908,8 +908,9 @@ fn resolve_ref_to_coords(
 
 /// Resolve a named range to grid coordinates for object scripts.
 /// Reuses the existing `refers_to` parsing and extends single-cell handling to
-/// full ranges (A1:B10). The sheet is resolved from the formula's sheet prefix
-/// (mapped to its index), or falls back to the name's scope, or sheet 0.
+/// full ranges (A1:B10). The sheet is the formula's sheet prefix, matched by
+/// Excel's case rule; a `refers_to` with no prefix falls back to the name's
+/// scope, then sheet 0.
 #[tauri::command]
 pub fn resolve_named_range_coords(
     state: State<AppState>,
@@ -920,11 +921,31 @@ pub fn resolve_named_range_coords(
     let sheet_names = state.sheet_names.read().unwrap();
     let named_ranges = state.named_ranges.read().unwrap();
 
-    let key = name.to_uppercase();
+    let key = identity::defined_name_key(&name);
     let nr = named_ranges
         .get(&key)
         .ok_or_else(|| format!("Named range '{}' does not exist.", name))?;
 
+    named_range_coords_in(&sheet_names, nr, &name)
+}
+
+/// The pure half of `resolve_named_range_coords`: `nr`'s rectangle on the
+/// sheet its `refers_to` names, against the workbook's `sheet_names`.
+///
+/// THE SHEET PREFIX IS MATCHED BY EXCEL'S CASE RULE (`identity::sheet_names_equal`),
+/// the one every engine lookup uses -- `='ärende'!$B$1` is the sheet `Ärende`,
+/// exactly as `=Rate` resolves it in a cell. It used to be
+/// `eq_ignore_ascii_case`, which found no sheet for that prefix.
+///
+/// A PREFIX THAT NAMES NO SHEET IS REFUSED, never resolved somewhere else. The
+/// old fallback to the name's scope sheet, or sheet 0, sent a script's
+/// `names.Rate` write to `Sheet1!B1` with no error, over the user's data; Excel
+/// evaluates a name whose sheet is gone to `#REF!` and selects nothing.
+fn named_range_coords_in(
+    sheet_names: &[String],
+    nr: &NamedRange,
+    name: &str,
+) -> Result<NamedRangeCoords, String> {
     let parsed = parser::parse(&nr.refers_to)
         .map_err(|_| format!("Named range '{}' does not refer to a parseable range.", name))?;
 
@@ -933,16 +954,17 @@ pub fn resolve_named_range_coords(
             format!("Named range '{}' does not refer to a cell or range.", name)
         })?;
 
-    // Resolve the sheet index: prefer the formula's sheet prefix, then the
-    // name's own scope, then the first sheet.
-    let sheet_index = if let Some(sname) = sheet_ref {
-        sheet_names
+    let sheet_index = match sheet_ref {
+        Some(sname) => sheet_names
             .iter()
-            .position(|n| n.eq_ignore_ascii_case(&sname))
-            .or(nr.sheet_index)
-            .unwrap_or(0)
-    } else {
-        nr.sheet_index.unwrap_or(0)
+            .position(|n| identity::sheet_names_equal(n, &sname))
+            .ok_or_else(|| {
+                format!(
+                    "Named range '{}' refers to the sheet '{}', which is not in this workbook ({}).",
+                    name, sname, nr.refers_to
+                )
+            })?,
+        None => nr.sheet_index.unwrap_or(0),
     };
 
     Ok(NamedRangeCoords {
@@ -1100,8 +1122,8 @@ pub(crate) fn rename_named_range_impl(
         return refuse(format!("Invalid name '{}'. Names must start with a letter or underscore, contain only letters, numbers, underscores, and periods, and cannot be cell references.", new_name));
     }
 
-    let old_key = old_name.to_uppercase();
-    let new_key = new_name.to_uppercase();
+    let old_key = identity::defined_name_key(old_name);
+    let new_key = identity::defined_name_key(new_name);
 
     // ---- THE LOCKS, IN THE CRATE'S ORDER, BEFORE ANY OTHER (BUG-0592). -----
     // `grid` and `grids` FIRST, then everything else -- the order of every
@@ -1464,7 +1486,7 @@ fn repoint_named_range_scripts(
             && script
                 .instance_id
                 .as_deref()
-                .map(|id| id.eq_ignore_ascii_case(old_name))
+                .map(|id| identity::defined_names_equal(id, old_name))
                 .unwrap_or(false)
     };
     let Ok(mut scripts) = state.object_scripts.write(effect) else {
@@ -1738,14 +1760,14 @@ pub fn apply_names_to_formulas(
     // it, so the two could each hold what the other waited for (fix round 4,
     // found by the lock-order census once it could see `lock_pending`). The
     // names are only read here, to build the text replacements.
-    let names_filter: HashSet<String> = names.iter().map(|n| n.to_uppercase()).collect();
+    let names_filter: HashSet<String> = names.iter().map(|n| identity::defined_name_key(n)).collect();
     let apply_all = names_filter.is_empty();
 
     let mut replacements: Vec<(String, Vec<String>)> = Vec::new();
     {
         let named_ranges = state.named_ranges.read().unwrap();
         for nr in named_ranges.values() {
-            if !apply_all && !names_filter.contains(&nr.name.to_uppercase()) {
+            if !apply_all && !names_filter.contains(&identity::defined_name_key(&nr.name)) {
                 continue;
             }
 
@@ -1972,6 +1994,48 @@ mod tests {
         assert!(NamedRange::looks_like_cell_reference("XFD1"), "XFD = 16384 is the last column");
         assert!(!NamedRange::looks_like_cell_reference("XFE1"), "XFE = 16385 is past it");
     }
+
+    /// rev10C: a script's `names.Rate` resolved its sheet ASCII-only and FELL
+    /// BACK to the scope sheet, or sheet 0, when the prefix matched nothing --
+    /// so a name defined as `='ärende'!$B$1` beside the tab `Ärende` read and
+    /// wrote `Sheet1!B1` with no error. The prefix is matched by Excel's case
+    /// rule now, and a prefix naming no sheet is refused.
+    #[test]
+    fn a_name_resolves_its_sheet_by_excels_case_rule_and_refuses_an_unknown_one() {
+        let sheets = vec!["Sheet1".to_string(), "\u{c4}rende".to_string()];
+        let named = |refers_to: &str, scope: Option<usize>| NamedRange {
+            name: "Rate".to_string(),
+            sheet_index: scope,
+            refers_to: refers_to.to_string(),
+            comment: None,
+            folder: None,
+        };
+
+        let c = named_range_coords_in(&sheets, &named("='\u{e4}rende'!$B$1", None), "Rate")
+            .expect("ärende is the sheet Ärende by Excel's case rule");
+        assert_eq!(
+            (c.sheet_index, c.start_row, c.start_col),
+            (1, 0, 1),
+            "='ärende'!$B$1 is Ärende!B1, not Sheet1!B1"
+        );
+        let c = named_range_coords_in(&sheets, &named("='\u{c4}RENDE'!$A$1:$B$2", None), "Rate")
+            .expect("the uppercased spelling is the same sheet");
+        assert_eq!(c.sheet_index, 1);
+        let c = named_range_coords_in(&sheets, &named("=sheet1!$A$1", Some(1)), "Rate")
+            .expect("an ASCII case variant is the same sheet");
+        assert_eq!(c.sheet_index, 0, "the prefix wins over the scope");
+
+        // A prefix naming no sheet -- even with a scope that would have caught
+        // it -- is refused, never sent to another sheet.
+        for scope in [None, Some(0)] {
+            let err = named_range_coords_in(&sheets, &named("='Gone'!$B$1", scope), "Rate")
+                .expect_err("a sheet that is not in the workbook must be refused");
+            assert!(err.contains("'Gone'"), "the refusal names the missing sheet: {err}");
+        }
+        // No prefix at all: the name's scope, then sheet 0 (unchanged).
+        assert_eq!(named_range_coords_in(&sheets, &named("=$C$3", Some(1)), "Rate").unwrap().sheet_index, 1);
+        assert_eq!(named_range_coords_in(&sheets, &named("=$C$3", None), "Rate").unwrap().sheet_index, 0);
+    }
 }
 
 /// RENAME — the key moves, the formulas follow it, and Ctrl+Z brings both back.
@@ -2039,7 +2103,7 @@ mod rename_tests {
 
         fn define(&self, name: &str, refers_to: &str, scope: Option<usize>) {
             self.state.named_ranges.write(&test_seed_effect()).unwrap().insert(
-                name.to_uppercase(),
+                identity::defined_name_key(name),
                 NamedRange {
                     name: name.to_string(),
                     sheet_index: scope,
@@ -2054,7 +2118,7 @@ mod rename_tests {
         /// gate under test asks `table_names`, not `tables`.
         fn declare_table(&self, name: &str) {
             self.state.table_names.write(&test_seed_effect()).unwrap().insert(
-                name.to_uppercase(),
+                crate::tables::table_name_key(name),
                 (0, identity::EntityId::from_bytes(identity::generate_uuid_v7())),
             );
         }

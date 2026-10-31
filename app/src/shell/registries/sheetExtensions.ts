@@ -312,14 +312,18 @@ export function registerCoreSheetContextMenu(): void {
     },
   });
 
-  // Delete
+  // Delete -- greyed for the last VISIBLE sheet, not the last sheet
+  // (BUG-0368): Excel refuses deleting it ("A workbook must contain at least
+  // one visible worksheet" [LIVE]), the rule core.sheet.delete applies, so the
+  // menu does not offer what the command then refuses. `totalSheets` counts
+  // hidden sheets too, which is the flaw Hide Sheet had.
   sheetExtensions.registerContextMenuItem({
     id: "core:delete",
     label: "Delete",
-    disabled: (context) => context.totalSheets <= 1,
+    disabled: (context) => isLastVisibleSheet(context),
     separatorAfter: true,
     onClick: async (context) => {
-      if (context.totalSheets <= 1) return;
+      if (isLastVisibleSheet(context)) return;
       window.dispatchEvent(new CustomEvent("sheet:requestDelete", {
         detail: { index: context.index, sheetId: context.sheetId },
       }));

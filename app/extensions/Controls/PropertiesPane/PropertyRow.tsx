@@ -25,6 +25,7 @@ import {
   type ScriptPickerEntry,
 } from "../../_shared/lib/scriptModuleProvenance";
 import { BindableField } from "../../_shared/components/bindings";
+import { useNativeColorPick } from "../../_shared/components/colorPick";
 import { getBinding, isBindablePath, type ObjectBindingRef } from "@api/objectBindings";
 import { controlPropertyPointer } from "../lib/controlBindings";
 import { NumberInput } from "@api/layout";
@@ -154,6 +155,26 @@ function toDisplayValue(val: ControlPropertyValue | undefined, defaultValue: str
  */
 export function fromDisplayValue(displayValue: string): string {
   return displayValue.startsWith("'") ? displayValue.slice(1) : displayValue;
+}
+
+/**
+ * A colour row's OS picker: the drag steps only preview into the row's text
+ * box, and the picker's closing `change` writes ONCE (BUG-0536: WebView2 fires
+ * an `input` per step, and each used to be a property write and an undo step).
+ */
+function ColorLiteralSwatch(props: {
+  stored: string;
+  onStep: (hex: string) => void;
+  onCommit: (hex: string) => void;
+  onEnd: () => void;
+}): React.ReactElement {
+  const picker = useNativeColorPick({
+    value: props.stored,
+    onStep: props.onStep,
+    onCommit: props.onCommit,
+    onEnd: props.onEnd,
+  });
+  return <input {...picker} style={colorSwatchStyle} />;
 }
 
 /**
@@ -311,14 +332,14 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
       case "color":
         return (
           <div style={colorInputContainerStyle}>
-            <input
-              type="color"
-              style={colorSwatchStyle}
-              value={localValue || "#000000"}
-              onChange={(e) => {
-                setLocalValue(e.target.value);
-                handleCommit(e.target.value);
+            <ColorLiteralSwatch
+              stored={displayValue}
+              onStep={setLocalValue}
+              onCommit={(hex) => {
+                setLocalValue(hex);
+                handleCommit(hex);
               }}
+              onEnd={() => setLocalValue(displayValue)}
             />
             <input
               type="text"

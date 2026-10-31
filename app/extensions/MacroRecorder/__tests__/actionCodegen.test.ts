@@ -19,7 +19,7 @@ import {
 import type { RecordedAction, RecordedEvent } from "../lib/types";
 // The REAL broker validators, so "the generated call is accepted by the
 // script API" is a fact this suite checks rather than a claim it makes.
-import { vSortRange, vBiModelMutation, vAddSheet } from "@api/scriptHost/validators";
+import { vSortRange, vBiModelMutation, vAddSheet, vDimensionRuns } from "@api/scriptHost/validators";
 
 // ============================================================================
 // Fixtures
@@ -566,6 +566,9 @@ describe("structural actions (object script)", () => {
     [{ kind: "unmergeCells", row: 0, col: 0 }, "await api.unmergeCells(0, 0); // A1"],
     [{ kind: "rowHeight", row: 4, height: 32 }, "await api.setRowHeight(4, 32);"],
     [{ kind: "columnWidth", col: 2, width: 140 }, "await api.setColumnWidth(2, 140);"],
+    // A batch resize is ONE run-based call (NEW-recorder-select-all).
+    [{ kind: "rowHeights", runs: [[17, 21]], height: 40 }, "await api.setRowHeights([[17,21]], 40);"],
+    [{ kind: "columnWidths", runs: [[2, 4], [7, 7]], width: 90 }, "await api.setColumnWidths([[2,4],[7,7]], 90);"],
     [
       { kind: "freezePanes", freezeRow: 1, freezeCol: null },
       "await api.freezePanes(1, null);",
@@ -599,6 +602,16 @@ describe("structural actions (object script)", () => {
     const nb = gen([act(event)], NB).unsupported;
     expect(nb).toHaveLength(1);
     expect(nb[0]).toContain("add canvas");
+  });
+
+  // NEW-recorder-select-all: Select All + Row Height is ONE line, not a
+  // million -- and the line is one the broker accepts.
+  it("replays a recorded Select All + Row Height as ONE api.setRowHeights the broker accepts", () => {
+    const { source } = gen([act({ kind: "rowHeights", runs: [[0, 1_048_575]], height: 30 })]);
+    const lines = source.split(/\r?\n/).filter((l) => l.includes("api.setRowHeight"));
+    expect(lines).toEqual([expect.stringContaining("await api.setRowHeights([[0,1048575]], 30);")]);
+    expect(vDimensionRuns([[[0, 1_048_575]], 30])).toBe(true);
+    expect(vDimensionRuns([[[2, 4], [7, 7]], 90])).toBe(true);
   });
 
   it("keeps the worksheet form byte-identical (no kind argument)", () => {

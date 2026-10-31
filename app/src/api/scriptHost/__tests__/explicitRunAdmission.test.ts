@@ -47,6 +47,8 @@ const h = vi.hoisted(() => ({
   rollBack: "ok" as "ok" | "refuse" | "throw",
   /** The cells a successful rollback says it took back (Rust `takenBackCells`). */
   takenBack: [] as Array<{ sheet: number; row: number; col: number }>,
+  /** The inverse line deltas a successful rollback reports (Rust `structuralDeltas`). */
+  rollbackDeltas: [] as unknown[],
   /** How `begin_undo_savepoint` explains a missing point, when it does (Rust `refused`). */
   savepointRefused: null as string | null,
   stepSeq: 900,
@@ -93,7 +95,7 @@ vi.mock("../../backend", () => ({
         await new Promise<void>((r) => setTimeout(r, 1));
         if (h.rollBack === "throw") throw new Error("the backend went away");
         if (h.rollBack === "refuse") return { success: false, refusal: "the undo step it was recorded in is no longer open", updatedCells: [], refreshDomains: [], activeSheetIndex: 0 };
-        return { success: true, refusal: null, updatedCells: [], refreshDomains: [], activeSheetIndex: 0, takenBackCells: h.takenBack };
+        return { success: true, refusal: null, updatedCells: [], refreshDomains: [], activeSheetIndex: 0, takenBackCells: h.takenBack, structuralDeltas: h.rollbackDeltas };
       }
       if (cmd === "audit_explicit_run_writes") {
         await new Promise<void>((r) => setTimeout(r, 1));
@@ -358,6 +360,7 @@ beforeEach(() => {
   h.savepoint = "open";
   h.rollBack = "ok";
   h.takenBack = [];
+  h.rollbackDeltas = [];
   h.savepointRefused = null;
   h.writeGate = null;
   h.standing = "allow";
@@ -1156,6 +1159,38 @@ describe("(t) a granted run is ALL OR NOTHING (F9)", () => {
     expect(h.reports[0].sheets).toEqual([{ sheet: 0, cellsModified: 2, firstRow: 0, lastRow: 1, firstCol: 0, lastCol: 0 }]);
   });
 
+  // Round 15 (lane clip7, clip6's remaining item): the take-back is shown
+  // through the ONE rollback announcer (`announceRolledBackRestore`), so the
+  // line edits the run made are handed back to their followers (a pending
+  // copy's source, bookmarks, Watch Window entries) as STRUCTURAL_UNDO
+  // `source: "rollback"`. It used to announce MUTATION_REFRESH alone.
+  it("(t1b) a taken-back run that INSERTED a row hands its followers the inverse delta, and still refreshes", async () => {
+    h.rollbackDeltas = [{ kind: "rowDelete", sheetIndex: 0, at: 1, count: 1 }];
+    const { onAppEvent, AppEvents } = await import("../../events");
+    const structural: unknown[] = [];
+    const refreshes: unknown[] = [];
+    const offA = onAppEvent(AppEvents.STRUCTURAL_UNDO, (p) => structural.push(p));
+    const offB = onAppEvent(AppEvents.MUTATION_REFRESH, (p) => refreshes.push(p));
+    try {
+      FakeWorker.onMount = (w) => {
+        w.send({ t: "call", callId: 1, method: "api.setCellValue", args: [0, 0, "one"] });
+        w.send({ t: "mounted", ok: false, error: "boom after an insert" });
+      };
+      const h_ = await host();
+      const definition = appRun({ explicitRun: mintExplicitMacroRun("macrosDialog", "macro-b") });
+      await expect(h_.hostMountScript(definition)).rejects.toThrow(/boom after an insert/);
+      expect(await h_.hostSettleExplicitRun(definition.id)).toMatchObject({ rolledBack: true });
+      await settle();
+      expect(structural, "the run's insert was not handed back to its followers").toEqual([
+        { description: undefined, source: "rollback", deltas: [{ kind: "rowDelete", sheetIndex: 0, at: 1, count: 1 }] },
+      ]);
+      expect(refreshes, "the restore was not refreshed").toContainEqual({ domains: ["styles"], source: "undo" });
+    } finally {
+      offA();
+      offB();
+    }
+  });
+
   it("(t2) CONTROL: a run that completes is committed as ONE step, and nothing is taken back", async () => {
     FakeWorker.onMount = (w) => {
       w.send({ t: "call", callId: 1, method: "api.setCellValue", args: [0, 0, "one"] });
@@ -1171,6 +1206,62 @@ describe("(t) a granted run is ALL OR NOTHING (F9)", () => {
     expect(h.undo).toEqual([`savepoint ${ticket}`, "write 0,0", "write 1,0", `commit ${ticket}`]);
     await settle();
     expect(h.reports[0]).toMatchObject({ completed: true, rolledBack: false });
+  });
+
+  // Round 16 (rev14A): a move a gesture announced from the run's JOINED step
+  // is remembered for the run's take-back. When the run COMMITS, that memory
+  // must go: it used to stay for the session, and a LATER take-back of the
+  // same geometry inside its own step (the user's refused Cut A1 > Paste C1)
+  // matched it and moved a bookmark on C1 to A1 that nobody had moved.
+  // SABOTAGE: drop releaseAnnouncedMoves() from closeGrantedRunStep's
+  // completed branch -> fails at "a committed run's move was handed back".
+  it("(t2b) a run that commits releases the moves its joined gestures announced", async () => {
+    const { announceCellsMoved, announceRolledBackRestore } = await import("../../../core/lib/cellsMoved");
+    const { onAppEvent, AppEvents } = await import("../../events");
+    FakeWorker.onMount = (w) => {
+      // The run's Cut A1 > Paste C1, joined to the run's step, announced its move.
+      announceCellsMoved(0, 0, 0, 0, 0, 0, 0, 2, true);
+      w.send({ t: "call", callId: 1, method: "api.setCellValue", args: [0, 2, "moved"] });
+      w.send({ t: "mounted", ok: true });
+    };
+    const h_ = await host();
+    const definition = appRun({ explicitRun: mintExplicitMacroRun("macrosDialog", "macro-b") });
+    await h_.hostMountScript(definition);
+    expect(await h_.hostSettleExplicitRun(definition.id)).toMatchObject({ completed: true });
+    await settle();
+
+    const handedBack: unknown[] = [];
+    const off = onAppEvent(AppEvents.CELLS_MOVED, (p) => handedBack.push(p));
+    try {
+      // Later: the user's own Cut A1 > Paste C1 is refused and taken back inside
+      // its OWN step -- its move was never announced.
+      announceRolledBackRestore({
+        success: true,
+        description: "Paste",
+        updatedCells: [],
+        canUndo: true,
+        canRedo: false,
+        mergeChanged: false,
+        structuralRestore: false,
+        pivotChanged: false,
+        slicerChanged: false,
+        ribbonFilterChanged: false,
+        paneControlChanged: false,
+        objectsChanged: false,
+        hiddenChanged: false,
+        refreshDomains: [],
+        activeSheetIndex: 0,
+        activeSheetName: "Sheet1",
+        restoredAnchor: null,
+        restoredRange: null,
+        structuralDeltas: [
+          { kind: "move", fromSheetIndex: 0, fromStartRow: 0, fromStartCol: 2, fromEndRow: 0, fromEndCol: 2, toSheetIndex: 0, toRow: 0, toCol: 0 },
+        ],
+      } as never);
+      expect(handedBack, "a committed run's move was handed back to a later take-back").toEqual([]);
+    } finally {
+      off();
+    }
   });
 
   // SABOTAGE: in openGrantedRunStep, record a step whose savepoint is null

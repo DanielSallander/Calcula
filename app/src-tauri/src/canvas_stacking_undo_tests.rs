@@ -53,7 +53,7 @@ impl Wb {
     }
 
     fn patch(&self, patch: CanvasLayoutPatch) -> Result<crate::sheets::CanvasLayoutChanged, String> {
-        crate::sheets::set_canvas_layout_inner(&self.state, &self.file, Some(self.canvas), &patch)
+        crate::sheets::set_canvas_layout_inner(&self.state, &self.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(self.canvas), &patch)
     }
 
     fn layout(&self) -> persistence::CanvasLayout {
@@ -229,6 +229,7 @@ fn a_refused_patch_records_nothing() {
     let worksheet = crate::sheets::set_canvas_layout_inner(
         &wb.state,
         &wb.file,
+        crate::sheets::ObjectFamilyStores::none_for_test(),
         Some(0),
         &CanvasLayoutPatch { z_order: Some(vec![obj("chart", "c1")]), ..Default::default() },
     );
@@ -303,7 +304,7 @@ fn the_stacking_step_is_recorded_with_sheet_ids_released() {
     let stranger = state.undo_stack.lock().unwrap();
     let reader_got_sheet_ids = std::thread::scope(|scope| {
         let patch = CanvasLayoutPatch { z_order: Some(front.clone()), ..Default::default() };
-        let restack = scope.spawn(move || crate::sheets::set_canvas_layout_inner(state, file, Some(canvas), &patch));
+        let restack = scope.spawn(move || crate::sheets::set_canvas_layout_inner(state, file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(canvas), &patch));
         // The layout shows once the restack has written it and dropped
         // `sheet_kinds`; it then records -- waiting for the stranger's stack.
         let deadline = Instant::now() + CEILING;

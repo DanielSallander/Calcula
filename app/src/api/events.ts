@@ -3,6 +3,8 @@
 // CONTEXT: Extensions and Shell use this to communicate without direct coupling.
 // FIX: Event names must match core/lib/events.ts which is the canonical source.
 
+import type { StructuralDelta, StructuralMoveDelta } from "../core/types";
+
 // ============================================================================
 // Event Names
 // ============================================================================
@@ -112,7 +114,35 @@ export const AppEvents = {
   COLUMNS_INSERTED: "app:columns-inserted",
   ROWS_DELETED: "app:rows-deleted",
   COLUMNS_DELETED: "app:columns-deleted",
+  // Payload: StructuralUndoPayload. An Undo or Redo of a structural step
+  // carries `source: "undo" | "redo"` and `deltas`, the coordinate changes it
+  // made in the order made (the backend's `UndoResult.structuralDeltas`, read
+  // from the step itself -- every edit of a grouped step, a cell shift's band);
+  // an Insert/Delete Cells announces it with `source: "edit"` and its band.
+  // @api/structuralFollow moves the stores whose coordinates the backend never
+  // holds by those deltas.
   STRUCTURAL_UNDO: "app:structural-undo",
+  // A block of cells MOVED -- a Cut + Paste, or a drag -- after the move has
+  // committed, and the Undo / Redo of a step that moved cells (when that step
+  // made no structural restore; otherwise the move rides STRUCTURAL_UNDO's
+  // `deltas`). Payload: CellsMovedPayload. The stores whose coordinates the
+  // backend never holds (Watch Window entries, cell bookmarks) follow the
+  // moved cells, as Excel's Watch Window does [LIVE: a watch on a cut-pasted
+  // cell follows it, and Undo moves it back].
+  CELLS_MOVED: "app:cells-moved",
+  // A data command REWROTE a block of cells in place -- a Sort (the ribbon's,
+  // the Sort dialog's, an AutoFilter dropdown's, a script's), a Remove
+  // Duplicates, a Text to Columns -- once it has succeeded. Payload:
+  // DataCommandAppliedPayload. Excel ENDS the clipboard mode, a copy's and a
+  // cut's, on each of them [LIVE 2026-10-30: CutCopyMode goes to 0 and a Paste
+  // fails, from the ribbon and from COM alike], so a Paste can never move the
+  // pre-sort snapshot; Core's clipboard listens for it. Also announced by the
+  // other commands Excel ends the mode on [LIVE 2026-10-30, clip5]: an
+  // AutoFilter turned on or its criteria applied or cleared, a Merge or
+  // Unmerge, Calculate Now / Calculate Sheet, a calculation-mode change and
+  // a refresh of the data underneath the grid (@api/dataAftermath, Excel's
+  // Data > Refresh All) -- the payload's `command` names which.
+  DATA_COMMAND_APPLIED: "app:data-command-applied",
   // A row/column insert or delete landed OFF the sheet on screen: on a
   // non-active sheet (a script's or the command line's `sheetIndex`) or on a
   // floating grid's backing sheet. The backend moved what it keeps for those
@@ -126,7 +156,9 @@ export const AppEvents = {
   // and @api/cellBehaviors' workbook-wide binding index -- or a store whose
   // coordinates the backend never holds, which REPLAYS the payload's edits on
   // the sheet each names: the embedded forms' anchors and Controls' side state
-  // filed under anchor-derived control ids.
+  // filed under anchor-derived control ids, and -- through
+  // @api/structuralFollow -- Watch Window entries, cell bookmarks, Insights
+  // range overlays and animation driver cells (BUG-0614).
   // Coalesced: one announcement per burst (a script loop of N inserts is not N
   // announcements), with every edit of the burst listed in order.
   // Payload: StructuralEditElsewherePayload.
@@ -352,6 +384,47 @@ export interface StructuralEditElsewhereEdit {
   at: number;
   /** How many rows (columns). */
   count: number;
+}
+
+/**
+ * Payload of STRUCTURAL_UNDO. `deltas` are the coordinate changes to apply NOW,
+ * in order: for an Undo the inverse of each change the step recorded, newest
+ * first; for a Redo each change again, oldest first; for an Insert / Delete
+ * Cells (`source: "edit"`) the one band shift it made; for a gesture TAKEN BACK
+ * to its savepoint (`source: "rollback"`: Insert Copied Cells whose paste did
+ * not land) the inverse of each change it had announced, newest first --
+ * followed like an Undo, but it leaves nothing to Redo. Absent only from an
+ * announcement that cannot say what moved.
+ */
+export interface StructuralUndoPayload {
+  description: string | null;
+  source?: "undo" | "redo" | "edit" | "rollback";
+  deltas?: StructuralDelta[];
+}
+
+/**
+ * Payload of CELLS_MOVED: the blocks that moved, in order. `source` is "edit"
+ * for the move itself (Cut + Paste, drag), "undo" / "redo" for its Undo (each
+ * move already reversed: the landed block back to where it came from) / Redo,
+ * "rollback" for an announced move taken back with the outer step it joined
+ * (an undo savepoint's take-back: followed like an Undo, nothing to Redo).
+ */
+export interface CellsMovedPayload {
+  moves: StructuralMoveDelta[];
+  source: "edit" | "undo" | "redo" | "rollback";
+}
+
+/**
+ * Payload of DATA_COMMAND_APPLIED: which command changed the sheet in a way
+ * that ENDS the clipboard mode, as Excel's does [LIVE]: a data command that
+ * rewrote cells in place (sort, removeDuplicates, textToColumns), an
+ * AutoFilter turned on or its criteria applied or cleared (autoFilter), a
+ * Merge or Unmerge (merge), Calculate Now / Calculate Sheet (calculate), and
+ * a change of the calculation mode, either way or to the mode already in
+ * effect (calculationMode).
+ */
+export interface DataCommandAppliedPayload {
+  command: "sort" | "removeDuplicates" | "textToColumns" | "autoFilter" | "merge" | "calculate" | "calculationMode" | "refresh";
 }
 
 /** Payload of STRUCTURAL_EDIT_ELSEWHERE: the edits the burst made. */

@@ -64,7 +64,7 @@ vi.mock("../components/scriptEmbed", () => ({
 
 import { insertRows, deleteRows, insertColumns, deleteColumns } from "@api/lib";
 import { AppEvents, emitAppEvent } from "@api/events";
-import { installEmbeddedFormLayer } from "../lib/embeddedFormLayer";
+import { installEmbeddedFormLayer, ORPHANED_DELETES_KEPT, rememberNewest } from "../lib/embeddedFormLayer";
 import {
   __resetEmbeddedFormPlacementsForTests,
   __setEmbeddedFormIdMinterForTests,
@@ -178,5 +178,72 @@ describe("a form embedded on another sheet follows an insert/delete there (round
       col: 0,
       orphaned: false,
     });
+  });
+});
+
+// Round 16 (rev14A): the layer heard only the FORWARD edits, so a form moved by
+// an insert stayed moved after the insert's Undo -- or after the take-back of a
+// refused Insert Copied Cells (STRUCTURAL_UNDO source "rollback") -- put the
+// line back out. It now follows through @api/structuralFollow, like bookmarks.
+describe("a form follows the Undo / Redo / take-back of a line edit (round 16)", () => {
+  it("Insert Copied Cells over row 2 moves a row-10 form to row 11; the refused paste's take-back puts it back on row 10", async () => {
+    const form = placeEmbeddedForm({ scriptId: "s", sheetIndex: 0, anchorRow: 9, anchorCol: 0 }).id;
+    await insertRows(1, 1); // the room the copy was to land in, on the sheet on screen
+    await settle();
+    expect(anchorOf(form)).toEqual({ row: 10, col: 0, orphaned: false });
+
+    emitAppEvent(AppEvents.STRUCTURAL_UNDO, {
+      description: "Insert Copied Cells",
+      source: "rollback",
+      deltas: [{ kind: "rowDelete", sheetIndex: 0, at: 1, count: 1 }],
+    });
+    await settle();
+    expect(anchorOf(form), "the take-back put the row back out, and the form with it").toEqual({
+      row: 9,
+      col: 0,
+      orphaned: false,
+    });
+  });
+
+  it("Ctrl+Z of a row delete that took the anchor puts the form back on its cell; Ctrl+Y takes it again", async () => {
+    const form = placeEmbeddedForm({ scriptId: "s", sheetIndex: 0, anchorRow: 4, anchorCol: 2 }).id;
+    await deleteRows(3, 2); // rows 4-5 go: the anchor row 5 (index 4) is deleted
+    await settle();
+    expect(anchorOf(form).orphaned).toBe(true);
+
+    emitAppEvent(AppEvents.STRUCTURAL_UNDO, {
+      description: "Delete Rows",
+      source: "undo",
+      deltas: [{ kind: "rowInsert", sheetIndex: 0, at: 3, count: 2 }],
+    });
+    await settle();
+    expect(anchorOf(form), "the Undo brought the row back, and the form on it").toEqual({
+      row: 4,
+      col: 2,
+      orphaned: false,
+    });
+
+    emitAppEvent(AppEvents.STRUCTURAL_UNDO, {
+      description: "Delete Rows",
+      source: "redo",
+      deltas: [{ kind: "rowDelete", sheetIndex: 0, at: 3, count: 2 }],
+    });
+    await settle();
+    expect(anchorOf(form).orphaned, "the Redo deleted the anchor row again").toBe(true);
+  });
+
+  // Round 18 (rev16B nit): the memory of orphaning deletes is BOUNDED (the
+  // newest ORPHANED_DELETES_KEPT, above the 100-step undo history), so a
+  // delete that is never undone is not kept for the session. (Its clear on
+  // File > Open / New is memory hygiene only: after a document swap no undo
+  // can name an old seq, so no test can observe it.)
+  // SABOTAGE: drop the bound in rememberNewest -> fails at "the oldest".
+  it("only the newest ORPHANED_DELETES_KEPT orphaning deletes are remembered", () => {
+    const memory = new Map<number, string>();
+    for (let seq = 1; seq <= ORPHANED_DELETES_KEPT + 5; seq++) rememberNewest(memory, seq, `d${seq}`, ORPHANED_DELETES_KEPT);
+    expect(memory.size, "the oldest deletes past the bound were still remembered").toBe(ORPHANED_DELETES_KEPT);
+    expect(memory.has(1) || memory.has(5)).toBe(false);
+    expect(memory.get(ORPHANED_DELETES_KEPT + 5)).toBe(`d${ORPHANED_DELETES_KEPT + 5}`);
+    expect(ORPHANED_DELETES_KEPT, "the bound must exceed the 100-step undo history").toBeGreaterThan(100);
   });
 });

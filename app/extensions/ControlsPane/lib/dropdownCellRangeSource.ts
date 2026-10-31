@@ -23,6 +23,7 @@
 //              nothing (found live 2026-09-29, e2e fixall-calp W7).
 
 import { CellRange, getFloatingRangeCells, getSheets, listFloatingRanges } from "@api";
+import { findBySheetName } from "@api/sheetNames";
 
 /** Cap cell-range reads so a whole-column reference stays cheap. */
 const MAX_RANGE_CELLS = 1000;
@@ -74,8 +75,7 @@ export function resolveCellRangeSource(
   if (address === "") return null;
   if (sheetName === null) return { sheetIndex: undefined, address };
   if (sheetName === "") return null;
-  const wanted = sheetName.toLowerCase();
-  const match = sheets.find((s) => s.name.toLowerCase() === wanted);
+  const match = findBySheetName(sheets, sheetName, (s) => s.name);
   return match ? { sheetIndex: match.index, address } : null;
 }
 

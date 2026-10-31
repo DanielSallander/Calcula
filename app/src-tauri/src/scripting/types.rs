@@ -49,6 +49,17 @@ pub struct ScriptState {
     /// cells each one wrote (F15). Transient bookkeeping, never saved: a grant
     /// lives from the mount door's `runAdmitted` answer to its one report.
     pub explicit_run_grants: super::explicit_run_audit::ExplicitRunGrants,
+    /// The custom-function names the PAGE registers that the backend cannot
+    /// read itself -- every add-in's (`formulas.registerFunction`), uppercased,
+    /// never a Custom Functions library's (the backend reads the workbook's
+    /// libraries, so a library name kept here would outlive its workbook onto
+    /// the next one opened, rev11C) -- as it last reported them
+    /// (`bi::cube::note_custom_function_registry`).
+    /// Session state, never saved: the registry lives in the page, and an
+    /// add-in's function is defined by the add-in being loaded, not by the
+    /// workbook. Read by `bi::cube::note_library_custom_functions` before every
+    /// full pass and at every open.
+    pub registered_custom_functions: Mutex<Vec<String>>,
 }
 
 impl ScriptState {
@@ -63,6 +74,7 @@ impl ScriptState {
             notebook_executor: super::notebook_executor::NotebookExecutor::new(),
             notebook_exec_lock: tokio::sync::Mutex::new(()),
             explicit_run_grants: super::explicit_run_audit::ExplicitRunGrants::default(),
+            registered_custom_functions: Mutex::new(Vec::new()),
         }
     }
 }
@@ -122,6 +134,12 @@ pub fn build_host_state(
     view_state: Option<&HostViewState>,
 ) -> script_engine::types::HostState {
     let mut host = script_engine::types::HostState::default();
+
+    // `Calcula.getCalculationState()` answers what the status bar's
+    // "Calculate" answers (Excel's CalculationState). Read FIRST, because it
+    // takes `grid` then `grids` (canonical order) and releases both before
+    // any other store here is touched.
+    host.calculation_state = crate::calculation::calculation_state_impl(state).to_string();
 
     // Zoom now HAS a backend authority (`AppState::sheet_zooms`, a percent per
     // sheet), so seed it here -- BEFORE the request's view state, which still

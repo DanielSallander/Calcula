@@ -322,8 +322,9 @@ function activate(context: ExtensionContext): void {
   //
   //     AFTER_OPEN: a newly opened workbook brings a whole new outline.
   //     The structural events: the backend shifts groups through row/column
-  //     insert & delete, and a pure structural UNDO carries no coordinates, so
-  //     re-reading is the only correct response.
+  //     insert & delete and moves them back on a structural UNDO (whose
+  //     `deltas` say what moved), so the backend holds the outline: re-reading
+  //     it is the correct response, never a replay.
   const onOutlineStale = () => { void resyncOutlineFromBackend(); };
   for (const evt of [
     AppEvents.OUTLINE_CHANGED,

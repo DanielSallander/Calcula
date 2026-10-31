@@ -811,3 +811,35 @@ fn a_grouped_clear_formats_removes_the_grouped_sheets_column_formats() {
         assert!(b.bold_at(sheet, 300, 2), "undo restores sheet {sheet}'s column format");
     }
 }
+
+/// A clear that changes NOTHING -- Clear Formats over empty or already-Normal
+/// cells, Clear Contents / Clear All over an empty rectangle -- writes nothing
+/// and records no undo step, but DIRTIES the document, because Excel does
+/// (round 11 overruled round 10's BUG-0359 "stays clean"): [LIVE, Excel 16]
+/// Delete on an empty cell, Home > Clear > Clear Formats / Clear All on an
+/// empty cell and Clear Formats on a plain number each set Workbook.Saved =
+/// False. A REFUSED clear still leaves the document clean (the refusal tests
+/// above).
+#[test]
+fn a_clear_that_changes_nothing_dirties_the_document_as_excel_does() {
+    let b = Book::new(1);
+    b.seed(0, |g| g.set_cell(3, 3, number(7.0)));
+    for apply_to in [ClearApplyTo::Formats, ClearApplyTo::Contents, ClearApplyTo::All] {
+        crate::document_effect::mark_saved(&b.file);
+        let out = b.clear((10, 10, 20, 20), apply_to).expect("an empty clear succeeds");
+        assert_eq!(out.count, 0, "{apply_to:?}: nothing to clear");
+        assert!(b.file.is_dirty(), "{apply_to:?} over empty cells left the document clean; Excel dirties it");
+        assert_eq!(b.undo_depth(), 0, "{apply_to:?}: no undo step for a no-op");
+    }
+    // D4 holds a number with no format of its own: Clear Formats changes nothing.
+    crate::document_effect::mark_saved(&b.file);
+    b.clear((0, 0, 5, 5), ClearApplyTo::Formats).expect("Clear Formats over a plain cell");
+    assert!(b.file.is_dirty(), "Clear Formats over an already-Normal cell left the document clean; Excel dirties it");
+    assert_eq!(b.value(0, 3, 3), CellValue::Number(7.0));
+    assert_eq!(b.undo_depth(), 0, "Clear Formats over a plain cell: no undo step");
+    // Positive control: Clear Contents over D4 changes it, and dirties.
+    crate::document_effect::mark_saved(&b.file);
+    b.clear((0, 0, 5, 5), ClearApplyTo::Contents).expect("Clear Contents over D4");
+    assert!(b.file.is_dirty(), "a clear that changed a cell must dirty the document");
+    assert_eq!(b.value(0, 3, 3), CellValue::Empty);
+}

@@ -1679,7 +1679,9 @@ Owner finding G1 ("chart background colour does nothing"), package P1.
   `colorful-8`) and light outline (`outline-1` .. `outline-3`) presets set no plot fill; the monochrome, dark,
   `outline-4` and gradient presets keep a deliberately tinted plot that differs from their background.
 - **One pick = one undo step.** Every native colour input that previews goes through
-  `_shared/components/colorPick/useNativeColorPick`: the base is snapshotted when the pick STARTS (a preview
+  `useNativeColorPick` (`@api/layout`, `src/api/layout/primitives/useNativeColorPick.ts` since 2026-10-30, so
+  the layout kit's own ColorPopover "More Colors..." and ColorSwatch `native` use it too; `_shared/components/colorPick`
+  re-exports it): the base is snapshotted when the pick STARTS (a preview
   rewrites the very value the swatch shows), each `input` previews, the native `change` commits ONCE against
   that base, and blur ends the pick. A host with a draft (the chart Data tab's series swatch) diffs the commit
   against its STORED value, never the draft. Before this, the Format tab never committed a pick (BUG-0503), the
@@ -1768,8 +1770,9 @@ the grid and a door that wrote "the selection" wrote that hidden cell.
   table-like object. Nothing was changed." These are permanent.
 - Insert / Delete Cells with a shift: "Insert Cells is not available inside a floating grid yet. Nothing was
   changed." (ruling Q3; the whole-row and whole-column forms work).
-- Style-only writes INTO a grid (Format Painter from a sheet, Paste Formatting, Paste No Borders) refuse with one
-  sentence until BUG-0513 is fixed; painting FROM a grid onto a sheet works.
+- (No longer refused, BUG-0513, 2026-10-30: style-only writes INTO a grid -- Format Painter from a sheet, Paste
+  Formatting, Paste No Borders -- go through `set_cell_style`'s cell target, one undo step, exactly as sheet ->
+  sheet; and Custom Sort's Cell Icon list reads the grid's own icons through `get_range_icons`' target, BUG-0514.)
 - Non-Home doors (Data Validation, comments, hyperlinks, bookmarks, Group, Remove Duplicates, Print Area, cell
   types, Define Name, ...) keep refusing with "<action> is not available inside a floating grid yet. Nothing was
   changed.".

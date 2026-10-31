@@ -235,8 +235,9 @@ fn the_digest_takes_the_two_grid_locks_in_the_passs_order() {
     let digest_src = include_str!("state_digest.rs");
     let calc_src = include_str!("calculation.rs");
 
-    // The pass's body (`run_calculation_pass` delegates to it since round 7).
-    let pass = function_body(calc_src, "pub(crate) fn run_calculation_pass_with(");
+    // The pass's body (`run_calculation_pass` -> `run_calculation_pass_with` ->
+    // `run_calculation_pass_gated`, round 16).
+    let pass = function_body(calc_src, "pub(crate) fn run_calculation_pass_gated(");
     let pass_grid = first_index_of(pass, "state.grid.write(").expect("the pass stopped locking grid");
     let pass_grids =
         first_index_of(pass, "state.grids.write(").expect("the pass stopped locking grids");
@@ -3687,7 +3688,7 @@ fn crate_sources() -> Vec<(String, String)> {
 /// The cell write paths that call the recorder while they hold the grid locks
 /// -- the three the R5 finding names, which the AI chat, the MCP server and the
 /// notebook drive off the main thread.
-const CELL_WRITERS: [&str; 3] = ["update_cell_impl", "update_cells_batch_core", "fill_range"];
+const CELL_WRITERS: [&str; 3] = ["update_cell_impl", "update_cells_batch_core", "fill_range_core"];
 
 /// The recorder every cell writer calls with its whole set held.
 const RECORDER: &str = "record_subscription_override_edits";
@@ -6820,7 +6821,9 @@ fn every_publish_door_takes_the_dialogs_sheet_ids_over_its_positions() {
         (
             &calp,
             "pub fn calp_publish(",
-            "RequestedSheets::from_wire(params.sheet_ids, params.sheet_indices)",
+            // Cloned (round 13): the carrier gates read `&params` after the
+            // request is built, so the ids are no longer moved out of it.
+            "RequestedSheets::from_wire(params.sheet_ids.clone(), params.sheet_indices.clone())",
             "resolve_publish_selection(",
         ),
         (
@@ -9045,6 +9048,47 @@ fn the_name_writers_hold_the_registry_until_their_undo_steps_are_recorded() {
     );
 }
 
+/// The MOVE's name relocation (a cut-paste of a named cell) is a name writer
+/// too, and records a WHOLE-registry snapshot: if it released the registry
+/// before taking the undo stack (round-9 review rev8B), a rename or delete
+/// could run whole in between, and undoing the move would then undo that
+/// writer's registry change as well while its formulas kept the new name. So
+/// while it waits for the stack, the registry must be held.
+#[test]
+fn the_move_s_name_relocation_holds_the_registry_until_its_undo_step_is_recorded() {
+    let state = workbook_with_a_name_and_its_reader();
+    let undo_held = state.undo_stack.lock().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        move || {
+            let names = vec!["Sheet1".to_string()];
+            let mv = crate::commands::structure::CellMove {
+                source_sheet: "Sheet1",
+                dest_sheet: "Sheet1",
+                block: (0, 0, 0, 0),
+                delta_row: 4,
+                delta_col: 0,
+            };
+            crate::commands::structure::relocate_named_ranges(&state, &test_seed_effect(), &names, &mv)
+        }
+    };
+    let probe_state = Arc::clone(&state);
+    let (parked, reached, changed) = run_site_while_held(undo_held, site, || name_keys_within(&probe_state, 400).is_some());
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the relocation finished while the undo stack was held, so it never waited for it \
+         and this test measured nothing"
+    );
+    assert_eq!(changed, vec!["Rate".to_string()], "the name on A1 follows the move");
+    assert_eq!(state.named_ranges.read().unwrap()["RATE"].refers_to, "=Sheet1!$A$5");
+    assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 1, "one step for the names");
+    assert!(
+        !reached,
+        "INTERLEAVED NAME WRITE: while the move's name relocation waited to record its step, the registry was \
+         free -- a rename could land between the change and its whole-registry snapshot"
+    );
+}
+
 /// The whole-list object-script snapshot (`obj_object_scripts`) put back every
 /// script as the step found it, and a script SAVE records no undo -- so undoing
 /// a name rename or delete, a table delete or a Convert to Range after the user
@@ -10429,8 +10473,8 @@ fn pivot_count_within(pivots: &Arc<PivotState>, ms: u64) -> Option<usize> {
 /// another thread and parks on the stack to record its step. The question is
 /// whether it holds `pivot_tables` while it waits.
 ///
-/// (`delete_pivot_table`, the other half of the finding, is a Tauri command over
-/// eight `State`s with no state-only body; the crate-wide census pins it.)
+/// (`delete_pivot_table`, the other half of the finding, has its own runtime
+/// test below, `deleting_a_pivot_never_holds_pivot_tables_while_it_waits_for_the_undo_stack`.)
 ///
 /// SABOTAGE: take the undo stack in `create_pivot_core` while `pivot_tables`
 /// is still held -- this fails at "DEADLOCK SHAPE".
@@ -10499,4 +10543,90 @@ fn creating_a_pivot_never_holds_pivot_tables_while_it_waits_for_the_undo_stack()
     assert!(pivots.pivot_tables.read().unwrap().contains_key(&id), "the pivot was not stored");
     assert_eq!(*pivots.active_pivot_id.lock().unwrap(), Some(id), "the new pivot is not the active one");
     assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 1, "the pivot create is one undo step");
+}
+
+/// NEW-pivot-create-delete-undo-cycle AS A TEST, the DELETE door (round-9
+/// review rev8B: it was pinned only by the source census). This thread plays a
+/// CELL WRITER mid-step holding the undo stack (as `update_cell_impl` does when
+/// it reads `pivot_tables` for GETPIVOTDATA); the delete runs on another thread
+/// and parks on the stack to record its step. It must not hold `pivot_tables`
+/// while it waits -- the store must still answer, with the pivot in it.
+///
+/// SABOTAGE: hold the `pivot_tables` read guard across the undo record in
+/// `delete_pivot_table` -- this fails at "DEADLOCK SHAPE".
+#[test]
+fn deleting_a_pivot_never_holds_pivot_tables_while_it_waits_for_the_undo_stack() {
+    let state = workbook_with_a_sales_table();
+    let file = Arc::new(crate::persistence::FileState::default());
+    let pivots = Arc::new(PivotState::new());
+    let id = {
+        let pane = crate::pane_control::PaneControlState::new();
+        let ribbon = RibbonFilterState::new();
+        let user_files = crate::persistence::UserFilesState::default();
+        let recalc = crate::pivot::operations::PivotRecalcStates { pane: &pane, ribbon: &ribbon, user_files: &user_files };
+        let request = crate::pivot::types::CreatePivotRequest {
+            source_range: "A1:C4".to_string(),
+            destination_cell: "F2".to_string(),
+            source_sheet: Some(0),
+            destination_sheet: Some(0),
+            has_headers: Some(true),
+            name: None,
+            source_table_name: None,
+            canvas_frame: None,
+        };
+        crate::pivot::commands::create_pivot_core(
+            &state,
+            &file,
+            &pivots,
+            recalc,
+            request,
+            vec!["Region".to_string()],
+            vec![("Sales".to_string(), pivot_engine::AggregationType::Sum)],
+        )
+        .expect("the pivot to delete")
+        .pivot_id
+    };
+    let depth_before = state.undo_stack.lock().unwrap().undo_depth();
+    let writer_holds_the_stack = state.undo_stack.lock().unwrap();
+    let site = {
+        let state = Arc::clone(&state);
+        let file = Arc::clone(&file);
+        let pivots = Arc::clone(&pivots);
+        move || {
+            crate::pivot::commands::delete_pivot_table(
+                &state,
+                &file,
+                &pivots,
+                &crate::persistence::UserFilesState::default(),
+                &crate::pane_control::PaneControlState::new(),
+                &RibbonFilterState::new(),
+                &crate::slicer::SlicerState::new(),
+                &crate::timeline_slicer::TimelineSlicerState::new(),
+                id,
+            )
+        }
+    };
+    let probe_pivots = Arc::clone(&pivots);
+    let mut seen: Option<usize> = None;
+    let (parked, _, result) = run_site_while_held(writer_holds_the_stack, site, || {
+        seen = pivot_count_within(&probe_pivots, 400);
+        seen.is_some()
+    });
+    assert!(
+        parked,
+        "PRECONDITION FAILED: the pivot delete finished while the undo stack was held, so it never waited for it \
+         and this test measured nothing"
+    );
+    assert!(
+        seen.is_some(),
+        "DEADLOCK SHAPE (NEW-pivot-create-delete-undo-cycle): while the pivot delete waited for the undo stack to \
+         record its step, it HELD `pivot_tables`. A cell writer holds `grid`, `grids` and the undo stack while it \
+         waits for `pivot_tables` (GETPIVOTDATA) -- an AI, MCP or notebook write meeting a pivot delete froze the \
+         window. Copy the pivot out, release the store, then record."
+    );
+    assert_eq!(seen, Some(1), "the delete parked on the stack BEFORE it removed the pivot");
+    // NON-VACUITY: once the stack was free the delete did all of it, as ONE step.
+    result.expect("the pivot delete failed");
+    assert!(!pivots.pivot_tables.read().unwrap().contains_key(&id), "the pivot was not removed");
+    assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), depth_before + 1, "the pivot delete is one undo step");
 }

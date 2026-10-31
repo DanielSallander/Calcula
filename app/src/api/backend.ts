@@ -705,6 +705,12 @@ export async function sortRange<TResult>(
       orientation,
     });
   }
+  // A sort that happened ENDS the clipboard mode, a copy's and a cut's, as
+  // Excel's does from every route [LIVE]: announced here so every caller (the
+  // ribbon, the Sort dialog, an AutoFilter dropdown, a script) announces it.
+  if (didSucceed(result)) {
+    emitAppEvent(AppEvents.DATA_COMMAND_APPLIED, { command: "sort" });
+  }
 
   return result;
 }
@@ -914,7 +920,7 @@ export async function applyAutoFilter(
   columnIndex?: number,
   criteria?: Partial<FilterCriteria>
 ): Promise<AutoFilterResult> {
-  return invoke<AutoFilterResult>("apply_auto_filter", {
+  return announcedFilterChange(await invoke<AutoFilterResult>("apply_auto_filter", {
     params: {
       startRow,
       startCol,
@@ -935,7 +941,20 @@ export async function applyAutoFilter(
           }
         : undefined,
     },
-  });
+  }));
+}
+
+/**
+ * Turning an AutoFilter on, applying criteria to it and clearing them (a
+ * column's or all) END the clipboard mode, a copy's and a cut's, as Excel's do
+ * [LIVE 2026-10-30, clip5/probe-endings.ps1 and rev11B/probe.ps1]: announced
+ * here (DATA_COMMAND_APPLIED), once the change landed, so every caller -- the
+ * dropdown, the ribbon, a view bookmark, a script -- announces it. Reapplying
+ * the filter and removing it keep the mode [LIVE] and announce nothing.
+ */
+function announcedFilterChange(result: AutoFilterResult): AutoFilterResult {
+  if (didSucceed(result)) emitAppEvent(AppEvents.DATA_COMMAND_APPLIED, { command: "autoFilter" });
+  return result;
 }
 
 /**
@@ -946,7 +965,7 @@ export async function applyAutoFilter(
 export async function clearColumnCriteria(
   columnIndex: number
 ): Promise<AutoFilterResult> {
-  return invoke<AutoFilterResult>("clear_column_criteria", { columnIndex });
+  return announcedFilterChange(await invoke<AutoFilterResult>("clear_column_criteria", { columnIndex }));
 }
 
 /**
@@ -954,7 +973,7 @@ export async function clearColumnCriteria(
  * @returns Result with all rows now visible
  */
 export async function clearAutoFilterCriteria(): Promise<AutoFilterResult> {
-  return invoke<AutoFilterResult>("clear_auto_filter_criteria", {});
+  return announcedFilterChange(await invoke<AutoFilterResult>("clear_auto_filter_criteria", {}));
 }
 
 /**
@@ -1084,11 +1103,11 @@ export async function setColumnFilterValues(
   values: string[],
   includeBlanks: boolean = false
 ): Promise<AutoFilterResult> {
-  return invoke<AutoFilterResult>("set_column_filter_values", {
+  return announcedFilterChange(await invoke<AutoFilterResult>("set_column_filter_values", {
     columnIndex,
     values,
     includeBlanks,
-  });
+  }));
 }
 
 /**
@@ -1105,12 +1124,12 @@ export async function setColumnCustomFilter(
   criterion2?: string,
   operator?: FilterOperator
 ): Promise<AutoFilterResult> {
-  return invoke<AutoFilterResult>("set_column_custom_filter", {
+  return announcedFilterChange(await invoke<AutoFilterResult>("set_column_custom_filter", {
     columnIndex,
     criterion1,
     criterion2,
     operator,
-  });
+  }));
 }
 
 /**
@@ -1125,11 +1144,11 @@ export async function setColumnTopBottomFilter(
   filterOn: "topItems" | "topPercent" | "bottomItems" | "bottomPercent",
   value: number
 ): Promise<AutoFilterResult> {
-  return invoke<AutoFilterResult>("set_column_top_bottom_filter", {
+  return announcedFilterChange(await invoke<AutoFilterResult>("set_column_top_bottom_filter", {
     columnIndex,
     filterOn,
     value,
-  });
+  }));
 }
 
 /**
@@ -1142,10 +1161,10 @@ export async function setColumnDynamicFilter(
   columnIndex: number,
   dynamicCriteria: DynamicFilterCriteria
 ): Promise<AutoFilterResult> {
-  return invoke<AutoFilterResult>("set_column_dynamic_filter", {
+  return announcedFilterChange(await invoke<AutoFilterResult>("set_column_dynamic_filter", {
     columnIndex,
     dynamicCriteria,
-  });
+  }));
 }
 
 // ============================================================================
@@ -1640,6 +1659,23 @@ export async function canEditCell(
   col: number
 ): Promise<ProtectionCheckResult> {
   return invoke<ProtectionCheckResult>("can_edit_cell", { row, col });
+}
+
+/**
+ * Check whether EVERY listed cell of the active sheet can be edited, in ONE
+ * call (the backend's `can_edit_cell` with `cells`): the answer names the first
+ * refused cell in list order. An empty list makes no call and can edit.
+ * @param cells - The cells, 0-based
+ */
+export async function canEditCells(
+  cells: ReadonlyArray<{ row: number; col: number }>,
+): Promise<ProtectionCheckResult> {
+  if (cells.length === 0) return { canEdit: true };
+  return invoke<ProtectionCheckResult>("can_edit_cell", {
+    row: 0,
+    col: 0,
+    cells: cells.map((c) => ({ row: c.row, col: c.col })),
+  });
 }
 
 /**
@@ -2475,18 +2511,22 @@ export async function evaluateConditionalFormats(
  * @param startCol - Start column
  * @param endRow - End row
  * @param endCol - End column
+ * @param opts - `target` (BUG-0514): a floating grid's cells -- the icons its
+ *   own rules show there, the rectangle clipped to the object's extent.
  */
 export async function getRangeIcons(
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
+  endCol: number,
+  opts?: CellTargetOptions,
 ): Promise<{ iconSet: IconSetType; iconIndex: number }[]> {
   return invoke<{ iconSet: IconSetType; iconIndex: number }[]>("get_range_icons", {
     startRow,
     startCol,
     endRow,
     endCol,
+    ...cellTargetArg("get_range_icons", opts),
   });
 }
 
@@ -3005,6 +3045,8 @@ export async function removeDuplicates(
       keyColumns: [...keyColumns],
       hasHeaders,
     });
+    // Ends the clipboard mode, as Excel's Remove Duplicates does [LIVE].
+    emitAppEvent(AppEvents.DATA_COMMAND_APPLIED, { command: "removeDuplicates" });
   }
 
   return result;
@@ -3048,6 +3090,11 @@ export interface GoalSeekResult {
   updatedCells: CellData[];
   /** Error message if goal seek failed validation */
   error: string | null;
+  /** The id of the ONE undo step the run recorded (the changing cell as it
+   *  was), for the status dialog's Cancel to take back with
+   *  `cancelGoalSeek(undoSeq)`; null when the run was refused and wrote
+   *  nothing (and on a Cancel's own answer). */
+  undoSeq: number | null;
 }
 
 /**
@@ -3060,6 +3107,18 @@ export async function goalSeek(
   params: GoalSeekParams,
 ): Promise<GoalSeekResult> {
   return invoke<GoalSeekResult>("goal_seek", { params });
+}
+
+/**
+ * The Goal Seek Status dialog's CANCEL, as Excel's: put the changing cell back
+ * exactly as it was and leave NOTHING in the history -- no undo step and no
+ * redo step (the document still counts as changed, as Excel's does).
+ * `undoSeq` is the id the run answered. Refuses, moving nothing, when another change is
+ * on top of the run's step (`error` says so). `updatedCells` repaints the
+ * changing cell and its dependents.
+ */
+export async function cancelGoalSeek(undoSeq: number): Promise<GoalSeekResult> {
+  return invoke<GoalSeekResult>("goal_seek", { cancelRun: undoSeq });
 }
 
 // ============================================================================
@@ -6495,7 +6554,12 @@ export async function clearPendingRecalc(): Promise<boolean> {
   return invoke<boolean>("clear_pending_recalc");
 }
 
-/** "done" when the workbook is fully calculated, "pending" after a cancel. */
+/**
+ * "done" when the workbook is fully calculated; "pending" (Excel's xlPending,
+ * the status bar's "Calculate") after a cancelled recalculation, after a
+ * manual-calculation edit a formula depends on, and for a workbook saved with
+ * calculation incomplete -- until a completed Calculate Now.
+ */
 export async function getCalculationState(): Promise<string> {
   return invoke<string>("get_calculation_state");
 }
@@ -6750,6 +6814,12 @@ export interface SolverResultData {
   statusMessage: string;
   updatedCells: CellData[];
   originalValues: SolverVariableValue[];
+  /**
+   * The sheet the run solved on, by STABLE id (null on a refusal). Restore
+   * Original Values ({@link solverRevert}) names the sheet by it, so a tab
+   * moved while the result dialog is open restores the right sheet.
+   */
+  sheetId: string | null;
   error: string | null;
 }
 
@@ -6758,12 +6828,16 @@ export async function solverSolve(params: SolverParams): Promise<SolverResultDat
   return invoke<SolverResultData>("solver_solve", { params });
 }
 
-/** Revert solver results to original values. */
+/**
+ * Revert solver results to original values, on the sheet the run answered by
+ * stable id (`SolverResultData.sheetId`) -- wherever that sheet is now. A sheet
+ * deleted meanwhile is refused (`error`) and nothing is written.
+ */
 export async function solverRevert(
-  sheetIndex: number,
+  sheetId: string,
   originalValues: SolverVariableValue[],
 ): Promise<SolverResultData> {
-  return invoke<SolverResultData>("solver_revert", { sheetIndex, originalValues });
+  return invoke<SolverResultData>("solver_revert", { sheetId, originalValues });
 }
 
 // ============================================================================

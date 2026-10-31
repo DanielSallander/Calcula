@@ -474,8 +474,8 @@ export function applyRenamesVacatedFirst<T extends { readonly oldId: string; rea
 /**
  * Remove every floating control of one sheet from the store (group membership
  * included). Used before re-reading the sheet's controls from the backend —
- * structural UNDO carries no coordinates, so re-anchoring cannot be replayed
- * and the anchors must be re-read wholesale.
+ * after a structural UNDO the backend holds the anchors it moved back, so they
+ * are re-read wholesale rather than replayed from the payload's `deltas`.
  */
 export function removeFloatingControlsForSheet(sheetIndex: number): void {
   for (const ctrl of floatingControls) {

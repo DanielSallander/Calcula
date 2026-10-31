@@ -20,6 +20,7 @@
 //          nothing here imports app/extensions.
 
 import type { PivotNotice } from "./pivotTypes";
+import { sheetNamesEqual } from "./sheetNames";
 
 // ============================================================================
 // The definition
@@ -173,7 +174,7 @@ const MAX_SHEET_NAME_CHARS = 31;
 /** Rust `ILLEGAL_SHEET_NAME_CHARS`: `: \ / ? * [ ]`. */
 const ILLEGAL_SHEET_NAME_CHARS = /[:\\/?*[\]]/g;
 /** Rust `RESERVED_SHEET_NAME`. */
-const RESERVED_SHEET_NAME = "history";
+const RESERVED_SHEET_NAME = "History";
 
 /**
  * A sheet-name BASE the backend's `validate_sheet_name` accepts, or null:
@@ -189,7 +190,7 @@ function sheetNameBase(raw: string): string | null {
   if (chars.length > MAX_SHEET_NAME_CHARS) {
     name = chars.slice(0, MAX_SHEET_NAME_CHARS).join("").trim().replace(/'+$/g, "").trim();
   }
-  if (!name || name.toLowerCase() === RESERVED_SHEET_NAME) return null;
+  if (!name || sheetNamesEqual(name, RESERVED_SHEET_NAME)) return null;
   return name;
 }
 

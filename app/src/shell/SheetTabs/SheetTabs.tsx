@@ -87,7 +87,7 @@ import {
 // command; model-drillthrough.md 2.5).
 import { keepEphemeralSheet, discardEphemeralSheet, type DiscardedSheet } from "../../api/lib";
 import { showToast } from "@api/notifications";
-import { resolveTabClick } from "./resolveTabClick";
+import { resolveTabClick, plainClickKeepsGroup, shiftClickGroup, type GroupTab } from "./resolveTabClick";
 import {
   EPHEMERAL_TAB_TOOLTIP,
   createEphemeralLeaveObserver,
@@ -1304,10 +1304,35 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         return;
       }
 
-      // Normal click (no Ctrl): clear sheet grouping. A Ctrl+click outside
-      // formula mode that was refused (a canvas at either end) leaves it alone.
-      // Asked of Core's group at EVENT time, never the render's copy.
-      if (isSheetGroupingActive() && !isCurrentlyFormulaMode && !event?.ctrlKey) {
+      // The tabs as the group rules read them (resolveTabClick.ts, SHEET GROUP
+      // CLICKS): which are visible, which are canvases.
+      const groupTabs: GroupTab[] = sheets.map((s) => ({
+        index: s.index,
+        visible: s.visibility === "visible",
+        isCanvas: s.kind === "canvas",
+      }));
+
+      // Shift+click outside formula mode: the sheets from the active one to the
+      // clicked one become the group, replacing any group; the active sheet
+      // stays where it is (Excel [LIVE]).
+      if (action === "groupRange") {
+        const range = shiftClickGroup(activeIndex, index, groupTabs);
+        if (range.length > 1) setSelectedSheetIndices(range);
+        else clearSheetGrouping();
+        return;
+      }
+
+      // A plain click that SWITCHES: it ends the group unless it lands on a
+      // member of a group that leaves some visible tab out -- Excel keeps the
+      // group then and only moves the active sheet (BUG-0616 item 6). A click on
+      // the active tab, and a Ctrl/Shift click refused at a canvas, change
+      // nothing ("ignore"). Asked of Core's group at EVENT time, never the
+      // render's copy.
+      if (
+        action === "normal" &&
+        isSheetGroupingActive() &&
+        !plainClickKeepsGroup(getSelectedSheetIndices(), index, groupTabs)
+      ) {
         clearSheetGrouping();
         console.log("[SheetTabs] Normal click: cleared sheet grouping");
       }

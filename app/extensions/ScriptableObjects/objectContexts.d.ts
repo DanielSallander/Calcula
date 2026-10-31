@@ -4105,14 +4105,14 @@ declare interface UnlockedAPI {
    * e.g. `await api.setRangeFormat(0, 0, 0, 4, { bold: true, backgroundColor: "#EEEEEE" })`
    *
    * Calcula policy (generated): Change how cells look on any sheet (font, colour, alignment, number format, borders), including whether a cell is locked while its sheet is protected.
-   * Reach: broker `api.setRangeFormat`, unlocked tier, class mutate. Limits: maxCells 100,000.
+   * Reach: broker `api.setRangeFormat`, unlocked tier, class mutate. Limits: maxCells 4,000,000.
    */
   setRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, format: ScriptFormat, sheet?: SheetRef): Promise<void>;
   /** Remove ALL formatting from a rectangle, keeping the values. ACTIVE SHEET
    *  only — call setActiveSheet() first for another sheet.
    *
    * Calcula policy (generated): Remove all formatting from a block of cells (the values are kept).
-   * Reach: broker `api.clearRangeFormat`, unlocked tier, class mutate. Limits: maxCells 100,000.
+   * Reach: broker `api.clearRangeFormat`, unlocked tier, class mutate. Limits: maxCells 4,000,000.
    */
   clearRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<void>;
   /**
@@ -4408,8 +4408,9 @@ declare interface UnlockedAPI {
   // may be ANY sheet of this workbook — no activate-dance. On a non-visible
   // sheet the operation runs with the full guard chain (protection, spills,
   // writeback claims, undo, cross-sheet formula rewrite) and the canvas simply
-  // has nothing to repaint. EXCEPTIONS: setRowHeight / setColumnWidth still
-  // act on the ACTIVE sheet only and reject a sheet ref naming another one.
+  // has nothing to repaint. EXCEPTIONS: setRowHeight / setColumnWidth (and
+  // their run-based forms setRowHeights / setColumnWidths) still act on the
+  // ACTIVE sheet only and reject a sheet ref naming another one.
 
   /** Insert `count` rows at `startRow`, shifting everything below down.
    *
@@ -4489,6 +4490,35 @@ declare interface UnlockedAPI {
    * Reach: broker `api.setColumnWidth`, unlocked tier, class mutate.
    */
   setColumnWidth(col: number, width: number, sheetOrOptions?: SheetRef | { unit?: "px" | "chars"; sheet?: SheetRef }): Promise<void>;
+  /**
+   * Set the height of every row in `runs` -- inclusive `[first, last]` pairs
+   * of 0-based rows -- in ONE call and ONE undo step, as Excel's
+   * `Rows("18:22").RowHeight = h`. `[[0, 1048575]]` is Select All
+   * (`Cells.RowHeight = h`): it sets the sheet's STANDARD height. A height
+   * given to hidden rows shows them, except that under an applied filter the
+   * hidden rows of runs that hold a visible row are passed over (Excel's
+   * rules). 0 restores the default. ACTIVE sheet only; same units and options
+   * bag as `setRowHeight`. A recorded batch resize replays as this call.
+   *
+   * ```js
+   * await api.setRowHeights([[17, 21]], 40);              // rows 18:22
+   * await api.setRowHeights([[0, 1048575]], 30, { unit: "pt" }); // Select All
+   * ```
+   *
+   * Calcula policy (generated): Change the height of every row in a set of row runs (one undo step).
+   * Reach: broker `api.setRowHeights`, unlocked tier, class mutate. Limits: maxRuns 10,000.
+   */
+  setRowHeights(runs: Array<[number, number]>, height: number, sheetOrOptions?: SheetRef | { unit?: "px" | "pt"; sheet?: SheetRef }): Promise<void>;
+  /**
+   * Set the width of every column in `runs` (inclusive `[first, last]` pairs
+   * of 0-based columns) in ONE call and ONE undo step, as Excel's
+   * `Columns("C:E").ColumnWidth = w`; `[[0, 16383]]` sets the sheet's
+   * standard width. Same units and options bag as `setColumnWidth`.
+   *
+   * Calcula policy (generated): Change the width of every column in a set of column runs (one undo step).
+   * Reach: broker `api.setColumnWidths`, unlocked tier, class mutate. Limits: maxRuns 10,000.
+   */
+  setColumnWidths(runs: Array<[number, number]>, width: number, sheetOrOptions?: SheetRef | { unit?: "px" | "chars"; sheet?: SheetRef }): Promise<void>;
   /**
    * Size an inclusive span of columns to fit their contents — EXACTLY the
    * double-click best-fit: the same canvas measurement, per-cell fonts and
@@ -5142,7 +5172,7 @@ declare interface UnlockedAPI {
    * ```
    *
    * Calcula policy (generated): Clear a block of cells on a sheet — everything, only their contents, or only their formatting (one undo step).
-   * Reach: broker `api.clearRange`, unlocked tier, class mutate. Limits: maxCells 100,000.
+   * Reach: broker `api.clearRange`, unlocked tier, class mutate. Limits: maxCells 4,000,000.
    */
   clearRange(startRow: number, startCol: number, endRow: number, endCol: number, options?: { applyTo?: "all" | "contents" | "formats" }, sheet?: SheetRef): Promise<{ count: number }>;
   /** Every sheet with its kind ("worksheet" | "canvas"), visibility
@@ -6625,13 +6655,13 @@ declare interface SheetContext extends BaseObjectContext {
    *  their own (active) sheet, and may not set `locked` / `formulaHidden`.
    *
    * Calcula policy (generated): Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders).
-   * Reach: broker `sheet.setRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
+   * Reach: broker `sheet.setRangeFormat`, restricted tier, class mutate. Limits: maxCells 4,000,000.
    */
   setRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, format: ScriptFormat, sheet?: SheetRef): Promise<void>;
   /** Remove ALL formatting from a rectangle on this sheet, keeping the values.
    *
    * Calcula policy (generated): Remove all formatting from a block of cells on the sheet currently shown (the values are kept).
-   * Reach: broker `sheet.clearRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
+   * Reach: broker `sheet.clearRangeFormat`, restricted tier, class mutate. Limits: maxCells 4,000,000.
    */
   clearRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<void>;
   /** Read a rectangle's formats on this sheet as a dense rows x cols grid —

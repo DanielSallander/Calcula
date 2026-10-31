@@ -1112,6 +1112,7 @@ fn animation_snapshots_do_not_survive_the_document() {
         crate::animation_commands::AnimSnapshot {
             sheet_id: None,
             cells: vec![((0, 0), Some(probe_cell("A-ORIGINAL")))],
+            ..Default::default()
         },
     );
     assert_eq!(

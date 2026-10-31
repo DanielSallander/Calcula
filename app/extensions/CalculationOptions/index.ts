@@ -4,7 +4,7 @@
 //          menu items in the Formulas menu. Controls automatic vs manual calculation mode.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerStatusBarItem, unregisterStatusBarItem } from "@api";
+import { registerStatusBarItem, unregisterStatusBarItem, onAppEvent, AppEvents } from "@api";
 import {
   registerCalculationMenuItems,
   syncCalculationMode,
@@ -17,6 +17,9 @@ const STATUS_ITEM_ID = "calcula.calculation-options.status";
 /** Takes back the Formulas-menu items the current activation added. */
 let unregisterMenuItems: (() => void) | null = null;
 
+/** Stops re-reading the calculation mode after an open. */
+let offAfterOpen: (() => void) | null = null;
+
 // ============================================================================
 // Lifecycle
 // ============================================================================
@@ -28,8 +31,15 @@ function activate(_context: ExtensionContext): void {
   unregisterMenuItems?.();
   unregisterMenuItems = registerCalculationMenuItems();
 
-  // 2. Sync checked state from backend
+  // 2. Sync checked state from backend -- and again after every open: an
+  //    opened file (.xlsx or .cala) sets the calculation mode, as the first
+  //    workbook Excel opens does (`adopt_xlsx_calculation_mode` /
+  //    `adopt_cala_calculation_mode` in the backend).
   syncCalculationMode();
+  offAfterOpen?.();
+  offAfterOpen = onAppEvent(AppEvents.AFTER_OPEN, () => {
+    void syncCalculationMode();
+  });
 
   // 3. Progress + Cancel + the "Calculate" stale marker.
   //
@@ -49,6 +59,8 @@ function activate(_context: ExtensionContext): void {
 
 function deactivate(): void {
   unregisterStatusBarItem(STATUS_ITEM_ID);
+  offAfterOpen?.();
+  offAfterOpen = null;
   unregisterMenuItems?.();
   unregisterMenuItems = null;
   console.log("[CalculationOptions] Deactivated.");

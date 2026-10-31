@@ -489,7 +489,9 @@ pub fn apply_cell_formatting(
 ///
 /// Now it states WHAT it wants (a rectangle and the fields the client set) and
 /// `apply_formatting_core` decides HOW, exactly as for a ribbon click: the
-/// formatCells option and the locked-cell gate under the held guards, whole
+/// Format Cells option under the held guards (only the option, never the
+/// cells' lock flags -- Excel formats a locked cell when the option is on, and
+/// a Locked/Hidden change is refused on a protected sheet), whole
 /// rows / whole columns / Select All as ONE row or column tier entry per line,
 /// every other cell based on its EFFECTIVE style, one undo step, and the
 /// document dirtied only when something changed (`DocumentEffect` is minted

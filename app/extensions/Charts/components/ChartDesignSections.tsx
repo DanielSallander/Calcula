@@ -136,6 +136,11 @@ import {
 import { resolveDataSource } from "../lib/dataSourceResolver";
 import { getStackModeFromSpec, setStackModeInOptions, stackModesFor } from "../lib/stackMode";
 import { markSwitchPatch } from "../lib/markOptionsForMark";
+import {
+  comboSecondarySeries,
+  comboSwitchSecondarySeries,
+  withComboSecondarySeries,
+} from "../rendering/comboChartPainter";
 
 // ============================================================================
 // Layout (tokens only — the band's geometry is the fill rule)
@@ -898,13 +903,40 @@ export function ChartLayoutSection(_props: PanelSectionProps): React.ReactElemen
     />
   );
 
+  // BUG-0445: the switch used to write only `secondaryYAxis`, so no series ever
+  // moved and the layout kept an empty strip. On = Excel's "Clustered Column -
+  // Line on Secondary Axis": the line series go on a right-hand value axis
+  // (comboSwitchSecondarySeries); off = every series back on the left. It is
+  // ON while any series is on the secondary axis. Per-series choice: the chart
+  // dialog's Design tab, Excel's Combo dialog.
+  // The series count is the painted data's (the indices the painter reads);
+  // before the chart has painted once there is none yet, and the switch shows
+  // the stored choice, disabled.
+  const paintedSeries = isCombo ? getCachedChartData(chartId)?.data?.series : undefined;
+  const seriesCount = paintedSeries?.length ?? 0;
+  const secondaryOn =
+    paintedSeries !== undefined
+      ? comboSecondarySeries(comboOpts, seriesCount).length > 0
+      : comboOpts.secondaryYAxis === true && (comboOpts.secondaryAxisSeries?.length ?? 0) > 0;
   const secondaryAxis = isCombo ? (
     <Switch
       label="2nd axis"
-      checked={comboOpts.secondaryYAxis ?? false}
-      tooltip="Plot series against a secondary (right) value axis"
+      checked={secondaryOn}
+      disabled={seriesCount < 2}
+      tooltip={
+        seriesCount < 2
+          ? "Plot the line series against a secondary (right) value axis (needs two or more series)"
+          : "Plot the line series against a secondary (right) value axis"
+      }
       testId="chart-secondary-axis"
-      onChange={(on) => updateSpec({ markOptions: { ...comboOpts, secondaryYAxis: on } })}
+      onChange={(on) =>
+        updateSpec({
+          markOptions: withComboSecondarySeries(
+            comboOpts,
+            on ? comboSwitchSecondarySeries(comboOpts, seriesCount) : [],
+          ),
+        })
+      }
     />
   ) : null;
 

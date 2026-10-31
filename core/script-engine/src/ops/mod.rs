@@ -35,17 +35,19 @@ pub(crate) fn sheet_names_for_error(names: &[String]) -> String {
 }
 
 /// Resolve a sheet NAME to its 0-based index: exact match first, then a
-/// UNIQUE case-insensitive match. The Err lists the workbook's sheet names so
-/// the script author sees what WOULD have matched.
+/// UNIQUE match by Excel's sheet-name case rule (`identity::sheet_names_equal`,
+/// the rule every other sheet lookup uses -- full `to_lowercase` merged the
+/// Angstrom sign with `å` and split final `ς` from `σ`). The Err lists the
+/// workbook's sheet names so the script author sees what WOULD have matched.
+/// Twin of `resolveSheetName` in app/src/api/scriptHost/worker/canonicalModel.ts.
 pub(crate) fn resolve_sheet_name(names: &[String], name: &str) -> Result<usize, String> {
     if let Some(i) = names.iter().position(|n| n == name) {
         return Ok(i);
     }
-    let lower = name.to_lowercase();
     let matches: Vec<usize> = names
         .iter()
         .enumerate()
-        .filter(|(_, n)| n.to_lowercase() == lower)
+        .filter(|(_, n)| identity::sheet_names_equal(n, name))
         .map(|(i, _)| i)
         .collect();
     match matches.as_slice() {
@@ -120,5 +122,30 @@ pub(crate) fn resolve_opt_sheet_key<'js>(
             }
             resolve_sheet_key(ctx, sc, v)
         }
+    }
+}
+
+#[cfg(test)]
+mod sheet_name_rule_tests {
+    use super::resolve_sheet_name;
+
+    /// A script's sheet name resolves by Excel's case rule, the one the engine
+    /// and the worker realm use: the Angstrom sign is NOT `å` (full lowercasing
+    /// merged them), and `σ` IS the capital sigma of `QΣ` (full lowercasing
+    /// applies the final-sigma rule, `QΣ` -> `qς`, and split them). Excel
+    /// answered both pairs live (core/identity/src/sheet_name_case.rs).
+    #[test]
+    fn a_script_sheet_name_resolves_by_excels_case_rule() {
+        let names = vec!["\u{e5}".to_string(), "Q\u{3a3}".to_string(), "\u{c4}rende".to_string()];
+        assert!(
+            resolve_sheet_name(&names, "\u{212b}").is_err(),
+            "the Angstrom sign named the a-ring sheet, which Excel keeps apart"
+        );
+        assert_eq!(
+            resolve_sheet_name(&names, "Q\u{3c3}"),
+            Ok(1),
+            "sigma did not find the capital-sigma sheet, which Excel calls the same name"
+        );
+        assert_eq!(resolve_sheet_name(&names, "\u{e4}RENDE"), Ok(2));
     }
 }

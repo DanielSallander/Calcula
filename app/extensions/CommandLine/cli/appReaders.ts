@@ -179,8 +179,11 @@ async function runShow(cmd: GenericCommand, s: AppCliSession, io: CliIo): Promis
       try {
         const c = await s.gateway.resolveNamedRangeCoords(named.name);
         resolved = `${sheetNameOf(s, c.sheetIndex)}!${formatRange(c)}`;
-      } catch {
-        resolved = "(not a range)";
+      } catch (e) {
+        // The backend says why (a sheet the name refers to that is not in the
+        // workbook, or a name that is not a range), as `goto` reports it.
+        const why = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+        resolved = why ? `(not a range) -- ${why}` : "(not a range)";
       }
       io.print(
         detailBlock([

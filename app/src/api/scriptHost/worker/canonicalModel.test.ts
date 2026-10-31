@@ -122,6 +122,16 @@ describe("resolveSheetName (twin of resolve_sheet_name in core/script-engine/src
       /ambiguous: it case-insensitively matches more than one sheet/,
     );
   });
+  // Excel's sheet-name case rule (@api/sheetNames), as the Rust twin's
+  // a_script_sheet_name_resolves_by_excels_case_rule pins it.
+  it("matches by Excel's case rule, not JavaScript's toLowerCase", () => {
+    const sheets = ["å", "QΣ", "Ärende"];
+    expect(() => resolveSheetName(sheets, "Å"), "the Angstrom sign is not a-ring [LIVE]").toThrow(
+      /No sheet named/,
+    );
+    expect(resolveSheetName(sheets, "Qσ"), "sigma is capital sigma's name [LIVE]").toBe(1);
+    expect(resolveSheetName(sheets, "äRENDE")).toBe(2);
+  });
 });
 
 describe("ScriptRange geometry + navigation", () => {

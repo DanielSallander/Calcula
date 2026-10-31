@@ -54,7 +54,7 @@ impl Fx {
     /// Store the page's interactions through the LAYOUT core alone (no
     /// re-fold): what an older door or a loaded file leaves behind.
     fn store_interactions(&self, interactions: CanvasInteractions) {
-        crate::sheets::set_canvas_layout_inner(&self.state, &self.file, Some(PAGE), &interactions_patch(interactions))
+        crate::sheets::set_canvas_layout_inner(&self.state, &self.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(PAGE), &interactions_patch(interactions))
             .expect("store the interactions");
     }
 

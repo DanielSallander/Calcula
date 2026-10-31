@@ -41,6 +41,49 @@ const GROUP_ORDER: Record<string, number> = {
   [GridMenuGroups.DEVELOPER]: 900,
 };
 
+/**
+ * The ids of the visible items another SHOWING item stands in for
+ * (`GridContextMenuItem.replaces`). Only a showing item replaces: an item that
+ * is itself left out leaves out nothing, so in a chain A replaces B replaces C,
+ * A shows, B is left out and C shows. Decided to a fixed point -- an item
+ * shows once every item replacing it is left out, and is left out once any
+ * showing item replaces it -- and a CYCLE (A and B each replacing the other)
+ * that leaves items undecided is broken DETERMINISTICALLY: the earliest
+ * registered undecided item shows. Mutually replacing items used to hide each
+ * other, so the menu showed neither (round 18, rev16B nit).
+ */
+export function itemsLeftOutByReplacement(visibleItems: readonly GridContextMenuItem[]): Set<string> {
+  const replacersOf = new Map<string, GridContextMenuItem[]>();
+  for (const item of visibleItems) {
+    for (const id of item.replaces ?? []) {
+      if (id === item.id) continue; // an item cannot stand in for itself
+      const list = replacersOf.get(id);
+      if (list) list.push(item);
+      else replacersOf.set(id, [item]);
+    }
+  }
+  const shown = new Set<string>();
+  const leftOut = new Set<string>();
+  let undecided = visibleItems.filter((item) => !shown.has(item.id));
+  while (undecided.length > 0) {
+    let progressed = false;
+    for (const item of undecided) {
+      const replacers = replacersOf.get(item.id) ?? [];
+      if (replacers.some((r) => shown.has(r.id))) {
+        leftOut.add(item.id);
+        progressed = true;
+      } else if (replacers.every((r) => leftOut.has(r.id))) {
+        shown.add(item.id);
+        progressed = true;
+      }
+    }
+    undecided = undecided.filter((item) => !shown.has(item.id) && !leftOut.has(item.id));
+    // A cycle: the earliest registered undecided item shows.
+    if (!progressed && undecided.length > 0) shown.add(undecided[0].id);
+  }
+  return leftOut;
+}
+
 // Import gridCommands for use in registerCoreGridContextMenu
 import { gridCommands } from "../../core/lib/gridCommands";
 import { applyRowsHidden, applyColsHidden, indexRange } from "../../core/lib/hiddenRowsCols";
@@ -139,13 +182,20 @@ class GridExtensionRegistry {
    * @param context The current grid context
    */
   getContextMenuItemsForContext(context: GridMenuContext): GridContextMenuItem[] {
-    const items = this.getContextMenuItems()
+    const visibleItems = this.getContextMenuItems()
       // Filter by visibility
       .filter((item) => {
         if (item.visible === undefined) return true;
         if (typeof item.visible === "function") return item.visible(context);
         return item.visible;
-      })
+      });
+    // An item that is showing leaves out the items it stands in for
+    // (`replaces`): the replaced item is decided by its replacement, never by
+    // a guess of its own about whether the replacement exists (rev14A, round 16).
+    // Only a SHOWING item replaces: see `itemsLeftOutByReplacement`.
+    const replaced = itemsLeftOutByReplacement(visibleItems);
+    const items = visibleItems
+      .filter((item) => !replaced.has(item.id))
       // Resolve labels, disabled state, and children
       .map((item) => this.resolveItem(item, context));
 
@@ -295,16 +345,21 @@ export function registerCoreGridContextMenu(): void {
     label: "Insert Row",
     group: GridMenuGroups.INSERT,
     order: 10,
-    // Only visible when rows are selected (right-click on row header)
+    // Only visible when rows are selected (right-click on row header). With a
+    // copy pending Excel's header menu reads "Insert Copied Cells" instead
+    // [LIVE 2026-10-30]: the InsertDeleteCells extension's item, which
+    // `replaces` this one while it shows. The shell does not predicate its own
+    // item on the clipboard: without that extension a header Insert is still
+    // offered (rev14A, round 16).
     visible: (ctx) => ctx.selection?.type === "rows",
     disabled: false,
     onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "rows") return;
-      
+
       const startRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
       const endRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
       const count = endRow - startRow + 1;
-      
+
       console.log(`[GridMenu] Insert ${count} row(s) at row ${startRow}`);
       await gridCommands.execute("insertRow");
     },
@@ -316,16 +371,17 @@ export function registerCoreGridContextMenu(): void {
     group: GridMenuGroups.INSERT,
     order: 20,
     separatorAfter: true,
-    // Only visible when columns are selected (right-click on column header)
+    // Only visible when columns are selected (right-click on column header);
+    // replaced by "Insert Copied Cells" while that shows, as on a row header.
     visible: (ctx) => ctx.selection?.type === "columns",
     disabled: false,
     onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "columns") return;
-      
+
       const startCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
       const endCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
       const count = endCol - startCol + 1;
-      
+
       console.log(`[GridMenu] Insert ${count} column(s) at column ${startCol}`);
       await gridCommands.execute("insertColumn");
     },

@@ -63,6 +63,13 @@ export interface AnimationSpec {
   name: string;
   sheetIndex: number;
   driver: DriverKind;
+  /**
+   * The driver's cell (a clock cell, a Monte Carlo outcome cell) was DELETED
+   * with its row or column -- Excel's #REF! for a reference to a deleted cell.
+   * The spec is kept (an Undo of that edit clears the flag again) but cannot
+   * be loaded; Edit it to point at a cell. Absent otherwise.
+   */
+  refDeleted?: boolean;
   playback: PlaybackSettings;
   clockCell?: ClockCellSpec;
   chartParam?: ChartParamSpec;

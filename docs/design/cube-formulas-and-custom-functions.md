@@ -212,7 +212,29 @@ for exactly the arguments it has now**, and `#N/A` only when none is recorded.
   data (the cross-sheet walk, a fill, a background write) it was served that
   number as current with no error (rev6A#1). Such an argument is now `#N/A`
   until the next refresh. Custom-function answers survive a refresh: they are
-  facts about their arguments, not about the model.
+  facts about their arguments, not about the model -- but not a change of the
+  function's own CODE (rev8A). When a Custom Functions library changes -- the
+  dialog's Save (`scripting::save_script`), an application's subscribe or update
+  merging its functions (`calp_commands`, after `materialize_distributed_scripts`
+  and before the installed sheets are seeded) -- every function whose definition
+  changed forgets its answers on every sheet (`CallKey` carries a tag of the
+  function's name, `CallMemo::forget_custom_function_answers`), and a function
+  the libraries no longer define is forgotten altogether, so a call of it is
+  Excel's ordinary `#NAME?` again and `=IFERROR(GONEFN(A1),0)` is 0
+  (`CallMemo::forget_custom_function`; it used to stay the sticky refusal until a
+  reopen). Driven by `bi::cube::forget_redefined_custom_functions`, which
+  compares the definitions before and after the write. Before it, an argument no
+  cell held when the new code was installed kept the old code's answer, and the
+  cross-sheet walk, F9 or the save served it as current.
+  On the application doors the page still runs the OLD code until it hears
+  `custom-functions:refresh` and re-installs, so every changed function is also
+  HELD (`bi::cube::hold_custom_functions_until_reinstalled`,
+  `CallMemo::hold_custom_function`) under a fresh library generation, which the
+  event carries: an answer served while held answers its edit but is not filed,
+  until the page reports that generation installed
+  (`loadAndInstallCustomFunctions({ libraryGeneration })` ->
+  `note_custom_function_registry`; a failed install reports nothing). The
+  authoring Save needs no hold: the dialog installs first and saves after.
 - **Bounded:** a call is filed under a fixed-size KEY, never its arguments'
   spelling (`CallKey`: the kind, the spelling's length and 128 bits of SipHash
   under a per-process secret key -- a custom function handed a 5,000-row range
@@ -222,8 +244,12 @@ for exactly the arguments it has now**, and `#N/A` only when none is recorded.
   `CALL_MEMO_GENERATION_BYTES`), and every sheet's memo together at most about
   64 MiB (`CALL_MEMO_WORKBOOK_BYTES`, one ledger per process, which is per
   workbook; a dropped sheet gives its bytes back). The full generation becomes
-  the previous one and the old previous one is dropped; forgetting only turns an
-  answer into a refusal.
+  the previous one and the old previous one is dropped. When the WORKBOOK's
+  budget is full, the sheet holding the most gives back its oldest generation
+  (`CallMemoLedger` keeps a weak handle to every memo; rev8A) -- it used to be
+  the sheet filing the answer, so once two big sheets filled the budget a third
+  rolled its own generation on every answer and kept two. Forgetting only turns
+  an answer into a refusal.
 
 The cache is keyed by fingerprint rather than by cell, so sorting or moving
 cells cannot misfile it and two cells making the same call share one answer,
@@ -290,7 +316,14 @@ checked by the pass (`calculation::run_calculation_pass`, `KeepWithoutData`):
   recalculates nothing), so does saving an edited manual document without
   recalculating it (`calculate_before_save` off), and so does a foreign install
   (above). A completed Calculate Now that planned every formula vouches for them
-  again. Consequence, on purpose: under manual calculation, once anything was
+  again. The mark OUTLIVES THE FILE (BUG-0615#2): a save while any sheet is marked
+  writes `calc_state.json` (`Workbook::calculation_incomplete`, `.cala` v12,
+  `CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION`) -- Excel's `calcCompleted="0"`,
+  which Excel writes for a manual workbook saved without recalculating and
+  reopens with the stale values and `CalculationState` = xlPending until F9
+  [LIVE, Excel 16] -- and the open marks every sheet again BEFORE the results
+  cache is seeded, which then files no saved value of a marked sheet as an
+  answer. Consequence, on purpose: under manual calculation, once anything was
   edited -- and on the first Calculate Now after leaving manual -- every call the
   cache cannot answer is refused, as round 6 did everywhere; Excel's F9 would
   recompute only the cells the edit dirtied, a record Calcula does not keep.
@@ -310,9 +343,26 @@ was refused for lack of data into that refusal, the way the work budget's
 cascade, the cross-sheet walk, a fill and a background write no longer write
 IFERROR's / IFNA's 0 or ISNA's FALSE as if computed. A call answered from data or
 from the cache is never affected, nor is a custom-function NAME the workbook is
-not known to define (no resolver ever served it and no saved root call of it was
-seeded, `CallMemo::knows_custom_function`): that may be a typo, Excel's `#NAME?`,
-which IFERROR handles. Its refusal is still reported to the full pass.
+not known to define (no resolver ever served it, no library defines it and the
+page does not register it, `CallMemo::knows_custom_function`): that may be a typo, Excel's `#NAME?`,
+which IFERROR handles. Its refusal is still reported to the full pass, which
+keeps the cell when it may and otherwise writes the ENGINE's answer -- so
+`=IFERROR(UNKNOWNFN(RAND()),0)` is 0 on F9, as in Excel [LIVE] (BUG-0615#1; the
+pass used to overwrite every such answer with `#NAME?`). Before each Calculate
+Now / Calculate Sheet, and at every open, the commands tell every sheet's cache
+which names are the workbook's custom functions: the ones its Custom Functions
+libraries define AND the ones the page registers -- an add-in's
+`formulas.registerFunction` is in no library (`bi::cube::note_library_custom_functions`,
+reading `ScriptState::registered_custom_functions`). The page reports its
+registry on every change (`note_custom_function_registry`, from
+`@api/formulaUdf`'s `installUdfEvaluation`), and a name it stops registering
+that no library defines is no longer known (its add-in was unloaded: Excel's
+`#NAME?`, which IFERROR handles). So a function used only inside composite
+formulas right after an open is KNOWN, and its refusal stays whole -- before
+(rev10 rev9A) `=IFERROR(FXRATE("USD",TODAY()),0)` around an add-in's function
+saved a plausible 0. Seeding a saved ROOT call files its answer but vouches for
+no name: a saved value proves the function existed when it was computed, not
+that anything defines it now (rev10).
 
 A recalculation that runs because something CHANGED -- an edit's cascade, the
 cross-sheet walk, a fill, a background-sheet write -- never keeps: there, a call
@@ -324,6 +374,12 @@ applies the full pass's rule, with the cells the update itself wrote afterwards
 -- the subscriber's overrides, the writeback values, re-rendered pivot output --
 counted as changed, and a sheet not yet recalculated counted as changing. It
 used to refuse every composite there, and the next save kept the refusal. The
+sheets are visited after the installed sheets their formulas name
+(`calculation::installed_sheet_order`, rev8A): in index order, an earlier
+`Report!B4 =MYFN(Data!A2)*2` counted every reference into the later Data as
+changed -- a literal no recalculation can change included -- and an update
+that changed nothing it read refused it. Only sheets that read each other (a
+cycle) still meet an unsettled sheet, conservatively. The
 same rule governs custom functions -- see §4.4.
 
 ### 2.5 Known limitations (v1)

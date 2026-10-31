@@ -39,6 +39,7 @@ import {
   parseStructuredReference,
   type ParsedNameBoxAddress,
 } from "./NameBox.address";
+import { findBySheetName } from "../../api/sheetNames";
 
 /** What the navigator needs from its host. */
 export interface ReferenceNavigatorContext {
@@ -191,7 +192,7 @@ export function createReferenceNavigator(ctx: ReferenceNavigatorContext): Refere
     const activeIndex = ctx.activeSheetIndex();
     const { sheets } = await getSheets();
     const target = address.sheetName
-      ? sheets.find((s) => s.name.toLowerCase() === address.sheetName!.toLowerCase())
+      ? findBySheetName(sheets, address.sheetName, (s) => s.name)
       : sheets.find((s) => s.index === activeIndex);
     if (address.sheetName && !target) {
       return `There is no sheet named "${address.sheetName}" in this workbook.`;

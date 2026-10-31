@@ -1004,29 +1004,29 @@ impl<'a> MultiSheetContext<'a> {
     /// Adds a grid to the context.
     pub fn add_grid(&mut self, name: String, grid: &'a Grid) {
         // Store with uppercase key for case-insensitive lookup
-        self.grids.insert(name.to_uppercase(), grid);
+        self.grids.insert(identity::sheet_name_key(&name), grid);
     }
 
     /// Gets a grid by name (case-insensitive).
     pub fn get_grid(&self, name: &str) -> Option<&&'a Grid> {
-        self.grids.get(&name.to_uppercase())
+        self.grids.get(&identity::sheet_name_key(name))
     }
 
     /// Gets the current/default grid.
     pub fn get_current_grid(&self) -> Option<&&'a Grid> {
-        self.grids.get(&self.current_sheet.to_uppercase())
+        self.grids.get(&identity::sheet_name_key(&self.current_sheet))
     }
 
     /// Gets all sheet names between start and end (inclusive) based on tab order.
     /// Returns an empty Vec if either sheet is not found in the order.
     pub fn get_sheets_in_range(&self, start: &str, end: &str) -> Vec<String> {
-        let start_upper = start.to_uppercase();
-        let end_upper = end.to_uppercase();
+        let start_upper = identity::sheet_name_key(start);
+        let end_upper = identity::sheet_name_key(end);
 
         let start_idx = self.sheet_order.iter()
-            .position(|s| s.to_uppercase() == start_upper);
+            .position(|s| identity::sheet_name_key(s) == start_upper);
         let end_idx = self.sheet_order.iter()
-            .position(|s| s.to_uppercase() == end_upper);
+            .position(|s| identity::sheet_name_key(s) == end_upper);
 
         match (start_idx, end_idx) {
             (Some(si), Some(ei)) => {
@@ -1177,6 +1177,13 @@ pub struct Evaluator<'a> {
     /// Scope for LAMBDA/LET name bindings. Names are stored uppercased.
     /// Uses RefCell for interior mutability so evaluate() can stay &self.
     scope: RefCell<HashMap<String, EvalResult>>,
+    /// The REFERENCE a LET name was bound to, when its value expression was one
+    /// (`LET(b, A2, ..)`), as a stack: the innermost entry for a name wins, and
+    /// an entry of `None` (a LAMBDA parameter, a name bound to a value) hides
+    /// an outer one. `scope` keeps only the VALUE, which cannot tell `b = A2`
+    /// from `b = 20`; Excel's `b:b` is A2 for the first and #VALUE! for the
+    /// second [LIVE]. Read only by `eval_bound_name_range`.
+    scope_refs: RefCell<Vec<(String, Option<Expression>)>>,
     /// How many lambda invocations are currently on the Rust stack.
     /// Incremented/decremented ONLY by `invoke_lambda_with_captured`, which is
     /// the single choke point every lambda call goes through. See
@@ -1283,7 +1290,7 @@ impl<'e> CubeResolver for EvalCubeResolver<'e> {
     }
     fn is_own_sheet(&self, sheet: &str) -> bool {
         self.sheets
-            .is_some_and(|ctx| sheet.to_uppercase() == ctx.current_sheet.to_uppercase())
+            .is_some_and(|ctx| identity::sheet_names_equal(sheet, &ctx.current_sheet))
     }
     fn qualified_cell_arg(&self, sheet: &str, row: u32, col: u32) -> Result<String, crate::cube::CubeError> {
         // No sheet table: there is no way to tell which sheet is named, and
@@ -1385,7 +1392,7 @@ impl<'e> CubeResolver for CubeFingerprintResolver<'e> {
     }
     fn is_own_sheet(&self, sheet: &str) -> bool {
         self.sheets
-            .is_some_and(|ctx| sheet.to_uppercase() == ctx.current_sheet.to_uppercase())
+            .is_some_and(|ctx| identity::sheet_names_equal(sheet, &ctx.current_sheet))
     }
     fn qualified_cell_arg(&self, sheet: &str, row: u32, col: u32) -> Result<String, crate::cube::CubeError> {
         let Some(ctx) = self.sheets else {
@@ -1419,6 +1426,7 @@ impl<'a> Evaluator<'a> {
             udf_fn: None,
             locale: Box::new(LocaleSettings::invariant()),
             scope: RefCell::new(HashMap::new()),
+            scope_refs: RefCell::new(Vec::new()),
             lambda_depth: std::cell::Cell::new(0),
             data_refusals: std::cell::Cell::new(0),
             certain_refusals: std::cell::Cell::new(0),
@@ -1651,8 +1659,8 @@ impl<'a> Evaluator<'a> {
     /// intersecting a typo against the local sheet.
     fn resolved_sheet_key(&self, sheet: &Option<String>) -> String {
         match (sheet, &self.multi_sheet) {
-            (Some(name), Some(_)) => name.to_uppercase(),
-            (None, Some(ctx)) => ctx.current_sheet.to_uppercase(),
+            (Some(name), Some(_)) => identity::sheet_name_key(name),
+            (None, Some(ctx)) => identity::sheet_name_key(&ctx.current_sheet),
             (_, None) => String::new(),
         }
     }
@@ -1677,11 +1685,11 @@ impl<'a> Evaluator<'a> {
         match (sheet, &self.multi_sheet) {
             // Named sheet that actually resolves to a grid: that sheet's key.
             (Some(sheet_name), Some(ctx)) if ctx.get_grid(sheet_name).is_some() => {
-                sheet_name.to_uppercase()
+                identity::sheet_name_key(sheet_name)
             }
             // Unnamed, or a name with no grid (get_grid_for_sheet fell back to
             // self.grid): the current sheet.
-            (_, Some(ctx)) => ctx.current_sheet.to_uppercase(),
+            (_, Some(ctx)) => identity::sheet_name_key(&ctx.current_sheet),
             (_, None) => String::new(),
         }
     }
@@ -2056,6 +2064,13 @@ impl<'a> Evaluator<'a> {
         start: &Expression,
         end: &Expression,
     ) -> EvalResult {
+        // `b:b` inside a LET / LAMBDA: the range operator between two names,
+        // never column B (see `eval_bound_name_range`).
+        if sheet.is_none() {
+            if let (Expression::NamedRef { name: s, .. }, Expression::NamedRef { name: e, .. }) = (start, end) {
+                return self.eval_bound_name_range(s, e);
+            }
+        }
         let grid = match self.resolve_grid_for_sheet(sheet) {
             Ok(grid) => grid,
             Err(err) => return EvalResult::Error(err),
@@ -4193,8 +4208,14 @@ impl<'a> Evaluator<'a> {
                                 // resolver -- wherever this call sits in its
                                 // formula, but only when no argument was itself
                                 // a refusal for lack of data (that `#N/A` stands
-                                // for a value this call never saw).
-                                if self.data_refusals.get() == refusals_before {
+                                // for a value this call never saw), and not
+                                // while the function is HELD: its library was
+                                // just replaced and the page may still have
+                                // served the OLD code's answer
+                                // (`CallMemo::hold_custom_function`).
+                                if self.data_refusals.get() == refusals_before
+                                    && !self.custom_function_held(&key)
+                                {
                                     if let Some(fp) = crate::cube::udf_call_fingerprint(&key, &eval_args) {
                                         self.grid.call_memo().remember(fp, &result);
                                     }
@@ -8947,7 +8968,12 @@ impl<'a> Evaluator<'a> {
     /// Helper to determine rows/cols dimensions of a range expression.
     fn get_range_dimensions(&self, expr: &Expression) -> (usize, usize) {
         match expr {
-            Expression::Range { start, end, .. } => {
+            Expression::Range { start, end, .. }
+                if matches!(
+                    (start.as_ref(), end.as_ref()),
+                    (Expression::CellRef { .. }, Expression::CellRef { .. })
+                ) =>
+            {
                 if let (
                     Expression::CellRef { col: sc, row: sr, .. },
                     Expression::CellRef { col: ec, row: er, .. },
@@ -8959,6 +8985,9 @@ impl<'a> Evaluator<'a> {
                     (rows, cols)
                 } else { (1, 1) }
             }
+            // `b:b` inside a LET (`Range { NamedRef, NamedRef }`, see
+            // `eval_bound_name_range`) and any other non-literal range fall
+            // through to the shape of its VALUE below.
             // NOT A LITERAL RECTANGLE — so ask the VALUE for its shape.
             //
             // This used to answer (1, 1) for everything else, which is what made
@@ -9634,10 +9663,12 @@ impl<'a> Evaluator<'a> {
         // Save previous scope values that might be shadowed
         let pair_count = (args.len() - 1) / 2;
         let mut saved: Vec<(String, Option<EvalResult>)> = Vec::new();
+        let refs_depth = self.scope_refs.borrow().len();
 
         for i in 0..pair_count {
             let name = self.extract_param_name(&args[i * 2]);
             if name.is_empty() {
+                self.scope_refs.borrow_mut().truncate(refs_depth);
                 return EvalResult::Error(CellError::Value);
             }
             let value = self.evaluate(&args[i * 2 + 1]);
@@ -9650,9 +9681,14 @@ impl<'a> Evaluator<'a> {
                         None => { scope.remove(&k); }
                     }
                 }
+                self.scope_refs.borrow_mut().truncate(refs_depth);
                 return EvalResult::Error(e.clone());
             }
             let key = name.to_uppercase();
+            // The reference the name stands for, when its value is one: what
+            // `b:b` (a bare `B:B` the parser bound to this name) reads.
+            let reference = self.reference_of_binding(&args[i * 2 + 1]);
+            self.scope_refs.borrow_mut().push((key.clone(), reference));
             {
                 let mut scope = self.scope.borrow_mut();
                 saved.push((key.clone(), scope.get(&key).cloned()));
@@ -9662,6 +9698,7 @@ impl<'a> Evaluator<'a> {
 
         // Evaluate the calculation expression with bindings in scope
         let result = self.evaluate(args.last().unwrap());
+        self.scope_refs.borrow_mut().truncate(refs_depth);
 
         // Restore previous scope
         {
@@ -9720,6 +9757,18 @@ impl<'a> Evaluator<'a> {
 
         // Collect all keys we need to save/restore: captured keys + param keys
         let mut saved: Vec<(String, Option<EvalResult>)> = Vec::new();
+        // Parameters and captured names are VALUES here: they hide any outer
+        // LET reference of the same name from `b:b` (see `scope_refs`).
+        let refs_depth = self.scope_refs.borrow().len();
+        {
+            let mut refs = self.scope_refs.borrow_mut();
+            for key in captured.keys() {
+                refs.push((key.clone(), None));
+            }
+            for name in params {
+                refs.push((name.to_uppercase(), None));
+            }
+        }
         {
             let mut scope = self.scope.borrow_mut();
 
@@ -9761,8 +9810,149 @@ impl<'a> Evaluator<'a> {
         // `EvalResult::Error` for every failure mode — so there is no unwind
         // path that could skip this.
         self.lambda_depth.set(entry_depth);
+        self.scope_refs.borrow_mut().truncate(refs_depth);
 
         result
+    }
+
+    /// The reference a LET value expression IS, if it is one: a cell, a range,
+    /// a whole column or row (qualified or not), or a name already bound to a
+    /// reference. What `b:b` reads when `b` was bound to it (Excel:
+    /// `=LET(b,A2,b:b)` is 20, `=LET(b,A1,d,A3,SUM(b:d))` is A1:A3 [LIVE]).
+    fn reference_of_binding(&self, expr: &Expression) -> Option<Expression> {
+        match expr {
+            Expression::CellRef { .. } | Expression::ColumnRef { .. } | Expression::RowRef { .. } => {
+                Some(expr.clone())
+            }
+            Expression::Range { start, end, .. }
+                if matches!(start.as_ref(), Expression::CellRef { .. })
+                    && matches!(end.as_ref(), Expression::CellRef { .. }) =>
+            {
+                Some(expr.clone())
+            }
+            Expression::NamedRef { name, .. } => self.bound_reference(&name.to_uppercase()),
+            _ => None,
+        }
+    }
+
+    /// The innermost reference `key` (uppercased) is bound to, if any.
+    fn bound_reference(&self, key: &str) -> Option<Expression> {
+        self.scope_refs
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .and_then(|(_, reference)| reference.clone())
+    }
+
+    /// `b:b` / `b:d` -- a bare column range the parser bound to LET or LAMBDA
+    /// names (`parser::bind_parameter_column_ranges`), i.e. Excel's range
+    /// operator between two names [LIVE, Excel 16, round 18]:
+    /// a name not bound here is `#NAME?` (`=LET(b,2,SUM(B:D))`); one name bound
+    /// to a reference is that reference (`=LET(b,A2,b:b)` is 20), and a range
+    /// value passed to a LAMBDA is that range (`=LAMBDA(b,SUM(B:B))(A1:A2)` is
+    /// 30); two references span both (`=LET(b,A1,d,A3,SUM(b:d))` is A1:A3); a
+    /// plain value is `#VALUE!` (`=LET(b,2,SUM(B:B)*b)`).
+    ///
+    /// A SECOND HALF OF BARE `C` OR `R` THAT NOTHING BINDS is not a name in
+    /// Excel: it is R1C1's own column / row of the formula cell [LIVE, Excel 16,
+    /// round 19/20: `=LET(a,1,SUM(A:C)+a)` in J2 is stored `SUM(a:J:J)` and is
+    /// #VALUE!, `=LET(a,1,SUM(A:R)+a)` is `a:9:9` in J9, #VALUE!, as are
+    /// `=LAMBDA(b,SUM(B:C)*b)(2)` and `=LET(a,{1,2},SUM(A:C))`]. A plain or array
+    /// value against that line is `#VALUE!`. A REFERENCE-valued first half is
+    /// #NAME? [LIVE: `=LET(a,A1,SUM(A:C))` and `=LET(a,A1,ROWS(A:R))` are #NAME?,
+    /// because Excel then reads the formula's A1-style references as names --
+    /// it stores `LET(a,'A1',...)`].
+    fn eval_bound_name_range(&self, start: &str, end: &str) -> EvalResult {
+        let (a, b) = (start.to_uppercase(), end.to_uppercase());
+        let (va, vb) = {
+            let scope = self.scope.borrow();
+            (scope.get(&a).cloned(), scope.get(&b).cloned())
+        };
+        if let (Some(va), None) = (&va, &vb) {
+            if b == "C" || b == "R" {
+                if let EvalResult::Error(_) = va {
+                    return va.clone();
+                }
+                return if self.bound_reference(&a).is_some() {
+                    EvalResult::Error(CellError::Name)
+                } else {
+                    EvalResult::Error(CellError::Value)
+                };
+            }
+        }
+        let (Some(va), Some(vb)) = (va, vb) else {
+            return EvalResult::Error(CellError::Name);
+        };
+        if let EvalResult::Error(_) = va {
+            return va;
+        }
+        if let EvalResult::Error(_) = vb {
+            return vb;
+        }
+        let (ra, rb) = (self.bound_reference(&a), self.bound_reference(&b));
+        if a == b {
+            return if ra.is_some() || matches!(va, EvalResult::Array(_)) {
+                va
+            } else {
+                EvalResult::Error(CellError::Value)
+            };
+        }
+        match (ra, rb) {
+            (Some(x), Some(y)) => match Self::reference_span(&x, &y) {
+                Some(span) => self.evaluate(&span),
+                None => EvalResult::Error(CellError::Value),
+            },
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// The smallest range holding two cell/range references on one sheet.
+    fn reference_span(x: &Expression, y: &Expression) -> Option<Expression> {
+        fn rect(e: &Expression) -> Option<(Option<String>, u32, u32, u32, u32)> {
+            match e {
+                Expression::CellRef { sheet, col, row, .. } => {
+                    let c = col_to_index(col);
+                    Some((sheet.clone(), *row, *row, c, c))
+                }
+                Expression::Range { sheet, start, end, .. } => match (start.as_ref(), end.as_ref()) {
+                    (
+                        Expression::CellRef { sheet: s1, col: c1, row: r1, .. },
+                        Expression::CellRef { col: c2, row: r2, .. },
+                    ) => {
+                        let (c1, c2) = (col_to_index(c1), col_to_index(c2));
+                        let qualifier = if sheet.is_some() { sheet.clone() } else { s1.clone() };
+                        Some((qualifier, (*r1).min(*r2), (*r1).max(*r2), c1.min(c2), c1.max(c2)))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let (sx, r1, r2, c1, c2) = rect(x)?;
+        let (sy, q1, q2, d1, d2) = rect(y)?;
+        let same_sheet = match (&sx, &sy) {
+            (None, None) => true,
+            (Some(p), Some(q)) => p.eq_ignore_ascii_case(q),
+            _ => false,
+        };
+        if !same_sheet {
+            return None;
+        }
+        let corner = |row: u32, col: u32| Expression::CellRef {
+            sheet: None,
+            col: index_to_col(col),
+            row,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
+        };
+        Some(Expression::Range {
+            sheet: sx,
+            start: Box::new(corner(r1.min(q1), c1.min(d1))),
+            end: Box::new(corner(r2.max(q2), c2.max(d2))),
+            ref_site_id: Default::default(),
+        })
     }
 
     /// Invoke a lambda with the given argument values bound to its parameters.
@@ -11302,6 +11492,17 @@ impl<'a> Evaluator<'a> {
                 .is_some_and(|ctx| ctx.grids.values().any(|g| g.call_memo().knows_custom_function(name_upper)))
     }
 
+    /// Whether some sheet's results cache HOLDS `name_upper`
+    /// (`CallMemo::hold_custom_function`): an answer served for it now may be
+    /// the old code's, so it is used but not recorded.
+    fn custom_function_held(&self, name_upper: &str) -> bool {
+        self.grid.call_memo().holds_custom_function(name_upper)
+            || self
+                .multi_sheet
+                .as_ref()
+                .is_some_and(|ctx| ctx.grids.values().any(|g| g.call_memo().holds_custom_function(name_upper)))
+    }
+
     /// Whether any cube or custom-function call this evaluator evaluated had
     /// no data -- no pre-fetched cube result, no UDF resolver, and no answer in
     /// the results cache for its exact arguments -- and so was REFUSED; and if
@@ -11401,13 +11602,15 @@ impl<'a> Evaluator<'a> {
                     if self.data_refusals.get() != refusals_before {
                         return false;
                     }
+                    // The answer is filed, but the name is NOT noted as a
+                    // known custom function: a saved value proves the
+                    // function existed in the workbook that computed it, not
+                    // that anything defines it now. Which names are the
+                    // workbook's functions is the host's to say (its
+                    // libraries and the functions it registers,
+                    // `CallMemo::note_custom_function`).
                     match crate::cube::udf_call_fingerprint(&name.to_uppercase(), &eval_args) {
-                        Some(fp) => {
-                            // A saved root call holding a value: the function
-                            // existed in the workbook that computed it.
-                            self.grid.call_memo().note_custom_function(&name.to_uppercase());
-                            fp
-                        }
+                        Some(fp) => fp,
                         None => return false,
                     }
                 }
@@ -17537,9 +17740,9 @@ impl<'a> Evaluator<'a> {
                 };
 
                 // Find position in sheet_order
-                let upper = sheet_name.to_uppercase();
+                let upper = identity::sheet_name_key(&sheet_name);
                 for (i, name) in ctx.sheet_order.iter().enumerate() {
-                    if name.to_uppercase() == upper {
+                    if identity::sheet_name_key(name) == upper {
                         return EvalResult::Number((i + 1) as f64);
                     }
                 }
@@ -18875,6 +19078,65 @@ mod tests {
             &EvalResult::Number(30.0),
         );
         assert_eq!(refused("=IFERROR(MYFUNC(A1),0)"), (EvalResult::Number(30.0), None), "answered from the cache");
+    }
+
+    /// rev10 cache2 residual (the calp race). An application update replaced
+    /// MYFUNC's library: the backend HOLDS the function until the page reports
+    /// it runs the new code. An answer served in between may be the OLD code's,
+    /// so it answers the edit that carried it but is never filed for a later
+    /// recalculation without a resolver; once the page reports the library
+    /// installed, served answers are filed again.
+    ///
+    /// SABOTAGE: drop the `!self.custom_function_held(&key)` condition.
+    #[test]
+    fn a_held_custom_function_is_served_but_its_answer_is_never_filed() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(4.0));
+        grid.call_memo().hold_custom_function("myFunc", 7);
+        assert_eq!(eval_udf_cell(&grid, 4, 4, "=MYFUNC(A1)", Some(&times_ten)), EvalResult::Number(40.0));
+        assert_eq!(
+            eval_udf_cell(&grid, 5, 5, "=MYFUNC(A1)", None),
+            EvalResult::Error(CellError::Name),
+            "an answer served while MYFUNC was held was filed as a fact about MYFUNC(4)"
+        );
+        grid.call_memo().release_custom_functions_up_to(6);
+        assert!(grid.call_memo().holds_custom_function("MYFUNC"), "an older library's report released a newer hold");
+        grid.call_memo().release_custom_functions_up_to(7);
+        assert!(!grid.call_memo().holds_custom_function("MYFUNC"));
+        assert_eq!(eval_udf_cell(&grid, 4, 4, "=MYFUNC(A1)", Some(&times_ten)), EvalResult::Number(40.0));
+        assert_eq!(
+            eval_udf_cell(&grid, 5, 5, "=MYFUNC(A1)", None),
+            EvalResult::Number(40.0),
+            "after the release a served answer is filed again"
+        );
+    }
+
+    /// rev10 cache2 residual (seeding). A saved ROOT call's value is filed as
+    /// its answer, but it no longer makes the name a KNOWN custom function: the
+    /// value proves the function existed when it was computed, not that
+    /// anything defines it now. A composite call of a function nothing defines
+    /// is then Excel's ordinary `#NAME?`, which IFERROR catches.
+    ///
+    /// SABOTAGE: note the name again in `remember_stored_call_answer`.
+    #[test]
+    fn seeding_a_saved_root_call_files_its_answer_but_does_not_vouch_for_the_name() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(3.0));
+        stored_formula(&mut grid, 1, 0, "=GONEFN(A1)", CellValue::Number(30.0));
+        {
+            let mut ms = MultiSheetContext::new("Sheet1".to_string());
+            ms.add_grid("Sheet1".to_string(), &grid);
+            let ctx = EvalContext { current_row: Some(1), current_col: Some(0), ..Default::default() };
+            let ev = Evaluator::with_context(&grid, ms, ctx);
+            assert!(ev.remember_stored_call_result(&parser::parse("=GONEFN(A1)").unwrap()));
+        }
+        assert_eq!(eval_udf_cell(&grid, 5, 5, "=GONEFN(A1)", None), EvalResult::Number(30.0), "the seeded answer");
+        assert!(!grid.call_memo().knows_custom_function("GONEFN"), "seeding vouched for a name nothing defines");
+        assert_eq!(
+            eval_udf_cell(&grid, 5, 5, "=IFERROR(GONEFN(A1+1),0)", None),
+            EvalResult::Number(0.0),
+            "a call of a function nothing defines is an ordinary #NAME? for IFERROR"
+        );
     }
 
     #[test]

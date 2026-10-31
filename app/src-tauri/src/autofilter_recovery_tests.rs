@@ -149,3 +149,50 @@ fn the_loader_still_recovers_per_sheet_and_still_reports() {
          delete every autofilter in the workbook silently"
     );
 }
+
+/// rev13C nit: the toast read "Part of this workbook could not be read and was
+/// not loaded (autofilters.json: the whole section could not be read: <serde
+/// error>)" -- an internal file name and a parser message on the user's screen.
+/// The user is now told WHAT was lost in plain words; the detail stays in the
+/// log line.
+#[test]
+fn the_autofilter_load_warning_is_in_plain_words() {
+    for (lost, expect) in [
+        (Some(1), "The filter settings on one sheet"),
+        (Some(3), "The filter settings on 3 sheets"),
+        (None, "The filter settings of this workbook"),
+    ] {
+        let text = crate::persistence::autofilter_load_warning(lost);
+        assert!(text.starts_with(expect), "{text}");
+        assert!(text.contains("Saving the workbook will not write them back."), "{text}");
+        for internal in [".json", "serde", "expected", "section", "entr"] {
+            assert!(!text.contains(internal), "internal detail `{internal}` reaches the user: {text}");
+        }
+    }
+    // The real loader sends THAT sentence, not the raw `lost` list.
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/persistence.rs"))
+        .expect("persistence.rs must be readable");
+    assert!(src.contains("\"message\": autofilter_load_warning("), "the loader no longer words the loss for the user");
+    assert!(!src.contains("\"lost\": lost"), "the raw parser errors are sent to the screen again");
+}
+
+/// rev13C nit: the sheet-rename notice was emitted in the middle of `open_file`,
+/// before install steps that can still return Err, so a workbook that then
+/// failed to open was announced as "opened with a sheet renamed". Every load
+/// warning is now emitted once, after the last fallible step.
+#[test]
+fn load_warnings_are_emitted_only_after_the_open_succeeded() {
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/persistence.rs"))
+        .expect("persistence.rs must be readable");
+    let start = src.find("pub fn open_file(").expect("open_file");
+    let body_end = src[start..].find("\n}\n").map(|i| start + i).expect("open_file's end");
+    let body = &src[start..body_end];
+    let emits: Vec<usize> = body.match_indices("window.emit(").map(|(i, _)| i).collect();
+    assert_eq!(emits.len(), 1, "open_file emits from {} places; every load warning must wait for the end", emits.len());
+    let last_fallible = body.rfind("?;").expect("a fallible step");
+    assert!(
+        emits[0] > last_fallible,
+        "a load warning is emitted before a step that can still fail the open"
+    );
+    assert!(body[emits[0]..].contains("\"document:load-warnings\""), "the one emit is not the load-warnings event");
+}

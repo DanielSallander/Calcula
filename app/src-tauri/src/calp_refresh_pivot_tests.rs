@@ -591,8 +591,15 @@ fn the_ledger_merge_no_longer_carries_pivots_forward() {
          pivots adopted, that both duplicates survivors and resurrects deleted \
          ones.",
     );
+    // The carry-forward keeps dataSource rows only while they are still true
+    // (rev12C: the version still carries the id, or a live connection is filed
+    // under it BEFORE the refresh -- round 16: data_source_claim_carries, so a
+    // connection minted during the refresh for another payload does not count)
+    // and extensionData rows as before.
     assert!(
-        src.contains("o.kind == \"dataSource\" || o.kind == \"extensionData\""),
+        src.contains("(o.kind == \"dataSource\"")
+            && src.contains("&& data_source_claim_carries(")
+            && src.contains("|| o.kind == \"extensionData\""),
         "the ledger merge's carry-forward filter is not the expected shape; \
          re-read it before trusting either assertion here.",
     );

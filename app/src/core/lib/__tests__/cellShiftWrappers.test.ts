@@ -55,10 +55,13 @@ describe("insertCellsRange / deleteCellsRange", () => {
     ]);
   });
 
-  it("an applied shift announces a coordinate-free structural change and the store domains", async () => {
+  it("an applied shift announces its band shift as coordinates (source edit) and the store domains", async () => {
+    const delta = { kind: "colInsert", sheetIndex: 0, at: 1, count: 2, band: { start: 1, end: 2 } };
+    nextResult = { applied: true, confirm: null, wholeLines: false, delta };
     await insertCellsRange(1, 1, 2, 2, "right");
     expect(heard.map((h) => h.type)).toEqual([AppEvents.STRUCTURAL_UNDO, AppEvents.MUTATION_REFRESH]);
-    expect(heard[0].detail).toEqual({ description: "Insert Cells" });
+    // The backend's own delta, handed on as it came (@api/structuralFollow follows it).
+    expect(heard[0].detail).toEqual({ description: "Insert Cells", source: "edit", deltas: [delta] });
     const domains = (heard[1].detail as { domains: string[] }).domains;
     for (const d of ["annotations", "hyperlinks", "validations", "conditionalFormats", "controls", "objects"]) {
       expect(domains).toContain(d);

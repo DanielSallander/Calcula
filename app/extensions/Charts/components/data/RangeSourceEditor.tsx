@@ -316,7 +316,12 @@ export function RangeSourceEditor({
                     onChange={(e) => handleSeriesToggle(idx, e.target.checked)}
                     data-testid={tid(`series-${idx}`)}
                   />
-                  <span style={{ flex: 1 }}>{axisLabel}</span>
+                  {/* The name the chart's legend shows (BUG-0448): the series'
+                      own name while it is plotted, else the axis label (its
+                      header text when the range has headers). */}
+                  <span style={{ flex: 1 }} data-testid={tid(`series-name-${idx}`)}>
+                    {seriesDef?.name || axisLabel}
+                  </span>
                   {isActive && seriesDef && (
                     <SeriesColorSwatch
                       value={

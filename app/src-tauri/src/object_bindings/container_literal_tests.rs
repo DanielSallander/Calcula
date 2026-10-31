@@ -113,7 +113,7 @@ impl H {
 
     fn lock_objects(&self, on: bool) {
         let patch = crate::api_types::CanvasLayoutPatch { objects_locked: Some(on), ..Default::default() };
-        crate::sheets::set_canvas_layout_inner(&self.state, &self.file, Some(self.canvas), &patch)
+        crate::sheets::set_canvas_layout_inner(&self.state, &self.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(self.canvas), &patch)
             .expect("toggle Lock Objects");
     }
 

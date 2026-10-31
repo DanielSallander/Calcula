@@ -170,7 +170,7 @@ pub(crate) fn sheet_contents(
             .read()
             .map_err(|e| e.to_string())?
             .values()
-            .any(|(def, _)| def.destination_sheet.as_deref().is_some_and(|d| d.eq_ignore_ascii_case(&sheet_name))),
+            .any(|(def, _)| def.destination_sheet.as_deref().is_some_and(|d| identity::sheet_names_equal(&d, &sheet_name))),
         "PivotTables",
     );
     note(slicer_state.slicers.read().map_err(|e| e.to_string())?.values().any(|s| s.sheet_index == sheet), "slicers");

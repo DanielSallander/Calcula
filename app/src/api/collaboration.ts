@@ -3092,7 +3092,11 @@ export interface ApplicationConnectionRestoreSkip {
   registryUrl: string;
   /**
    * `"unreachable"` | `"notPinned"` | `"publisherChanged"` | `"badManifest"`
-   * | `"appTooOld"` | `"unsupportedTransport"` | `"unknown"`.
+   * | `"appTooOld"` | `"unsupportedTransport"` | `"sharedDataSource"` | `"unknown"`.
+   *
+   * `"sharedDataSource"`: another subscription of this workbook claims the same
+   * data-source id (a document written before each application had its own), so
+   * neither model was connected under it; the detail starts `CALP_DATA_SOURCE_SHARED`.
    *
    * `"unsupportedTransport"` is an HTTP workspace: it exposes no local model
    * artifact, so an application connection cannot be built from it — true of the

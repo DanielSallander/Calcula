@@ -18,6 +18,7 @@ import {
   commitUndoTransaction,
   cancelUndoTransaction,
 } from "@api";
+import { AppEvents, emitAppEvent } from "@api/events";
 import type { CellUpdateInput } from "@api";
 import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
 
@@ -44,4 +45,7 @@ export async function writeSplitAsOneStep(updates: CellUpdateInput[]): Promise<v
     try { await tx?.cancel(); } catch { /* already closed */ }
     throw err;
   }
+  // A split that landed ENDS the clipboard mode, a copy's and a cut's, as
+  // Excel's Text to Columns does [LIVE 2026-10-30, COM: CutCopyMode 0].
+  emitAppEvent(AppEvents.DATA_COMMAND_APPLIED, { command: "textToColumns" });
 }

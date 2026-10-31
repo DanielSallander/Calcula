@@ -61,6 +61,40 @@ pub struct XlsxStyleData {
     /// loss, not a fidelity preference, which is why it is closed here rather
     /// than recorded. Filed as **S8** in `docs/design/open-decisions-2026-08.md`.
     pub properties: crate::WorkbookProperties,
+    /// Some worksheet part caches an error literal calamine cannot parse
+    /// (`#SPILL!` written plainly, by a writer other than Excel), so the
+    /// archive must be handed to calamine sanitized. Read off the parts as
+    /// written, before a rich value names the real error.
+    pub unknown_error_literals: bool,
+    /// The shared strings that are RICH -- `<si>` made of `<r>` runs --
+    /// keyed by their index in `xl/sharedStrings.xml`. calamine reads only
+    /// their text; the runs are put back by the reader
+    /// (`SheetMeta::rich_string_cells` says which cells use which).
+    pub rich_strings: HashMap<u32, Vec<ParsedRichRun>>,
+}
+
+/// One `<r>` run of a rich shared string: its text and its `<rPr>` font,
+/// `None` for a run with no `<rPr>` (it shows in the cell's font).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ParsedRichRun {
+    pub text: String,
+    pub font: Option<ParsedRunFont>,
+}
+
+/// A run's `<rPr>`. Each element present states the run's own value; one
+/// absent is the font's default (an `<rPr>` with no `<b/>` is not bold), except
+/// size, name and colour, which fall back to the cell's when absent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ParsedRunFont {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: UnderlineStyle,
+    pub strikethrough: bool,
+    pub size: Option<FontSize>,
+    pub color: Option<Color>,
+    pub name: Option<String>,
+    pub superscript: bool,
+    pub subscript: bool,
 }
 
 /// Font properties parsed from <font> elements.
@@ -165,6 +199,30 @@ pub struct SheetMeta {
     pub column_widths: HashMap<u32, f64>,
     /// Custom row heights keyed by 0-based row index (in pixels, converted from Excel points)
     pub row_heights: HashMap<u32, f64>,
+    /// `<sheetFormatPr defaultRowHeight=".." customHeight="1">` -- the sheet's
+    /// own STANDARD row height in px (what Excel's Select All + Row Height
+    /// writes). `None` without `customHeight`: the bare `defaultRowHeight`
+    /// Excel writes on every sheet is the font's height, not a user choice.
+    pub default_row_height: Option<f64>,
+    /// `<sheetFormatPr defaultColWidth="..">` (or a non-standard
+    /// `baseColWidth`) -- the sheet's own STANDARD column width in px.
+    pub default_column_width: Option<f64>,
+    /// `<c t="e"><v>#SPILL!</v></c>` -- every cached ERROR's literal, as the
+    /// file spells it. calamine parses only seven error literals and refuses
+    /// the rest (`#SPILL!`, `#CALC!`, ...), so the reader hands calamine a
+    /// stand-in for those and takes the real literal from here.
+    pub cell_error_literals: HashMap<(u32, u32), String>,
+    /// `<c t="e" vm="..">`: an error cell's value-metadata index. Excel saves
+    /// `#SPILL!`, `#CALC!` ... as `#VALUE!` with the real error in its rich
+    /// value; `parse_xlsx_styles` resolves these into `cell_error_literals`.
+    pub error_value_metadata: HashMap<(u32, u32), u32>,
+    /// `<c t="str"><v>0123</v></c>` whose value LOOKS like a number: a formula's
+    /// TEXT result, which calamine turns into a number. The text as written.
+    pub numeric_text_results: HashMap<(u32, u32), String>,
+    /// `<c t="s"><v>7</v></c>` whose shared string is RICH
+    /// (`XlsxStyleData::rich_strings`): the cell and the string's index. Only
+    /// the rich ones are recorded, not every text cell.
+    pub rich_string_cells: HashMap<(u32, u32), u32>,
     /// `<col s="..">` — the column's default style, as a RAW xlsx xf index.
     ///
     /// Kept raw because the xf -> Calcula style-registry mapping is not built
@@ -272,12 +330,20 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
     data.date1904 = parse_date1904(&mut archive);
     // Document properties ride their own parts, outside xl/.
     data.properties = parse_doc_properties(&mut archive);
+    // The rich shared strings, before the sheets: a sheet records only the
+    // cells that use one.
+    // STREAMED, never read into a String: the part can be the largest in the
+    // file, and calamine reads it on its own as well.
+    if let Ok(entry) = archive.by_name("xl/sharedStrings.xml") {
+        data.rich_strings = parse_rich_shared_strings_from(Reader::from_reader(std::io::BufReader::new(entry)));
+    }
+    let rich_indices: std::collections::HashSet<u32> = data.rich_strings.keys().copied().collect();
 
     if !logical_sheet_paths.is_empty() {
         // Use the relationship-based mapping (1-based logical index → path)
         for (logical_idx, sheet_path) in &logical_sheet_paths {
             if let Ok(sheet_xml) = read_zip_entry(&mut archive, sheet_path) {
-                let mut meta = parse_sheet_xml(&sheet_xml);
+                let mut meta = parse_sheet_xml_with(&sheet_xml, &rich_indices);
                 resolve_sheet_parts(&mut archive, sheet_path, &mut meta);
                 data.sheet_meta.insert(*logical_idx, meta);
             }
@@ -297,9 +363,29 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
 
         for (sheet_num, sheet_path) in &sheet_paths {
             if let Ok(sheet_xml) = read_zip_entry(&mut archive, sheet_path) {
-                let mut meta = parse_sheet_xml(&sheet_xml);
+                let mut meta = parse_sheet_xml_with(&sheet_xml, &rich_indices);
                 resolve_sheet_parts(&mut archive, sheet_path, &mut meta);
                 data.sheet_meta.insert(*sheet_num, meta);
+            }
+        }
+    }
+
+    // Before the rich values below rename `#VALUE!` cells: does calamine need
+    // the archive sanitized (see `xlsx_reader::archive_calamine_can_read`)?
+    data.unknown_error_literals = data.sheet_meta.values().any(|meta| {
+        meta.cell_error_literals
+            .values()
+            .any(|literal| !crate::xlsx_reader::CALAMINE_ERROR_LITERALS.contains(&literal.as_str()))
+    });
+    // `<c t="e" vm="..">#VALUE!`: the error Excel keeps in a rich value
+    // (`#SPILL!`, `#CALC!` ...) is the cell's real cached error.
+    let rich = parse_rich_error_literals(&mut archive);
+    if !rich.is_empty() {
+        for meta in data.sheet_meta.values_mut() {
+            for (cell, vm) in &meta.error_value_metadata {
+                if let Some(literal) = rich.get(vm) {
+                    meta.cell_error_literals.insert(*cell, literal.clone());
+                }
             }
         }
     }
@@ -307,8 +393,165 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
     Some(data)
 }
 
+/// The error each value-metadata index (`vm`, 1-based) names, from Excel's
+/// rich values: `xl/metadata.xml` maps a `vm` to an `XLRICHVALUE` future-
+/// metadata block, whose `xlrd:rvb i` is a rich value in
+/// `xl/richData/rdrichvalue.xml`; a rich value of an `_error` structure
+/// carries its `errorType` (see `xlsx_writer::RICH_ERROR_TYPES`). Empty when
+/// the file has none, or any part is missing or unreadable.
+fn parse_rich_error_literals(archive: &mut zip::ZipArchive<std::fs::File>) -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    let Ok(metadata) = read_zip_entry(archive, crate::xlsx_writer::XLSX_METADATA_PART) else { return out };
+    let Ok(values) = read_zip_entry(archive, crate::xlsx_writer::XLSX_RICH_VALUE_PART) else { return out };
+    let Ok(structures) = read_zip_entry(archive, crate::xlsx_writer::XLSX_RICH_VALUE_STRUCTURE_PART) else { return out };
+    let parsed = parse_rich_value_parts(&metadata, &values, &structures);
+    for (vm, error_type) in parsed {
+        if let Some(literal) = crate::xlsx_writer::rich_error_literal(error_type) {
+            out.insert(vm, literal.to_string());
+        }
+    }
+    out
+}
+
+/// `vm` (1-based) -> the `errorType` of the `_error` rich value it names, from
+/// the three parts' text.
+pub(crate) fn parse_rich_value_parts(metadata: &str, values: &str, structures: &str) -> HashMap<u32, u32> {
+    use quick_xml::events::Event;
+    fn attr(e: &quick_xml::events::BytesStart, name: &str) -> Option<String> {
+        get_attr(e, name)
+    }
+    fn local(e: &quick_xml::events::BytesStart) -> String {
+        String::from_utf8_lossy(e.local_name().as_ref()).to_string()
+    }
+
+    // metadata.xml: the type names, the XLRICHVALUE future blocks' rich value
+    // indices, and the value-metadata blocks' (type, index).
+    let mut type_names: Vec<String> = Vec::new();
+    let mut rich_blocks: Vec<u32> = Vec::new();
+    let mut value_blocks: Vec<(usize, usize)> = Vec::new();
+    {
+        let mut reader = quick_xml::Reader::from_str(metadata);
+        let mut future: Option<String> = None;
+        let mut in_values = false;
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match local(e).as_str() {
+                    "metadataType" => type_names.push(attr(e, "name").unwrap_or_default()),
+                    "futureMetadata" => future = attr(e, "name"),
+                    "rvb" if future.as_deref() == Some("XLRICHVALUE") => {
+                        rich_blocks.push(attr(e, "i").and_then(|i| i.parse().ok()).unwrap_or(u32::MAX));
+                    }
+                    "valueMetadata" => in_values = true,
+                    "rc" if in_values => {
+                        let t = attr(e, "t").and_then(|t| t.parse().ok()).unwrap_or(0);
+                        let v = attr(e, "v").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+                        value_blocks.push((t, v));
+                    }
+                    _ => {}
+                },
+                Ok(Event::End(ref e)) => match String::from_utf8_lossy(e.local_name().as_ref()).as_ref() {
+                    "futureMetadata" => future = None,
+                    "valueMetadata" => in_values = false,
+                    _ => {}
+                },
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+
+    // rdrichvaluestructure.xml: each structure's type and key names.
+    let mut structs: Vec<(String, Vec<String>)> = Vec::new();
+    {
+        let mut reader = quick_xml::Reader::from_str(structures);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match local(e).as_str() {
+                    "s" => structs.push((attr(e, "t").unwrap_or_default(), Vec::new())),
+                    "k" => {
+                        if let Some(last) = structs.last_mut() {
+                            last.1.push(attr(e, "n").unwrap_or_default());
+                        }
+                    }
+                    _ => {}
+                },
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+
+    // rdrichvalue.xml: each rich value's structure and values, in order.
+    let mut rich_values: Vec<(usize, Vec<String>)> = Vec::new();
+    {
+        let mut reader = quick_xml::Reader::from_str(values);
+        let mut in_v = false;
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(ref e)) => match local(e).as_str() {
+                    "rv" => rich_values.push((attr(e, "s").and_then(|s| s.parse().ok()).unwrap_or(usize::MAX), Vec::new())),
+                    "v" => in_v = true,
+                    _ => {}
+                },
+                Ok(Event::Empty(ref e)) if local(e) == "v" => {
+                    if let Some(last) = rich_values.last_mut() {
+                        last.1.push(String::new());
+                    }
+                }
+                Ok(Event::Text(ref t)) if in_v => {
+                    if let Some(last) = rich_values.last_mut() {
+                        last.1.push(t.unescape().map(|s| s.to_string()).unwrap_or_default());
+                    }
+                }
+                Ok(Event::End(ref e)) if e.local_name().as_ref() == b"v" => in_v = false,
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = HashMap::new();
+    for (index, &(t, v)) in value_blocks.iter().enumerate() {
+        if type_names.get(t.wrapping_sub(1)).map(String::as_str) != Some("XLRICHVALUE") {
+            continue;
+        }
+        let Some(&rv) = rich_blocks.get(v) else { continue };
+        let Some((s, vals)) = rich_values.get(rv as usize) else { continue };
+        let Some((kind, keys)) = structs.get(*s) else { continue };
+        if kind != "_error" {
+            continue;
+        }
+        let error_type = keys
+            .iter()
+            .position(|k| k == "errorType")
+            .and_then(|at| vals.get(at))
+            .and_then(|v| v.parse::<u32>().ok());
+        if let Some(error_type) = error_type {
+            out.insert(index as u32 + 1, error_type);
+        }
+    }
+    out
+}
+
 /// Resolve a parsed sheet's rels-dependent parts: hyperlink r:id targets and
 /// the legacy comments part (cell notes).
+/// A hyperlink relationship's `Target` as the address Excel shows for it. The
+/// file spells a space `%20` (Excel and the library both write
+/// `Target="my%20report.xlsx"` for `my report.xlsx`), and Excel reads it back
+/// as a space -- in the PATH only: [LIVE] Excel 16, round 18
+/// (calcref/probe-link.ps1), reopened, `my%20report.xlsx` -> `my report.xlsx`,
+/// `https://example.com/a%20b` -> `https://example.com/a b`,
+/// `..a%20b?q=1%202` -> `..a b?q=1%202`, and `sub%20dir/x%25y.xlsx` ->
+/// `sub dir/x%25y.xlsx` (no other escape is decoded). The reader kept
+/// `my%20report.xlsx`, a file no one has (xlsx5, round 17).
+pub(crate) fn excel_link_address(target: &str) -> String {
+    let (path, rest) = match target.find('?') {
+        Some(at) => target.split_at(at),
+        None => (target, ""),
+    };
+    format!("{}{}", path.replace("%20", " "), rest)
+}
+
 fn resolve_sheet_parts(
     archive: &mut zip::ZipArchive<std::fs::File>,
     sheet_path: &str,
@@ -317,13 +560,21 @@ fn resolve_sheet_parts(
     let rels = parse_sheet_rels(archive, sheet_path);
 
     // Hyperlinks: external targets come from rels; internal links keep their
-    // in-workbook location ("#Sheet2!A1" convention).
+    // in-workbook location ("#Sheet2!A1" convention). An external link WITH a
+    // location is a place in that file -- [LIVE] Excel 16 saves a link to
+    // `report.xlsx` at `Sheet1!A1` as the relationship `Target="report.xlsx"`
+    // plus `location="Sheet1!A1"` -- and is `report.xlsx#Sheet1!A1`; the
+    // location used to be dropped, so the link opened the file at its start.
     for raw in std::mem::take(&mut meta.raw_hyperlinks) {
         let target = match &raw.rid {
             Some(rid) => rels
                 .get(rid)
                 .filter(|(t, _)| t.contains("hyperlink"))
-                .map(|(_, target)| target.clone()),
+                .map(|(_, target)| excel_link_address(target))
+                .map(|target| match raw.location.as_deref().filter(|loc| !loc.is_empty()) {
+                    Some(location) => format!("{}#{}", target, location),
+                    None => target,
+                }),
             None => raw.location.as_ref().map(|loc| format!("#{}", loc)),
         };
         let Some(target) = target else { continue };
@@ -858,7 +1109,15 @@ enum StyleParseContext {
 // xl/worksheets/sheetN.xml parser
 // ============================================================================
 
+#[cfg(test)]
 fn parse_sheet_xml(xml: &str) -> SheetMeta {
+    parse_sheet_xml_with(xml, &std::collections::HashSet::new())
+}
+
+/// One worksheet part's metadata. `rich_strings` are the indices of the
+/// workbook's rich shared strings (`parse_rich_shared_strings`); a cell that
+/// uses one is recorded in `SheetMeta::rich_string_cells`.
+fn parse_sheet_xml_with(xml: &str, rich_strings: &std::collections::HashSet<u32>) -> SheetMeta {
     let mut meta = SheetMeta {
         show_gridlines: true, // Default is to show gridlines
         ..Default::default()
@@ -870,6 +1129,20 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
     let mut in_sheet_views = false;
     let mut in_merge_cells = false;
     let mut in_sheet_data = false;
+    // The `<c>` being read when its cached value's type matters: (row, col,
+    // is_error) for `t="e"` / `t="str"`, and whether a `<v>` is open.
+    let mut current_cell: Option<(u32, u32, bool)> = None;
+    // The `<c t="s">` being read, when the workbook has rich strings.
+    let mut current_sst_cell: Option<(u32, u32)> = None;
+    // Where a `<c>` with no `r` attribute (ECMA-376 allows one) is: the
+    // column after the previous cell of the row, in the row after the
+    // previous row -- calamine's own positioning (its `cells_reader`), so the
+    // metadata read here lands on the cells calamine returns. calamine
+    // advances the column for a `<c>` with content only, not for a
+    // self-closing `<c/>`; so does this.
+    let mut next_col: u32 = 0;
+    let mut next_row: u32 = 0;
+    let mut in_cell_value = false;
     let mut in_sheet_pr = false;
     let mut in_hyperlinks = false;
     let mut in_row_breaks = false;
@@ -883,13 +1156,49 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
     let mut saw_page_setup = false;
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        let event = reader.read_event_into(&mut buf);
+        let self_closing = matches!(event, Ok(Event::Empty(_)));
+        match event {
             Ok(Event::Eof) => break,
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let tag = e.local_name();
                 let tag_str = std::str::from_utf8(tag.as_ref()).unwrap_or("");
 
                 match tag_str {
+                    "sheetFormatPr" => {
+                        // <sheetFormatPr baseColWidth="10" defaultColWidth="20.6"
+                        //                defaultRowHeight="30" customHeight="1"/>
+                        // It precedes <cols> and <sheetData> in CT_Worksheet,
+                        // so the row reader below can compare against it.
+                        let custom_height = get_attr(e, "customHeight")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false);
+                        if custom_height {
+                            if let Some(ht) = get_attr(e, "defaultRowHeight").and_then(|v| v.parse::<f64>().ok()) {
+                                if ht > 0.0 {
+                                    meta.default_row_height = Some((ht * 1.333).round());
+                                }
+                            }
+                        }
+                        if let Some(w) = get_attr(e, "defaultColWidth").and_then(|v| v.parse::<f64>().ok()) {
+                            // The same padded-width -> px rule as <col width>.
+                            // A value that IS the application's standard (a
+                            // generator's 9.140625 reads as 64px against the
+                            // 64.29 standard) is no choice of the sheet's: as
+                            // an override it would make every save state a
+                            // standard nobody set.
+                            let px = (w * 7.0).round();
+                            if w > 0.0 && (px - crate::DEFAULT_COLUMN_WIDTH_PX).abs() >= 1.0 {
+                                meta.default_column_width = Some(px);
+                            }
+                        } else if let Some(base) = get_attr(e, "baseColWidth").and_then(|v| v.parse::<f64>().ok()) {
+                            // baseColWidth counts characters without the padding;
+                            // 8 is Excel's standard, so only another value is a choice.
+                            if base > 0.0 && (base - 8.0).abs() > 1e-9 {
+                                meta.default_column_width = Some(crate::DEFAULT_COLUMN_WIDTH_PX + (base - 8.0) * 7.0);
+                            }
+                        }
+                    }
                     "sheetPr" => in_sheet_pr = true,
                     "tabColor" if in_sheet_pr => {
                         // <tabColor rgb="FFRRGGBB"/> — strip the alpha byte.
@@ -1034,17 +1343,32 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                         // Row element: <row r="5" ht="20" customHeight="1" hidden="1">
                         if let Some(r_str) = get_attr(e, "r") {
                             current_row = r_str.parse::<u32>().unwrap_or(1).saturating_sub(1);
+                        } else {
+                            // No `r`: the row after the previous one.
+                            current_row = next_row;
                         }
                         // Row height: read whenever ht is present
                         // (customHeight="1" means user-set, but ht without it
                         // still represents the actual rendered height)
+                        // A hidden row with no height of its own carries no
+                        // `ht` ([LIVE] Excel 16, also for RowHeight 0), so it
+                        // unhides at the standard. An `ht="0"` row (never
+                        // written by Excel) is kept at 0 deliberately: [LIVE]
+                        // Excel opens one hidden and Rows.Hidden = False leaves
+                        // it at height 0 -- unlike a zero-width COLUMN, which
+                        // Excel unhides at the standard (see `<col>` below).
                         if let Some(ht_str) = get_attr(e, "ht") {
                             if let Ok(ht) = ht_str.parse::<f64>() {
                                 // Excel stores row height in points; convert to pixels (1 pt = 1.333 px)
                                 let px = (ht * 1.333).round();
-                                // Only store if different from the default (15pt = 20px)
-                                // to avoid bloating the map with thousands of default-height rows
-                                if (px - 20.0).abs() > 1.0 {
+                                // Only store if different from THIS SHEET's standard
+                                // height (its sheetFormatPr, else 15pt = 20px) to avoid
+                                // bloating the map with thousands of default-height
+                                // rows. Against the sheet's own standard, not 20: on a
+                                // sheet whose standard is 30, an explicit 20px row is
+                                // a real choice that must survive.
+                                let standard = meta.default_row_height.unwrap_or(crate::DEFAULT_ROW_HEIGHT_PX);
+                                if (px - standard).abs() > 1.0 {
                                     meta.row_heights.insert(current_row, px);
                                 }
                             }
@@ -1067,16 +1391,51 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                     }
                     "c" if in_sheet_data => {
                         // Cell element: <c r="B3" s="5" t="s">
-                        if let Some(r_str) = get_attr(e, "r") {
-                            if let Some((row, col)) = parse_cell_ref(&r_str) {
+                        current_cell = None;
+                        current_sst_cell = None;
+                        // Its position: `r`, else the column after the
+                        // previous cell (calamine's positioning, see
+                        // `next_col`). An `r`-less cell used to be skipped
+                        // here, so an unknown error literal in one was never
+                        // seen and the archive was not sanitized for calamine,
+                        // which then refused the whole import (rev14C nit).
+                        let position = match get_attr(e, "r") {
+                            Some(r_str) => parse_cell_ref(&r_str),
+                            None if self_closing => None,
+                            None => Some((current_row, next_col)),
+                        };
+                        if !self_closing {
+                            if let Some((_, col)) = position {
+                                next_col = col + 1;
+                            }
+                        }
+                        if let Some((row, col)) = position {
+                            {
                                 if let Some(s_str) = get_attr(e, "s") {
                                     if let Ok(s) = s_str.parse::<u32>() {
                                         meta.cell_styles.insert((row, col), s);
                                     }
                                 }
+                                // The cached value's TYPE, for the two cases
+                                // calamine reads wrongly (see SheetMeta).
+                                current_cell = match get_attr(e, "t").as_deref() {
+                                    Some("e") => {
+                                        if let Some(vm) = get_attr(e, "vm").and_then(|v| v.parse::<u32>().ok()) {
+                                            meta.error_value_metadata.insert((row, col), vm);
+                                        }
+                                        Some((row, col, true))
+                                    }
+                                    Some("str") => Some((row, col, false)),
+                                    Some("s") if !rich_strings.is_empty() => {
+                                        current_sst_cell = Some((row, col));
+                                        None
+                                    }
+                                    _ => None,
+                                };
                             }
                         }
                     }
+                    "v" if in_sheet_data => in_cell_value = true,
                     "col" => {
                         // <col min="2" max="5" width="15.5" customWidth="1" hidden="1"/>
                         let min: u32 = get_attr(e, "min")
@@ -1088,15 +1447,34 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                         let custom_width = get_attr(e, "customWidth")
                             .map(|v| v == "1" || v == "true")
                             .unwrap_or(false);
-                        let hidden = get_attr(e, "hidden")
-                            .map(|v| v == "1" || v == "true")
-                            .unwrap_or(false);
+                        let width = get_attr(e, "width").and_then(|v| v.parse::<f64>().ok());
+                        // A width of 0 is not a width the column HAS: it is how
+                        // a hidden column with no width of its own is written
+                        // ([LIVE] Excel 16 saves one as `<col width="0"
+                        // hidden="1" customWidth="1"/>`, and a column given
+                        // ColumnWidth 0 the same way), and Excel shows a
+                        // zero-width column as hidden even with no `hidden`
+                        // attribute and unhides it at the standard width
+                        // ([LIVE], both spellings). Storing the 0 as the
+                        // column's width made it unhide to a 0px column in
+                        // Calcula, where Excel unhides it at the standard width.
+                        let zero_width = custom_width && width.map_or(false, |w| w <= 0.0);
+                        let hidden = zero_width
+                            || get_attr(e, "hidden")
+                                .map(|v| v == "1" || v == "true")
+                                .unwrap_or(false);
 
-                        if custom_width {
+                        if custom_width && !zero_width {
                             if let Some(w_str) = get_attr(e, "width") {
                                 if let Ok(w) = w_str.parse::<f64>() {
-                                    // Excel character width -> pixels: w * 7.0 + 5 (approximate)
-                                    let px = (w * 7.0 + 5.0).round();
+                                    // The stored `width` ALREADY includes Excel's 5px
+                                    // padding (a 20-character column is written as
+                                    // 20.71 with Calibri, 20.60 with Aptos, live
+                                    // Excel 16), so px = w * 7. Adding the padding
+                                    // again (w * 7 + 5, as this did) made every
+                                    // imported column 5px too wide and every Calcula
+                                    // xlsx round trip grow each width by 5px.
+                                    let px = (w * 7.0).round();
                                     for c in min..=max {
                                         meta.column_widths.insert(c - 1, px); // 0-based
                                     }
@@ -1134,6 +1512,22 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                 }
             }
             Ok(Event::Text(ref t)) => {
+                if in_cell_value {
+                    if let (Some(at), Ok(text)) = (current_sst_cell, t.unescape()) {
+                        if let Ok(index) = text.trim().parse::<u32>() {
+                            if rich_strings.contains(&index) {
+                                meta.rich_string_cells.insert(at, index);
+                            }
+                        }
+                    }
+                    if let (Some((row, col, is_error)), Ok(text)) = (current_cell, t.unescape()) {
+                        if is_error {
+                            meta.cell_error_literals.insert((row, col), text.to_string());
+                        } else if text.parse::<f64>().is_ok() {
+                            meta.numeric_text_results.insert((row, col), text.to_string());
+                        }
+                    }
+                }
                 if in_odd_header || in_odd_footer {
                     if let Ok(text) = t.unescape() {
                         if in_odd_header {
@@ -1153,6 +1547,17 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                 match tag_str {
                     "sheetViews" => in_sheet_views = false,
                     "sheetData" => in_sheet_data = false,
+                    "v" => in_cell_value = false,
+                    "c" => {
+                        current_cell = None;
+                        current_sst_cell = None;
+                    }
+                    "row" if in_sheet_data => {
+                        // calamine's `row_index += 1; col_index = 0` (see
+                        // `next_col`).
+                        next_row = current_row + 1;
+                        next_col = 0;
+                    }
                     "mergeCells" => in_merge_cells = false,
                     "sheetPr" => in_sheet_pr = false,
                     "hyperlinks" => in_hyperlinks = false,
@@ -1172,7 +1577,224 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
         meta.page_setup = Some(ps);
     }
 
+    collapse_full_width_columns(&mut meta);
+
     meta
+}
+
+/// The RICH shared strings of `xl/sharedStrings.xml` -- each `<si>` made of
+/// `<r>` runs -- by index. A plain `<si><t>` is left out (calamine's text is
+/// all it has), and so is the phonetic guide (`<rPh>`), whose `<t>` is no part
+/// of the cell's text. [LIVE] Excel 16 saves `rich ` + bold `text` as
+/// `<si><r><t xml:space="preserve">rich </t></r><r><rPr><b/><sz val="11"/>
+/// <color theme="1"/><rFont val="Aptos Narrow"/>..</rPr><t>text</t></r></si>`.
+pub(crate) fn parse_rich_shared_strings(xml: &str) -> HashMap<u32, Vec<ParsedRichRun>> {
+    parse_rich_shared_strings_from(Reader::from_str(xml))
+}
+
+/// [`parse_rich_shared_strings`] over any reader -- the import STREAMS the
+/// part out of the archive through it (rev16C: it read the whole of
+/// `xl/sharedStrings.xml` into a String first, on top of calamine's own pass,
+/// even for a file with no rich string at all).
+fn parse_rich_shared_strings_from<R: std::io::BufRead>(mut reader: Reader<R>) -> HashMap<u32, Vec<ParsedRichRun>> {
+    let mut out = HashMap::new();
+    // No trimming: a run's text may be a single space (`<t xml:space=
+    // "preserve"> </t>`), and it is part of the cell's text.
+    let mut buf = Vec::new();
+    let mut index: u32 = 0;
+    let mut runs: Vec<ParsedRichRun> = Vec::new();
+    let mut run: Option<ParsedRichRun> = None;
+    let mut in_rpr = false;
+    let mut in_t = false;
+    let on = |e: &quick_xml::events::BytesStart| {
+        let val = get_attr(e, "val");
+        val.as_deref() != Some("0") && val.as_deref() != Some("false")
+    };
+    loop {
+        let event = reader.read_event_into(&mut buf);
+        let self_closing = matches!(event, Ok(Event::Empty(_)));
+        match event {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let local = e.local_name();
+                match std::str::from_utf8(local.as_ref()).unwrap_or("") {
+                    "si" => {
+                        runs.clear();
+                        if self_closing {
+                            index += 1;
+                        }
+                    }
+                    "r" => {
+                        run = Some(ParsedRichRun::default());
+                    }
+                    "rPr" if run.is_some() => {
+                        if let Some(r) = run.as_mut() {
+                            r.font = Some(ParsedRunFont::default());
+                        }
+                        in_rpr = !self_closing;
+                    }
+                    "t" => in_t = !self_closing,
+                    tag if in_rpr => {
+                        if let Some(font) = run.as_mut().and_then(|r| r.font.as_mut()) {
+                            match tag {
+                                "b" => font.bold = on(e),
+                                "i" => font.italic = on(e),
+                                "strike" => font.strikethrough = on(e),
+                                "u" => {
+                                    font.underline = match get_attr(e, "val").as_deref() {
+                                        Some("double") => UnderlineStyle::Double,
+                                        Some("singleAccounting") => UnderlineStyle::SingleAccounting,
+                                        Some("doubleAccounting") => UnderlineStyle::DoubleAccounting,
+                                        Some("none") => UnderlineStyle::None,
+                                        _ => UnderlineStyle::Single,
+                                    }
+                                }
+                                "sz" => {
+                                    font.size = get_attr(e, "val")
+                                        .and_then(|v| v.parse::<f64>().ok())
+                                        .map(FontSize::from_points_clamped)
+                                }
+                                "color" => font.color = parse_color_element(e),
+                                "rFont" => font.name = get_attr(e, "val"),
+                                "vertAlign" => match get_attr(e, "val").as_deref() {
+                                    Some("superscript") => font.superscript = true,
+                                    Some("subscript") => font.subscript = true,
+                                    _ => {}
+                                },
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(ref t)) => {
+                // Only a RUN's text counts: the phonetic guide's `<t>` (in
+                // `<rPh>`, which follows the runs and holds no `<r>`) is
+                // outside every run.
+                if in_t {
+                    if let (Some(r), Ok(text)) = (run.as_mut(), t.unescape()) {
+                        r.text.push_str(&text);
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let local = e.local_name();
+                match std::str::from_utf8(local.as_ref()).unwrap_or("") {
+                    "t" => in_t = false,
+                    "rPr" => in_rpr = false,
+                    "r" => {
+                        if let Some(r) = run.take() {
+                            runs.push(r);
+                        }
+                    }
+                    "si" => {
+                        if !runs.is_empty() {
+                            out.insert(index, std::mem::take(&mut runs));
+                        }
+                        index += 1;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// A rich shared string's runs as Calcula's [`engine::cell::RichTextRun`]s
+/// over the cell's own font in the file (`base`: the font of the cell's xf,
+/// as Excel shows a run with no `<rPr>`): a run states only what DIFFERS from
+/// it (an Excel `<rPr>` restates the whole font). `None` when no run differs
+/// -- the cell is plain text -- or the runs' text is not the cell's text.
+///
+/// DELIBERATELY SEMANTIC, NOT EXACT (rev16C): a run whose attribute EQUALS
+/// the cell's font comes back inheriting it, even if Calcula exported it as an
+/// explicit override (`bold: Some(true)` on a bold cell). The file cannot say
+/// more -- every `<rPr>` restates the whole font -- and it is what Excel
+/// itself does with that run: a cell-level font change overrides every run's
+/// attribute. [LIVE] Excel 16, round 18 (calcref/probe-rich.ps1): a bold cell
+/// whose first run is bold and second is not, then `Range.Font.Bold = False`
+/// -> both runs not bold; a red run, then the cell coloured blue -> both runs
+/// blue; a 14 pt run on a 14 pt cell beside a 9 pt run, then the cell 20 pt ->
+/// both 20. Excel has one vertical alignment per run, so superscript wins over
+/// subscript, and no font colour alpha.
+pub(crate) fn rich_text_runs(
+    runs: &[ParsedRichRun],
+    value: &str,
+    base: &ParsedFont,
+) -> Option<Vec<engine::cell::RichTextRun>> {
+    if runs.iter().map(|r| r.text.as_str()).collect::<String>() != value {
+        return None;
+    }
+    // A font with no colour shows the text colour (theme dk1, black).
+    let base_color = base.color.unwrap_or(Color::new(0, 0, 0));
+    let same_rgb = |c: &Color| c.r == base_color.r && c.g == base_color.g && c.b == base_color.b;
+    let mut any = false;
+    let out: Vec<engine::cell::RichTextRun> = runs
+        .iter()
+        .map(|r| {
+            let mut run = engine::cell::RichTextRun::plain(r.text.clone());
+            if let Some(ref f) = r.font {
+                run.bold = (f.bold != base.bold).then_some(f.bold);
+                run.italic = (f.italic != base.italic).then_some(f.italic);
+                run.underline = (f.underline != base.underline).then_some(f.underline);
+                run.strikethrough = (f.strikethrough != base.strikethrough).then_some(f.strikethrough);
+                run.font_size = f.size.filter(|s| *s != base.size);
+                run.font_family = f.name.as_deref().filter(|n| *n != base.name).map(map_font_name);
+                run.color = f.color.filter(|c| !same_rgb(c));
+                run.superscript = f.superscript;
+                run.subscript = f.subscript && !f.superscript;
+            }
+            any |= run.bold.is_some()
+                || run.italic.is_some()
+                || run.underline.is_some()
+                || run.strikethrough.is_some()
+                || run.font_size.is_some()
+                || run.font_family.is_some()
+                || run.color.is_some()
+                || run.superscript
+                || run.subscript;
+            run
+        })
+        .collect();
+    any.then_some(out)
+}
+
+/// Every one of the sheet's 16,384 columns has an explicit width: the shape a
+/// sheet's STANDARD width takes when a writer has no `defaultColWidth` and
+/// states it as `<col>` runs (Calcula's own export did, before it wrote
+/// `defaultColWidth` the way Excel does). Read it back as what it is: the width
+/// MOST of the columns share becomes the sheet's standard (ties go to the
+/// narrower width, so the answer never depends on hash order), and only the
+/// columns that differ from it keep a width of their own. Lossless: every
+/// column shows the same width either way, and the map holds the exceptions,
+/// not 16,383 copies of the rule.
+fn collapse_full_width_columns(meta: &mut SheetMeta) {
+    const COLUMNS: usize = engine::EXCEL_MAX_COL_INDEX as usize + 1;
+    if meta.column_widths.len() < COLUMNS {
+        return;
+    }
+    // Widths are whole px (`round(w * 7)`), so the bit pattern is the key.
+    let mut counts: HashMap<u64, usize> = HashMap::new();
+    for w in meta.column_widths.values() {
+        *counts.entry(w.to_bits()).or_insert(0) += 1;
+    }
+    let Some(standard) = counts
+        .into_iter()
+        .map(|(bits, n)| (f64::from_bits(bits), n))
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.total_cmp(&a.0)))
+        .map(|(w, _)| w)
+    else {
+        return;
+    };
+    // The application's own standard is no choice of the sheet's (see the
+    // `defaultColWidth` read).
+    meta.default_column_width =
+        if (standard - crate::DEFAULT_COLUMN_WIDTH_PX).abs() >= 1.0 { Some(standard) } else { None };
+    meta.column_widths.retain(|_, w| (*w - standard).abs() > 1e-9);
 }
 
 /// Parse sheet visibility from xl/workbook.xml `<sheet state="...">`
@@ -1780,14 +2402,18 @@ pub(crate) fn text_rotation_from_ooxml(rotation: u16) -> TextRotation {
 }
 
 /// Map Excel font name to Calcula font family.
-/// "Calibri" (Excel default body font) maps to "Body" (theme-aware).
+/// "Calibri" (Excel default body font) maps to "Body" (theme-aware), Cambria /
+/// Calibri Light to "Headings" -- the theme keyword `ThemeDefinition::
+/// resolve_font` knows. (It mapped them to "Heading", which no theme resolves:
+/// such a cell asked for a font called "Heading".)
 fn map_font_name(name: &str) -> String {
     match name {
         "Calibri" => "Body".to_string(),
-        "Cambria" | "Calibri Light" => "Heading".to_string(),
+        "Cambria" | "Calibri Light" => "Headings".to_string(),
         other => other.to_string(),
     }
 }
+
 
 /// Convert a parsed fill to a Calcula Fill.
 fn convert_fill(fill: &ParsedFill) -> Fill {
@@ -2429,6 +3055,85 @@ fn count_decimal_places(code: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG-0352/0353, against the bytes live Excel 16 wrote (2026-10-30 probe):
+    /// Select All + Row Height 30 and Select All + Column Width 20 on Sheet1
+    /// produce ONE `<sheetFormatPr>` -- no per-row heights, no `<cols>` -- while
+    /// an untouched sheet carries only the font's `defaultRowHeight` with no
+    /// `customHeight`, which is not a user choice and must not become one.
+    #[test]
+    fn the_sheets_standard_sizes_are_read_off_sheet_format_pr() {
+        let set = parse_sheet_xml(
+            r#"<worksheet><sheetFormatPr defaultColWidth="20.59765625" defaultRowHeight="30" customHeight="1"/><sheetData><row r="2" ht="15" customHeight="1"/><row r="3" ht="30" customHeight="1"/></sheetData></worksheet>"#,
+        );
+        assert_eq!(set.default_row_height, Some(40.0), "30pt standard row height, in px");
+        assert_eq!(set.default_column_width, Some(144.0), "the <col width> px rule on defaultColWidth");
+        // Against the SHEET's standard: an explicit 15pt row on a 30pt sheet is
+        // a real choice and survives; a 30pt row is just the standard.
+        assert_eq!(set.row_heights.get(&1), Some(&20.0));
+        assert_eq!(set.row_heights.get(&2), None);
+
+        let untouched = parse_sheet_xml(
+            r#"<worksheet><sheetFormatPr defaultRowHeight="14.25"/><sheetData/></worksheet>"#,
+        );
+        assert_eq!(untouched.default_row_height, None, "no customHeight: the font's height, not a choice");
+        assert_eq!(untouched.default_column_width, None);
+    }
+
+    /// A sheet whose 16,384 columns ALL carry a width (a writer with no
+    /// defaultColWidth; Calcula's own export was one until it wrote Excel's)
+    /// reads back as a standard plus the columns that differ from it.
+    #[test]
+    fn a_sheet_wide_column_run_reads_back_as_the_standard_width() {
+        let collapsed = parse_sheet_xml(
+            r#"<worksheet><cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="3" width="9" customWidth="1"/><col min="4" max="16384" width="20" customWidth="1"/></cols><sheetData/></worksheet>"#,
+        );
+        assert_eq!(collapsed.default_column_width, Some(140.0));
+        assert_eq!(collapsed.column_widths.len(), 1, "only the column that differs keeps a width");
+        assert_eq!(collapsed.column_widths.get(&2), Some(&63.0));
+
+        let partial = parse_sheet_xml(
+            r#"<worksheet><cols><col min="2" max="16384" width="20" customWidth="1"/></cols><sheetData/></worksheet>"#,
+        );
+        assert_eq!(partial.default_column_width, None, "column A has the standard: not a sheet-wide width");
+        assert_eq!(partial.column_widths.len(), 16_383);
+
+        // The LAST column is the one exception: the standard is still the
+        // width most columns share, not XFD's.
+        let last_differs = parse_sheet_xml(
+            r#"<worksheet><cols><col min="1" max="16383" width="20" customWidth="1"/><col min="16384" max="16384" width="9" customWidth="1"/></cols><sheetData/></worksheet>"#,
+        );
+        assert_eq!(
+            last_differs.default_column_width,
+            Some(140.0),
+            "the standard was taken from the last column instead of the width the columns share"
+        );
+        assert_eq!(last_differs.column_widths.len(), 1, "only XFD differs: {:?}", last_differs.column_widths.len());
+        assert_eq!(last_differs.column_widths.get(&16_383), Some(&63.0));
+    }
+
+    /// `defaultColWidth` that IS the application's standard is no choice of the
+    /// sheet's: a generator's 9.140625 (64px against the 64.29 standard) must
+    /// not become a per-sheet override that every later save states again.
+    #[test]
+    fn a_default_col_width_equal_to_the_application_standard_is_not_an_override() {
+        let generator = parse_sheet_xml(
+            r#"<worksheet><sheetFormatPr defaultColWidth="9.140625" defaultRowHeight="15"/><sheetData/></worksheet>"#,
+        );
+        assert_eq!(
+            generator.default_column_width, None,
+            "an invisible 0.29px difference became a per-sheet standard width"
+        );
+        let wider = parse_sheet_xml(
+            r#"<worksheet><sheetFormatPr defaultColWidth="10.7109375" defaultRowHeight="15"/><sheetData/></worksheet>"#,
+        );
+        assert_eq!(wider.default_column_width, Some(75.0), "a real standard is still read");
+        let runs = parse_sheet_xml(
+            r#"<worksheet><cols><col min="1" max="2" width="9.140625" customWidth="1"/><col min="3" max="3" width="20" customWidth="1"/><col min="4" max="16384" width="9.140625" customWidth="1"/></cols><sheetData/></worksheet>"#,
+        );
+        assert_eq!(runs.default_column_width, None, "16,384 runs of the application standard are no override");
+        assert_eq!(runs.column_widths.len(), 1);
+    }
 
     #[test]
     fn test_parse_cell_ref() {

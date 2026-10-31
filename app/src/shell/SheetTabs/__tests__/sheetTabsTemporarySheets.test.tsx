@@ -351,7 +351,8 @@ vi.mock("../../../api", async () => {
       return [...h.m.nextGroup];
     },
     isSheetGroupingActive: () => h.m.group.length > 1,
-    getSelectedSheetIndices: () => [],
+    // The group the strip SET, read at the click (the group rules ask it).
+    getSelectedSheetIndices: () => [...h.m.group],
     primeSheetSwitch: async () => {},
     getSheetTabDecorations: () => [],
     onSheetTabDecorationsChanged: () => () => {},
@@ -2012,5 +2013,99 @@ describe("the strip's switching doors carry the sheet's stable id in their own d
     });
     await settle();
     expect(names()).toEqual(["Costs", "Summary", "Q4"]);
+  });
+});
+
+// BUG-0616 item 6: what a tab click does to a group of selected sheets, as
+// Excel 16 does it [LIVE, 2026-10-30, real mouse clicks on a visible instance;
+// resolveTabClick.ts SHEET GROUP CLICKS]. The strip ended the group on EVERY
+// plain click -- the active tab and a member's included -- and took a
+// Shift+click for a plain one.
+describe("a tab click and the sheet group, as Excel does it (BUG-0616 item 6)", () => {
+  const FOUR: LayoutSheet[] = [
+    { id: "id-Sales", name: "Sales", ephemeral: false },
+    { id: "id-Costs", name: "Costs", ephemeral: false },
+    { id: "id-Summary", name: "Summary", ephemeral: false },
+    { id: "id-Q4", name: "Q4", ephemeral: false },
+  ];
+  /** Mount on Sales (index 0) with `group` selected, as Core holds it. */
+  async function mountGrouped(group: number[], layout: LayoutSheet[] = FOUR): Promise<void> {
+    await mountOnDrill(layout);
+    h.m.activeId = "id-Sales";
+    h.m.group = [...group];
+    h.m.groupClears = 0;
+  }
+  const clickTab = (index: number, init: MouseEventInit = {}) =>
+    act(() => {
+      tab(index).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ...init }));
+    });
+  const activations = () => h.m.log.filter((l) => l.startsWith("activate:"));
+
+  it("some sheets grouped: a plain click on ANOTHER member switches to it and KEEPS the group", async () => {
+    await mountGrouped([0, 2]);
+    await clickTab(2);
+    await settle();
+    expect(activations()).toEqual(["activate:2"]);
+    expect(h.m.groupClears, "a click on a member of the group ended it (Excel keeps it)").toBe(0);
+    expect(h.m.group).toEqual([0, 2]);
+  });
+
+  it("a plain click on the ACTIVE tab changes nothing, the group included -- all sheets grouped too", async () => {
+    await mountGrouped([0, 1, 2, 3]);
+    await clickTab(0);
+    await settle();
+    expect(activations()).toEqual([]);
+    expect(h.m.groupClears, "a click on the active tab ended the group").toBe(0);
+    expect(h.m.group).toEqual([0, 1, 2, 3]);
+  });
+
+  it("EVERY visible tab grouped: a plain click on another member ends the group and switches", async () => {
+    await mountGrouped([0, 1, 2, 3]);
+    await clickTab(2);
+    await settle();
+    expect(activations()).toEqual(["activate:2"]);
+    expect(h.m.groupClears).toBe(1);
+    expect(h.m.group).toEqual([]);
+  });
+
+  it("every VISIBLE tab grouped (the fourth hidden): a member click ends the group as well", async () => {
+    await mountGrouped([0, 1, 2], [...FOUR.slice(0, 3), { ...FOUR[3], visibility: "hidden" }]);
+    await clickTab(2);
+    await settle();
+    expect(h.m.groupClears).toBe(1);
+    expect(h.m.group).toEqual([]);
+  });
+
+  it("a plain click on a tab OUTSIDE the group ends it and switches", async () => {
+    await mountGrouped([0, 2]);
+    await clickTab(1);
+    await settle();
+    expect(activations()).toEqual(["activate:1"]);
+    expect(h.m.groupClears).toBe(1);
+    expect(h.m.group).toEqual([]);
+  });
+
+  it("Shift+click selects the sheets from the active one to the clicked one, the active sheet unchanged", async () => {
+    await mountGrouped([]);
+    await clickTab(2, { shiftKey: true });
+    await settle();
+    expect(h.m.group, "Shift+click did not select the range of sheets").toEqual([0, 1, 2]);
+    expect(activations(), "Shift+click switched sheets").toEqual([]);
+  });
+
+  it("Shift+click passes over a hidden sheet, and replaces an existing group", async () => {
+    await mountGrouped([0, 3], [FOUR[0], { ...FOUR[1], visibility: "hidden" }, FOUR[2], FOUR[3]]);
+    await clickTab(2, { shiftKey: true });
+    await settle();
+    expect(h.m.group).toEqual([0, 2]);
+    expect(activations()).toEqual([]);
+  });
+
+  it("Shift+click on the active tab leaves that sheet alone selected", async () => {
+    await mountGrouped([0, 2]);
+    await clickTab(0, { shiftKey: true });
+    await settle();
+    expect(h.m.group).toEqual([]);
+    expect(activations()).toEqual([]);
   });
 });

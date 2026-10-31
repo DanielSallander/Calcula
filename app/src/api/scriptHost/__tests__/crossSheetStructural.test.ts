@@ -18,7 +18,9 @@ const gridMock = {
   convertFormulaStyle: vi.fn(async (f: string) => f),
 };
 vi.mock("../../grid", () => gridMock);
-const cellEventsMock = { emitBatch: vi.fn() };
+// Hoisted: tauri-api.ts imports cellEvents at module load, so the mock factory
+// below runs before an ordinary top-level const would be initialised.
+const cellEventsMock = vi.hoisted(() => ({ emitBatch: vi.fn() }));
 vi.mock("../../../core/lib/cellEvents", () => ({
   cellEvents: cellEventsMock,
   cellToChange: vi.fn((c: unknown) => c),

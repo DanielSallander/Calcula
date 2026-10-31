@@ -17,7 +17,7 @@ import type { ClipboardData } from "@api/lib";
 import { CoreCommands } from "@api/commands";
 import { DialogExtensions } from "@api/ui";
 import { getGridStateSnapshot } from "@api/state";
-import { getInternalClipboard } from "@api/lib";
+import { getInternalClipboard, settledInternalClipboard } from "@api/lib";
 import { resolveCellTarget, targetRefOf, type CellTargetRef } from "@api/cellTarget";
 import { alertAsync } from "@api/dialogs";
 import { canvasOwnsObjectClipboard } from "@api/objectClipboard";
@@ -101,8 +101,14 @@ function pasteVariant(label: string, run: PasteRun): () => Promise<void> {
       void alertAsync(pasteRefusalSentence.canvas(label));
       return;
     }
-    const clipboard = getInternalClipboard();
+    // A read of a stale snapshot (an undo, a rename, a write onto the source
+    // since the copy) is waited for, so the variant pastes what the source
+    // holds NOW, as plain Paste does.
+    const clipboard = await settledInternalClipboard();
     if (!clipboard || clipboard.cells.length === 0) {
+      // Null with the copy still pending: its source kept changing and the
+      // settle has already told the user to paste again -- not "nothing copied".
+      if (!clipboard && getInternalClipboard() !== null) return;
       void alertAsync(pasteRefusalSentence.nothingCopied(label));
       return;
     }

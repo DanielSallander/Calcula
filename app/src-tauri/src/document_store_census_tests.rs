@@ -158,7 +158,6 @@ const SAVE_ROOTS: &[&str] = &["assemble_workbook_for_save", "assemble_publish_wo
 /// the census would notice before it silently started excusing a store.
 const RESET_FUNCTIONS: &[&str] = &[
     "reset_document_scoped_stores",
-    "reset_default_geometry",
     "init_builtin_named_styles",
     "reset_bi_connections",
 ];
@@ -293,7 +292,7 @@ const SESSION_SCOPED: &[(&str, &str)] = &[
     // and its exemption here has to go.
     (
         "AppState.calculation_mode",
-        "Automatic vs Manual is an application preference in Calcula (nothing serialises it), and it is a choice the user makes ABOUT their session. Resetting it would silently put a user who had switched to Manual — usually because automatic recalculation was too slow — back on Automatic at every File > Open",
+        "Automatic vs Manual is an application preference in Calcula, as Application.Calculation is in Excel, and it is a choice the user makes ABOUT their session. Resetting it would silently put a user who had switched to Manual — usually because automatic recalculation was too slow — back on Automatic at every File > New. Like Excel, every save RECORDS it (.xlsx calcMode, written by save_file; .cala calc_mode.json from Workbook::calculation_manual, which save_file and auto_recover_save set from this leaf through record_session_calculation_mode -- never inside the shared assembly) and every open ADOPTS the file's mode (persistence::adopt_xlsx_calculation_mode / adopt_cala_calculation_mode), which is Excel's rule for the first workbook opened -- so it is a session value a file SETS, never one File > New resets",
     ),
     (
         "AppState.iteration_enabled",
@@ -340,6 +339,10 @@ const SESSION_SCOPED: &[(&str, &str)] = &[
         "AppState.calc_cancel",
         "the Ctrl+Break flag, an `Arc<AtomicBool>` deliberately outside any Mutex so `cancel_calculation` cannot block on a lock the recalculation holds. It cannot carry a stale cancel across documents: `eval_budget::PassToken::claim` resets it at the start of every governed pass that owns one",
     ),
+    (
+        "AppState.whatif_run",
+        "the what-if single-flight (`whatif_recalc::begin_whatif_run`): an `AtomicBool` claimed by a running Data Table, Goal Seek or Solver run and released by its guard on every exit path. It describes a run in progress in this process, not the document, and a reset could only release a run that is still writing",
+    ),
     // -- Script security: session and machine scope, NOT document scope -------
     (
         "ScriptState.permission_grants",
@@ -356,6 +359,10 @@ const SESSION_SCOPED: &[(&str, &str)] = &[
     (
         "ScriptState.notebook_exec_lock",
         "a `tokio::sync::Mutex<()>` that serialises notebook execution. It is a concurrency primitive holding no value at all — there is nothing in it to be scoped to anything",
+    ),
+    (
+        "ScriptState.registered_custom_functions",
+        "the custom-function names the PAGE registers that the backend cannot read itself -- every loaded add-in's, never a Custom Functions library's (the page leaves those out of its report; the backend reads the libraries of the workbook it holds) -- as the page last reported them (`bi::cube::note_custom_function_registry`). An add-in's function is defined by the add-in being loaded, not by the workbook, so it must survive File > Open: resetting it would make the opened workbook's add-in functions unknown names until the page happened to report again, and `=IFERROR(FXRATE(..),0)` would save a plausible 0 (rev10 rev9A). Because no library name is in it, the previous document's library names are not carried onto the next one (rev11C). Never saved",
     ),
 ];
 
@@ -2279,7 +2286,7 @@ mod xlsx_loss_census {
     /// sees, and that category has to EXIST in `compute_publish_report`.
     ///
     /// This is the half a plain coverage list cannot check. "EXCLUDED: reported
-    /// 'gridDefaults'" is a claim about another function, and a claim about
+    /// 'protection'" is a claim about another function, and a claim about
     /// another function is exactly the kind of statement that silently stops
     /// being true — which is how `protection` came to be the only exclusion line
     /// while three more categories were being dropped without one.

@@ -30,6 +30,9 @@ import type {
   InsertCellsShift,
   DeleteCellsShift,
   CellTargetRef,
+  StyleCheckArea,
+  StructuralDelta,
+  CalculationModeChange,
 } from "../types";
 import { getGroupForActiveSheet } from "../state/sheetGrouping";
 // The sheet ON SCREEN, which `groupArgs` checks against the group (review G#4).
@@ -40,6 +43,7 @@ import { getGridStateSnapshot } from "../state/GridContext";
 // command is refused HERE, before invoke (see placementArgs).
 import { TARGET_COMMANDS } from "../../api/cellTargetCommands";
 import { AppEvents, emitAppEvent } from "./events";
+import { cellEvents, cellToChange } from "./cellEvents";
 // STRUCTURAL_UNDO lives only in the @api event table (Core's own table has no
 // entry for it); the cell-shift wrappers below announce through it.
 import { AppEvents as ApiAppEvents } from "../../api/events";
@@ -431,6 +435,16 @@ export type RecordedGridEvent =
     }
   | { kind: "rowHeight"; row: number; height: number }
   | { kind: "columnWidth"; col: number; width: number }
+  /**
+   * ONE batch Row Height... over inclusive `runs` (`setRowHeights`; Select All
+   * is `[[0, 1048575]]`), replayed as ONE `api.setRowHeights(runs, height)` --
+   * the same command, so Select All replays as the sheet's standard height
+   * and a hidden row is shown or passed over by the same rules. It used to be
+   * one `rowHeight` event per row: 1,048,576 of them for Select All.
+   */
+  | { kind: "rowHeights"; runs: Array<[number, number]>; height: number }
+  /** ONE batch Column Width... over `runs` (`setColumnWidths`), as `rowHeights`. */
+  | { kind: "columnWidths"; runs: Array<[number, number]>; width: number }
   | { kind: "freezePanes"; freezeRow: number | null; freezeCol: number | null }
   | {
       kind: "replaceAll";
@@ -627,10 +641,21 @@ export async function getCollectionTexts(
   return invoke<string[]>("get_collection_texts", { cells });
 }
 
+/**
+ * Write one entry on the active sheet. `groupSheets`, when given and not
+ * empty, makes it a GROUPED entry: the backend also writes every one of those
+ * (other, non-active) sheets in the SAME call and records ONE undo step for
+ * all of them (`update_cell_grouped` in commands/data.rs), answering
+ * `groupWritten` / `groupError`. One call, so no transaction is ever held
+ * open across an await for another writer to join. A CUBE entry carries one
+ * targeted prefetch per grouped sheet, aligned with `groupSheets`, by the rule
+ * `updateCellOnSheets` uses.
+ */
 export async function updateCell(
   row: number,
   col: number,
-  input: string
+  input: string,
+  groupSheets?: number[],
 ): Promise<UpdateCellResult> {
   const t0 = performance.now();
   // Pre-resolve any user-defined formula functions the edit will trigger, so the
@@ -653,6 +678,19 @@ export async function updateCell(
   const args: Record<string, unknown> = { row, col, value: input };
   applyUdfArgs(args, udf);
   if (cubeResults) args.cubeResults = cubeResults;
+  if (groupSheets && groupSheets.length > 0) {
+    args.groupSheets = groupSheets;
+    if (noteCubeFormulaWrites([input])) {
+      const perSheet: unknown[] = [];
+      for (const sheetIndex of groupSheets) {
+        const prefetch = await prefetchCubeForWrites([{ row, col, value: input }], sheetIndex);
+        if (!prefetch) break;
+        perSheet.push(prefetch);
+      }
+      // All or nothing, as in updateCellOnSheets: Rust ignores a misaligned list.
+      if (perSheet.length === groupSheets.length) args.groupCubeResults = perSheet;
+    }
+  }
   const result = await invoke<UpdateCellResult>("update_cell", args);
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] updateCell(${row},${col}) => ${result.cells.length} cells | ipc=${dt.toFixed(1)}ms`);
@@ -673,7 +711,9 @@ export interface CellUpdateInput {
    * style -- `0` (Normal) under a row/column format is written as an explicit
    * Normal, so the line's format does not show through -- and with an empty
    * `value` the position keeps that look as an empty cell. Omitted, the cell
-   * keeps its own style (a typed value under a line format inherits it).
+   * keeps its own style (a typed value under a line format inherits it). On a
+   * PROTECTED sheet it is a format like any other (Excel [LIVE]): dropped when
+   * the sheet does not allow Format Cells, and the cell keeps its Locked flag.
    */
   styleIndex?: number;
   /** When true, the value is already in invariant (US) format — skip delocalization. */
@@ -690,6 +730,31 @@ export interface CellUpdateInput {
    * Omitted: a typed entry, as before. Mirrors Rust `CellUpdateInput.pasted`.
    */
   pasted?: boolean;
+  /**
+   * Set, this write lands a MOVED cell (the destination half of Cut + Paste)
+   * from the named SOURCE cell: its format moves with it. On a PROTECTED sheet
+   * that does not allow Format Cells, `styleIndex` is then still written (a
+   * copy's is dropped), and the cell still keeps its Locked flag -- Excel moves
+   * a cut cell's format with the option off or on, and drops only a copy's
+   * [LIVE]. BOUND, not asserted: the backend honours it only when the source
+   * cell (read before any write of the batch) shows exactly `styleIndex`;
+   * otherwise the write is a copy. Omitted: a copy or an entry. Mirrors Rust
+   * `CellUpdateInput.moved` / `MovedFrom`.
+   */
+  moved?: MovedFrom;
+}
+
+/**
+ * The source cell of a moved write (`CellUpdateInput.moved`): a cell of the
+ * sheet at `sheetIndex`, or -- with `target` -- a cell of that object (a
+ * floating grid's own cell, `row` / `col` in its coordinates; `sheetIndex` is
+ * then not used). Mirrors Rust `MovedFrom`.
+ */
+export interface MovedFrom {
+  sheetIndex: number;
+  row: number;
+  col: number;
+  target?: CellTargetRef;
 }
 
 /**
@@ -1172,9 +1237,16 @@ function mergeLineRuns(runs: readonly LineRun[]): Array<[number, number]> {
  * {@link setRowHeight} does. Gated by the sheet's "Format rows" protection
  * option -- a refusal rejects with the backend's sentence and changes nothing.
  *
- * The macro recorder sees the same per-row `rowHeight` events the one-row
- * wrapper reports (a recorded macro replays `setRowHeight` per row); the
- * events are built only while a recorder is listening.
+ * The macro recorder sees ONE `rowHeights` event carrying the runs AS SENT,
+ * as Excel's recorder writes `Rows("18:22").RowHeight = 30` (or
+ * `Cells.RowHeight`) for the selection, never row by row. Its replay,
+ * `api.setRowHeights(runs, height)`, reaches this same command, so Select All
+ * replays as the sheet's standard and a hidden row is shown or passed over by
+ * the same rules (under filter mode the backend passes over the hidden rows
+ * of runs that hold a visible one, on the replay as in the gesture). It used
+ * to record one `rowHeight` event per row -- 1,048,576 for Select All, each
+ * replayed as that row's own height. The backend's reply (the runs the size
+ * reached) is not needed for that.
  */
 export async function setRowHeights(
   runs: readonly LineRun[],
@@ -1183,17 +1255,16 @@ export async function setRowHeights(
 ): Promise<void> {
   const merged = mergeLineRuns(runs);
   const placed = cellTargetArg("set_row_heights", opts);
-  await invoke<void>("set_row_heights", { rows: merged, height, ...placed });
-  if (!placed.target && isGridRecorderActive()) {
-    for (const [first, last] of merged) {
-      for (let row = first; row <= last; row++) recordGridEvent({ kind: "rowHeight", row, height });
-    }
+  await invoke<LineRun[] | null>("set_row_heights", { rows: merged, height, ...placed });
+  if (!placed.target && merged.length > 0) {
+    recordGridEvent({ kind: "rowHeights", runs: merged.map(([a, b]): [number, number] => [a, b]), height });
   }
 }
 
 /**
  * Excel's Column Width... over every column of `runs`, ONE call and ONE undo
- * step (Rust `set_column_widths`). See {@link setRowHeights}.
+ * step (Rust `set_column_widths`). See {@link setRowHeights}: the recorder sees
+ * ONE `columnWidths` event with the runs as sent.
  */
 export async function setColumnWidths(
   runs: readonly LineRun[],
@@ -1202,11 +1273,9 @@ export async function setColumnWidths(
 ): Promise<void> {
   const merged = mergeLineRuns(runs);
   const placed = cellTargetArg("set_column_widths", opts);
-  await invoke<void>("set_column_widths", { cols: merged, width, ...placed });
-  if (!placed.target && isGridRecorderActive()) {
-    for (const [first, last] of merged) {
-      for (let col = first; col <= last; col++) recordGridEvent({ kind: "columnWidth", col, width });
-    }
+  await invoke<LineRun[] | null>("set_column_widths", { cols: merged, width, ...placed });
+  if (!placed.target && merged.length > 0) {
+    recordGridEvent({ kind: "columnWidths", runs: merged.map(([a, b]): [number, number] => [a, b]), width });
   }
 }
 
@@ -1314,14 +1383,70 @@ export async function getAllStyles(): Promise<StyleData[]> {
  * arbitrary style index, so it is the sharpest way to change a cell's
  * protection attributes wholesale (Format Painter and Paste-Formats both go
  * through it) — callers must handle the rejection rather than assume success.
- * Resolves to `null` when the target cell does not exist.
+ *
+ * `opts.target` (BUG-0513): a floating grid's cell -- written on its backing
+ * sheet, inside its extent, gated by the HOST's protection; the coordinates
+ * are the object's own.
+ *
+ * `opts.checkArea` (ALL OR NOTHING): the call is a CHECK only -- every gate
+ * the write asks of one cell is asked of the whole rectangle, nothing is
+ * written, and it answers null (`row`, `col` and `styleIndex` are not used).
+ * A gesture that styles cell by cell (Format Painter, Paste Formatting) asks
+ * it first, so a refusal comes before its first cell changes.
  */
 export async function setCellStyle(
   row: number,
   col: number,
-  styleIndex: number
+  styleIndex: number,
+  opts?: SetCellStyleOptions,
 ): Promise<CellData | null> {
-  return invoke<CellData | null>("set_cell_style", { row, col, styleIndex });
+  const checkArea = opts?.checkArea;
+  return invoke<CellData | null>("set_cell_style", {
+    row,
+    col,
+    styleIndex,
+    ...cellTargetArg("set_cell_style", opts),
+    ...(checkArea ? { checkArea } : {}),
+  });
+}
+
+/** `setCellStyle`'s options: the target, and the whole-rectangle CHECK. */
+export interface SetCellStyleOptions extends CellTargetOptions {
+  checkArea?: StyleCheckArea;
+}
+
+/**
+ * One cell of a style-only batch (`setCellStyles`). Mirrors Rust
+ * `CellStyleWrite`.
+ */
+export interface CellStyleWrite {
+  row: number;
+  col: number;
+  /** The LOOK the cell must show, exactly as `setCellStyle`'s `styleIndex`. */
+  styleIndex: number;
+  /**
+   * The cell keeps every border side it shows (Paste Special > All Except
+   * Borders: the source's style but the destination's own borders).
+   */
+  keepBorders?: boolean;
+}
+
+/**
+ * Style many cells in ONE call (`set_cell_style`'s `cells`): each as
+ * `setCellStyle` would style it -- the requested look, the Locked flag kept on
+ * a protected sheet -- gated once and all or nothing (a refusal writes
+ * nothing), as ONE undo step (or inside the caller's open one). An empty list
+ * makes no call.
+ */
+export async function setCellStyles(writes: CellStyleWrite[], opts?: CellTargetOptions): Promise<void> {
+  if (writes.length === 0) return;
+  await invoke<CellData | null>("set_cell_style", {
+    row: 0,
+    col: 0,
+    styleIndex: 0,
+    cells: writes,
+    ...cellTargetArg("set_cell_style", opts),
+  });
 }
 
 /**
@@ -1802,8 +1927,9 @@ export async function adjustNumberFormatDecimals(
 
 /**
  * Replicate a cell value update to multiple non-active sheets.
- * Used when sheet grouping is active, and by the script host's off-sheet
- * single-cell write. Dependent formulas (written sheets + active sheet) are
+ * The script host's off-sheet single-cell write (a grouped ENTRY no longer
+ * comes here: `updateCell` with `groupSheets` writes the whole group in one
+ * call and one undo step). Dependent formulas (written sheets + active sheet) are
  * recalculated by the backend unless `recalc` is false — the bulk script path
  * passes false per cell and calls recalculateSheetsAfterScriptWrite ONCE.
  *
@@ -1986,8 +2112,49 @@ export async function getFunctionTemplate(functionName: string): Promise<string>
 // Calculation Mode Operations
 // ============================================================================
 
-export async function setCalculationMode(mode: "automatic" | "manual"): Promise<string> {
-  return invoke<string>("set_calculation_mode", { mode });
+/**
+ * Set the calculation mode; answers the mode IN EFFECT afterwards.
+ *
+ * Leaving manual for automatic is a recalculation, as in Excel: the backend
+ * runs Calculate Now itself (with the cube pre-fetch) and answers the cells it
+ * repainted, so every caller -- the Formulas menu, a script's
+ * `setCalculationMode("automatic")`, the release when a script holding manual
+ * ends, the workbook-swap sweep -- shows the recalculated values and announces
+ * the pass, the way `calculateNow` does. Nobody chains Calculate Now after it.
+ *
+ * ONE SWITCH AT A TIME, IN CALL ORDER. The command is async on the backend, and
+ * two switches sent close together (Manual, then Automatic) started their
+ * bodies on pool threads in either order, so the backend could end in the
+ * mode of the EARLIER click while the menu showed the later one. Each call now
+ * waits for the previous one to settle before it is sent, so the last call is
+ * the last applied; the answer is the mode actually in effect, which the
+ * caller shows.
+ */
+let calculationModeQueue: Promise<unknown> = Promise.resolve();
+
+export function setCalculationMode(mode: "automatic" | "manual"): Promise<string> {
+  const run = calculationModeQueue.then(async () => {
+    const startedAt = performance.now();
+    const change = await invoke<CalculationModeChange>("set_calculation_mode", { mode });
+    // Setting the calculation mode ends copy and cut mode, either way and
+    // even to the mode already in effect [LIVE 2026-10-30, clip5/probe-endings.ps1
+    // and clip6/probe-calc.ps1: auto->auto, manual->manual, auto->manual and
+    // manual->auto each take CutCopyMode from xlCopy to 0].
+    announceClipboardModeEnding("calculationMode");
+    // The switch applied; a recalculation that then failed is reported beside
+    // the mode (the values stay "pending", as after a cancelled pass).
+    if (change.recalculationError) console.warn("[calc]", change.recalculationError);
+    const cells = change.recalculated;
+    if (cells) {
+      announceRecalcCompleted("workbook", cells.length, startedAt);
+      cellEvents.emitBatch(cells.map(cellToChange));
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    }
+    return change.mode;
+  });
+  // A failed switch must not wedge the ones after it.
+  calculationModeQueue = run.catch(() => undefined);
+  return run;
 }
 
 export async function getCalculationMode(): Promise<string> {
@@ -1996,7 +2163,8 @@ export async function getCalculationMode(): Promise<string> {
 
 /**
  * Get the current calculation state.
- * Returns "done", "calculating", or "pending".
+ * Returns "done" or "pending" (Excel's xlPending: a cancelled recalculation,
+ * a manual-calculation edit a formula depends on, or a workbook saved that way).
  */
 export async function getCalculationState(): Promise<string> {
   return invoke<string>("get_calculation_state");
@@ -2020,6 +2188,18 @@ function announceRecalcCompleted(
     cellsUpdated,
     durationMs: Math.round(performance.now() - startedAt),
   });
+}
+
+/**
+ * Announce a command that ENDS the clipboard mode -- a copy's and a cut's --
+ * as Excel's does [LIVE] (DATA_COMMAND_APPLIED; Core's clipboard listens):
+ * Calculate Now / Calculate Sheet, a Merge or Unmerge, a change of the
+ * calculation mode (`setCalculationMode`). Announced next to the
+ * invoke, once it landed, so every caller -- the ribbon, F9, a script, the
+ * command line -- announces it.
+ */
+function announceClipboardModeEnding(command: "calculate" | "merge" | "calculationMode"): void {
+  emitAppEvent(ApiAppEvents.DATA_COMMAND_APPLIED, { command });
 }
 
 async function recalcAll(forceCube: boolean): Promise<CellData[]> {
@@ -2049,6 +2229,11 @@ export async function calculateNow(): Promise<CellData[]> {
   console.log("[tauri-api] calculateNow - recalculating the workbook");
   const result = await recalcAll(false);
   console.log(`[tauri-api] calculateNow returned ${result.length} updated cells`);
+  // F9 ENDS the clipboard mode as Excel's Calculate does [LIVE, rev11B and
+  // clip5/probe-endings.ps1: Application.Calculate -> CutCopyMode 0]; the
+  // full recalculation with cubes (`recalcWithCube`, Excel's CalculateFull,
+  // which keeps the mode [LIVE]) does not.
+  announceClipboardModeEnding("calculate");
   return result;
 }
 
@@ -2066,6 +2251,8 @@ export async function calculateSheet(): Promise<CellData[]> {
   const result = await invoke<CellData[]>("calculate_sheet");
   console.log(`[tauri-api] calculateSheet returned ${result.length} updated cells`);
   announceRecalcCompleted("sheet", result.length, startedAt);
+  // Shift+F9 ENDS the clipboard mode as Excel's Worksheet.Calculate does [LIVE].
+  announceClipboardModeEnding("calculate");
   return result;
 }
 
@@ -2967,15 +3154,17 @@ function wholeLineSpan(
 /**
  * A cell shift moved part of the sheet's cells and every store anchored to
  * them (notes, comments, hyperlinks, controls, validations, conditional
- * formats, tables, names). It carries no whole-row/column coordinates, so the
+ * formats, tables, names). It moves no WHOLE rows or columns, so the
  * ROWS_INSERTED family cannot describe it: the extensions that cache those
- * stores re-read them on STRUCTURAL_UNDO -- the "a structural change with no
- * coordinates happened" announcement an undone insert also makes -- and on the
- * MUTATION_REFRESH domains below. Emitted here, at the IPC wrapper, so every
- * route announces (the convention events.ts records).
+ * stores re-read them on STRUCTURAL_UNDO -- the announcement an undone insert
+ * also makes -- and on the MUTATION_REFRESH domains below. It carries the
+ * shift as COORDINATES (`source: "edit"`, `deltas`: the backend's band edit,
+ * `CellShiftResult.delta`), which the stores whose coordinates the backend
+ * never holds follow (@api/structuralFollow). Emitted here, at the IPC
+ * wrapper, so every route announces (the convention events.ts records).
  */
-function announceCellShift(description: string): void {
-  emitAppEvent(ApiAppEvents.STRUCTURAL_UNDO, { description });
+function announceCellShift(description: string, delta: StructuralDelta | null | undefined): void {
+  emitAppEvent(ApiAppEvents.STRUCTURAL_UNDO, { description, source: "edit", deltas: delta ? [delta] : [] });
   emitAppEvent(AppEvents.MUTATION_REFRESH, {
     domains: [
       "styles",
@@ -3033,7 +3222,7 @@ export async function insertCellsRange(
     shift,
     unmergeCutMerges: options.unmergeCutMerges ?? false,
   });
-  if (result.applied) announceCellShift("Insert Cells");
+  if (result.applied) announceCellShift("Insert Cells", result.delta);
   return result;
 }
 
@@ -3064,7 +3253,7 @@ export async function deleteCellsRange(
     shift,
     unmergeCutMerges: options.unmergeCutMerges ?? false,
   });
-  if (result.applied) announceCellShift("Delete Cells");
+  if (result.applied) announceCellShift("Delete Cells", result.delta);
   return result;
 }
 
@@ -3192,6 +3381,14 @@ export interface UndoResult {
     endRow: number;
     endCol: number;
   } | null;
+  /** The coordinate changes this restore made, IN THE ORDER MADE: for an Undo
+   *  the inverse of each change the step recorded, newest first (an undone
+   *  insert reads as the delete that took its lines back); for a Redo each
+   *  change again, oldest first. Every change of a grouped step is listed, an
+   *  Insert / Delete Cells with its band, a cut-paste as a move -- read from
+   *  the step itself, never its description. Empty when nothing moved.
+   *  Optional only so an older double without it reads as empty. */
+  structuralDeltas?: StructuralDelta[];
 }
 
 /**
@@ -3682,6 +3879,11 @@ export async function mergeCells(
     ...placed,
   });
   if (!options?.probe && !placed.target) recordMergeResult(result, sheetIndex);
+  // A Merge ENDS the clipboard mode as Excel's does [LIVE 2026-10-30,
+  // rev11B/probe.ps1 and clip5/probe-endings.ps1: Range.Merge -> CutCopyMode
+  // 0], before the gesture announces any value it moved (CELLS_MOVED): the
+  // mode is over either way. A probe changes nothing and ends nothing.
+  if (!options?.probe && result?.success) announceClipboardModeEnding("merge");
   return result;
 }
 
@@ -3717,6 +3919,8 @@ export async function unmergeCells(
       recordGridEvent({ kind: "unmergeCells", row: r.startRow, col: r.startCol, ...onSheet });
     }
   }
+  // An Unmerge ENDS the clipboard mode too [LIVE 2026-10-30, clip5/probe-endings.ps1].
+  if (result?.success) announceClipboardModeEnding("merge");
   return result;
 }
 
@@ -3863,6 +4067,11 @@ export async function fillRange(
  * `srcSheetIndex`: the sheet the block was cut FROM, when that is not the
  * active sheet (a Cut on Sheet1 pasted on Sheet2). Omitted, the block moved on
  * the active sheet itself.
+ *
+ * The step records the block as MOVED, so its Undo / Redo hands the cell
+ * followers (a watch, a bookmark) the move back and forth
+ * (`UndoResult.structuralDeltas`) -- a drag of whole rows or columns too: it
+ * overwrites where it lands, and the lines it passes over stay [LIVE].
  */
 export async function relocateCellReferences(
   srcStartRow: number,

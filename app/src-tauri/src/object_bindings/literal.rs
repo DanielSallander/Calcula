@@ -124,14 +124,22 @@ pub fn check_literal_gates(
     if row.protect_edit_objects {
         crate::protection::check_sheet_action(state, location.sheet_index, "editObjects", protect_phrase(object.kind))?;
     }
-    if row.lock_objects_position {
-        let locked = {
-            let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
-            crate::sheets::canvas_objects_locked_in(&kinds, location.sheet_index)
-        };
-        if locked {
-            return Err(crate::sheets::canvas_objects_locked_refusal(lock_phrase(object.kind)));
-        }
+    check_lock_objects_gate(state, object, row, location)
+}
+
+/// The Lock Objects half of [`check_literal_gates`] alone. `Set` and `Clear`
+/// ask it AGAIN while holding the binding store they write (BUG-0443), so a
+/// Lock Objects toggle cannot land between the decision and the write: the
+/// toggle's barrier (`sheets::set_canvas_layout_inner`) waits for that store.
+/// A leaf read of `sheet_kinds`, released before this returns.
+pub fn check_lock_objects_gate(
+    state: &AppState,
+    object: &ObjectBindingRef,
+    row: &BindablePathSpec,
+    location: &ObjectLocation,
+) -> Result<(), String> {
+    if row.lock_objects_position && crate::sheets::canvas_objects_locked_now(state, location.sheet_index)? {
+        return Err(crate::sheets::canvas_objects_locked_refusal(lock_phrase(object.kind)));
     }
     Ok(())
 }
@@ -639,7 +647,8 @@ fn write_canvas_page(
         let kinds = ctx.state.sheet_kinds.read().map_err(|e| e.to_string())?;
         kinds.get(index).and_then(|k| k.canvas_layout().cloned())
     };
-    let changed = crate::sheets::set_canvas_layout_inner(ctx.state, ctx.file_state, Some(index), &patch)?;
+    let families = crate::sheets::ObjectFamilyStores { slicers: ctx.slicers, timelines: ctx.timelines, pivots: ctx.pivots };
+    let changed = crate::sheets::set_canvas_layout_inner(ctx.state, ctx.file_state, &families, Some(index), &patch)?;
     if before.as_ref() == Some(&changed.layout) {
         return Ok(LiteralWriteOutcome::Unchanged);
     }

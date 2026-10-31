@@ -60,8 +60,8 @@
  *   - FG6: `get_all_row_heights` reads the ACTIVE sheet only and no command
  *     reads another sheet's heights, so the leak witness is the HOST sheet's
  *     row heights; the object's map and the frame are asserted directly.
- *   - FG8: Format Painter from Sheet1 INTO a floating grid is REFUSED until
- *     BUG-0513 (no style-index command takes a target); the reverse works.
+ *   - FG8: Format Painter works both ways: grid -> sheet, and sheet -> grid
+ *     through set_cell_style's cell target (BUG-0513, fixed 2026-10-30).
  *   - FG10: ruling Q4 -- Merge on a floating grid is the sheet's gesture (the
  *     same keep-first-value prompt). A1 already holds the first value, so the
  *     outcome is the spec's: A1 keeps "c", B1 is discarded.
@@ -171,8 +171,6 @@ const TABLE_REFUSAL =
 const FILTER_REFUSAL =
   "Filter is not available inside a floating grid: a floating grid is already a table-like object. Nothing was changed.";
 const INSERT_CELLS_REFUSAL = /^Insert Cells is not available inside a floating grid yet\./;
-/** formatPainterLogic.ts FR_PAINT_INTO_GRID_REFUSAL (BUG-0513, open). */
-const PAINT_INTO_GRID_REFUSAL = /Format Painter cannot paint into a floating grid's cells yet/;
 
 const WORK = path.join(os.tmpdir(), "calcula-floating-grid-home");
 const RUN = Date.now().toString(36);
@@ -943,7 +941,7 @@ test.describe("floating grids take every Home command (round 2 P3, G3)", () => {
     expect(panes.isOpen, "a task pane leaked out of FG7").toBe(false);
   });
 
-  test("FG8 clipboard: Float1!C1 (=B1*2) pasted on Sheet1!F12 reads =E12*2; Sheet1!A1:A2 pasted into Float1!D1 lands on the grid; Paste Special Values onto D2; Format Painter from bold B2 to Sheet1!A3 paints, and from Sheet1 into the grid refuses (BUG-0513)", async ({
+  test("FG8 clipboard: Float1!C1 (=B1*2) pasted on Sheet1!F12 reads =E12*2; Sheet1!A1:A2 pasted into Float1!D1 lands on the grid; Paste Special Values onto D2; Format Painter from bold B2 to Sheet1!A3 paints, and from Sheet1!A3 into the grid paints too (BUG-0513)", async ({
     appPage: page,
   }) => {
     test.setTimeout(240_000);
@@ -1002,15 +1000,15 @@ test.describe("floating grids take every Home command (round 2 P3, G3)", () => {
       await sheetClick(page, 2, 0, 150);
       await eventually(() => styleAt(page, 2, 0), (s) => s.bold === true, "Format Painter from Float1!B2 did not bold Sheet1!A3");
 
-      // Sheet -> grid: refused until BUG-0513 (no style-index command takes a target).
+      // Sheet -> grid (BUG-0513): the bold Sheet1!A3 paints the grid's A4,
+      // through the grid's cell target -- never the host's hidden A4 under it.
+      const hostA4Before = (await styleAt(page, 3, 0)).bold;
       await sheetClick(page, 2, 0);
       await clickHomeControl(page, "fmt-formatPainter");
       await eventually(() => callModule<boolean>(page, FORMAT_PAINTER_STATE, "isFormatPainterActive"), (v) => v, "Format Painter did not arm on Sheet1!A3");
-      const mark = await toastMark(page);
       await frClick(page, float1, 3, 0);
-      const said = await saidOnce(page, mark, "Format Painter into the grid");
-      expect(said, "painting into the grid did not say why it refused").toMatch(PAINT_INTO_GRID_REFUSAL);
-      expect((await frStyle(page, float1.id, 3, 0)).bold, "Format Painter painted into the grid's A4 anyway").not.toBe(true);
+      await eventually(() => frStyle(page, float1.id, 3, 0), (s) => s.bold === true, "Format Painter from Sheet1!A3 did not bold Float1!A4");
+      expect((await styleAt(page, 3, 0)).bold, "Format Painter painted the HOST's hidden A4").toBe(hostA4Before);
     } finally {
       panes = await teardown(page, holder);
     }

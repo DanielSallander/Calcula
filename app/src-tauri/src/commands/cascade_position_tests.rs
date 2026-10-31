@@ -54,6 +54,7 @@ fn paste(wb: &Workbook, writes: &[(u32, u32, &str)]) -> Vec<CellData> {
             style_index: None,
             invariant: Some(true),
             pasted: None,
+            moved: None,
         })
         .collect();
     update_cells_batch_core(
@@ -524,7 +525,8 @@ fn every_same_sheet_cascade_evaluates_through_the_positioned_per_cell_evaluator(
     for command in [
         "update_cell_impl",
         "update_cells_batch_core",
-        "fill_range",
+        // The command delegates to this body (testability split).
+        "fill_range_core",
         "recalc_after_active_sheet_bulk_rewrite",
     ] {
         let body = body_of(DATA_RS, command);

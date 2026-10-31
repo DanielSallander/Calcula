@@ -19,6 +19,7 @@
 
 import { indexToCol } from "@api";
 import type { CanvasPivotPlacement } from "../../_shared/lib/canvasPivotFrame";
+import { findBySheetName } from "@api/sheetNames";
 
 // ============================================================================
 // Placement and frame
@@ -180,8 +181,7 @@ export async function resolveCanvasPivotSource(
   const { sheetName, rest } = splitSheetPrefix(trimmed);
   if (sheetName !== null) {
     if (sheetName === "") return { ok: false, message: CANVAS_SOURCE_NEEDS_SHEET_MESSAGE };
-    const wanted = sheetName.toLowerCase();
-    const sheet = sheets.find((s) => s.name.toLowerCase() === wanted);
+    const sheet = findBySheetName(sheets, sheetName, (s) => s.name);
     if (!sheet) return { ok: false, message: unknownSourceSheetMessage(sheetName) };
     if (isCanvas(sheet)) return { ok: false, message: canvasSourceIsCanvasMessage(sheet.name) };
     const range = normalizeRange(rest);
@@ -236,8 +236,7 @@ export function resolveWorksheetPivotSource(
   if (sheetName === null || sheetName === "") {
     return { ok: true, sourceRange: trimmed, sourceSheet: fallbackSheet };
   }
-  const wanted = sheetName.toLowerCase();
-  const sheet = sheets.find((s) => s.name.toLowerCase() === wanted);
+  const sheet = findBySheetName(sheets, sheetName, (s) => s.name);
   if (!sheet) return { ok: false, message: unknownSourceSheetMessage(sheetName) };
   if (isCanvas(sheet)) return { ok: false, message: canvasSourceIsCanvasMessage(sheet.name) };
   return { ok: true, sourceRange: qualifySourceRange(sheet.name, rest), sourceSheet: sheet.index };
@@ -276,8 +275,7 @@ export function resolveWorksheetPivotDestination(
 ): WorksheetPivotDestination {
   const { sheetName } = splitSheetPrefix(text);
   if (sheetName === null || sheetName === "") return { ok: true, sheet: null };
-  const wanted = sheetName.toLowerCase();
-  const sheet = sheets.find((s) => s.name.toLowerCase() === wanted);
+  const sheet = findBySheetName(sheets, sheetName, (s) => s.name);
   if (!sheet) return { ok: false, message: unknownSourceSheetMessage(sheetName) };
   return { ok: true, sheet };
 }

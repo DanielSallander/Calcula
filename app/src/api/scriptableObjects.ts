@@ -2010,8 +2010,12 @@ export const ObjectScriptManager: IObjectScriptAPI = {
  * The reset IS a change, so it announces itself: emptying the registry has to
  * reach the subscribers, or one that cached a non-empty list keeps painting it
  * when the incoming workbook registers nothing of its own.
+ *
+ * `options.openedDocument`: the reset follows a File > Open, whose file has
+ * already set the calculation mode -- a script's manual-calculation debt is
+ * then forgotten, not restored over it (see the host's `hostResetAll`).
  */
-export function resetObjectScriptManager(): void {
+export function resetObjectScriptManager(options?: { openedDocument?: boolean }): void {
   for (const scriptId of mountedScripts.keys()) {
     ObjectScriptManager.unmountScript(scriptId);
   }
@@ -2022,7 +2026,7 @@ export function resetObjectScriptManager(): void {
   // a closed workbook leaves a realm holding a consented capability set.
   resetScriptLibraryRealms();
   clearExposed();
-  hostResetAll();
+  hostResetAll(options);
   // Announced LAST, so a listener that re-reads the manager sees the settled
   // empty registry rather than a half-torn-down one.
   notifyChange();

@@ -52,12 +52,16 @@ vi.mock("@api", () => ({
   updateConfig: vi.fn((cfg: Record<string, number>) => ({ type: "updateConfig", cfg })),
   dispatchGridAction: vi.fn(),
   requestOverlayRedraw: vi.fn(),
+  refreshGridDimensions: vi.fn(),
   // The coalescer under test is @api's own primitive — use the real one.
   createCoalescedRefresh: actualCoalescedRefresh,
 }));
 
 import {
   groupRows,
+  expandRowGroup,
+  collapseRowGroup,
+  refreshGridDimensions,
   getOutlineInfo,
   getHiddenRowsByGroup,
   getHiddenColsByGroup,
@@ -65,6 +69,8 @@ import {
 } from "@api";
 import {
   performGroupRows,
+  performExpandRow,
+  performCollapseRow,
   resyncOutlineFromBackend,
   resetGroupingState,
   refreshOutlineState,
@@ -207,5 +213,20 @@ describe("recovery after a reset", () => {
       colCount: 10,
     } as never);
     expect(mockOutlineInfo).toHaveBeenCalledWith(100, 135, 0, 15);
+  });
+});
+
+// Round 16 (rev14C): an expand also shows the rows the user hid by hand inside
+// the group (Excel's ShowDetail [LIVE]). Those live in the grid's hand-hidden
+// mirror, which only a dimensions re-read refreshes -- so the grid kept them
+// hidden although the backend had shown them.
+describe("an expand re-reads the hand-hidden lines it may have shown", () => {
+  it("an expand that showed rows asks for a dimensions re-read; a collapse does not", async () => {
+    vi.mocked(expandRowGroup).mockResolvedValue({ success: true, hiddenRowsChanged: [12, 13, 14], hiddenColsChanged: [] } as never);
+    await performExpandRow(15);
+    expect(vi.mocked(refreshGridDimensions), "the grid kept the hand-hidden rows the expand showed").toHaveBeenCalledTimes(1);
+    vi.mocked(collapseRowGroup).mockResolvedValue({ success: true, hiddenRowsChanged: [12, 13, 14], hiddenColsChanged: [] } as never);
+    await performCollapseRow(15);
+    expect(vi.mocked(refreshGridDimensions)).toHaveBeenCalledTimes(1);
   });
 });

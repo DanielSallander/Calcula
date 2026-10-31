@@ -405,13 +405,13 @@ fn sheet_by_id(workbook: &Workbook, id: SheetId) -> Option<&persistence::Sheet> 
     workbook.sheets.iter().find(|s| s.id == id)
 }
 
-/// The workbook sheet with this name, case-insensitively (the lexer uppercases
+/// The workbook sheet with this name, by Excel's case rule (the lexer uppercases
 /// bare identifiers, so `Data` and `data` are one sheet to a formula).
 fn sheet_by_name<'a>(workbook: &'a Workbook, name: &str) -> Option<&'a persistence::Sheet> {
     workbook
         .sheets
         .iter()
-        .find(|s| s.name.eq_ignore_ascii_case(name))
+        .find(|s| identity::sheet_names_equal(&s.name, name))
 }
 
 /// A chart's name for a warning: the ChartDefinition envelope's `name`, else
@@ -436,7 +436,7 @@ fn chart_named_range<'a>(
     let matching: Vec<&'a persistence::SavedNamedRange> = workbook
         .named_ranges
         .iter()
-        .filter(|nr| nr.name.eq_ignore_ascii_case(name))
+        .filter(|nr| identity::defined_names_equal(&nr.name, name))
         .collect();
     matching
         .iter()
@@ -1167,9 +1167,9 @@ pub fn publish(
     // renames one of the two on pull, the package's own `=Sheet1!A1` binds to
     // whichever sheet won the name — with no `#REF!` and no warning.
     //
-    // CASE-INSENSITIVE, matching every other sheet-name comparison in the
-    // product: the lexer uppercases bare identifiers, so `Data` and `data` are
-    // one name to a formula and must be one name here.
+    // BY EXCEL'S CASE RULE (`identity::sheet_name_key`), matching every other
+    // sheet-name comparison in the product: `Data` and `data` -- and `Ärende`
+    // and `ärende` -- are one name to a formula and must be one name here.
     //
     // Here rather than in the Tauri command so EVERY publish route is covered,
     // the scripted gateway included — it has no dialog to warn through.
@@ -1177,7 +1177,7 @@ pub fn publish(
         let mut seen: std::collections::HashMap<String, &PublishedSheet> =
             std::collections::HashMap::new();
         for s in &sheets {
-            let key = s.name.to_ascii_lowercase();
+            let key = identity::sheet_name_key(&s.name);
             if let Some(first) = seen.get(&key) {
                 let detail = if first.sheet_id == s.sheet_id {
                     "The same sheet was named twice in the selection.".to_string()
@@ -3039,7 +3039,7 @@ mod tests {
     }
 
     /// CASE-INSENSITIVE, because the lexer uppercases bare identifiers and every
-    /// other sheet-name comparison in the product is `eq_ignore_ascii_case`.
+    /// other sheet-name comparison in the product is `identity::sheet_names_equal`.
     /// `Data` and `data` are one name to a formula, so they must be one name
     /// here.
     ///

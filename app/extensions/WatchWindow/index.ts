@@ -10,7 +10,8 @@ import {
   registerWatchWindowMenuItem,
   registerWatchWindowContextMenu,
 } from "./handlers/menuBuilder";
-import { refreshWatches, reset } from "./lib/watchStore";
+import { applySheetRenumbering, applyStructuralStep, refreshWatches, reset } from "./lib/watchStore";
+import { followSheetRenumbering, followStructuralEdits } from "@api/structuralFollow";
 
 // ============================================================================
 // Constants
@@ -55,6 +56,30 @@ function activate(context: ExtensionContext): void {
     refreshWatches();
   });
   cleanupFns.push(unsubCells);
+
+  // 5. Watches follow inserted and deleted rows and columns, Insert / Delete
+  //    Cells and cut-pasted cells on every sheet, and their undo and redo
+  //    (BUG-0614; see applyStructuralStep).
+  cleanupFns.push(
+    followStructuralEdits(
+      (step) => {
+        if (applyStructuralStep(step)) void refreshWatches();
+      },
+      { subscribe: (eventName, cb) => context.events.on(eventName, cb), moves: true },
+    ),
+  );
+
+  // 6. Watches follow their SHEET: renumbered at once when sheets are moved,
+  //    inserted or deleted, then re-checked by the sheet's stable id (a watch
+  //    on a deleted sheet goes, as Excel's does).
+  cleanupFns.push(
+    followSheetRenumbering((renumber) => {
+      if (applySheetRenumbering(renumber)) void refreshWatches();
+    }),
+  );
+  for (const eventName of [AppEvents.SHEET_ADDED, AppEvents.SHEET_DELETED, AppEvents.SHEET_RENAMED]) {
+    cleanupFns.push(context.events.on(eventName, () => void refreshWatches()));
+  }
 
   console.log("[WatchWindow] Activated successfully.");
 }

@@ -1189,13 +1189,18 @@ fn the_release_and_its_gates_sit_where_every_push_passes() {
     assert_eq!(assembly.matches("SignedBase::new(").count(), 1, "the signed base is opened more than once");
     assert_eq!(assembly.matches("&signed_base,").count(), 2, "a release reads its own signed base again");
     let publish = body_of(&cmds, "pub fn calp_publish(");
-    let gate = publish.find("refuse_push_on_button_code(").expect("the button-code gate moved");
+    // The gate sits in `refuse_push_on_carrier` (round 13: asked of a carrier
+    // assembled before the recalculation as well as of the shipping one).
+    let gate = publish.rfind("refuse_push_on_carrier(").expect("the carrier gates moved");
     let core = publish.find("calp::publish::publish(").expect("core publish moved");
-    let effect = publish.find("DocumentEffect::mutates(").expect("the push's effect moved");
+    // The push's one effect is minted inside the link-recording helper (rev13A).
+    let effect = publish.find("record_push_in_working_copy_link(").expect("the push's effect moved");
     assert!(gate < core && gate < effect, "the button-code gate runs before core publish and the effect");
+    let carrier_gates = body_of(&cmds, "fn refuse_push_on_carrier(");
+    let gate = carrier_gates.find("refuse_push_on_button_code(").expect("the button-code gate moved");
     // Acknowledgements come from the push REQUEST, which only the push dialog
     // fills with the code on screen -- never from anywhere else.
-    let call = &publish[gate..];
+    let call = &carrier_gates[gate..];
     let call = &call[..call.find(")?;").expect("the gate call")];
     assert!(call.contains("&params.acknowledged_button_code,"), "the gate is not handed the request's own list: {call}");
     let gate_body = body_of(&source("src/held_button_code.rs"), "pub(crate) fn refuse_push_on_button_code(").to_string();

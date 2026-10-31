@@ -1123,11 +1123,13 @@ instances:
   > formulas referencing them stay live), `comments` (unless the publisher ticks
   > "Include comments"), `protection` and `workbookProtection` (governance
   > features — but per-cell locked/hidden DO travel, as cell formatting),
-  > `gridDefaults` (workbook-wide row height / column width would re-size sheets
-  > the subscriber already had), `biRoleSelections` (a publisher's "view as"
+  > `biRoleSelections` (a publisher's "view as"
   > impersonation must not be re-applied under a subscriber's identity), and
   > `documentProperties`. Each carries its own reason string, which is the
-  > property that matters and which the drift above did not damage.
+  > property that matters and which the drift above did not damage. (A
+  > `gridDefaults` exclusion -- the workbook-wide standard row height / column
+  > width -- was removed 2026-10-30: the standard sizes are per sheet now, as in
+  > Excel, and travel with each published sheet's metadata.json.)
 - **Materialization parity.** Pull and refresh now materialize tables, sheet
   presentation state (merges, freeze panes, tab color, visibility,
   gridlines, page setup, notes, hyperlinks), and controls; refresh uses

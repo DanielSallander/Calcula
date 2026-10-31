@@ -14,7 +14,8 @@ import {
   markDataCacheClean,
   getAllGroups,
 } from "./store";
-import type { SparklineGroup, DataOrientation, EmptyCellHandling } from "./types";
+import type { SparklineGroup, SparklineArea, DataOrientation, EmptyCellHandling } from "./types";
+import { groupAreas, validateSparklineRanges } from "./types";
 
 // ============================================================================
 // Data Fetching (async, per group)
@@ -91,19 +92,39 @@ export function sparklineCellNumber(cell: { value: unknown; type?: string } | nu
  * The data range is read TYPED, one call per band (on the active sheet, like
  * the sparkline itself), and each cell's number comes from its value, never
  * from the text it shows.
+ *
+ * A group of SEVERAL AREAS (`moreAreas`, types.ts) reads each area in turn and
+ * lists their sparklines in area order -- the order `rebuildCellIndex`
+ * (store.ts) numbers the cells in. `orientation` is the first area's; every
+ * further area's comes from its own ranges.
  */
 export async function fetchGroupData(
   group: SparklineGroup,
   orientation: DataOrientation,
 ): Promise<number[][]> {
+  const areas = groupAreas(group);
+  const slices: number[][] = [];
+  for (let a = 0; a < areas.length; a++) {
+    const areaOrientation =
+      a === 0 ? orientation : (validateSparklineRanges(areas[a].location, areas[a].dataRange).orientation ?? "byRow");
+    slices.push(...(await fetchAreaData(areas[a], areaOrientation)));
+  }
+  return slices;
+}
+
+/** One area's sparklines' data (see `fetchGroupData`). */
+async function fetchAreaData(
+  area: SparklineArea,
+  orientation: DataOrientation,
+): Promise<number[][]> {
   const { getRangeCellsTyped } = await import("@api/lib");
 
-  const dr = group.dataRange;
+  const dr = area.dataRange;
   const dataRows = dr.endRow - dr.startRow + 1;
   const dataCols = dr.endCol - dr.startCol + 1;
 
-  const locRows = group.location.endRow - group.location.startRow + 1;
-  const locCols = group.location.endCol - group.location.startCol + 1;
+  const locRows = area.location.endRow - area.location.startRow + 1;
+  const locCols = area.location.endCol - area.location.startCol + 1;
   const count = Math.max(locRows, locCols);
 
   // A dense grid of NaN (the typed read is sparse: an absent cell is empty).

@@ -9,13 +9,31 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | 10-08 (Canvas = Power BI) | 10-15 (WP-D bindings) | 10-15 (WP-C S7) | 10-16 (round 2 P3) | 10-17 (round 2 P4) | 10-21 (writeback subscriber UX) | 10-21 (Collected Responses for the author) | 10-22 (Writeback > Collect From) | 10-22 (identity phase 1) | Recounted (2026-10-22, fixer round) | 10-23 (model-visual drill-through) | 10-23 (drill-through review round) | How counted |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | 829 | 830 | 831 | 832 | 833 | 834 | 835 | 836 | 836 | 836 | 838 | **839** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | 872 | 873 | 874 | 875 | 877 | 878 | 879 | 879 | 879 | 878 | 880 | **882** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 122 | 125 | 125 | **125** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
-| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | 714 | 715 | 716 | 717 | 718 | 719 | 720 | 721 | 714 | 711 | 713 | **714** | 839 − 125 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | 10-08 (Canvas = Power BI) | 10-15 (WP-D bindings) | 10-15 (WP-C S7) | 10-16 (round 2 P3) | 10-17 (round 2 P4) | 10-21 (writeback subscriber UX) | 10-21 (Collected Responses for the author) | 10-22 (Writeback > Collect From) | 10-22 (identity phase 1) | Recounted (2026-10-22, fixer round) | 10-23 (model-visual drill-through) | 10-23 (drill-through review round) | 10-31 (bug-ledger rounds 9-20) | How counted |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | 829 | 830 | 831 | 832 | 833 | 834 | 835 | 836 | 836 | 836 | 838 | 839 | **840** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | 872 | 873 | 874 | 875 | 877 | 878 | 879 | 879 | 879 | 878 | 880 | 882 | **880** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 122 | 125 | 125 | 125 | **125** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
+| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | 714 | 715 | 716 | 717 | 718 | 719 | 720 | 721 | 714 | 711 | 713 | 714 | **715** | 840 − 125 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **342** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+
+The "10-31 (bug-ledger rounds 9-20)" column is rounds 9-20 of the bug-ledger fix programme (2026-10-30/31). It added
+ONE feature-open command, `bi::cube::note_custom_function_registry` (the page reports the custom-function names its
+add-ins register and the library generation it installed, so the CUBE/UDF results cache knows which names exist and
+when to release a hold; session-only, no `DocumentEffect`). Seven commands became
+`#[tauri::command(async)]` so a long pass no longer runs on the UI thread: `get_calculation_state`, `goal_seek`,
+`solver_solve`, `data_table_one_var`, `data_table_two_var`, `calp_publish` and `can_edit_cell`. `set_calculation_mode`
+was made `(async)` in round 9 and became `#[tauri::command]` on an `async fn` in round 12, so its attribute line is bare
+again. Bare attribute lines read 829 (835 + 1 - 7) and `#[tauri::command(async)]` lines read 11. The exact-text count
+does not match the `(async)` form, so it drops by six net (882 + 1 - 7 = 876); it reads 880 because four more
+occurrences are attribute TEXT in comments or test fixtures (51 of the 880 are not bare attribute lines, 47 before).
+The denylist is unchanged at 125. Two typed wrappers were added to `backend.ts`: `canEditCells` and `cancelGoalSeek`.
+All five figures were re-run together, line-wise, with
+`count-commands.mjs` (the same parse as the column before, but splitting lines on `\r?\n`): 840 / 880 / 125 / 715 /
+342, all 840 unique and every entry a valid path. That split matters for the denylist: `backendCommands.ts` is CRLF,
+and with a split on `\n` alone every line keeps a trailing `\r`, the per-line `//...$` strip never matches, and quoted
+words inside comments count as names. That parse reads 129 (compare the first count of 129 noted in the
+model-visual drill-through column below).
 
 The "10-23 (drill-through review round)" column is the drill-through's review round
 (`docs/design/model-drillthrough.md` section 7). It added ONE feature-open command, `sheets::discard_ephemeral_sheet`:

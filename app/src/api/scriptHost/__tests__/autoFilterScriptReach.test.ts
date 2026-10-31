@@ -266,7 +266,10 @@ describe("sheet move/copy and split validators", () => {
     expect(vCopySheet([0])).toBe(true);
     expect(vCopySheet([0, "February"])).toBe(true);
     expect(vCopySheet([0, "Bad/Name"])).toMatch(/may not contain/);
-    expect(vCopySheet([0, "   "])).toMatch(/non-empty/);
+    // Excel [LIVE, 2026-10-31]: a name of spaces only is a legal sheet name;
+    // only the EMPTY name is refused.
+    expect(vCopySheet([0, "   "])).toBe(true);
+    expect(vCopySheet([0, ""])).toMatch(/non-empty/);
   });
 
   it("splitPanes reports its OWN argument names, not freezePanes'", () => {

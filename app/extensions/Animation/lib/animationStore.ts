@@ -27,7 +27,8 @@
 //                           Deliberately does not persist; the name says so.
 //   * `current`          -- read-only, and typed `readonly AnimationSpec[]` so a
 //                           caller cannot `push` onto the store's own array.
-import { getExtensionData, setExtensionDataUndoable } from "@api/extensionData";
+import { getExtensionData, setExtensionData, setExtensionDataUndoable } from "@api/extensionData";
+import { shiftCellByEdit, type StructuralFollowStep } from "@api/structuralFollow";
 import type { AnimationSpec } from "../types";
 
 const EXTENSION_ID = "calcula.animation";
@@ -77,6 +78,24 @@ class AnimationStore {
   }
 
   /**
+   * Change the animations because CELLS MOVED (a structural edit, its undo or
+   * redo -- `applyStructuralStepToAnimations`), and write the change through
+   * WITHOUT an undo entry of its own: the structural edit IS the undo step,
+   * and its Undo replays the inverse here. An entry of its own would make the
+   * first Ctrl+Z undo the follow instead of the insert.
+   */
+  async follow(next: (current: readonly AnimationSpec[]) => readonly AnimationSpec[]): Promise<void> {
+    const replacement = next(this.#animations);
+    if (replacement === this.#animations) return;
+    this.#animations = replacement;
+    notify();
+    const payload: PersistShape = { animations: [...replacement] };
+    const write = setExtensionData(EXTENSION_ID, payload);
+    followWrite = write.catch(() => undefined);
+    await write;
+  }
+
+  /**
    * Install a list WITHOUT persisting it. The two callers are the two cases
    * where persisting would be wrong, not forgotten: `loadAnimations` (the list
    * just came out of the workbook) and `resetAnimations` (File > New, where the
@@ -88,6 +107,9 @@ class AnimationStore {
     notify();
   }
 }
+
+/** The newest structural-follow write (`AnimationStore.follow`), settled or not. */
+let followWrite: Promise<unknown> = Promise.resolve();
 
 const store = new AnimationStore();
 
@@ -138,6 +160,10 @@ export async function deleteAnimation(id: string): Promise<void> {
 /** Load specs from the workbook (call in activate() and on AFTER_OPEN). */
 export async function loadAnimations(): Promise<void> {
   let loaded: AnimationSpec[] = [];
+  // A structural Undo announces the follow (STRUCTURAL_UNDO) before the
+  // refresh that brings this reload: read only after its write has landed, or
+  // the reload could adopt the pre-follow blob over it.
+  await followWrite;
   try {
     const data = await getExtensionData<PersistShape>(EXTENSION_ID);
     loaded = Array.isArray(data?.animations) ? data!.animations : [];
@@ -146,6 +172,65 @@ export async function loadAnimations(): Promise<void> {
     loaded = [];
   }
   store.adopt(loaded);
+}
+
+/** The specs a structural edit marked `refDeleted`, by the edit's journal number, for its Undo. */
+const brokenByStructuralEdit = new Map<number, string[]>();
+
+/**
+ * The cell a spec drives or reads, with a setter: a clock cell on the spec's
+ * sheet, or a Monte Carlo outcome cell on its own sheet. Null for a driver
+ * with no cell (a chart parameter, a scenario tween).
+ */
+function specCell(spec: AnimationSpec): { sheetIndex: number; row: number; col: number; with: (row: number, col: number) => AnimationSpec } | null {
+  if (spec.driver === "clockCell" && spec.clockCell) {
+    const clock = spec.clockCell;
+    return { sheetIndex: spec.sheetIndex, row: clock.row, col: clock.col, with: (row, col) => ({ ...spec, clockCell: { ...clock, row, col } }) };
+  }
+  if (spec.driver === "monteCarlo" && spec.monteCarlo) {
+    const mc = spec.monteCarlo;
+    return { sheetIndex: mc.sheetIndex, row: mc.outcomeRow, col: mc.outcomeCol, with: (row, col) => ({ ...spec, monteCarlo: { ...mc, outcomeRow: row, outcomeCol: col } }) };
+  }
+  return null;
+}
+
+/**
+ * Follow one whole-line edit (or its undo / redo) on any sheet (BUG-0614): a
+ * spec's driver cell moves with its cell, as a formula reference does. One
+ * whose cell was DELETED keeps its last address and is marked `refDeleted`
+ * (Excel's #REF!) until that edit is undone. Persisted without an undo entry
+ * (`AnimationStore.follow`). Answers whether anything changed.
+ */
+export async function applyStructuralStepToAnimations(step: StructuralFollowStep): Promise<boolean> {
+  const { edit, cause, seq } = step;
+  let changed = false;
+  const restore = cause === "undo" ? new Set(brokenByStructuralEdit.get(seq) ?? []) : new Set<string>();
+  if (cause === "undo") brokenByStructuralEdit.delete(seq);
+  const broken: string[] = [];
+  await store.follow((current) => {
+    const next = current.map((spec) => {
+      if (restore.has(spec.id) && spec.refDeleted) {
+        changed = true;
+        const { refDeleted: _cleared, ...rest } = spec;
+        return rest as AnimationSpec;
+      }
+      if (spec.refDeleted) return spec;
+      const cell = specCell(spec);
+      if (cell === null || cell.sheetIndex !== edit.sheetIndex) return spec;
+      const moved = shiftCellByEdit(edit, cell.row, cell.col);
+      if (moved === null) {
+        changed = true;
+        broken.push(spec.id);
+        return { ...spec, refDeleted: true };
+      }
+      if (moved.row === cell.row && moved.col === cell.col) return spec;
+      changed = true;
+      return cell.with(moved.row, moved.col);
+    });
+    return changed ? next : current;
+  });
+  if (cause !== "undo" && broken.length > 0) brokenByStructuralEdit.set(seq, broken);
+  return changed;
 }
 
 /** Clear the in-memory store without persisting (call on AFTER_NEW). */

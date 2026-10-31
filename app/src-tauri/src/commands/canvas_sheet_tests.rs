@@ -1879,6 +1879,12 @@ fn snapshot(wb: &Workbook, token: &str, sheet_index: usize) {
 fn restore(wb: &Workbook, token: &str, sheet_index: usize) -> crate::api_types::AnimationFrameResult {
     crate::animation_commands::anim_restore_inner(
         &wb.state,
+        &crate::whatif_recalc::WhatIfStates {
+            user_files: &wb.files,
+            pivots: &wb.pivots,
+            pane_control: &wb.pane,
+            ribbon_filter: &wb.filters,
+        },
         crate::api_types::AnimRestoreParams { token: token.to_string(), sheet_index },
     )
 }
@@ -1915,6 +1921,7 @@ fn an_animation_restore_never_writes_into_a_canvas() {
         crate::animation_commands::AnimSnapshot {
             sheet_id: Some(canvas_id),
             cells: vec![((0, 0), Some(engine::Cell::new_number(5.0)))],
+            ..Default::default()
         },
     );
     let r = restore(&wb, "run", 0);
@@ -2153,7 +2160,7 @@ fn set_canvas_layout_applies_a_patch_and_refuses_worksheets_and_bad_values_clean
         page_preset: Some("4:3".to_string()),
         ..Default::default()
     };
-    let changed = crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(canvas), &patch)
+    let changed = crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(canvas), &patch)
         .expect("a valid patch applies");
     assert_eq!(changed.sheet_index, canvas);
     assert_eq!(changed.layout.grid_size_px, 25);
@@ -2166,6 +2173,7 @@ fn set_canvas_layout_applies_a_patch_and_refuses_worksheets_and_bad_values_clean
     let changed = crate::sheets::set_canvas_layout_inner(
         &wb.state,
         &wb.file,
+        crate::sheets::ObjectFamilyStores::none_for_test(),
         Some(canvas),
         &crate::api_types::CanvasLayoutPatch { page_width: Some(1000), ..Default::default() },
     )
@@ -2175,9 +2183,9 @@ fn set_canvas_layout_applies_a_patch_and_refuses_worksheets_and_bad_values_clean
     crate::document_effect::mark_saved(&wb.file);
     let before = kinds(&wb);
     let bad = crate::api_types::CanvasLayoutPatch { grid_size_px: Some(1), ..Default::default() };
-    assert!(crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(canvas), &bad).is_err());
+    assert!(crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(canvas), &bad).is_err());
     assert!(
-        crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(0), &patch).is_err(),
+        crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(0), &patch).is_err(),
         "a worksheet has no canvas layout"
     );
     assert_eq!(kinds(&wb), before, "a refused patch changes nothing");
@@ -2200,7 +2208,7 @@ fn set_canvas_layout_dedupes_the_ref_lists_and_refuses_bad_ones_cleanly() {
         locked: Some(vec![obj("slicer", "2"), obj("slicer", "2")]),
         ..Default::default()
     };
-    let changed = crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(canvas), &patch)
+    let changed = crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(canvas), &patch)
         .expect("duplicates are normalized, not refused");
     assert_eq!(changed.layout.z_order, vec![obj("chart", "1"), obj("slicer", "2"), obj("pivot", "3")]);
     assert_eq!(changed.layout.locked, vec![obj("slicer", "2")]);
@@ -2213,7 +2221,7 @@ fn set_canvas_layout_dedupes_the_ref_lists_and_refuses_bad_ones_cleanly() {
         ("a blank ref", crate::api_types::CanvasLayoutPatch { locked: Some(vec![obj("chart", " ")]), ..Default::default() }),
     ] {
         assert!(
-            crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(canvas), &bad).is_err(),
+            crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(canvas), &bad).is_err(),
             "{label} must be refused"
         );
     }
@@ -2352,16 +2360,16 @@ fn every_canvas_write_door_is_wired_and_ordered() {
         // The writers the M1 grid-writer classification found with no door.
         (COMPUTED, "computed_properties.rs", "pub fn add_computed_property(", "is_canvas_sheet", Some(EFFECT)),
         (COMPUTED, "computed_properties.rs", "pub fn update_computed_property(", "is_canvas_sheet", Some(EFFECT)),
-        (SCENARIOS, "scenario_manager.rs", "pub fn scenario_show(", "ensure_not_canvas_in_state", Some(EFFECT)),
-        (SCENARIOS, "scenario_manager.rs", "pub fn scenario_summary(", "ensure_not_canvas_in_state", Some(EFFECT)),
+        (SCENARIOS, "scenario_manager.rs", "pub(crate) fn scenario_show_impl(", "ensure_not_canvas_in_state", Some(EFFECT)),
+        (SCENARIOS, "scenario_manager.rs", "pub(crate) fn scenario_summary_impl(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (SCENARIOS, "scenario_manager.rs", "pub fn scenario_merge(", "check_sheet_action", Some(EFFECT)),
         (ANIMATION, "animation_commands.rs", "pub(crate) fn anim_snapshot_inner(", "ensure_not_canvas_in_state", Some("state.grids.read")),
         // The restore is gated on the SNAPSHOT's sheet before the snapshot is
         // taken out of the registry (`let saved =` is the take).
         (ANIMATION, "animation_commands.rs", "pub(crate) fn anim_restore_inner(", "ensure_not_canvas_in_state", Some("let saved =")),
-        (ANIMATION, "animation_commands.rs", "pub fn anim_apply_frame(", "ensure_not_canvas_in_state", Some("frame_effect(")),
+        (ANIMATION, "animation_commands.rs", "pub(crate) fn anim_apply_frame_inner(", "ensure_not_canvas_in_state", Some("frame_effect(")),
         (PROTECTION, "protection.rs", "pub fn set_cell_protection(", "ensure_not_canvas_in_state", Some(EFFECT)),
-        (SOLVER, "solver.rs", "pub fn solver_revert(", "ensure_not_canvas_in_state", Some(EFFECT)),
+        (SOLVER, "solver.rs", "pub(crate) fn solver_revert_impl(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (BI, "bi/commands.rs", "pub async fn bi_refresh_connection(", "is_canvas_sheet", Some(EFFECT)),
         (NOTEBOOK, "scripting/notebook_commands.rs", "async fn notebook_rewind_internal(", "is_canvas_sheet", Some(EFFECT)),
         (CALP, "calp_commands.rs", "pub fn calp_import_overrides(", "is_canvas_sheet", Some(EFFECT)),
@@ -2554,7 +2562,7 @@ fn style_request(
 
 fn lock_page(wb: &Workbook, index: usize, on: bool) {
     let patch = crate::api_types::CanvasLayoutPatch { objects_locked: Some(on), ..Default::default() };
-    crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(index), &patch).expect("toggle Lock Objects");
+    crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(index), &patch).expect("toggle Lock Objects");
 }
 
 /// Ctrl+Z through the real restore path.
@@ -2927,7 +2935,7 @@ fn an_invalid_interactions_patch_is_refused_before_the_effect() {
             },
         ),
     ] {
-        let err = crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(canvas), &bad)
+        let err = crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(canvas), &bad)
             .expect_err(&format!("{label} must be refused"));
         assert!(err.contains("Canvas interactions"), "{label}: the refusal names the interactions: {err}");
     }
@@ -2939,6 +2947,7 @@ fn an_invalid_interactions_patch_is_refused_before_the_effect() {
     crate::sheets::set_canvas_layout_inner(
         &wb.state,
         &wb.file,
+        crate::sheets::ObjectFamilyStores::none_for_test(),
         Some(canvas),
         &with_pairs(vec![CanvasInteraction {
             source: obj("slicer", "1"),
@@ -2948,4 +2957,109 @@ fn an_invalid_interactions_patch_is_refused_before_the_effect() {
     )
     .expect("a valid pair applies");
     assert_eq!(*announced.lock().unwrap(), vec![true], "fixture: the observer hears this flag");
+}
+
+// ---------------------------------------------------------------------------
+// BUG-0477 / BUG-0488: the pivot property and number-format doors -- a no-op
+// and a refusal leave the document clean, a write is one undo step
+// ---------------------------------------------------------------------------
+
+/// BUG-0477: the SAME style, name or frame again changes nothing and records
+/// no undo step. Whether it dirties follows Excel property by property (round
+/// 11, [LIVE, Excel 16 COM]): the same TableStyle2 again sets Saved = False,
+/// the same Name again leaves it True -- so the same style dirties, the same
+/// name, an empty request and the same canvas frame (no Excel analogue) stay
+/// clean.
+#[test]
+fn a_pivot_properties_request_that_changes_nothing_dirties_only_as_excel_does() {
+    let wb = Workbook::new(2);
+    seed_sales(&wb);
+    let id = create(&wb, create_request(1, Some(0), None).with_destination("A1"))
+        .expect("a worksheet pivot on Sheet2")
+        .pivot_id;
+    let update = |r| crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, r);
+    let medium = crate::pivot::types::PivotStyleConfig {
+        style_id: "PivotStyleMedium9".to_string(),
+        theme_overrides: Default::default(),
+    };
+    update(style_request(id, Some(Some(medium.clone())))).expect("a style is set");
+    let named = crate::pivot::types::UpdatePivotPropertiesRequest {
+        name: Some("Sales".to_string()),
+        ..style_request(id, None)
+    };
+    update(named.clone()).expect("a name is set");
+    let depth = undo_depth(&wb);
+
+    crate::document_effect::mark_saved(&wb.file);
+    update(style_request(id, Some(Some(medium.clone())))).expect("the same style again");
+    assert!(wb.file.is_dirty(), "the same style again left the document clean; Excel dirties it");
+    assert_eq!(undo_depth(&wb), depth, "the same style again records no undo step");
+    crate::document_effect::mark_saved(&wb.file);
+    update(named.clone()).expect("the same name again");
+    assert!(!wb.file.is_dirty(), "the same name again dirtied the document");
+    let info = update(style_request(id, None)).expect("an empty request");
+    assert!(!wb.file.is_dirty(), "an empty request dirtied the document");
+    assert_eq!(info.name, "Sales", "a no-op still answers with the pivot's properties");
+    assert_eq!(undo_depth(&wb), depth, "and records nothing");
+
+    // Positive control: a real rename dirties.
+    update(crate::pivot::types::UpdatePivotPropertiesRequest { name: Some("Revenue".to_string()), ..named })
+        .expect("a rename");
+    assert!(wb.file.is_dirty(), "a rename is a document change");
+
+    // A canvas pivot's SAME frame again leaves it clean too.
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    let framed = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+    crate::document_effect::mark_saved(&wb.file);
+    update(frame_request(framed, test_frame())).expect("the same frame again");
+    assert!(!wb.file.is_dirty(), "the same frame again dirtied the document");
+}
+
+/// BUG-0488: an out-of-range value field is refused with the document clean;
+/// a format that changes is ONE undo step that Ctrl+Z puts back; the same
+/// format again changes nothing and records nothing, but dirties the document
+/// as Excel does (round 11, [LIVE, Excel 16 COM]: the same DataField
+/// NumberFormat again sets Saved = False).
+#[test]
+fn a_pivot_number_format_refusal_is_clean_and_a_change_is_one_undo_step() {
+    let wb = Workbook::new(2);
+    seed_sales(&wb);
+    let id = create(&wb, create_request(1, Some(0), None).with_destination("A1"))
+        .expect("a worksheet pivot on Sheet2")
+        .pivot_id;
+    let set = |index: usize, format: &str| {
+        crate::pivot::commands::set_pivot_number_format_core(
+            &wb.state,
+            &wb.file,
+            &wb.pivots,
+            recalc_states(&wb),
+            crate::pivot::types::SetNumberFormatRequest {
+                pivot_id: id,
+                value_field_index: index,
+                number_format: format.to_string(),
+            },
+        )
+    };
+    let format_of = || stored_definition(&wb, id).value_fields[0].number_format.clone();
+    let depth = undo_depth(&wb);
+
+    crate::document_effect::mark_saved(&wb.file);
+    let refused = set(5, "0.0");
+    assert!(refused.is_err_and(|e| e.contains("out of range")), "index 5 is refused");
+    assert!(!wb.file.is_dirty(), "a refused number format dirtied the document");
+    assert_eq!(undo_depth(&wb), depth);
+
+    set(0, "0.0").expect("a number format is set");
+    assert_eq!(format_of(), Some("0.0".to_string()));
+    assert!(wb.file.is_dirty(), "setting a format is a document change");
+    assert_eq!(undo_depth(&wb), depth + 1, "ONE undo step for the format");
+
+    crate::document_effect::mark_saved(&wb.file);
+    set(0, "0.0").expect("the same format again");
+    assert!(wb.file.is_dirty(), "the same format again left the document clean; Excel dirties it");
+    assert_eq!(undo_depth(&wb), depth + 1, "and recorded nothing");
+
+    undo_once(&wb);
+    assert_eq!(format_of(), None, "Ctrl+Z puts the field's format back");
 }

@@ -94,6 +94,7 @@ pub(crate) fn diff_grids_to_updates(before: &Grid, after: &Grid) -> Vec<CellUpda
                 style_index: None,
                 invariant: Some(true),
                 pasted: None,
+                moved: None,
             });
         }
     }
@@ -2030,22 +2031,92 @@ pub fn get_script(
 /// they do not mutate the publisher's one into theirs.
 #[tauri::command]
 pub fn save_script(
+    state: State<'_, crate::AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     script_state: State<ScriptState>,
     script: WorkbookScript,
 ) -> Result<(), String> {
-    // Scripts/notebooks are persisted in the .cala; this is a document change.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut scripts = script_state.workbook_scripts.write(&effect)
-        .map_err(|e| e.to_string())?;
+    save_script_core(&state, &file_state, &script_state, script)
+}
 
-    let mut script = script;
-    script.source_package = sticky_source_package(
-        script.source_package.take(),
-        scripts.get(&script.id).and_then(|s| s.source_package.as_deref()),
-    );
-    scripts.insert(script.id.clone(), script);
-    Ok(())
+/// The body of [`save_script`], without a Tauri runtime.
+///
+/// A save of a Custom Functions library record (the authoring dialog's Save)
+/// is a change of the workbook's custom functions: every function whose
+/// definition changed forgets the answers the results cache holds for it, and
+/// a function the library dropped is forgotten altogether
+/// (`bi::cube::forget_redefined_custom_functions`, rev8A) -- after the store's
+/// lock is released, so the grids are taken in canonical order.
+pub(crate) fn save_script_core(
+    state: &crate::AppState,
+    file_state: &crate::persistence::FileState,
+    script_state: &ScriptState,
+    script: WorkbookScript,
+) -> Result<(), String> {
+    write_script_record(state, file_state, script_state, script, false).map(|_| ())
+}
+
+/// [`save_script_core`] for a record that must ALREADY exist: the JSON view's
+/// edit of a script (`json_view::set_script_json`). Same sticky provenance,
+/// same custom-function forget -- no door may change a script's code without
+/// both (rev10B) -- and a record that does not exist is refused, with the
+/// document left clean, in the same critical section as the write.
+///
+/// Returns `Some(generation)` when a Custom Functions library CHANGED: unlike
+/// the authoring dialog, this door installs nothing in the page, whose OLD
+/// realm keeps serving the old code until it re-installs. So every changed
+/// function is also HELD (`bi::cube::hold_custom_functions_until_reinstalled`,
+/// rev12C), and the caller must emit `custom-functions:refresh` with that
+/// generation, as the calp doors do -- otherwise the next calculation files
+/// the old code's answers again, as current.
+pub(crate) fn update_existing_script_core(
+    state: &crate::AppState,
+    file_state: &crate::persistence::FileState,
+    script_state: &ScriptState,
+    script: WorkbookScript,
+) -> Result<Option<u64>, String> {
+    write_script_record(state, file_state, script_state, script, true)
+}
+
+/// THE ONE WRITER of a script record by an author: [`save_script_core`] and
+/// [`update_existing_script_core`]. `must_exist` refuses an unknown id before
+/// the `DocumentEffect` exists, under the same lock as the write; it is also
+/// the JSON view's door, which -- not being the authoring dialog that installs
+/// the new library in the page FIRST -- holds a changed library's functions
+/// until the page re-installs and returns the generation to announce.
+fn write_script_record(
+    state: &crate::AppState,
+    file_state: &crate::persistence::FileState,
+    script_state: &ScriptState,
+    script: WorkbookScript,
+    must_exist: bool,
+) -> Result<Option<u64>, String> {
+    let is_library = script.id.starts_with("__calcula_custom_functions__");
+    let library_change = {
+        let pending = script_state.workbook_scripts.lock_pending().map_err(|e| e.to_string())?;
+        if must_exist && !pending.contains_key(&script.id) {
+            return Err(format!("Script '{}' not found", script.id));
+        }
+        // Scripts/notebooks are persisted in the .cala; this is a document change.
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut scripts = pending.authorize(&effect);
+        let before = is_library.then(|| crate::bi::cube::custom_function_definitions_in(&scripts));
+
+        let mut script = script;
+        script.source_package = sticky_source_package(
+            script.source_package.take(),
+            scripts.get(&script.id).and_then(|s| s.source_package.as_deref()),
+        );
+        scripts.insert(script.id.clone(), script);
+        before.map(|before| (before, crate::bi::cube::custom_function_definitions_in(&scripts)))
+    };
+    if let Some((before, after)) = library_change {
+        crate::bi::cube::forget_redefined_custom_functions(state, &before, &after);
+        if must_exist && before != after {
+            return Ok(Some(crate::bi::cube::hold_custom_functions_until_reinstalled(state, &before, &after)));
+        }
+    }
+    Ok(None)
 }
 
 /// The `source_package` an update must end up with — see `save_script`.

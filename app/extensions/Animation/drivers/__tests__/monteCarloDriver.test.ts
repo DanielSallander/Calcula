@@ -38,3 +38,15 @@ describe("monte carlo driver", () => {
     expect(emitAppEvent).toHaveBeenCalledWith("grid:refresh");
   });
 });
+
+describe("monte carlo driver: a refused trial", () => {
+  // The backend refuses a trial while a what-if run is going; the driver used
+  // to treat the reply as "no number" and record nothing for every remaining
+  // trial. It now fails the frame, so the clock stops and says why.
+  it("throws the backend's reason and records nothing", async () => {
+    const d = createMonteCarloDriver({ sheetIndex: 0, outcomeRow: 0, outcomeCol: 0, trials: 10 });
+    vi.mocked(animRerollAndRead).mockResolvedValue({ value: null, error: "A what-if analysis is running." });
+    await expect(d.applyFrame(0)).rejects.toThrow("A what-if analysis is running.");
+    expect(mcPush).not.toHaveBeenCalled();
+  });
+});

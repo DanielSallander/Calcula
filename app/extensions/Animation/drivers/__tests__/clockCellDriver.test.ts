@@ -65,3 +65,18 @@ describe("clock-cell driver backend wiring", () => {
     expect(d.frameLabel?.(3)).toBe("16");
   });
 });
+
+describe("clock-cell driver: a refused snapshot", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // The backend refuses the snapshot while a what-if run is going and files no
+  // restore buffer; the driver used to ignore the reply, so every frame then
+  // failed silently. It now fails the snapshot with the backend's message.
+  it("throws the backend's reason", async () => {
+    vi.mocked(animSnapshot).mockResolvedValueOnce({ success: false, error: "A what-if analysis is running." });
+    const d = createClockCellDriver({ sheetIndex: 0, row: 0, col: 0, from: 0, to: 3, step: 1 });
+    await expect(d.snapshot()).rejects.toThrow("A what-if analysis is running.");
+  });
+});

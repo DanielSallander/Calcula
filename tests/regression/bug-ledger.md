@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 616 | Open: 60 | Triaged: 0 | Fixed: 556 | Other: 0
+Total: 659 | Open: 60 | Triaged: 0 | Fixed: 599 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -3733,7 +3733,7 @@ icon-accent-contact.mjs --write COULD RAISE ALLOWLIST ENTRIES: a value up to TOL
 **Repro:** Copy scripts/icon-accent-contact.allowlist.json, run ICON_CONTACT_ALLOWLIST=<copy> node scripts/icon-accent-contact.mjs --write, diff: five entries rose.
 **Fix:** fixed
 
-## BUG-0344 `[open]`
+## BUG-0344 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** color-hex-blur-double-apply
@@ -3741,6 +3741,7 @@ icon-accent-contact.mjs --write COULD RAISE ALLOWLIST ENTRIES: a value up to TOL
 A TYPED HEX DRAFT FOLLOWED BY A SWATCH CLICK PROBABLY APPLIES TWICE (PLAUSIBLE, from code; jsdom cannot show it): in Chromium the mousedown focuses the swatch, the field's blur commits the draft, then the click applies the swatch -- two writes and two undo steps.
 
 **Repro:** Open Fill Color's palette, type 12ab34 without Enter, click Red; then Ctrl+Z once: if the cell shows #12ab34, it applied twice.
+**Fix:** fixed
 
 ## BUG-0345 `[open]`
 
@@ -3808,7 +3809,7 @@ AUTOFIT COLUMN WIDTH ON A PARTIAL RANGE STILL COUNTS A PIVOTTABLE ELSEWHERE IN T
 
 **Repro:** A pivot in A20:C40, select A1 only, Home > Format > AutoFit Column Width: column A is sized for the pivot.
 
-## BUG-0352 `[open]`
+## BUG-0352 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** standard-width-workbook-wide
@@ -3816,8 +3817,9 @@ AUTOFIT COLUMN WIDTH ON A PARTIAL RANGE STILL COUNTS A PIVOTTABLE ELSEWHERE IN T
 THE STANDARD COLUMN WIDTH IS ONE VALUE FOR THE WHOLE WORKBOOK (AppState.default_column_width); Excel keeps one per sheet.
 
 **Repro:** Home > Format > Default Width... 12 on Sheet1, switch to Sheet2: Sheet2's standard width changed too.
+**Fix:** fixed
 
-## BUG-0353 `[open]`
+## BUG-0353 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** select-all-row-height-refused
@@ -3825,6 +3827,7 @@ THE STANDARD COLUMN WIDTH IS ONE VALUE FOR THE WHOLE WORKBOOK (AppState.default_
 SELECT ALL, THEN ROW HEIGHT IS REFUSED (a toast). The batch command is cheap now, but the sheet stores one explicit height per row (row_heights HashMap): 1,048,576 entries cost about 35 MB per copy, copied into every structural undo step (up to ~3.5 GB), ~51 MB of JSON per dimension refresh and ~6 ms per scroll forEach -- so Row Height keeps a 16,384-row bound. Excel sets the sheet's DEFAULT row height instead.
 
 **Repro:** Ctrl+A, Home > Format > Row Height... 30: refused with a toast.
+**Fix:** fixed
 
 ## BUG-0354 `[fixed]`
 
@@ -3873,7 +3876,7 @@ THE MACRO RECORDER DOES NOT RECORD INSERT CELLS / DELETE CELLS: there is no Reco
 
 **Repro:** Record a macro, Home > Insert > Insert Cells... > Shift cells down, stop: the generated code has no insert.
 
-## BUG-0359 `[open]`
+## BUG-0359 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** clear-range-noop-dirties
@@ -3881,6 +3884,7 @@ THE MACRO RECORDER DOES NOT RECORD INSERT CELLS / DELETE CELLS: there is no Reco
 clear_range_with_options (ACTIVE PATH) DIRTIES THE DOCUMENT EVEN WHEN NOTHING WAS CLEARED: record_subscription_override_edits is passed DocumentEffect::mutates(&file_state) unconditionally after the clear loop.
 
 **Repro:** New workbook, select an empty range, Clear Formats: the title gets its asterisk.
+**Fix:** fixed
 
 ## BUG-0360 `[open]`
 
@@ -3956,7 +3960,7 @@ FORMAT CELLS LOADS THE ANCHOR CELL'S STYLE WHILE EVERY OTHER SURFACE READS THE A
 **Repro:** Bold B3 only, drag from A1 to B3, Ctrl+1: the Font tab shows A1's (not bold) state.
 **Fix:** fixed
 
-## BUG-0368 `[open]`
+## BUG-0368 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** sheet-tab-delete-greys-on-total
@@ -3964,6 +3968,7 @@ FORMAT CELLS LOADS THE ANCHOR CELL'S STYLE WHILE EVERY OTHER SURFACE READS THE A
 THE TAB MENU'S DELETE GREYS ON totalSheets <= 1, the flaw Hide Sheet had: with Sheet2 hidden, Sheet1's Delete is enabled and the strip/backend then refuses. core.sheet.delete itself refuses the last visible sheet correctly.
 
 **Repro:** Two sheets, hide Sheet2, right-click Sheet1's tab: Delete is enabled.
+**Fix:** fixed
 
 ## BUG-0369 `[open]`
 
@@ -3993,7 +3998,7 @@ THE KIT ONLY LOGS A REFUSAL FROM A HOSTED commandId ROW: RegisteredMenuButton's 
 **Repro:** Register a format-menu item with a commandId whose handler throws, open it from the ribbon hero and choose it: nothing is shown.
 **Fix:** fixed
 
-## BUG-0372 `[open]`
+## BUG-0372 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** color-palette-live-custom
@@ -4001,8 +4006,9 @@ THE KIT ONLY LOGS A REFUSAL FROM A HOSTED commandId ROW: RegisteredMenuButton's 
 THE COLOUR PALETTE'S CUSTOM <input type=color> REPORTS LIVE WHILE THE OS PICKER IS DRAGGED, so Format > Tab Color > More Colors... runs SHEET_TAB_COLOR on every intermediate value (Excel opens a modal Colors dialog and applies once).
 
 **Repro:** Home > Format > Tab Color > More Colors..., drag in the picker, and count core.sheet.setTabColor executions.
+**Fix:** fixed
 
-## BUG-0373 `[open]`
+## BUG-0373 `[fixed]`
 
 **Found:** 2026-10-04 (manual)
 **Oracle:** indicator-range-not-normalised
@@ -4010,6 +4016,7 @@ THE COLOUR PALETTE'S CUSTOM <input type=color> REPORTS LIVE WHILE THE OS PICKER 
 get_comment_indicators_in_range AND get_note_indicators_in_range DO NOT NORMALISE THEIR RANGE (they filter start_row <= row <= end_row as given; get_hyperlinks_in_range uses min/max), so a caller that passes a selection drawn upward silently finds nothing.
 
 **Repro:** Comment on C4, then invoke('get_comment_indicators_in_range', { startRow: 4, startCol: 3, endRow: 2, endCol: 1 }): [].
+**Fix:** fixed
 
 ## BUG-0374 `[fixed]`
 
@@ -4693,7 +4700,7 @@ THE controlPlacement TEST TITLED 'catalog default size' DID NOT ASSERT THE SIZE,
 **Repro:** Change createShape to request.width ?? 160: the titled test stays green.
 **Fix:** fixed
 
-## BUG-0443 `[open]`
+## BUG-0443 `[fixed]`
 
 **Found:** 2026-10-08 (manual)
 **Oracle:** lock-objects-check-then-write
@@ -4701,6 +4708,7 @@ THE controlPlacement TEST TITLED 'catalog default size' DID NOT ASSERT THE SIZE,
 LOCK OBJECTS IS CHECKED UNDER A READ LOCK RELEASED BEFORE THE GEOMETRY WRITE (ensure_canvas_objects_unlocked, sheets.rs:2181), the check-then-write shape CLAUDE.md forbids for gated commands: a set_canvas_layout { objectsLocked: true } landing between check and write lets ONE move through.
 
 **Repro:** Race a move against the toggle (not reproduced; by reading).
+**Fix:** fixed
 
 ## BUG-0444 `[open]`
 
@@ -4711,7 +4719,7 @@ MODEL ENGINE: A COMPOUND RESET MEASURE CANNOT BE GROUPED BY ANY COLUMN OF THE FA
 
 **Repro:** scratchpad/fixrust/shareprobe (standalone crate): single-table model 'share by region' -> ERR; star model 'share by year' (fact) -> ERR, 'share by name' (dimension) -> OK.
 
-## BUG-0445 `[open]`
+## BUG-0445 `[fixed]`
 
 **Found:** 2026-10-08 (manual)
 **Oracle:** combo-second-axis-no-op
@@ -4719,8 +4727,9 @@ MODEL ENGINE: A COMPOUND RESET MEASURE CANNOT BE GROUPED BY ANY COLUMN OF THE FA
 THE COMBO '2nd AXIS' SWITCH DOES NOTHING USEFUL: both the band (ChartDesignSections.tsx:903-906) and the dialog (DesignTab.tsx:597-598) write only secondaryYAxis, nothing in the UI writes secondaryAxisSeries, and the layout reserves a 46 px right margin on the flag alone -- an empty strip and no secondary axis.
 
 **Repro:** Line and clustered column chart, Chart Design > 2nd axis on.
+**Fix:** fixed
 
-## BUG-0446 `[open]`
+## BUG-0446 `[fixed]`
 
 **Found:** 2026-10-08 (manual)
 **Oracle:** quick-access-axis-titles-on-pie
@@ -4728,6 +4737,7 @@ THE COMBO '2nd AXIS' SWITCH DOES NOTHING USEFUL: both the band (ChartDesignSecti
 THE CHART QUICK-ACCESS ELEMENTS POPUP STILL OFFERS AXIS TITLES AND GRIDLINES ON PIE AND FUNNEL CHARTS (only title-only marks were narrowed).
 
 **Repro:** Select a pie chart, open the quick-access Elements button.
+**Fix:** fixed
 
 ## BUG-0447 `[fixed]`
 
@@ -4740,7 +4750,7 @@ THE TILE VISUALS WRITE '.' DECIMALS AND ',' GROUPING WHATEVER THE LOCALE: an sv-
 **Fix:** fixed
   Files: app/extensions/Charts/rendering/visuals/visualValues.ts, app/extensions/Charts/lib/chartFieldTypes.ts, app/extensions/Charts/rendering/visuals/kpiPainter.ts, app/extensions/Charts/index.ts
 
-## BUG-0448 `[open]`
+## BUG-0448 `[fixed]`
 
 **Found:** 2026-10-08 (manual)
 **Oracle:** chart-dialog-series-column-letters
@@ -4748,6 +4758,7 @@ THE TILE VISUALS WRITE '.' DECIMALS AND ',' GROUPING WHATEVER THE LOCALE: an sv-
 THE CREATE CHART DIALOG'S SERIES LIST NAMES SERIES BY COLUMN LETTER (B, C, D) WHILE THE LEGEND SAYS Q1, Q2, Q3.
 
 **Repro:** Insert a column chart over a range with a header row; open the dialog's series list.
+**Fix:** fixed
 
 ## BUG-0449 `[fixed]`
 
@@ -5014,7 +5025,7 @@ A CUBE FORMULA WRITTEN THROUGH @api SHOWS #N/A UNTIL A FORCED CUBE RECALC: CellR
 **Repro:** Live, 2026-10-15, AdventureWorks model connected as 'AWprobe2': tauri-api updateCell(5,3,'=CUBEVALUE("AWprobe2";"[Revenue]")') -> D6 shows 114033992,77...; CellRange.fromCell(6,3,0).setValue(same) -> D7 shows #N/A; after recalcWithCube() both show 114033992,77. Probe: scratchpad pd-probe-cube2.cjs.
 **Fix:** fixed
 
-## BUG-0477 `[open]`
+## BUG-0477 `[fixed]`
 
 **Found:** 2026-10-15 (manual)
 **Oracle:** pivot-properties-noop-dirties
@@ -5022,6 +5033,7 @@ A CUBE FORMULA WRITTEN THROUGH @api SHOWS #N/A UNTIL A FORCED CUBE RECALC: CellR
 update_pivot_properties DIRTIES THE DOCUMENT ON A NO-OP: update_pivot_properties_core (app/src-tauri/src/pivot/commands.rs) reaches the store through pivot_write_definition_only, which mints DocumentEffect::mutates unconditionally before anything is compared. A request that changes nothing -- the same canvas frame saved again, the same container, the same PivotTable style, the same name -- records no undo step (WP-C S7 compares before/after for the undo record) but still sets is_modified, so the close prompt and AutoRecover fire for a document the user did not change. The DocumentEffect rule says to construct the effect inside the branch that actually changes something.
 
 **Repro:** Unit tier: insert a canvas pivot, update_pivot_properties_core(frame_request(id, f)), mark_saved, then the SAME request again -> undo depth unchanged but wb.file.is_dirty() is true. Same for a style-only request with the style the pivot already has (canvas_sheet_tests a_worksheet_pivot_style_is_one_undoable_step_and_rides_its_region checks only the undo depth for that no-op).
+**Fix:** fixed
 
 ## BUG-0478 `[fixed]`
 
@@ -5116,7 +5128,7 @@ FORMATTING A CONTROL COULD NOT BE UNDONE. set_control_property (app/src-tauri/sr
 
 **Repro:** Insert a shape, change its fill in the Properties pane, press Ctrl+Z: the fill stays and the previous unrelated step is undone instead. Code: controls.rs set_control_property_core pushes undo only when the key is an executable / action property.
 
-## BUG-0488 `[open]`
+## BUG-0488 `[fixed]`
 
 **Found:** 2026-10-16 (manual)
 **Oracle:** set-pivot-number-format-dirties-on-refusal-no-undo
@@ -5124,6 +5136,7 @@ FORMATTING A CONTROL COULD NOT BE UNDONE. set_control_property (app/src-tauri/sr
 set_pivot_number_format DIRTIES THE DOCUMENT WHEN IT REFUSES, AND RECORDS NO UNDO STEP WHEN IT WRITES. set_pivot_number_format_core (app/src-tauri/src/pivot/commands.rs) takes `pivot_write`, which mints DocumentEffect::mutates BEFORE the value-field index is range-checked, so a refused out-of-range request sets the dirty flag (close-without-saving prompt, AutoRecover) with nothing changed; and the successful path calls finalize_pivot_update with no record_pivot_undo, so a number format set through this door cannot be undone. Same family as BUG-0477 (update_pivot_properties dirties on a no-op).
 
 **Repro:** Headless: create a pivot with one value field, mark the document saved, call set_pivot_number_format { pivotId, valueFieldIndex: 5, numberFormat: "0.0" } -> Err("Value field index 5 out of range") AND is_modified() == true. Then a valid call with index 0 -> the format changes, and undo restores nothing from it. Reachable from the Pivot service's `setNumberFormat` (Pivot/lib/pivot-api.ts:1639, backend.ts setPivotNumberFormat). WP-C's Data format card does NOT use this door (it rides the fields update, Pivot/lib/pivotDataFormats.ts), so the Format tab is unaffected.
+**Fix:** fixed
 
 ## BUG-0489 `[fixed]`
 
@@ -5342,7 +5355,7 @@ TYPING INTO A FLOATING GRID IGNORED THE HOST SHEET'S PROTECTION. update_floating
 **Repro:** Protect Sheet1 with every cell locked; type 9 into a cell of a floating grid on Sheet1: the value is stored and the document is dirty.
 **Fix:** fixed
 
-## BUG-0513 `[open]`
+## BUG-0513 `[fixed]`
 
 **Found:** 2026-10-16 (manual)
 **Oracle:** cell-target-route-gap
@@ -5350,8 +5363,9 @@ TYPING INTO A FLOATING GRID IGNORED THE HOST SHEET'S PROTECTION. update_floating
 NO STYLE-ONLY WRITE REACHES A FLOATING GRID'S CELLS. Format Painter into a floating grid, Paste Formatting and Paste (No Borders) onto a floating grid assign a source style INDEX per destination cell (set_cell_style), and no backend command that sets a style index takes a cell target: set_cell_style acts on the active sheet only, and update_cells_batch's target route always writes a VALUE with the style. Owner finding G3 asks for Format Painter sheet-to-floating-grid; P3 S10 refuses these doors on a floating grid with one sentence instead of painting the host's hidden cells.
 
 **Repro:** Select a sheet cell with a fill, Home > Format Painter, click a floating grid's cell: 'Format Painter cannot paint into a floating grid's cells yet' (expected: the fill is painted there). Same for Home > Paste > Formatting on a floating grid's cell.
+**Fix:** fixed
 
-## BUG-0514 `[open]`
+## BUG-0514 `[fixed]`
 
 **Found:** 2026-10-16 (manual)
 **Oracle:** cell-target-route-gap
@@ -5359,6 +5373,7 @@ NO STYLE-ONLY WRITE REACHES A FLOATING GRID'S CELLS. Format Painter into a float
 CUSTOM SORT OFFERS NO CELL ICON ON A FLOATING GRID. The Sort dialog's 'Cell Icon' order list asks get_range_icons which icons a column SHOWS; that command reads the ACTIVE sheet only and takes no cell target, and re-deriving the answer from the rule list is BUG-0107's mistake. So on a floating grid's cells the list is empty ('no icons found') and a sort by cell icon cannot be chosen there. Every other sort (values, cell colour, font colour, custom lists) works on the object's cells with its target.
 
 **Repro:** Put an icon-set rule on a floating grid's column, select a cell of it, Home > Sort & Filter > Custom Sort, Sort On 'Cell Icon': the Order list says no icons were found.
+**Fix:** fixed
 
 ## BUG-0515 `[fixed]`
 
@@ -5570,7 +5585,7 @@ object.setState aspects chart.setStyleProperty and slicer.setStyleProperty had n
 **Repro:** vSetState(['chart.setStyleProperty', ['bg', 'x'.repeat(3e6)]]) -> true. Test: setStateAspectRows.test.ts 'each style-override aspect has its own vSetState row'.
 **Fix:** fixed
 
-## BUG-0536 `[open]`
+## BUG-0536 `[fixed]`
 
 **Found:** 2026-10-17 (manual)
 **Oracle:** native-colour-input-commits-per-step
@@ -5578,6 +5593,7 @@ object.setState aspects chart.setStyleProperty and slicer.setStyleProperty had n
 WebView2 opens Chromium's in-page colour popup (not the OS ChooseColor) for <input type="color">, and one pick there fires MANY `input` events before its one `change` (measured live: 8 inputs + 1 change for a keyboard pick of R=100 G=30 B=200; a drag fires one per pointer step). The colour inputs that still commit on React onChange (= every `input`) therefore write once per step: the layout kit's ColorPopover custom picker (src/api/layout/primitives/Color.tsx, the `${testId}-custom` input) and the page navigator buttons' colour rows (extensions/Controls/PropertiesPane/PageNavigatorButtonsSection.tsx). Expected: one write and one undo step per pick, as useNativeColorPick gives the object pane.
 
 **Repro:** Live: canvas-round2-quick Q7 records native-pick-events input=8 change=1. The per-step commit of the two listed inputs is inferred from their onChange={(e) => onChange(e.target.value)} wiring, not yet driven live: pick a custom colour through either and count undo steps.
+**Fix:** fixed
 
 ## BUG-0537 `[fixed]`
 
@@ -6099,7 +6115,7 @@ A design-query chart (the Charts extension's DesignQueryDataSource, including th
 **Repro:** Publish a workbook whose canvas holds a design-query chart on a local BI connection together with that connection's model (Collaboration > Publish with the model included); subscribe from another workbook, or save the subscriber's workbook and reopen it: the chart shows 'BI model not loaded' while the application's BI pivot on the same page works, and `spec.data.connectionId` in the chart's stored spec still equals the publisher's connection uuid, which names no connection here. Unit reproduction: `a_subscribed_design_query_chart_is_bound_to_the_connection_the_pull_minted` (app/src-tauri/src/calp_materialize_tests.rs) with the `remap_chart_bi_connections` call after `load_embedded_data_sources` removed.
 **Fix:** fixed
 
-## BUG-0589 `[open]`
+## BUG-0589 `[fixed]`
 
 **Found:** 2026-10-23 (manual)
 **Oracle:** working-copy-push-keeps-data-source-identity
@@ -6107,6 +6123,7 @@ A design-query chart (the Charts extension's DesignQueryDataSource, including th
 A working-copy push files every BI data source under the pushing session's connection uuid (`published_data_source_id`, app/src-tauri/src/calp_commands.rs, used by `capture_bi_data_sources` for the data source and its writeback declarations), and a checkout mints a fresh uuid for each data source, so EVERY push re-keys every data source -- although a working copy cannot even edit the model. Every other object family keeps the STABLE key (the connection's `package_data_source_id`): pivots (`collect_pivot_definitions` prefers the carried key), model slicers, ribbon filters, grid reports (`connection_data_source_id`) and object-binding measure keys (`model_key_of`). Consequences at subscribers after ANY working-copy push: (1) EVERY subscriber, fresh or existing, loses the application's ribbon filters -- `materialize_pulled_ribbon_filters` skips a filter whose stamped id is not an embedded data source (a refresh first removes the application's filters, then re-materialises through the same skip); (2) at an EXISTING subscriber the refresh finds no connection for the new id and mints a SECOND connection, keeping the old one on the previous version's model: pivots and model slicers resolve the old key and stay there, while design-query charts follow the new id (BUG-0588's carrier key), so one canvas page reads two model versions and page slicers stop filtering the charts; (3) after the subscriber reopens, only the new id is re-minted, so those pivots keep `ConnectionId::ZERO` and show no model (their drill-through then says to open the model's connection); (4) `restore_pulled_pivots` / `apply_refreshed_pivots` fall back to `ds_to_conn.values().next()`, an arbitrary connection when two or more exist; (5) the push review lists every model object as removed and added, and a push merge collides on every model piece.
 
 **Repro:** Publish v1 from a local connection with a canvas page holding a BI pivot, a model slicer, a ribbon filter and a design-query chart; subscribe from workbook S; check out v1 (Collaboration > Open Application for Editing) and push v2 without changes; in S, refresh: the ribbon filter is gone, and the pivot and slicer read v1's model while the chart reads v2's; save and reopen S: the pivot has no model. Unit evidence: calp_materialize_tests `the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_is_filed_under` (the push files the data source under the working connection's uuid while the checked-out connection's package key is the publisher's id). Investigated 2026-10-23 with a full change list (open-items 2.aq): a stable published id -- the connection's package key when it has one, else its own id -- used by the capture, the writeback declarations, the carrier's chart keys and `calp_publish_model`; `create_pivot_from_bi_model` stamping that key; one live connection per key at pull (checkout refused on a collision); a capture refusal for two connections with one key; the ribbon-filter and single-source pivot fallbacks. It needs three owner decisions (is a data source's identity global across applications; which version serves a shared connection; does a NEW application published from a subscribed workbook keep the source's data-source id).
+**Fix:** fixed
 
 ## BUG-0590 `[fixed]`
 
@@ -6320,29 +6337,32 @@ A row/column insert or delete on an end sheet of a 3-D span re-pointed =SUM(Shee
 
 **Fix:** fixed
 
-## BUG-0613 `[open]`
+## BUG-0613 `[fixed]`
 
 **Found:** 2026-10-29 (manual)
 **Oracle:** whatif-routes-skip-dependents
 
 WHAT-IF ROUTES LEAVE DEPENDENTS STALE: Scenario Show, Goal Seek, Solver, data tables and animation evaluate dependents positionlessly (re-parsing display strings) or not at all on other sheets, and an application update's refreshed values do not recalculate other sheets' readers; since the save/F9 pass now KEEPS a stored value nothing it reads changed, such a stale cube/custom-function value can be saved.
 
+**Fix:** fixed
 
-## BUG-0614 `[open]`
+## BUG-0614 `[fixed]`
 
 **Found:** 2026-10-29 (manual)
 **Oracle:** frontend-coordinates-no-structural-follow
 
 Watch Window entries, Cell Bookmarks, Insights range overlays and Animation specs hold cell coordinates that follow NO structural edit on any sheet (Excel's Watch Window follows inserted rows).
 
+**Fix:** fixed
 
-## BUG-0615 `[open]`
+## BUG-0615 `[fixed]`
 
 **Found:** 2026-10-29 (manual)
 **Oracle:** cube-keep-rule-followups
 
 Results-cache / keep-rule follow-ups from the final review: =IFERROR(UNKNOWNFN(RAND()),0) becomes #NAME? on F9 (Excel: 0); a manual-calculation workbook saved without recalculation reopens with stale composite values vouched for; switching calculation mode during Calculate Now blocks the UI thread; reads_a_changed_cell is O(changed x ranges); a script badge is lost after a structural undo.
 
+**Fix:** fixed
 
 ## BUG-0616 `[open]`
 
@@ -6350,4 +6370,372 @@ Results-cache / keep-rule follow-ups from the final review: =IFERROR(UNKNOWNFN(R
 **Oracle:** owner-decisions-from-fix-programme
 
 Owner decisions raised by the programme: (1) the script API's 100,000-cell cap blocks whole-column format/clear (VBA Columns("C").ClearFormats) and a recorded whole-column format; (2) api.clearRange is not in the approved-macro grant, so grouped clears cannot replay there; (3) an extension worker can schedule jobs but has no expose door; (4) Excel keeps a sparkline group one group across inserts; (5) Excel ends COPY mode on Esc; (6) a plain click on a member tab clears the group (Excel keeps it); (7) pasting an empty formatted cell now carries its format (Excel parity).
+
+**Fix:** partial
+
+## BUG-0617 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** whatif-sheet-binding-and-overlap
+
+WHAT-IF RUNS ACTED ON THE WRONG SHEET OR OVERLAPPED: the Solver and Data Table dialogs always targeted sheet 0; an async run bound its sheet by index, so a tab move mid-run sent trials or the restore elsewhere; pressing Enter twice ran two Data Table / Goal Seek runs that overwrote the borrowed input cell; animation frames and Scenario Show/Summary could run between another run's trials; Goal Seek and Solver on a sheet deleted mid-run reported 'no solution'/NaN; Solver Restore wrote by sheet index; the Solver and Data Table dialogs could be closed mid-run.
+
+**Fix:** fixed
+
+## BUG-0618 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** whatif-manual-calculation
+
+WHAT-IF ROUTES MISHANDLED MANUAL CALCULATION: every trial recalculated whole sheets twice and formatted every formula into a discarded sink (quadratic, on the UI thread); Goal Seek and other read-back runs left unrelated stale cells stale where Excel recalculates the workbook at the end; Scenario Summary and transient animation frames freshened values the user had left stale; Scenario Show on a background sheet recalculated; animation Stop overwrote values the user made while paused; a background-sheet fallback freshened unrelated stale cells; a second Esc during Solver's final write left #LIMIT! in dependents.
+
+**Fix:** fixed
+
+## BUG-0619 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** whatif-result-values
+
+WHAT-IF RESULTS WERE WRITTEN WRONGLY: Data Table wrote error results as text 'Div0'/'Name' and booleans as text; Goal Seek 'not found' left x0*1.001 instead of the last trial; Goal Seek Cancel restored the original as a NUMBER (text or empty came back 0), left a Redo entry, popped its step before the write-back, and a failure on a non-numeric target dirtied the document with no undo step; animation frames used the caller's sheet index and any cells instead of the snapshot's.
+
+**Fix:** fixed
+
+## BUG-0620 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** calculation-state-pending
+
+CALCULATION STATE REPORTED 'DONE' WHEN VALUES WERE STALE: leaving manual without recalculating left an AUTOMATIC workbook pending; an off-sheet undo under manual recalculated (or marked pending unconditionally) and missed whole-column/row and 3-D readers; a forward manual write read by =SUM(Sheet2!G:G), a qualified row or a 3-D span reported done; set_calculation_mode returned Err after applying, two in-flight switches could apply out of order, and a manual switch in the gap before a pass was followed by a full Calculate Now; opening a manual workbook while a script held manual flipped it automatic, and Open Application for Editing forgot the script's manual debt; the script interpreter's getCalculationState always said 'done'.
+
+**Fix:** fixed
+
+## BUG-0621 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** calp-publish-across-documents
+
+AN ASYNC PUSH COULD CROSS DOCUMENTS: File > Open/New during calp_publish pushed one workbook and recorded the link (and audit row) in another; a manual-calculation edit between the pre-publish recalculation and assembly shipped stale values; calp_publish recalculated before gates that can refuse; a link re-pointed by a concurrent checkout still received the push; File > Open asked about unsaved changes only before the picker, so a push landing while the picker was open was discarded silently.
+
+**Fix:** fixed
+
+## BUG-0622 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** calp-shared-data-source-id
+
+TWO APPLICATIONS COULD SHARE ONE DATA-SOURCE ID: after BUG-0589, a NEW application published from a workbook subscribed to another filed the model under the source's id, so a subscriber to both minted two connections under one id and pivots, slicers and filters could read the other model; an open that connected neither model let the next refresh mint one under the shared id; Refresh All of an original and its re-keyed copy kept the copy's stale claim; the open path kept the first connection for a shared id.
+
+**Fix:** fixed
+
+## BUG-0623 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** custom-function-results-cache-lifecycle
+
+CUSTOM-FUNCTION ANSWERS OUTLIVED THEIR CODE OR THEIR NAME: an application update refused an unchanged composite on an earlier sheet that read a later installed sheet (and the save kept #NAME?); answers were never forgotten when the function's code changed (author edit, application update, JSON-view edit, an update failing after the library merge), and the old realm could re-file an old-code answer before the re-install; a hold was never released after a failed re-install, and overlapping installs released it early; one sheet could be starved by the 64 MB workbook ledger; a deleted library function, a seeded root call, or the previous workbook's library names stayed 'known', so IFERROR(...,0) stayed #NAME?; IFERROR around an add-in function saved a plausible 0 after open.
+
+**Fix:** fixed
+
+## BUG-0624 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** clipboard-snapshot-and-mode-endings
+
+COPY/CUT MODE AND ITS SNAPSHOT DIVERGED FROM EXCEL: a ribbon Sort, AutoFilter criteria, Group, Merge, F9, a calculation-mode change, a pivot Refresh, Data > Refresh Data and Delete Cells did not end the mode, so a later Paste moved or pasted the pre-change snapshot; above 100,000 cells the stale re-read was skipped (stale paste, untrue cut refusal); Paste Values pasted an old computed value after a recalculation or when the display text was unchanged; the re-read kept the old system-clipboard text, comments and validations; a failed system-clipboard write left the internal text ahead; Paste Special did not wait for a running re-read; a stale mark between settle and check refused a paste untruly; the settle was unbounded under a writer; a write landing during the paste's own awaits was pasted stale.
+
+**Fix:** fixed
+
+## BUG-0625 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** insert-copied-cells-and-tiling
+
+INSERT AND PASTE DID NOT MATCH EXCEL WITH A COPY PENDING: Insert inserted blank cells where Excel does Insert Copied Cells; Paste never tiled a copy into a selection that is an exact multiple of it; a refused Insert Copied Cells rolled back the backend only, leaving the copy source, followers and screen shifted; a header right-click with copied rows said Insert and ended the copy; Paste Special tiled cell by cell (about 1M awaited IPCs for one cell into a column); the inserted room and the tiled paste could disagree; a move or paste past the sheet edge announced the full block.
+
+**Fix:** fixed
+
+## BUG-0626 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** structural-follow-moves-review
+
+BUG-0614's followers mis-handled moves: the Undo of a Merge moved and permanently deleted bookmarks and watches the merge never moved; the Undo of a cut-paste deleted a bookmark added at the emptied source; a drag-move swallowed a relocation refusal, committed and still announced CELLS_MOVED (row/column drags too); moves announced from a joined step that was later rolled back, remembered joined moves were never released or were released globally; embedded forms did not follow a rollback or Undo of a line insert; a granted macro run's rollback announced no restore.
+
+**Fix:** fixed
+
+## BUG-0627 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** protected-sheet-format-parity
+
+FORMATTING ON PROTECTED SHEETS DID NOT MATCH EXCEL: with Format Cells allowed Calcula refused every format on a LOCKED cell (Excel formats it and keeps it locked); a paste or Fill Down of a locked source locked unlocked input cells and ignored the Format Cells option (sheet batch, floating-grid batch, fill_range); sheet-route Paste Special Formats/No Borders painted part of a range before refusing; Cut + Paste dropped the moved format; a blank batch write with no style lost the cell's own format; Paste Special spoke where Excel is silent; Format Painter / Paste Formatting onto a floating grid committed a partial batch; several decisions were made holding no lock (checkArea, target batch, fill_range); the move claim was caller-asserted, so renderer code could land any style on an unlocked cell.
+
+**Fix:** fixed
+
+## BUG-0628 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** sheet-name-case-rule
+
+SHEET-NAME MATCHING USED THE WRONG CASE RULE: uniqueness refused names Excel accepts (Straße beside STRASSE) and other doors compared ASCII-only; about 20 frontend lookups used toLowerCase; resolve_named_range_coords matched ASCII-only and silently fell back to sheet 0 (a script read or wrote the wrong sheet); the lexer uppercased bare names with full Unicode (=Straße!A1 became STRASSE!A1) and later folded non-ASCII into ASCII (Kelvin sign); bare non-ASCII qualifiers in names and bindings stopped following inserts/deletes; the formula bar quoted non-ASCII names; the ref highlighter and A1->R1C1 conversion were ASCII/byte based; the load-time rename of a now-colliding pair moved the keeper's references, reached only cells and only logged; publish pivot-anchor maps mixed folds.
+
+**Fix:** fixed
+
+## BUG-0629 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** defined-and-table-name-key
+
+DEFINED AND TABLE NAMES WERE KEYED WITH FULL to_uppercase: a defined name with ß became STRASSE while the lexer produced STRAẞE (#NAME?); table names likewise; push scope no longer recognised another application's ligature-spelled defined name as foreign; checkout collisions missed a held ligature name; object-binding analysis compared mismatched key sets; xlsx import deduped names Excel keeps apart.
+
+**Fix:** fixed
+
+## BUG-0630 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** sheet-name-suffix-and-spaces
+
+SHEET NAMES DIFFERED FROM EXCEL: a colliding 31-character application sheet got a 35-character name; unique_sheet_name trimmed the space a cut stem leaves; Copy Sheet of 'Data (2)' gave 'Data (2) (2)' (Excel: 'Data (3)'); leading/trailing spaces were trimmed on rename, load, DV list sources and Create PivotTable's new sheet; a script could create a spaces-only sheet but not address it.
+
+**Fix:** fixed
+
+## BUG-0631 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** name-and-table-edit-doors
+
+NAME/TABLE EDIT DOORS SKIPPED THEIR RULES: the JSON view renamed a table without validity, collision checks or the formula rename, and its rename plus field replacement were two critical sections with no undo; rename_table built its DocumentEffect before 'Table name already exists'; the JSON view's notebook arm minted its effect before not-found and dropped sourcePackage; the CLI 'show name' swallowed the refusal reason; a script's named-range mirror kept stale values when the name's sheet was refused.
+
+**Fix:** fixed
+
+## BUG-0632 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** undo-record-atomicity
+
+UNDO RECORDS COULD INTERLEAVE: concurrent one-line resizes could record steps in swapped order; relocate_named_ranges recorded a whole-registry snapshot after releasing the registry and without grid locks, so a concurrent name edit was undone with it; a typed value with sheets grouped was two undo steps (and its transaction stayed open across awaits, letting other writers join).
+
+**Fix:** fixed
+
+## BUG-0633 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-export-unopenable-file
+
+THE .XLSX EXPORT WROTE FILES EXCEL REFUSES OR LOST THE SAVE: a text result 'NaN'/'Inf'/'Infinity' was written as a number; a static error cell with a hyperlink got a duplicate t= attribute; an internal or file hyperlink refused the whole save; a formula cell inside a spill footprint made Excel refuse the workbook; an array-constant defined name lost its braces; a tooltip over 255 characters dropped the link; an unwritable hyperlink was only a stderr warning.
+
+**Fix:** fixed
+
+## BUG-0634 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-formula-syntax-export
+
+MODERN FORMULA SYNTAX WAS EXPORTED AS TYPED, AND LIVE EXCEL REFUSED THE WORKBOOK OR SHOWED #NAME?: LAMBDA/LET parameters without _xlpm. (and the scanner then prefixing $A$1 columns, error literals and the second half of A:B); a built-in call beside a same-named parameter; bare C/R (Excel's R1C1 this-column/row); cell-shaped parameter names (A1, E5, LOG10); optional [y] parameters; Calcula's internal __INVOKE__ marker for inline LAMBDA calls; trim references (A1:.A5) and the spill operator (A1#); the this-row shorthand Table1[@Col]; implicit intersection @; column names holding #; row-range trims; a C/R after a trim dot; a LET name put in scope inside its own value; a function-named parameter called with an arity the built-in rejects; R1C1-shaped tokens (RC, R1C1, RC[-1]).
+
+**Fix:** fixed
+
+## BUG-0635 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-export-fidelity
+
+THE .XLSX ROUND TRIP LOST OR MISTYPED CONTENT: cached boolean/error/numeric-text results were typed str/0/number; a static error was written as text; a hidden column imported with 0px width; #SPILL!/#CALC!/#BLOCKED! became #VALUE! and #CIRCULAR! was not cached as 0; rich text was exported plain; a sheet-scoped name on a sheet with an apostrophe or a '!' was mis-scoped or dropped; styled cells exported the theme alias 'Body' as a font name; a styled empty linked cell lost its style; relative file and dotted-name links were mis-mapped and %20 was not decoded; the reader parsed sharedStrings twice, held the whole file and decompressed every sheet part again, and the writer re-deflated every part.
+
+**Fix:** fixed
+
+## BUG-0636 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** let-bound-bare-column-range
+
+A BARE COLUMN RANGE NAMED LIKE A LET/LAMBDA PARAMETER WAS READ AS COLUMNS: Excel reads B:B under LET(b,..) as the parameter's range (Calcula computed column B); once bound, the structural shift and the Fill/Copy+Paste relative shift rewrote b:b as C:C (reading column C), and the parser bound A:B under LET(b,..) by its SECOND half (#NAME? where Excel sums A:B).
+
+**Fix:** fixed
+
+## BUG-0637 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** 3d-span-dependency-edges
+
+A 3-D REFERENCE MISSED SHEETS ADDED TO ITS SPAN: the cross-sheet map keyed only the span's end sheets (later every sheet, but only at registration), so a sheet moved, copied or inserted into Sheet1:Sheet3 never recalculated =SUM(Sheet1:Sheet3!K20), and a sheet moved out kept a stale edge.
+
+**Fix:** fixed
+
+## BUG-0638 `[fixed]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** extension-schedule-expose-hardening
+
+THE NEW schedule.expose DOOR (BUG-0616 item 3) HAD GAPS: withdrawing an older registration removed a newer one under the same name; publishing raised a 'schedule' consent prompt on every launch; an overwritten handler was never freed; a crafted workbook's scheduled-job row could fire an installed extension's published method.
+
+**Fix:** fixed
+
+## BUG-0639 `[fixed]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** load-warning-text-and-timing
+
+Open-time warnings were raw: the AutoFilter load warning showed the internal file name and serde errors, and the load-rename toast was emitted before the open finished.
+
+**Fix:** fixed
+
+## BUG-0640 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-dotted-column-range-dollar
+
+XLSX EXPORT: A DOTTED COLUMN RANGE WITH $ ON EITHER HALF IS GARBLED AND EXCEL REFUSES THE WHOLE WORKBOOK: SUM(A:.$C) is written SUM(A:.$J:J), SUM($A:.C) as SUM($_xlfn._TRO_TRAILING(A:C)), $A.:.$C as $A.:.$J:J, LET(c,1,SUM(A:.$C)+c) as A:.$_xlpm.C; Excel saves _xlfn._TRO_TRAILING(A:$C) etc. (round 20 verify pass 2, live Excel 16).
+
+
+## BUG-0641 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-unholdable-formulas-reach-file
+
+XLSX EXPORT: FORMULAS EXCEL CANNOT HOLD STILL REACH THE FILE, AND EXCEL REFUSES THE WHOLE WORKBOOK: LET(abs,abs(1,2),abs) (the arity check does not run while the name is pending in its own value), LET(ifs,LAMBDA(x,y,z,x),ifs(1,2,3)), and plain built-ins with a bad arity Calcula's parser stores: ABS(1,2), ROUND(1), PI(1), IF(), IFS(1,2,3), SWITCH(1), CHOOSE(1), SUMIFS(A1:A5,B1:B5); also a LET/LAMBDA declaring one name twice.
+
+
+## BUG-0642 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-future-functions-and-eta
+
+XLSX EXPORT: TRIMRANGE, GROUPBY AND PIVOTBY GO OUT WITHOUT _xlfn. AND ETA-REDUCED FUNCTION ARGUMENTS WITHOUT _xleta.: SUM(TRIMRANGE(A1:C10)), ROWS(GROUPBY(A1:A5,B1:B5,SUM)), SUM(BYROW(A1:C2,SUM)) show #NAME?/#VALUE! in Excel where Excel's own file holds _xlfn.TRIMRANGE / _xleta.SUM; the reader keeps _xleta. on import.
+
+
+## BUG-0643 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** structured-ref-second-special-item
+
+A SECOND SPECIAL ITEM IN A STRUCTURED REFERENCE IS STORED AS A COLUMN: ROWS(Table3[[#Headers],[#Data]]) is stored as ROWS(TABLE3[[#Headers],['#Data]]) and [[#Data],[#Totals]] as [[#Data],['#Totals]], so Calcula reads a column named '#Data' and the .xlsx export makes Excel show #REF! (Excel's value 10).
+
+
+## BUG-0644 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-tables-not-native
+
+XLSX EXPORT WRITES NO NATIVE EXCEL TABLE: tables go only into Calcula's metadata sheet, so every structured reference in a real export shows #REF! in Excel 16 (=SUM(#REF!) for SUM(Table2[My Col])), and anything summing those cells shows #REF! too. The formula text itself is Excel's (proved by patching it into Excel's own workbook).
+
+
+## BUG-0645 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-formula-reader-and-name-residuals
+
+XLSX FORMULA RESIDUALS FROM ROUND 20's VERIFY PASSES: (1) Excel's _xlnm. rule is broader than mark_cell_names: in a formula declaring a cell-shaped LET/LAMBDA name, Excel writes _xlnm. on every plain cell outside that name's scope (LAMBDA(A1,A1)(B1) is #NAME? in Excel, Calcula's file computes 10) -- an owner decision whether to follow Excel; (2) the reader leaves _TRO_* on a column range with $ or a sheet prefix, and on a trim with a parameter half (A1:._xlpm.A5), so the formula is lost or calls an unknown function; (3) the reader keeps ANCHORARRAY(_xlpm.A1) for a cell-shaped spill anchor; (4) the reader drops implicit intersection on legacy (no cm) formulas, so =@A1:A5 imports as a spilling A1:A5; (5) Calcula's own bare C/R export reads back as param:J:J; (6) a defined name with a sheetless cell reference (=A1, LAMBDA(x,SUM(A1:A5)*x)) makes Excel refuse the workbook; (7) a named-LAMBDA call is written without the dynamic-array flag (Excel shows =@Opt(1)).
+
+
+## BUG-0646 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** parser-rejects-excel-formulas
+
+CALCULA's PARSER REJECTS FIVE FORMULAS EXCEL 16 ACCEPTS (engine::Cell::new_formula stores no formula): LET(a,B2,SUM(a:C3)) (550), LET(b,A3,SUM(A1:b)) (6), LET(a,SEQUENCE(3),SUM(a#)), LET(Col,1,SUM(Table1[Col]:Table1[Col])+Col) (21), LET(a,1,SUM(Sheet1!A1:Sheet1!A3)+a) (7).
+
+
+## BUG-0647 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** parser-leading-row-trim-dot
+
+THE LEXER DROPS A ROW RANGE's LEADING TRIM DOT: =SUM(1.:3) is stored as SUM(1:3) and =SUM(2.:.3) as SUM(2:.3) because read_number takes the dot into the number, so the leading trim is silently lost on entry (Excel keeps _TRO_LEADING(1:3) = 695, _TRO_ALL(2:3) = 1180). The export's row_trim already writes whatever dots the stored text keeps.
+
+
+## BUG-0648 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** parser-accepts-bad-arity-shadowed-builtin
+
+Calcula's parser accepts LET(abs,LAMBDA(x,y,x+y),abs(1,2)), LET(pi,LAMBDA(x,x*2),pi(3)) and the like and evaluates the built-in with a refused arity; Excel 16 refuses to accept such a formula when typed. The export now writes the value and reports it.
+
+
+## BUG-0649 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** lone-r1c1-c-or-r-operand-in-let
+
+Inside a LET, a lone C or R operand that no binder names is R1C1's own column or row in Excel: =LET(a,1,a+C) in J5 is stored a+J:J and shows 0. Calcula reads C as an unbound name (presumably #NAME?; not run). The range case (a:C) is handled.
+
+
+## BUG-0650 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** rows-columns-ignore-error-argument
+
+fn_rows / fn_columns (core/engine/src/evaluator.rs ~9261) answer get_range_dimensions of the argument expression and never evaluate it, so an argument that evaluates to an error still gives a count: =LET(a,A1,ROWS(A:R)) gives 1 in Calcula and #NAME? in live Excel.
+
+
+## BUG-0651 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** xlsx-xlfn-in-string-disables-escaping
+
+PLAUSIBLE (from rust_xlsxwriter 0.79.4 formula.rs:768, not reproduced live): Formula::new copies a text unescaped whenever it contains '_xlfn.' anywhere, inside a string literal too, so ="_xlfn."&SEQUENCE(2) would leave SEQUENCE without its prefix and Excel would show #NAME?.
+
+
+## BUG-0652 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** data-table-under-manual-computes-its-body
+
+UNDER MANUAL CALCULATION A DATA TABLE COMPUTES ITS BODY: Excel's Data Table leaves the body uncalculated (0 until F9) with CalculationState xlPending [LIVE, whatif5/probe1.ps1]; Calcula's data_table_one_var_impl / two_var_impl run every substitution and write the values whatever the mode. Root cause: Calcula writes literal results and has no live {=TABLE()} array formula that recalculates with the workbook (re-running the command is the only refresh).
+
+
+## BUG-0653 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** replaced-workbook-push-audit-row
+
+A PUSH WHOSE WORKBOOK WAS REPLACED (File > Open/New mid-push) WRITES ITS AUDIT ROW ONLY TO THE SESSION LOG ('AUDIT (session)', calp_commands.rs ~2514): no audit viewer shows it, while the workspace's signed version list records the version. CLAUDE.md's transparency goal says egress use survives reload. Round 15 rejected writing the row into the newly opened workbook.
+
+
+## BUG-0654 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** floating-grid-move-claim-unbound
+
+THE FLOATING-GRID DESTINATION ROUTE STILL TRUSTS THE MOVE CLAIM: cell_target.rs update_cells_batch_on_target reads CellUpdateInput.moved through is_move() (cell_target.rs:462) without honoured_move_claims, so renderer code can land any styleIndex on an unlocked backing cell of a protected host that refuses Format Cells. The sheet route binds the claim to the source cell's style since round 18.
+
+
+## BUG-0655 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** floating-grid-paste-formatting-host-lock
+
+On a floating grid whose HOST refuses Format Cells, a formatting-only Paste Formatting over unlocked host cells still raises the refusal, where Excel's sheet behaviour is silent (Calcula's sheet route is silent since round 16). The host cells have no one-call lock question: can_edit_cell reads the active sheet only (documented on writeTargetBatch).
+
+
+## BUG-0656 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** lock-objects-restore-paths
+
+Lock Objects is never asked by the undo/redo restore paths or the raw JSON object editor; a sheet_kinds restore that brings back a locked canvas runs no barrier (BUG-0443 remainder).
+
+
+## BUG-0657 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** paste-under-continuous-writer
+
+Under a source written continuously (an animation, a fast scheduled job), Paste pastes the LAST frontend re-read made during the gesture, which may be milliseconds old; a writer that also makes every read fail or be replaced (a sheet reorder per read) still makes the paste refuse. Excel pastes the source's current values.
+
+
+## BUG-0658 `[open]`
+
+**Found:** 2026-10-31 (manual)
+**Oracle:** manual-mode-3d-move-recalculates
+
+Under manual calculation a sheet move/copy that changes a 3-D span recalculates the span's readers (as delete_sheet_impl already did); Excel's manual mode would presumably mark them pending instead. Not probed live.
+
+
+## BUG-0659 `[open]`
+
+**Found:** 2026-10-30 (manual)
+**Oracle:** restricted-tier-format-bound
+
+PLAUSIBLE (round 10 review nit): BUG-0616 item 1 raised the restricted-tier per-call bound for non-line format rectangles from 100,000 to 4,000,000 cells with no per-minute limit, so a restricted script can issue many large format calls.
 

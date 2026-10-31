@@ -780,6 +780,9 @@ fn set_inner(
         if pending.bindings.get(&key) == Some(&stored) {
             None
         } else {
+            // Lock Objects asked again, holding the store this write lands in
+            // (BUG-0443): the early gate above was released.
+            literal::check_lock_objects_gate(cx.state, &request.object, row, &location)?;
             let effect = DocumentEffect::mutates(cx.file_state);
             let mut store = pending.authorize(&effect);
             let previous = store.snapshot();
@@ -836,10 +839,12 @@ fn clear_inner(cx: &BindingCx<'_>, object: &ObjectBindingRef, path: &str) -> Res
     // A LIVE object: removing a binding changes what is painted exactly as
     // setting one does, so the same gates apply. An ORPHAN (its object is gone)
     // skips them: there is nothing left to protect.
+    let mut lock_gate = None;
     if let Some(location) = object_json::locate(&stores, object) {
         ensure_unsubscribed(cx.state, location.sheet_index)?;
         if let Ok(row) = catalog::match_path(object.kind, path) {
             literal::check_literal_gates(cx.state, object, row, &location)?;
+            lock_gate = Some((row, location));
         }
     }
     let key = binding_key(object, path);
@@ -848,6 +853,11 @@ fn clear_inner(cx: &BindingCx<'_>, object: &ObjectBindingRef, path: &str) -> Res
         if !pending.bindings.contains_key(&key) {
             None
         } else {
+            // Lock Objects asked again, holding the store this write lands in
+            // (BUG-0443): the early gate above was released.
+            if let Some((row, location)) = &lock_gate {
+                literal::check_lock_objects_gate(cx.state, object, row, location)?;
+            }
             let effect = DocumentEffect::mutates(cx.file_state);
             let mut store = pending.authorize(&effect);
             let previous = store.snapshot();

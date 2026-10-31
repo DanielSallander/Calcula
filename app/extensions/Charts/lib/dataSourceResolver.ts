@@ -34,6 +34,7 @@ import type { ChartSpec, DataSource, DataRangeRef } from "../types";
 import { isDataRangeRef, isPivotDataSource, isDesignQueryDataSource } from "../types";
 import { loadSheetIdMap, peekSheetIndexForId } from "./sheetIdMap";
 import { splitSheetQualifiedRange } from "./chartRangeBinding";
+import { findBySheetName } from "@api/sheetNames";
 
 // ============================================================================
 // Sheet identity: the stable sheet id -> the live sheet index
@@ -248,10 +249,7 @@ function letterToCol(letters: string): number {
 /** Resolve a sheet name to its 0-based index. */
 async function resolveSheetIndex(sheetName: string): Promise<number> {
   const result = await getSheets();
-  const normalized = sheetName.toLowerCase();
-  const sheet = result.sheets.find(
-    (s) => s.name.toLowerCase() === normalized,
-  );
+  const sheet = findBySheetName(result.sheets, sheetName, (s) => s.name);
   if (sheet) return sheet.index;
   throw new Error(`Sheet "${sheetName}" not found.`);
 }

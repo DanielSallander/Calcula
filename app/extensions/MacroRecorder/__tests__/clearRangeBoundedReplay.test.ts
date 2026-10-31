@@ -9,10 +9,11 @@
 //          memory. A rectangle that fits one script call still replays as one
 //          call; a bigger one clears contents only where the sheet stores cells
 //          (the used range, read at replay time), in calls the script API
-//          accepts; its formats are reported, never dropped. The action's own
+//          accepts; its formats replay as ONE call over the rectangle when it is
+//          whole lines or fits the script API's format bound (BUG-0616 #1), and
+//          are reported, never dropped, when it does not. The action's own
 //          sheet keeps `api.updateCellsBatch`, which the cell access of an
-//          application's macro run by a person admits (owner decision B) --
-//          `api.clearRange` it does not.
+//          application's macro run by a person admits (owner decision B).
 //
 //          Each generated macro is RUN against a recording fake of the script
 //          surface, every call checked by the broker's own validator and limit.
@@ -33,9 +34,19 @@ import {
   generateMacroSource,
   SCRIPT_RANGE_MAX_CELLS,
   CLEAR_REPLAY_MAX_SCANNED_CELLS,
+  SCRIPT_FORMAT_RECT_MAX_CELLS,
+  formatCallAccepts,
 } from "../lib/actionCodegen";
 import type { RecordedAction, RecordedEvent } from "../lib/types";
-import { MAX_RANGE_CELLS, vBatch, vClearRange, vRangeRef, vUsedRange } from "@api/scriptHost/validators";
+import {
+  MAX_FORMAT_RECT_CELLS,
+  MAX_RANGE_CELLS,
+  vBatch,
+  vClearRange,
+  vFormatRangeRef,
+  vRangeRef,
+  vUsedRange,
+} from "@api/scriptHost/validators";
 import { ALLOWLIST } from "@api/scriptHost/allowlist";
 import { explicitRunAdmits } from "@api/scriptHost/explicitRunGrant";
 
@@ -165,6 +176,9 @@ async function runObjectScript(
         return band;
       }
       if (method === "clearRange") expect(vClearRange(args), `api.clearRange(${JSON.stringify(args)})`).toBe(true);
+      if (method === "clearRangeFormat") {
+        expect(vFormatRangeRef(args), `api.clearRangeFormat(${JSON.stringify(args)})`).toBe(true);
+      }
       if (method === "updateCellsBatch") {
         // The broker's own checks: the shape, and the per-call limit.
         expect(vBatch(args)).toBe(true);
@@ -217,6 +231,45 @@ describe("the generator's one-call limit is the broker's", () => {
     expect(SCRIPT_RANGE_MAX_CELLS).toBe(MAX_RANGE_CELLS);
     expect(SCRIPT_RANGE_MAX_CELLS).toBe(ALLOWLIST["api.updateCellsBatch"].limits?.maxCells);
   });
+
+  // BUG-0616 #1: a format / clear call takes the backend's bound, not the
+  // 100,000 of a read. The generator's restated twin must answer exactly as the
+  // broker's validator does.
+  it("SCRIPT_FORMAT_RECT_MAX_CELLS equals MAX_FORMAT_RECT_CELLS, and formatCallAccepts is vFormatRangeRef", () => {
+    expect(SCRIPT_FORMAT_RECT_MAX_CELLS).toBe(MAX_FORMAT_RECT_CELLS);
+    const rects: Array<[number, number, number, number]> = [
+      [0, 2, LAST_ROW, 2], // a whole column
+      [4, 0, 4, LAST_COL], // a whole row
+      [0, 0, LAST_ROW, LAST_COL], // Select All
+      [1, 0, LAST_ROW, 3], // almost-whole columns A:D (4,194,300 cells)
+      [0, 0, 999_999, 9], // 10 million cells, not lines
+      [0, 0, 1999, 1999], // exactly 4,000,000
+      [0, 0, 2000, 1999], // one row more
+      [100, 0, 300_000, 15], // short of its columns by too much
+    ];
+    for (const [r0, c0, r1, c1] of rects) {
+      expect(formatCallAccepts(r0, c0, r1, c1), JSON.stringify([r0, c0, r1, c1])).toBe(
+        vFormatRangeRef([r0, c0, r1, c1]) === true,
+      );
+    }
+  });
+});
+
+describe("a recorded whole-column FORMAT replays (BUG-0616 #1)", () => {
+  // SABOTAGE: make vFormatRangeRef refuse above MAX_RANGE_CELLS -> the one
+  // call the generator emits is refused by the broker's own validator.
+  it("a recorded Bold on column C: ONE setRangeFormat over the column, which the broker's validator accepts", () => {
+    const rows = Array.from({ length: LAST_ROW + 1 }, (_, i) => i);
+    const event = { kind: "formatting", rows, cols: [2], formatting: { bold: true } } as unknown as RecordedEvent;
+    const { source, unsupported } = generate(event, "objectScript");
+    expect(unsupported).toEqual([]);
+    const emitted = [...source.matchAll(/await api\.setRangeFormat\(([^)]*)\)/g)];
+    expect(emitted, source).toHaveLength(1);
+    // eslint-disable-next-line no-new-func
+    const args = new Function(`return [${emitted[0][1]}];`)() as unknown[];
+    expect(args.slice(0, 4)).toEqual([0, 2, LAST_ROW, 2]);
+    expect(ALLOWLIST["api.setRangeFormat"].validate(args)).toBe(true);
+  });
 });
 
 describe("object script: a recorded Clear replays as bounded calls", () => {
@@ -239,9 +292,9 @@ describe("object script: a recorded Clear replays as bounded calls", () => {
     expect(batchPositions(calls)).toEqual(positions(0, 2, 9, 2));
   });
 
-  // SABOTAGE: replay the action's own contents through api.clearRange (the
-  // command the gesture ran) -> the grant refuses it, and every recorded Delete
-  // in an application's macro would fail when a person runs it.
+  // SABOTAGE: replay the action's own contents through api.clearRangeFormat ->
+  // the grant refuses it (formatting), and every recorded Delete in an
+  // application's macro would fail when a person runs it.
   it("an application's macro run by a person may make every call a recorded Delete replays (the explicit-run cell access)", async () => {
     const used = (): UsedRange => ({ startRow: 0, startCol: 0, endRow: 9, endCol: 4, empty: false });
     for (const event of [clearEvent(0, 2, LAST_ROW, 2, "contents"), clearEvent(0, 0, 1, 1, "contents")]) {
@@ -275,7 +328,13 @@ describe("object script: a recorded Clear replays as bounded calls", () => {
     expect(calls.map((c) => c.method)).toEqual(["getUsedRange"]);
   });
 
-  it("Clear All on a whole column: contents bounded, formats reported as not replayable (never dropped)", async () => {
+  // CHANGED DELIBERATELY (BUG-0616 #1, owner rule "Excel wins"): the whole
+  // column's FORMATS replay too, as ONE clearRangeFormat over the column --
+  // VBA's Columns("C").Clear clears the column format -- where they were
+  // reported as not replayable while the script API refused 100,000+ cells.
+  // SABOTAGE: restore `fits` (100,000 cells) as the format condition in
+  // emitClearRange -> the formats are reported unsupported again.
+  it("Clear All on a whole column: contents bounded, formats as ONE call over the column", async () => {
     const { calls, unsupported } = await runObjectScript(clearEvent(0, 2, LAST_ROW, 2, "all"), () => ({
       startRow: 0,
       startCol: 2,
@@ -283,10 +342,10 @@ describe("object script: a recorded Clear replays as bounded calls", () => {
       endCol: 2,
       empty: false,
     }));
-    expect(calls.map((c) => c.method)).toEqual(["getUsedRange", "getRangeValues", "updateCellsBatch"]);
+    expect(unsupported).toEqual([]);
+    expect(calls.map((c) => c.method)).toEqual(["getUsedRange", "getRangeValues", "updateCellsBatch", "clearRangeFormat"]);
     expect(batchPositions(calls)).toEqual(positions(0, 2, 4, 2));
-    expect(unsupported).toHaveLength(1);
-    expect(unsupported[0]).toContain("clear formats on C1:C1048576");
+    expect(calls[3].args).toEqual([0, 2, LAST_ROW, 2]);
   });
 
   it("a rectangle that fits one call replays as before: one batch, then one clearRangeFormat", async () => {
@@ -296,10 +355,23 @@ describe("object script: a recorded Clear replays as bounded calls", () => {
     expect(batchPositions(calls)).toEqual(positions(0, 0, 1, 1));
   });
 
-  it("Clear Formats on a whole column: reported, no call the script API would refuse", async () => {
+  it("Clear Formats on a whole column: one clearRangeFormat over the column (BUG-0616 #1)", async () => {
     const { calls, unsupported } = await runObjectScript(clearEvent(0, 2, LAST_ROW, 2, "formats"), () => EMPTY);
+    expect(unsupported).toEqual([]);
+    expect(calls).toEqual([{ method: "clearRangeFormat", args: [0, 2, LAST_ROW, 2] }]);
+  });
+
+  it("Clear Formats on a grouped sheet's whole column: one sheet-addressed clear on THAT sheet", async () => {
+    const { calls, unsupported } = await runObjectScript(clearEvent(0, 2, LAST_ROW, 2, "formats", 2), () => EMPTY);
+    expect(unsupported).toEqual([]);
+    expect(calls).toEqual([{ method: "clearRange", args: [0, 2, LAST_ROW, 2, { applyTo: "formats" }, 2] }]);
+  });
+
+  it("Clear Formats on 10 million cells that are not whole lines: reported, no call the script API would refuse", async () => {
+    const { calls, unsupported } = await runObjectScript(clearEvent(0, 0, 999_999, 9, "formats"), () => EMPTY);
     expect(calls).toEqual([]);
     expect(unsupported).toHaveLength(1);
+    expect(unsupported[0]).toContain("clear formats on A1:J1000000");
   });
 
   it("a grouped sheet's whole-column clear: bounded by THAT sheet's used range, on that sheet", async () => {

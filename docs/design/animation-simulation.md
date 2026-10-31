@@ -101,14 +101,21 @@ keyed by a **caller-owned token** so a restore survives a frontend reload:
 - `anim_snapshot(token, sheetIndex, cells)` — clones the listed cells into an `AppState`
   buffer (`AppState.animation_snapshots`) keyed by the token.
 - `anim_apply_frame(token, sheetIndex, writes) -> AnimationFrameResult` — applies the frame's
-  transient writes and recalculates dependents. It mirrors `scenario_show`'s *recalculation*
-  step for step (`get_recalculation_order` + `get_column_row_dependents` →
-  `evaluate_formula_multi_sheet` → `build_cell_data`) but **not** its dirty-flag behaviour.
+  transient writes and recalculates dependents on EVERY sheet through the shared cascade, the
+  same `whatif_recalc::write_cells_and_recalc_on` step `scenario_show`, Goal Seek, Solver and
+  the data tables take (BUG-0613, 2026-10-30: it used to re-evaluate only the frame sheet's own
+  dependents, positionlessly, so a reader on another sheet never moved) -- but **not**
+  `scenario_show`'s dirty-flag behaviour. The frame writes on the SNAPSHOT's sheet (resolved
+  by its stable id, so a tab dragged mid-run does not redirect it) and only the cells the
+  snapshot holds; any other cell is refused. It recalculates the driver's dependents even under
+  manual calculation -- the seeded cascade, never the whole sheet (round 11, 2026-10-30).
   The `token` is **required** and is the whole enforcement mechanism, not a convenience
   (`app/src-tauri/src/api_types.rs:1943-1953`); an earlier revision of this document documented
   the signature without it.
 - `anim_restore(token, sheetIndex) -> AnimationFrameResult` — restores the saved cells,
-  recalculates, and drops the buffer.
+  recalculates, and drops the buffer. Under MANUAL calculation it recalculates nothing: the
+  snapshot also journalled every formula cell's stored value, and the restore puts those back,
+  so a value the user left stale for F9 is still stale after Stop.
 
 **The key invariant, stated precisely:** `anim_apply_frame` does **not** append to the undo
 stack and does **not** mark the document dirty. Undo/redo therefore sees only intentional,

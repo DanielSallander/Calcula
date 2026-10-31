@@ -219,12 +219,13 @@ describe("Delete Sheet", () => {
 });
 
 describe("Rename Sheet", () => {
-  it("prompts with the active sheet's name and renames to the trimmed answer", async () => {
+  // Excel [LIVE, 2026-10-31]: the Rename UI keeps leading and trailing spaces.
+  it("prompts with the active sheet's name and renames to the answer exactly as typed", async () => {
     const c = mount(TWO_SHEETS);
     h.prompt.mockResolvedValue("  Totals  ");
     await CommandRegistry.execute(CoreCommands.SHEET_RENAME);
     expect(h.prompt.mock.calls[0][1]).toMatchObject({ defaultValue: "Data" });
-    expect(c.renameSheet).toHaveBeenCalledWith(1, "Totals", "id-Data");
+    expect(c.renameSheet).toHaveBeenCalledWith(1, "  Totals  ", "id-Data");
   });
 
   // Review TSHELL3-CONVERSE-OTHER-DOORS: a temporary sheet's discard can land
@@ -249,9 +250,9 @@ describe("Rename Sheet", () => {
     expect(c.renameSheet.mock.calls[0][2]).toBe("id-Data");
   });
 
-  it("Cancel, a blank answer or the same name renames nothing", async () => {
+  it("Cancel, an empty answer or the same name renames nothing", async () => {
     const c = mount(TWO_SHEETS);
-    for (const answer of [null, "   ", "Data", " Data "]) {
+    for (const answer of [null, "", "Data"]) {
       h.prompt.mockResolvedValueOnce(answer);
       await CommandRegistry.execute(CoreCommands.SHEET_RENAME);
     }
@@ -274,12 +275,18 @@ describe("promptForSheetName (the one rename prompt every door shows)", () => {
     expect(h.prompt).toHaveBeenCalledWith("Enter new sheet name:", { title: "Rename sheet", defaultValue: "Sheet1" });
   });
 
-  it("answers the trimmed new name, or null", async () => {
+  it("answers the new name exactly as typed (Excel keeps its spaces), or null", async () => {
     h.prompt.mockResolvedValueOnce(" New ");
-    expect(await promptForSheetName("Old")).toBe("New");
+    expect(await promptForSheetName("Old")).toBe(" New ");
+    h.prompt.mockResolvedValueOnce("Old ");
+    expect(await promptForSheetName("Old")).toBe("Old ");
+    h.prompt.mockResolvedValueOnce("  ");
+    expect(await promptForSheetName("Old")).toBe("  ");
     h.prompt.mockResolvedValueOnce(null);
     expect(await promptForSheetName("Old")).toBeNull();
-    h.prompt.mockResolvedValueOnce("Old ");
+    h.prompt.mockResolvedValueOnce("");
+    expect(await promptForSheetName("Old")).toBeNull();
+    h.prompt.mockResolvedValueOnce("Old");
     expect(await promptForSheetName("Old")).toBeNull();
   });
 });

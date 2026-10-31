@@ -38,7 +38,13 @@ import { pivot } from "@api/pivot";
 import { pivotCuesFor, type PivotCueDrop } from "@api/pivotCues";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 import { analyzeModel, analyzeRange } from "./backend";
-import { refreshBundleFor, type InsightsOrigin } from "./store";
+import { applyStructuralStepToOrigin, refreshBundleFor, type InsightsOrigin } from "./store";
+import {
+  followStructuralEdits,
+  shiftCellByEdit,
+  shiftRangeByEdit,
+  type StructuralFollowStep,
+} from "@api/structuralFollow";
 
 // ============================================================================
 // Owners
@@ -276,8 +282,60 @@ function intersects(rect: RangeInsightsRequest, change: { row: number; col: numb
   return change.row >= rect.startRow && change.row <= rect.endRow && change.col >= rect.startCol && change.col <= rect.endCol;
 }
 
+/**
+ * Follow one whole-line edit (or its undo / redo) on any sheet (BUG-0614): a
+ * RANGE overlay's rectangle moves, grows or shrinks with its cells as a
+ * formula reference does (@api/structuralFollow `shiftRangeByEdit`), its cues
+ * move with their cells at once, and it is recomputed over the new rectangle;
+ * one whose every cell was deleted is hidden. A PIVOT overlay follows its
+ * pivot's region, which the backend moves (PIVOT_REGIONS_UPDATED). Returns
+ * true when any overlay changed.
+ */
+export function applyStructuralStepToOverlays(step: StructuralFollowStep): boolean {
+  const { edit } = step;
+  let changed = false;
+  for (const [id, entry] of [...active]) {
+    if (entry.owner.kind !== "range" || entry.owner.request.sheetIndex !== edit.sheetIndex) continue;
+    const request = entry.owner.request;
+    const next = shiftRangeByEdit(edit, request);
+    if (
+      next !== null &&
+      next.startRow === request.startRow &&
+      next.endRow === request.endRow &&
+      next.startCol === request.startCol &&
+      next.endCol === request.endCol
+    ) {
+      continue;
+    }
+    changed = true;
+    hideSheetOverlay(id);
+    if (next === null) continue;
+    const owner: RangeOwner = { kind: "range", request: next };
+    const cues: CellCue[] = [];
+    for (const cue of entry.cueSet.cues) {
+      if (cue.sheetIndex !== edit.sheetIndex) {
+        cues.push(cue);
+        continue;
+      }
+      const moved = shiftCellByEdit(edit, cue.row, cue.col);
+      if (moved !== null) cues.push({ ...cue, row: moved.row, col: moved.col });
+    }
+    const nextId = ownerId(owner);
+    publish(nextId, { ...entry, owner, rect: next, cueSet: { ...entry.cueSet, cues } });
+    // The cells under the rectangle changed: compute its facts again.
+    scheduleSheetRecompute(nextId);
+  }
+  return changed;
+}
+
 /** Subscribe to cell changes and pivot refreshes. Returns the unsubscribe. */
 export function followSheetData(): () => void {
+  // Rows and columns inserted or deleted: the pane's analysed range first, so
+  // a moved overlay republishes against the origin the pane now holds.
+  const offStructure = followStructuralEdits((step) => {
+    applyStructuralStepToOrigin(step);
+    applyStructuralStepToOverlays(step);
+  });
   const offCells = onAppEvent<CellValuesChangedPayload>(AppEvents.CELL_VALUES_CHANGED, (payload) => {
     if (!payload || !Array.isArray(payload.changes) || active.size === 0) return;
     const grid = getGridStateSnapshot();
@@ -302,6 +360,7 @@ export function followSheetData(): () => void {
     if (active.has(id)) scheduleSheetRecompute(id);
   });
   return () => {
+    offStructure();
     offCells();
     offPivots();
     offViews();

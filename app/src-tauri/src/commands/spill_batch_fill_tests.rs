@@ -46,6 +46,7 @@ fn paste(wb: &Workbook, writes: &[(u32, u32, &str)]) -> Vec<CellData> {
             style_index: None,
             invariant: Some(true),
             pasted: None,
+            moved: None,
         })
         .collect();
     update_cells_batch_core(
@@ -233,7 +234,7 @@ fn a_fill_source_keeps_ordinary_cells_verbatim() {
 #[test]
 fn both_fill_bodies_collect_their_source_through_the_spill_aware_helper() {
     const DATA_RS: &str = include_str!("data.rs");
-    for func in ["fill_range", "fill_range_on_target"] {
+    for func in ["fill_range_core", "fill_range_on_target"] {
         let body = body_of(DATA_RS, func);
         assert!(
             body.contains("fill_source_cells("),

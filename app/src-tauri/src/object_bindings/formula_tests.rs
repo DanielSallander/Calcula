@@ -55,7 +55,7 @@ fn add_table(w: &mut FormulaWorld, name: &str, sheet: usize, columns: &[&str]) {
         auto_filter_id: None,
     };
     w.tables.entry(sheet).or_default().insert(id, table);
-    w.table_names.insert(name.to_uppercase(), (sheet, id));
+    w.table_names.insert(crate::tables::table_name_key(name), (sheet, id));
 }
 
 fn add_name(w: &mut FormulaWorld, name: &str, refers_to: &str) {
@@ -192,6 +192,18 @@ fn a_lexer_upper_cased_sheet_name_is_canonicalised() {
     assert_eq!(n.text, "=Sheet1!A1");
     let n = norm(&w, INPUTS, None, "=SUM(INPUTS!A1:A3)").unwrap();
     assert_eq!(n.text, "=SUM(Inputs!A1:A3)", "a range carries its sheet on the range node");
+}
+
+/// rev10C: the canonical-sheet lookup folded ASCII only, so a bound property
+/// naming `'ärende'` beside the tab `Ärende` (one name to Excel [LIVE]) was
+/// refused with "There is no sheet named", where Excel resolves it.
+#[test]
+fn a_sheet_spelled_in_another_non_ascii_case_is_canonicalised() {
+    let mut w = world();
+    w.sheet_names[INPUTS] = "\u{c4}rende".to_string();
+    let n = norm(&w, SHEET1, None, "='\u{e4}rende'!A1").expect("\u{e4}rende is the sheet \u{c4}rende");
+    assert!(n.text.contains("\u{c4}rende"), "spelled as the tab: {}", n.text);
+    assert!(norm(&w, SHEET1, None, "='\u{c5}rende'!A1").is_err(), "another letter is another sheet");
 }
 
 #[test]
@@ -376,6 +388,11 @@ fn the_analysis_flags_say_what_the_formula_reads() {
     // A JS UDF call is not a defined name; an undefined name in value position is.
     let n = norm(&w, INPUTS, None, "=MYUDF(1)").unwrap();
     assert!(!n.analysis.uses_names);
+    // ...whatever its spelling: a ligature-named UDF (`Bæ`, name key `BAE`)
+    // is compared under the same key `collect_names` gives it.
+    // SABOTAGE: key `function_position_names` with `to_uppercase` again.
+    let n = norm(&w, INPUTS, None, "=Bæ(1)").unwrap();
+    assert!(!n.analysis.uses_names, "a ligature-named JS UDF call is not a defined name");
     let n = norm(&w, INPUTS, None, "=Undefined*2").unwrap();
     assert!(n.analysis.uses_names, "a #NAME? waiting for its definition still reads a name");
 }

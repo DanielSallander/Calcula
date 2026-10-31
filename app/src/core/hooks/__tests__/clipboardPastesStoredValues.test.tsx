@@ -260,6 +260,35 @@ describe("Copy + Paste writes the STORED value of a constant, invariant, in ONE 
     ]);
   });
 
+  // BUG-0616 item 7. Excel 16 [LIVE, 2026-10-30, clipexcel/probe-empty.ps1]:
+  // Copy + Paste of an EMPTY cell with a red fill, bold and 0.000 onto C1
+  // holding 42 leaves C1 EMPTY, red, bold and 0.000; an empty UNFORMATTED cell
+  // pasted onto a green C2 holding 43 leaves it empty with no fill; Cut + Paste
+  // of the empty formatted cell onto E1 (7) does the same and takes the fill
+  // off A1. The paste writes each position's value -- "" clears -- WITH its
+  // look: the source's style, or 0 for a cell that has none (the backend keeps
+  // a blank with a named style as an empty cell of that style, BUG-0598,
+  // format_home_tests.rs `a_pasted_or_filled_plain_cell_stays_plain_in_a_formatted_row`).
+  it("an EMPTY formatted cell pastes its format and clears the destination's value; an unformatted one clears both", async () => {
+    put(0, { display: "", formula: null, styleIndex: 12, type: "empty", value: null });
+    // col 1: no cell at all.
+    await copyAndPaste(2);
+    expect(firstBatch(), "an empty position dropped its format, or kept the destination's value").toEqual([
+      { row: 5, col: 0, value: "", styleIndex: 12, invariant: true, pasted: true },
+      { row: 5, col: 1, value: "", styleIndex: 0, invariant: true, pasted: true },
+    ]);
+  });
+
+  it("Cut + Paste of an empty formatted cell moves its format the same way", async () => {
+    put(0, { display: "", formula: null, styleIndex: 12, type: "empty", value: null });
+    await copyAndPaste(1, true);
+    // `moved` (round 16): a cut's write is a MOVE, so a protected sheet without
+    // Format Cells still lands its format, as Excel moves it. Round 18: the
+    // claim names its SOURCE cell, which the backend checks holds the style.
+    expect(firstBatch()).toEqual([{ row: 5, col: 0, value: "", styleIndex: 12, invariant: true, pasted: true, moved: { sheetIndex: 0, row: 0, col: 0 } }]);
+    expect(api.clearCell, "the cut source keeps its format (Excel takes it off)").toHaveBeenCalled();
+  });
+
   it("a FORMULA keeps its own route: the formula (not invariant), flagged as a paste", async () => {
     put(0, { display: "2.47", formula: "=A1*2", styleIndex: 4, type: "number", value: 2.46912 });
     await copyAndPaste(1);
@@ -269,8 +298,28 @@ describe("Copy + Paste writes the STORED value of a constant, invariant, in ONE 
   it("Cut + Paste moves the stored value too", async () => {
     put(0, { display: "1.23", formula: null, styleIndex: 4, type: "number", value: 1.23456 });
     await copyAndPaste(1, true);
-    expect(firstBatch()).toEqual([{ row: 5, col: 0, value: "1.23456", styleIndex: 4, invariant: true, pasted: true }]);
+    // Marked as a MOVE (`moved`), and the COPY above is not (round 16, rev14A
+    // MAJOR): Excel moves a cut cell's format on a protected sheet whatever the
+    // Format Cells option says, and drops only a copy's [LIVE].
+    expect(firstBatch(), "a cut's write was not marked as a move").toEqual([
+      { row: 5, col: 0, value: "1.23456", styleIndex: 4, invariant: true, pasted: true, moved: { sheetIndex: 0, row: 0, col: 0 } },
+    ]);
     expect(api.clearCell, "the cut source was not cleared").toHaveBeenCalled();
+  });
+
+  // Round 18: `moved` is BOUND -- each write names the source cell it came
+  // from, and the backend honours the move only when that cell shows the
+  // style (data.rs `honoured_move_claims`). A copy names none.
+  it("each written cell of a Cut + Paste names ITS source cell", async () => {
+    put(0, { display: "1", formula: null, styleIndex: 4, type: "number", value: 1 });
+    put(1, { display: "2", formula: null, styleIndex: 7, type: "number", value: 2 });
+    await copyAndPaste(2, true);
+    expect(firstBatch().map((u) => u.moved), "a cut's write named the wrong source cell").toEqual([
+      { sheetIndex: 0, row: 0, col: 0 },
+      { sheetIndex: 0, row: 0, col: 1 },
+    ]);
+    await copyAndPaste(2);
+    expect(firstBatch().map((u) => u.moved), "a COPY claimed a move").toEqual([undefined, undefined]);
   });
 
   it("a copy that cannot read its cells typed still copies, and its paste falls back to the display text", async () => {

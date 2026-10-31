@@ -6,6 +6,7 @@
 //          state, so they are safe to run for any caller.
 
 import { SCRIPT_OBJECT_KINDS } from "./objectInventory";
+import { sheetNamesEqual } from "../sheetNames";
 import {
   BUTTON_ACTION_PROPERTY_KEYS,
   PAGE_NAVIGATOR_OVERRIDES_PROPERTY,
@@ -687,8 +688,10 @@ function checkSheetRef(v: unknown, label: string): true | string {
     // -- one written before the rule, or one an .xlsx/.calp publisher produced.
     // Loading accepts and carries such a name (see the Rust `sheet_names`
     // module), so a script must be able to ADDRESS it; only CREATING or
-    // RENAMING is held to the rule.
-    if (!isBoundedString(v, MAX_ADDRESSABLE_SHEET_NAME) || v.trim().length === 0) {
+    // RENAMING is held to the rule. Only the EMPTY name is refused: a name of
+    // spaces only is one `checkSheetName` accepts (Excel does [LIVE]), so a
+    // script that made `"  "` must be able to address it.
+    if (!isBoundedString(v, MAX_ADDRESSABLE_SHEET_NAME) || v.length === 0) {
       return `${label} must be a non-empty sheet name (max ${MAX_ADDRESSABLE_SHEET_NAME} chars) or a 0-based index`;
     }
     return true;
@@ -770,6 +773,77 @@ export const vRangeRef: Validator = ([startRow, startCol, endRow, endCol, sheetI
     ((endRow as number) - (startRow as number) + 1) *
     ((endCol as number) - (startCol as number) + 1);
   if (cells > MAX_RANGE_CELLS) return `range too large: ${cells} cells (max ${MAX_RANGE_CELLS})`;
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+// ---- FORMAT AND CLEAR RECTANGLES: whole lines are one call (BUG-0616 #1) ----
+// VBA's `Columns("C").ClearFormats`, `Rows(5).Font.Bold = True` and
+// `Cells.ClearFormats` act on whole lines. The 100,000-cell ceiling above is a
+// bound on what crosses the bridge CELL BY CELL -- a read's answer, a write's
+// values -- but a format or a clear names only its rectangle: the backend
+// formats whole rows, whole columns and Select All as ONE row/column format per
+// line (`plan_range_style`, commands/styles.rs, BUG-0354) and clears them the
+// same way (`plan_clear_formats`), and a contents clear touches only the cells
+// that are stored. So these rows take the BACKEND's bound instead:
+//   - a rectangle that is whole lines, or ALMOST whole lines (A2:D1048576 --
+//     `CellRect::line_extent`, mirrored by `formatLineExtent` below), at any
+//     size;
+//   - any other rectangle up to `MAX_FORMAT_RECT_CELLS`, the backend's
+//     `DENSE_BORDER_CELL_LIMIT`, above which it refuses rather than walk.
+
+/** Last 0-based row / column of the sheet. TWINS of `EXCEL_MAX_ROW_INDEX` /
+ *  `EXCEL_MAX_COL_INDEX` (core/engine/src/navigation.rs). */
+const SHEET_LAST_ROW_INDEX = 1_048_575;
+const SHEET_LAST_COL_INDEX = 16_383;
+
+/** The most cells a format or clear rectangle that is NOT whole lines may
+ *  name. TWIN of `DENSE_BORDER_CELL_LIMIT` (app/src-tauri/src/commands/styles.rs). */
+export const MAX_FORMAT_RECT_CELLS = 4_000_000;
+
+/** TWIN of `ALMOST_WHOLE_EXCEPTION_LIMIT` (commands/styles.rs): the most
+ *  positions of its whole lines an almost-whole rectangle may leave out. */
+const ALMOST_WHOLE_EXCEPTION_LIMIT = 65_536;
+
+/**
+ * Whether the backend writes this rectangle through row / column formats
+ * rather than cell by cell: whole rows, whole columns, Select All, or a
+ * rectangle that ALMOST fills whole lines. The TWIN of `CellRect::line_extent`
+ * (commands/styles.rs) -- same arithmetic, answered as yes/no.
+ */
+export function isFormatLineRect(
+  startRow: number, startCol: number, endRow: number, endCol: number,
+): boolean {
+  const r0 = Math.min(startRow, endRow);
+  const r1 = Math.max(startRow, endRow);
+  const c0 = Math.min(startCol, endCol);
+  const c1 = Math.max(startCol, endCol);
+  if ((r0 === 0 && r1 >= SHEET_LAST_ROW_INDEX) || (c0 === 0 && c1 >= SHEET_LAST_COL_INDEX)) return true;
+  const rows = r1 - r0 + 1;
+  const cols = c1 - c0 + 1;
+  const selected = rows * cols;
+  const asColumns = Math.max(0, SHEET_LAST_ROW_INDEX + 1 - rows) * cols;
+  const asRows = Math.max(0, SHEET_LAST_COL_INDEX + 1 - cols) * rows;
+  const exceptions = Math.min(asColumns, asRows);
+  return exceptions < selected && exceptions <= ALMOST_WHOLE_EXCEPTION_LIMIT;
+}
+
+/** A format / clear rectangle: [startRow, startCol, endRow, endCol, sheetIndex?],
+ *  bounded as the section comment above says. */
+export const vFormatRangeRef: Validator = ([startRow, startCol, endRow, endCol, sheetIndex]) => {
+  if (!isCellCoord(startRow)) return "startRow must be a non-negative integer";
+  if (!isCellCoord(startCol)) return "startCol must be a non-negative integer";
+  if (!isCellCoord(endRow)) return "endRow must be a non-negative integer";
+  if (!isCellCoord(endCol)) return "endCol must be a non-negative integer";
+  const [r0, c0, r1, c1] = [startRow, startCol, endRow, endCol] as number[];
+  if (r1 < r0) return "endRow must be >= startRow";
+  if (c1 < c0) return "endCol must be >= startCol";
+  const cells = (r1 - r0 + 1) * (c1 - c0 + 1);
+  if (cells > MAX_FORMAT_RECT_CELLS && !isFormatLineRect(r0, c0, r1, c1)) {
+    return (
+      `range too large: ${cells} cells (max ${MAX_FORMAT_RECT_CELLS}, ` +
+      "unless it is whole rows or whole columns)"
+    );
+  }
   return checkOptionalSheetRef(sheetIndex);
 };
 
@@ -906,7 +980,7 @@ export const SCRIPT_CLEAR_APPLY_TO: ReadonlySet<string> = new Set([
 
 /** api.clearRange args: [startRow, startCol, endRow, endCol, options?, sheet?]. */
 export const vClearRange: Validator = ([startRow, startCol, endRow, endCol, options, sheetIndex]) => {
-  const range = vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  const range = vFormatRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
   if (range !== true) return range;
   if (options === undefined || options === null) return true;
   if (typeof options !== "object" || Array.isArray(options)) {
@@ -1246,7 +1320,7 @@ export function checkFormatObject(
 
 /** setRangeFormat args: [startRow, startCol, endRow, endCol, format, sheetIndex?]. */
 export const vRangeFormat: Validator = ([startRow, startCol, endRow, endCol, format, sheetIndex]) => {
-  const rect = vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  const rect = vFormatRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
   if (rect !== true) return rect;
   return checkFormatObject(format);
 };
@@ -1258,7 +1332,7 @@ export const vRangeFormat: Validator = ([startRow, startCol, endRow, endCol, for
  * able to unlock cells (see the tier note at the top of this section).
  */
 export const vRangeFormatUnlocked: Validator = ([startRow, startCol, endRow, endCol, format, sheetIndex]) => {
-  const rect = vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  const rect = vFormatRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
   if (rect !== true) return rect;
   return checkFormatObject(format, { allowProtection: true });
 };
@@ -1737,6 +1811,35 @@ export const vDimension: Validator = ([index, size, sheetIndex]) => {
   return checkOptionalSheetRef(sheetIndex);
 };
 
+/** The most runs one setRowHeights / setColumnWidths call may name. A run is
+ *  one inclusive span, so Select All is ONE run; the cap only bounds the
+ *  argument a script can hand the broker. */
+export const MAX_DIMENSION_RUNS = 10_000;
+
+/** setRowHeights / setColumnWidths args: [runs, size, sheetIndex?]. `runs` is
+ *  an array of inclusive `[first, last]` index pairs (first <= last; Select
+ *  All is `[[0, 1048575]]`); `size` is in pixels as for {@link vDimension}
+ *  (0 restores the default). The backend checks the runs against the sheet's
+ *  last row / column. */
+export const vDimensionRuns: Validator = ([runs, size, sheetIndex]) => {
+  if (!Array.isArray(runs) || runs.length === 0) {
+    return "runs must be a non-empty array of [first, last] index pairs";
+  }
+  if (runs.length > MAX_DIMENSION_RUNS) {
+    return `too many runs: ${runs.length} (max ${MAX_DIMENSION_RUNS})`;
+  }
+  for (const run of runs) {
+    if (!Array.isArray(run) || run.length !== 2 || !isCellCoord(run[0]) || !isCellCoord(run[1])) {
+      return "each run must be a [first, last] pair of non-negative integers";
+    }
+    if ((run[1] as number) < (run[0] as number)) return "each run's last index must be >= its first";
+  }
+  if (!isFiniteNumber(size) || size < 0 || size > 4096) {
+    return "size must be a number between 0 and 4096 pixels (0 restores the default)";
+  }
+  return checkOptionalSheetRef(sheetIndex);
+};
+
 /** The most columns (or rows) one auto-fit call may measure. Measurement is
  *  canvas text metrics per non-empty cell, so it is priced like a big read,
  *  not like a resize. */
@@ -2115,20 +2218,22 @@ const MAX_ADDRESSABLE_SHEET_NAME = 255;
 const ILLEGAL_SHEET_NAME_CHARS = /[:\\/?*[\]]/;
 
 /** Excel reserves this for the change-history sheet of a shared workbook. */
-const RESERVED_SHEET_NAME = "history";
+const RESERVED_SHEET_NAME = "History";
 
+// The name is taken EXACTLY as written, as the backend's `validate_sheet_name`
+// takes it: Excel keeps leading and trailing spaces and accepts a name of
+// spaces only [LIVE, Excel 16, 2026-10-31]; only the empty name is refused.
 function checkSheetName(name: unknown): true | string {
-  if (!isBoundedString(name, MAX_SHEET_NAME) || name.trim().length === 0) {
+  if (!isBoundedString(name, MAX_SHEET_NAME) || name.length === 0) {
     return `sheet name must be a non-empty string (max ${MAX_SHEET_NAME} chars)`;
   }
   if (ILLEGAL_SHEET_NAME_CHARS.test(name)) {
     return "sheet name may not contain : \\ / ? * [ ]";
   }
-  const trimmed = name.trim();
-  if (trimmed.startsWith("'") || trimmed.endsWith("'")) {
+  if (name.startsWith("'") || name.endsWith("'")) {
     return "sheet name may not begin or end with an apostrophe";
   }
-  if (trimmed.toLowerCase() === RESERVED_SHEET_NAME) {
+  if (sheetNamesEqual(name, RESERVED_SHEET_NAME)) {
     return '"History" is reserved and may not be used as a sheet name';
   }
   return true;
@@ -3867,6 +3972,33 @@ function scheduleHandlerError(handler: unknown): string | null {
   }
   return null;
 }
+
+/**
+ * ext.scheduleExpose args: [handlerName, handlerId] to publish, or
+ * [handlerName, null, withdrawnId] to withdraw (BUG-0616 #3). The name a
+ * sandboxed extension's job stores, and the worker-local slot the host relays a
+ * firing into. A withdrawal names the slot it registered, so it removes the
+ * name only while that slot still owns it (a newer registration under the same
+ * name survives). A slot is a number the worker minted for one of its own
+ * functions; it addresses nothing outside that worker.
+ */
+export const vScheduleExpose: Validator = ([handlerName, handlerId, withdrawnId]) => {
+  if (!isBoundedString(handlerName, MAX_KEY) || (handlerName as string).length === 0) {
+    return "handlerName must be a non-empty string (the name a schedule stores)";
+  }
+  const isSlot = (v: unknown): boolean => typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
+  if (handlerId === null) {
+    if (!isSlot(withdrawnId)) {
+      return "a withdrawal must name the slot it registered (a positive integer)";
+    }
+    return true;
+  }
+  if (!isSlot(handlerId)) {
+    return "handlerId must be a positive integer (or null to withdraw the name)";
+  }
+  if (withdrawnId !== undefined) return "a registration takes exactly two arguments";
+  return true;
+};
 
 /** Optional { label } bag accepted by both registration methods. */
 function scheduleOptionsError(options: unknown): string | null {

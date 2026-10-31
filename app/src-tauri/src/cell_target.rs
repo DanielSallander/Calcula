@@ -326,7 +326,10 @@ pub(crate) fn refuse_target_with_sheet(
 ///    lock flags; the protected-region guard on the backing sheet (none
 ///    today, kept for truth); and the writeback and array guards per cell, so
 ///    the writes below can only fail on a poisoned lock and a paste is never
-///    half done.
+///    half done. The source FORMATS an update carries (`style_index`) ask the
+///    host's Format Cells option: refused, they are dropped and the values
+///    still land (Excel); on a protected host every cell keeps its Locked
+///    flag.
 /// 2. ONE owned undo step (`label`, joining a caller's open step); each update
 ///    goes through `update_cell_on_sheets_inner` on the backing sheet with
 ///    recalc OFF (it stores, registers the cell's cross-sheet edges and
@@ -370,6 +373,18 @@ pub(crate) fn update_cells_batch_on_target(
         crate::calp_commands::ensure_writeback_draft_before_write_on_sheets(state, &[backing], row, col)?;
     }
     crate::commands::data::check_spill_protection_cells(state, backing, &cells)?;
+    // FORMATTING IS THE HOST'S FORMAT CELLS OPTION, asked only when an update
+    // carries a style (a paste's source format). Refused, the batch is NOT:
+    // the values land and the formats are dropped, each cell keeping its own
+    // -- Excel [LIVE, Excel 16 COM, Format Cells not allowed: Paste All onto
+    // unlocked cells lands the value with no bold, no fill and General].
+    // This PLAN is asked holding nothing; every write below asks the option
+    // and the host's protected state AGAIN under its own grid and style
+    // guards (`set_backing_style`, `keep_backing_lock`), so a host protected
+    // -- or its option turned off -- between this question and a write can
+    // neither land a format nor move a Locked flag.
+    let format_allowed = !updates.iter().any(|u| u.style_index.is_some())
+        || gate_host_action(state, t.host_index, backing, "formatCells", "format cells").is_ok();
 
     // The undo lock is taken and RELEASED around the step's begin and commit:
     // every write below takes it again itself.
@@ -386,6 +401,7 @@ pub(crate) fn update_cells_batch_on_target(
         ribbon_filter_state,
         &t,
         updates,
+        format_allowed,
     );
     {
         let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
@@ -409,8 +425,17 @@ pub(crate) fn update_cells_batch_on_target(
 
 /// Step 2 of [`update_cells_batch_on_target`]: the writes, inside the caller's
 /// owned undo step. Returns the coordinates written.
+///
+/// `format_allowed` false (the host forbids Format Cells): no update's style
+/// is written -- except a MOVED cell's (`CellUpdateInput::moved`), whose
+/// format moves with it -- and a cleared cell gets its OWN previous style
+/// back. A blank that names no style keeps its own format either way. Each
+/// format write asks the option again under its guards and is dropped when
+/// it is refused there (`set_backing_style`); on a host that is protected
+/// at the write, each written cell ends with the Locked flag it had before
+/// (`keep_backing_lock`, which asks that under its guards).
 #[allow(clippy::too_many_arguments)]
-fn write_batch_on_backing(
+pub(crate) fn write_batch_on_backing(
     state: &AppState,
     file_state: &crate::persistence::FileState,
     user_files_state: &crate::persistence::UserFilesState,
@@ -419,12 +444,30 @@ fn write_batch_on_backing(
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     t: &ResolvedCellTarget,
     updates: Vec<crate::api_types::CellUpdateInput>,
+    format_allowed: bool,
 ) -> Result<Vec<(u32, u32)>, String> {
     let backing = t.backing_index;
     let mut written: Vec<(u32, u32)> = Vec::with_capacity(updates.len());
     for u in updates {
-        if let Some(style_index) = u.style_index {
-            set_backing_style(state, file_state, t, u.row, u.col, style_index)?;
+        // The cell as it was: its own style (put back after a clear when the
+        // paste's format is dropped) and its Locked flag (kept when the host
+        // is protected at the write).
+        let (own_before, locked_before) = backing_cell_style(state, t, u.row, u.col)?;
+        // A MOVED cell's format moves with it whatever the host's Format Cells
+        // option says, exactly as on the sheet (`update_cells_batch_core`,
+        // `CellUpdateInput::moved`; Excel [LIVE, rev14A/probe-cut.ps1]: a bold
+        // 0.00 cell cut to an unlocked cell of a protected sheet lands bold
+        // 0.00 with Format Cells off or on -- only a COPY drops it). Its Locked
+        // flag is still kept below (`keep_backing_lock`).
+        let moved = u.is_move();
+        let carries_format = format_allowed || moved;
+        let style = if carries_format { u.style_index } else { None };
+        // `false`: the format was refused under the write's guards -- the
+        // cell keeps its own, as when the plan refused it. A move's format is
+        // not a Format Cells action, so the option is not asked again for it.
+        let mut format_landed = carries_format;
+        if let Some(style_index) = style {
+            format_landed = set_backing_style(state, file_state, t, u.row, u.col, style_index, !moved)?;
         }
         // A PASTE keeps its kind in a Text-formatted cell, as on the sheet
         // (`CellUpdateInput::pasted`).
@@ -444,21 +487,100 @@ fn write_batch_on_backing(
             None,
             u.is_paste(),
         )?;
-        // A clear of a styled paste source keeps the format it brought: the
-        // clear above removed the whole cell, so the style is put back.
+        // A blank keeps a format: the clear above removed the whole cell, so
+        // the style it NAMES is put back (a styled paste or moved source) --
+        // or, when it names none or the named one was refused, the cell's OWN,
+        // as on the sheet (`update_cells_batch_core`). Excel [LIVE, Excel 16
+        // COM, 2026-10-31, cutfmt/probe1.ps1]: `Range.Value2 = ""` on a bold
+        // 0.00 unlocked cell leaves it bold 0.00, unprotected and protected
+        // with Format Cells off or on. A blank naming style 0 is a plain one.
         if u.value.trim().is_empty() {
-            if let Some(style_index) = u.style_index.filter(|&s| s != 0) {
-                set_backing_style(state, file_state, t, u.row, u.col, style_index)?;
+            let named = if format_landed { u.style_index } else { None };
+            let keep_own = match named {
+                Some(0) => false,
+                Some(style_index) => !set_backing_style(state, file_state, t, u.row, u.col, style_index, !moved)?,
+                None => true,
+            };
+            if keep_own && own_before != 0 {
+                set_backing_style(state, file_state, t, u.row, u.col, own_before, false)?;
             }
         }
+        keep_backing_lock(state, file_state, t, u.row, u.col, locked_before)?;
         written.push((u.row, u.col));
     }
     Ok(written)
 }
 
+/// A backing cell's OWN style index (0 when it has none) and its Locked flag
+/// as resolved through the tiers. LOCKS: `grids` -> `style_registry`, read and
+/// released.
+fn backing_cell_style(state: &AppState, t: &ResolvedCellTarget, row: u32, col: u32) -> Result<(usize, bool), String> {
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+    let Some(grid) = grids.get(t.backing_index) else {
+        return Err("Floating range backing sheet is missing".to_string());
+    };
+    let own = grid.get_cell(row, col).map(|c| c.style_index).unwrap_or(0);
+    Ok((own, crate::protection::cell_is_locked(grid, &styles, row, col)))
+}
+
+/// Give a backing cell back the Locked flag `locked` it had before a write on
+/// a PROTECTED host (`commands::styles::keep_cell_lock`), recording its
+/// previous state in the open undo step. No change, no effect. LOCKS:
+/// `grids` -> [`sheet_ids`, the TOCTOU re-check] -> `style_registry` ->
+/// `undo_stack`.
+fn keep_backing_lock(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    t: &ResolvedCellTarget,
+    row: u32,
+    col: u32,
+    locked: bool,
+) -> Result<(), String> {
+    let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    ensure_target_still_at(state, t)?;
+    let Some(grid) = grids.get(t.backing_index) else {
+        return Err("Floating range backing sheet is missing".to_string());
+    };
+    let styles = state.style_registry.lock_pending().map_err(|e| e.to_string())?;
+    // Whether the HOST is protected, asked under the held grid and style
+    // guards -- never from a read taken before them. Unprotected, the Locked
+    // flag travels with the format (Excel), so there is nothing to keep.
+    let host_protected = {
+        let storage = state.sheet_protection.read().map_err(|e| e.to_string())?;
+        target_protection_view(&storage, t).get(&t.backing_index).is_some_and(|p| p.protected)
+    };
+    if !host_protected || crate::protection::cell_is_locked(grid, &styles, row, col) == locked {
+        return Ok(());
+    }
+    let previous = grid.get_cell(row, col).cloned();
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grids = grids.authorize(&effect);
+    let mut styles = styles.authorize(&effect);
+    let grid = &mut grids[t.backing_index];
+    let own = previous.as_ref().map(|c| c.style_index).unwrap_or(0);
+    let mut cell = previous.clone().unwrap_or_else(engine::Cell::new);
+    cell.style_index = crate::commands::styles::keep_cell_lock(&mut styles, grid, row, col, own, locked);
+    grid.set_cell(row, col, cell);
+    state
+        .undo_stack
+        .lock()
+        .map_err(|e| e.to_string())?
+        .record_cell_change(t.backing_index, row, col, previous);
+    Ok(())
+}
+
 /// Give one backing cell an explicit style index, recording its previous
-/// state in the open undo step. No change, no effect. LOCKS: `grids` ->
-/// [`sheet_ids`, the TOCTOU re-check] -> `undo_stack`.
+/// state in the open undo step. No change, no effect.
+///
+/// `is_format` (a paste's source format, not the cell's own put back): the
+/// host's Format Cells option is asked AGAIN here, under the held grid guard
+/// (`format_protection_under_guards`); refused, nothing is written and the
+/// answer is `false` -- the caller keeps the cell's own format, as Excel
+/// does. Returns whether the style is in place.
+///
+/// LOCKS: `grids` -> [`sheet_ids`, the TOCTOU re-check] -> [`sheet_kinds`,
+/// `sheet_protection`, read and released] -> `undo_stack`.
 fn set_backing_style(
     state: &AppState,
     file_state: &crate::persistence::FileState,
@@ -466,15 +588,22 @@ fn set_backing_style(
     row: u32,
     col: u32,
     style_index: usize,
-) -> Result<(), String> {
+    is_format: bool,
+) -> Result<bool, String> {
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     ensure_target_still_at(state, t)?;
     let Some(grid) = grids.get(t.backing_index) else {
         return Err("Floating range backing sheet is missing".to_string());
     };
+    if is_format
+        && crate::commands::styles::format_protection_under_guards(state, Some(t), t.backing_index, "format cells")
+            .is_err()
+    {
+        return Ok(false);
+    }
     let previous = grid.get_cell(row, col).cloned();
     if previous.as_ref().map(|c| c.style_index) == Some(style_index) {
-        return Ok(());
+        return Ok(true);
     }
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let mut grids = grids.authorize(&effect);
@@ -486,7 +615,7 @@ fn set_backing_style(
         .lock()
         .map_err(|e| e.to_string())?
         .record_cell_change(t.backing_index, row, col, previous);
-    Ok(())
+    Ok(true)
 }
 
 /// The written cells as the object paints them, read through the styled read
@@ -1100,7 +1229,11 @@ pub(crate) fn edit_lines_on_target(
     crate::floating_range::ensure_host_objects_editable(state, t.host_index, what)?;
     if patch.is_some() {
         // Every field the patch can carry here (count, sizes, hidden set) is
-        // geometry: the page's Lock Objects refuses it.
+        // geometry: the page's Lock Objects refuses it. This is the EARLY
+        // refusal, before the structural edit; the window patch below asks
+        // again holding the floating-range store (`update_floating_range_inner`,
+        // BUG-0443), and a lock that lands in between fails the patch, which
+        // rolls the structural edit back.
         crate::sheets::ensure_canvas_objects_unlocked(state, t.host_index, what)?;
     }
     let host_option = match (insert, rows) {

@@ -647,45 +647,76 @@ fn body_of<'a>(src: &'a str, signature: &str) -> &'a str {
 /// right after the assembly, the macro-link gate after the button-code gate --
 /// and each is handed the request's own list.
 ///
-/// SABOTAGE: move `refuse_push_on_unshipped_macros(` below
+/// Round 13 (rev11A): the three carrier gates live in ONE helper,
+/// `refuse_push_on_carrier`, because `calp_publish` asks them twice when a
+/// recalculation is coming -- of a carrier assembled BEFORE the pass (so a
+/// refused push recalculates nothing) and of the carrier that ships. The
+/// placement is pinned on calp_publish's calls of the helper; the order and
+/// the arguments inside it.
+///
+/// SABOTAGE: move the shipping `refuse_push_on_carrier(` call below
 /// `calp::publish::publish(`.
 #[test]
 fn the_push_asks_both_gates_after_the_assembly_and_before_anything_is_written() {
     let cmds = source("src/calp_commands.rs");
     let publish = body_of(&cmds, "pub fn calp_publish(");
-    let at = |needle: &str| publish.find(needle).unwrap_or_else(|| panic!("`{needle}` moved out of calp_publish"));
+    let at = |needle: &str| publish.rfind(needle).unwrap_or_else(|| panic!("`{needle}` moved out of calp_publish"));
+    // The LAST assembly is the carrier that ships; the LAST helper call gates it.
     let assembly = at("assemble_publish_workbook(");
-    let inclusion = at("refuse_push_on_changed_inclusion(");
-    let button_code = at("refuse_push_on_button_code(");
-    let macros = at("refuse_push_on_unshipped_macros(");
+    let gates = at("refuse_push_on_carrier(");
     let core = at("calp::publish::publish(");
-    let effect = at("DocumentEffect::mutates(");
-    assert!(assembly < inclusion && inclusion < button_code, "the inclusion gate follows the assembly");
-    assert!(button_code < macros, "the macro-link gate follows the button-code gate");
-    for gate in [inclusion, macros] {
-        assert!(gate < core && gate < effect, "a gate runs after the version is written");
-    }
-    let call = &publish[inclusion..];
+    // The push's one effect is minted inside the link-recording helper (rev13A:
+    // only while the workbook is still the one that pushed).
+    let effect = publish.find("record_push_in_working_copy_link(").expect("the push's effect moved");
     assert!(
-        call[..call.find(")?;").unwrap()].contains("&params.include_in_application,"),
-        "the inclusion gate is not handed the request's own list"
+        body_of(&cmds, "pub(crate) fn record_push_in_working_copy_link(").contains("DocumentEffect::mutates("),
+        "the link-recording helper no longer mints the push's effect"
+    );
+    assert!(assembly < gates, "the carrier gates follow the shipping assembly");
+    assert!(gates < core && gates < effect, "a gate runs after the version is written");
+    let call = &publish[gates..];
+    assert!(
+        call[..call.find(")?;").unwrap()].contains("&assembly, &sheet_indices, &params"),
+        "the carrier gates are not handed the shipping carrier and the request"
     );
     let call = &publish[assembly..];
     assert!(
         call[..call.find(")?;").unwrap()].contains("&params.include_in_application,"),
         "the assembly does not filter with the request's inclusions"
     );
+    // A dry carrier assembled before the recalculation is gated too, by the
+    // same helper.
+    let dry = publish.find("refuse_push_before_recalculation(").expect("the dry carrier is no longer gated");
+    let recalc = publish.find("recalculate_before_publish(").expect("the push no longer recalculates");
+    assert!(dry < recalc, "the carrier gates are not asked before the recalculation");
+    assert!(
+        body_of(&cmds, "fn refuse_push_before_recalculation(").contains("refuse_push_on_carrier("),
+        "the dry carrier is not asked the carrier gates"
+    );
+
+    let helper = body_of(&cmds, "fn refuse_push_on_carrier(");
+    let at = |needle: &str| helper.find(needle).unwrap_or_else(|| panic!("`{needle}` moved out of refuse_push_on_carrier"));
+    let inclusion = at("refuse_push_on_changed_inclusion(");
+    let button_code = at("refuse_push_on_button_code(");
+    let macros = at("refuse_push_on_unshipped_macros(");
+    assert!(inclusion < button_code, "the inclusion gate comes first");
+    assert!(button_code < macros, "the macro-link gate follows the button-code gate");
+    let call = &helper[inclusion..];
+    assert!(
+        call[..call.find(")?;").unwrap()].contains("&params.include_in_application,"),
+        "the inclusion gate is not handed the request's own list"
+    );
     // ...and each gate is handed what it judges: the dead-link gate the sheets
     // THIS push publishes (an empty list silently turns off its button-control
     // half), the button-code gate the assembly's release and the request's
     // acknowledgements.
-    let call = &publish[macros..];
+    let call = &helper[macros..];
     let call = &call[..call.find(")?;").unwrap()];
     assert!(
-        call.contains("&assembly,\n        &sheet_indices,\n"),
+        call.contains("assembly,\n        sheet_indices,\n"),
         "the dead-link gate does not judge the sheets this push publishes: {call}"
     );
-    let call = &publish[button_code..];
+    let call = &helper[button_code..];
     let call = &call[..call.find(")?;").unwrap()];
     assert!(
         call.contains("&assembly.button_code,\n        &params.acknowledged_button_code,\n"),

@@ -82,6 +82,15 @@ pub struct SheetMetadata {
     /// canvas.
     #[serde(default, skip_serializing_if = "SheetKind::is_worksheet")]
     pub kind: SheetKind,
+    /// The sheet's own STANDARD row height in px (Select All + Row Height;
+    /// Excel's per-sheet `<sheetFormatPr defaultRowHeight>`). Omitted when the
+    /// sheet uses the application standard. Feature id
+    /// `SHEET_DEFAULT_SIZES_FEATURE`, no version link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_row_height: Option<f64>,
+    /// The sheet's own STANDARD column width in px (Format > Default Width).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_column_width: Option<f64>,
 }
 
 fn default_view_mode() -> String {
@@ -127,6 +136,8 @@ impl Default for SheetMetadata {
             view_mode: default_view_mode(),
             display_headings: true,
             kind: SheetKind::Worksheet,
+            default_row_height: None,
+            default_column_width: None,
         }
     }
 }
@@ -179,6 +190,8 @@ impl SheetMetadata {
             view_mode: sheet.view_mode.clone(),
             display_headings: sheet.display_headings,
             kind: sheet.kind.clone(),
+            default_row_height: sheet.default_row_height,
+            default_column_width: sheet.default_column_width,
         }
     }
 
@@ -207,6 +220,8 @@ impl SheetMetadata {
             // A canvas is NEVER default: omitting metadata.json would reload
             // it as a worksheet.
             && self.kind.is_worksheet()
+            && self.default_row_height.is_none()
+            && self.default_column_width.is_none()
     }
 
     pub fn apply_to_sheet(&self, sheet: &mut Sheet) {
@@ -230,6 +245,11 @@ impl SheetMetadata {
         sheet.show_formulas = self.show_formulas;
         sheet.view_mode = self.view_mode.clone();
         sheet.display_headings = self.display_headings;
+        // Only a positive, finite size is a standard; anything else is the
+        // application's (a hand-edited 0 must not collapse every row).
+        let valid = |v: Option<f64>| v.filter(|px| px.is_finite() && *px > 0.0);
+        sheet.default_row_height = valid(self.default_row_height);
+        sheet.default_column_width = valid(self.default_column_width);
         // Repaired on load, never refused: a file from a newer build may carry
         // a page preset this one does not know (see CanvasLayout::sanitized).
         sheet.kind = self.kind.clone().sanitized().0;

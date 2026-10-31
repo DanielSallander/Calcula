@@ -3,65 +3,39 @@
 // CONTEXT: Tabulates formula results for varying inputs. The formula cell is at
 //          a fixed position, and input values are substituted one at a time.
 
-use std::collections::HashSet;
 use tauri::State;
 
-use crate::api_types::{
-    CellData, DataTableCell, DataTableOneVarParams, DataTableResult, DataTableTwoVarParams,
-    MergedRegion,
-};
+use crate::api_types::{DataTableCell, DataTableOneVarParams, DataTableResult, DataTableTwoVarParams};
 use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
-use crate::{evaluate_formula_multi_sheet, format_cell_value_and_class, AppState};
-use engine::{Cell, CellValue, Grid, StyleRegistry};
+use crate::whatif_recalc::{
+    begin_whatif_run, check_run_protection_held, stored_cell_in, stored_value_in, write_cells_and_recalc_in,
+    RecalcMode, RunSheet, WhatIfStates,
+};
+use crate::AppState;
+use engine::{Cell, CellValue};
 
 // A what-if data table WRITES its computed results into the grid, which is persisted,
 // so both commands dirty the document. Neither took a `FileState` before.
 //
 // The effect is constructed after the sheet-protection gate AND after the orientation
 // check that rejects "no input cell specified", so a refused call stays clean.
-
-// ============================================================================
-// Helper: build CellData from grid
-// ============================================================================
-
-fn build_cell_data(
-    grid: &Grid,
-    styles: &StyleRegistry,
-    merged_regions: &HashSet<MergedRegion>,
-    r: u32,
-    c: u32,
-    locale: &engine::LocaleSettings,
-) -> Option<CellData> {
-    let cell = grid.get_cell(r, c)?;
-    // Honour the row/column style tiers for display and for the index we hand out.
-    let effective_style_index = grid.effective_style_index(r, c);
-    let style = styles.get(effective_style_index);
-    let (display, overflow) = format_cell_value_and_class(&cell.value, style, locale);
-
-    let merge = merged_regions
-        .iter()
-        .find(|m| m.start_row == r && m.start_col == c);
-    let (row_span, col_span) = match merge {
-        Some(m) => (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1),
-        None => (1, 1),
-    };
-
-    Some(CellData {
-        row: r,
-        col: c,
-        display,
-        overflow,
-        display_color: None,
-        formula: cell.formula_string().map(|f| format!("={}", f)),
-        style_index: effective_style_index,
-        row_span,
-        col_span,
-        sheet_index: None,
-        rich_text: None,
-        accounting_layout: None,
-    })
-}
+//
+// EACH SUBSTITUTION IS A REAL WRITE (BUG-0613). The input cell is written and
+// every dependent recalculated through the shared cascade (`whatif_recalc`); the
+// table's formula cell is then read as its STORED value, which the cascade has
+// just recalculated through the real dependency chain, on every sheet. This used
+// to set the input and evaluate the formula's TEXT alone, so the classic layout
+// -- a header `=B10` over a model whose `B10` reaches the input through other
+// cells -- filled the whole table with one stale number; and the tidy-up after
+// it re-evaluated every formula of the sheet in storage order, positionlessly,
+// and no formula on any other sheet. Excel [LIVE]: `=TABLE(,A10)` over `=B10`,
+// `B10 = Sheet2!B10+100`, `Sheet2!B10 = Sheet1!A10*2` fills 110 for input 5 and
+// 114 for 7, and leaves A10 = 1 and Sheet2!B10 = 2 afterwards.
+//
+// The results are still written as values (Excel writes `{=TABLE(..)}` array
+// formulas that recalculate with the workbook; Calcula has no TABLE function --
+// re-running the command refreshes the table).
 
 /// Extract numeric value from a CellValue
 fn cell_value_to_f64(val: &CellValue) -> Option<f64> {
@@ -83,9 +57,99 @@ fn cell_value_to_string(val: &CellValue) -> String {
         }
         CellValue::Text(t) => t.clone(),
         CellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-        CellValue::Error(e) => format!("{:?}", e),
+        CellValue::Error(e) => e.as_literal().to_string(),
         CellValue::Empty => String::new(),
         CellValue::List(_) | CellValue::Dict(_) => String::from("[collection]"),
+    }
+}
+
+/// The input cell holding `value`, keeping the style the cell has now.
+fn input_cell(state: &AppState, sheet: RunSheet, row: u32, col: u32, value: &CellValue) -> Cell {
+    let style_index = stored_cell_in(state, sheet, row, col).map_or(0, |c| c.style_index);
+    let mut cell = match value {
+        CellValue::Number(n) => Cell::new_number(*n),
+        CellValue::Text(t) => Cell::new_text(t.clone()),
+        CellValue::Boolean(b) => Cell::new_boolean(*b),
+        CellValue::Empty => Cell::default(),
+        CellValue::Error(_) => {
+            let mut cell = Cell::new();
+            cell.value = value.clone();
+            cell
+        }
+        _ => Cell::new_text(cell_value_to_string(value)),
+    };
+    cell.style_index = style_index;
+    cell
+}
+
+/// A computed result as the table stores it, keeping the cell's style -- with
+/// its REAL type. Every non-number used to be written as TEXT through
+/// `cell_value_to_string`, so an error came out as the text "Div0" (its Debug
+/// name) and a boolean as the text "TRUE": `=ISERROR(E12)` answered FALSE and a
+/// `SUM` over the body skipped the cell. Excel's `{=TABLE()}` body holds the
+/// formula's own value: `#DIV/0!` (ISERROR TRUE), TRUE / FALSE as booleans.
+fn result_cell(state: &AppState, sheet: RunSheet, row: u32, col: u32, value: &CellValue) -> Cell {
+    let style_index = stored_cell_in(state, sheet, row, col).map_or(0, |c| c.style_index);
+    let mut cell = match value {
+        CellValue::Number(n) => Cell::new_number(*n),
+        CellValue::Boolean(b) => Cell::new_boolean(*b),
+        CellValue::Text(t) => Cell::new_text(t.clone()),
+        CellValue::Error(_) => {
+            let mut cell = Cell::new();
+            cell.value = value.clone();
+            cell
+        }
+        // A blank result is Excel's 0 (a formula that reads an empty cell).
+        CellValue::Empty => Cell::new_number(0.0),
+        CellValue::List(_) | CellValue::Dict(_) => Cell::new_text(cell_value_to_string(value)),
+    };
+    cell.style_index = style_index;
+    cell
+}
+
+/// One substitution: write the inputs, recalculate, read each formula cell.
+fn substitute_and_read(
+    state: &AppState,
+    states: &WhatIfStates<'_>,
+    effect: &DocumentEffect,
+    sheet: RunSheet,
+    inputs: &[((u32, u32), Option<Cell>)],
+    formula_cells: &[(u32, u32)],
+) -> Result<Vec<CellValue>, String> {
+    let mut sink = Vec::new();
+    write_cells_and_recalc_in(state, states, effect, sheet, inputs, RecalcMode::Always, &mut sink)?;
+    Ok(formula_cells
+        .iter()
+        .map(|&(r, c)| stored_value_in(state, sheet, r, c))
+        .collect())
+}
+
+/// Write the computed body, put the borrowed input cells back, and recalculate
+/// both through the shared cascade: the inputs' dependents return to the
+/// values they had, and every reader of the table body sees the new results.
+fn finish_table(
+    state: &AppState,
+    states: &WhatIfStates<'_>,
+    effect: &DocumentEffect,
+    sheet: RunSheet,
+    originals: &[((u32, u32), Option<Cell>)],
+    results: &[DataTableCell],
+    computed: Vec<((u32, u32), CellValue)>,
+) -> DataTableResult {
+    let mut updated_cells = Vec::new();
+    let mut sink = Vec::new();
+    let restored = write_cells_and_recalc_in(state, states, effect, sheet, originals, RecalcMode::Always, &mut sink);
+    let body: Vec<((u32, u32), Option<Cell>)> = computed
+        .into_iter()
+        .map(|((r, c), v)| ((r, c), Some(result_cell(state, sheet, r, c, &v))))
+        .collect();
+    let written = write_cells_and_recalc_in(state, states, effect, sheet, &body, RecalcMode::AsAnEdit, &mut updated_cells);
+    // The restore's repaints too: the inputs and their dependents changed back.
+    crate::whatif_recalc::merge_reported_cells(&mut updated_cells, sink);
+    DataTableResult {
+        cells: results.to_vec(),
+        updated_cells,
+        error: restored.err().or(written.err()),
     }
 }
 
@@ -106,12 +170,40 @@ fn cell_value_to_string(val: &CellValue) -> String {
 ///   - Row start_row, cols start_col+1..end_col: input values
 ///   - Column start_col, rows start_row+1..end_row: formula cells
 ///   - Body (start_row+1..end_row, start_col+1..end_col): computed results
-#[tauri::command]
+/// `(async)`: a run is many trials, each a recalculation of the changing
+/// cells' dependents; as a sync command the whole run sat on the WebView2 UI
+/// thread and the window showed Not Responding until it ended.
+#[tauri::command(async)]
 pub fn data_table_one_var(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: DataTableOneVarParams,
 ) -> DataTableResult {
+    let states = WhatIfStates {
+        user_files: &user_files_state,
+        pivots: &pivot_state,
+        pane_control: &pane_control_state,
+        ribbon_filter: &ribbon_filter_state,
+    };
+    data_table_one_var_impl(&state, &file_state, &states, params)
+}
+
+/// The body of [`data_table_one_var`], callable without a Tauri runtime.
+pub(crate) fn data_table_one_var_impl(
+    state: &AppState,
+    file_state: &FileState,
+    states: &WhatIfStates<'_>,
+    params: DataTableOneVarParams,
+) -> DataTableResult {
+    // ONE what-if run at a time, taken before every gate (see `begin_whatif_run`).
+    let _run = match begin_whatif_run(state) {
+        Ok(run) => run,
+        Err(e) => return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) },
+    };
     // BACKGROUND: a what-if table is rows x cols full evaluations driven by a
     // caller-supplied rectangle, and every result is WRITTEN into the grid — so
     // the persisting ceiling, not a tighter one, and cancellable because the
@@ -130,210 +222,128 @@ pub fn data_table_one_var(
         params.sheet_index
     );
 
-    // Sheet protection over the table rectangle, which this command rewrites
-    // wholesale (and whose input cell it overwrites temporarily). Uses
-    // params.sheet_index, so a protected background sheet is covered too.
-    if let Err(e) = crate::protection::check_sheet_protection_range(
-        &state,
-        params.sheet_index,
-        params.start_row.min(params.end_row),
-        params.start_col.min(params.end_col),
-        params.start_row.max(params.end_row),
-        params.start_col.max(params.end_col),
-    ) {
-        return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
-    }
-
-    let grid = state.grid.lock_pending().unwrap();
-    let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
-
     let sheet_idx = params.sheet_index;
 
     // Determine orientation
-    let is_col_input = params.col_input_row.is_some() && params.col_input_col.is_some();
-    let is_row_input = params.row_input_row.is_some() && params.row_input_col.is_some();
+    let col_input = params.col_input_row.zip(params.col_input_col);
+    let row_input = params.row_input_row.zip(params.row_input_col);
+    let (input_pos, column_oriented) = match (col_input, row_input) {
+        (Some(pos), _) => (pos, true),
+        (None, Some(pos)) => (pos, false),
+        (None, None) => {
+            return DataTableResult {
+                cells: Vec::new(),
+                updated_cells: Vec::new(),
+                error: Some("Must specify either row input cell or column input cell.".to_string()),
+            };
+        }
+    };
 
-    if !is_col_input && !is_row_input {
-        return DataTableResult {
-            cells: Vec::new(),
-            updated_cells: Vec::new(),
-            error: Some("Must specify either row input cell or column input cell.".to_string()),
+    // The table's shape, read under the grid locks; every guard dropped before
+    // a substitution writes (the cascade takes them itself).
+    //   formula_cells: where each formula sits (top row, or left column);
+    //   inputs: (body line, input value) for each substitution.
+    let (effect, run_sheet, original_input, formula_cells, inputs) = {
+        let grid = state.grid.lock_pending().unwrap();
+        let grids = state.grids.lock_pending().unwrap();
+        let Some(sheet) = grids.get(sheet_idx) else {
+            return DataTableResult {
+                cells: Vec::new(),
+                updated_cells: Vec::new(),
+                error: Some(format!("Sheet index {} out of range", sheet_idx)),
+            };
         };
-    }
+        // Sheet protection over the table rectangle, which this command
+        // rewrites wholesale (and whose input cell it overwrites temporarily),
+        // on a protected background sheet too -- asked HERE, under the guards
+        // the run reads its cells under, so it judges the sheet the table is
+        // computed on (rev13A: a tab moved between an earlier gate and these
+        // locks gated one sheet and ran on another).
+        if let Err(e) = check_run_protection_held(state, &grid, &grids, sheet_idx, |kinds, protection, sheet, styles| {
+            crate::protection::check_sheet_protection_range_in(
+                kinds,
+                protection,
+                sheet,
+                styles,
+                sheet_idx,
+                params.start_row.min(params.end_row),
+                params.start_col.min(params.end_col),
+                params.start_row.max(params.end_row),
+                params.start_col.max(params.end_col),
+            )
+        }) {
+            return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
+        }
+        // The run's sheet by stable id, under the same guards as its cells.
+        let run_sheet = RunSheet::at(state, sheet_idx);
+        let original_input = sheet.get_cell(input_pos.0, input_pos.1).cloned();
+        let value_at = |r: u32, c: u32| sheet.get_cell(r, c).map(|cell| cell.value.clone()).unwrap_or(CellValue::Empty);
+        let (formula_cells, inputs): (Vec<(u32, u32)>, Vec<(u32, CellValue)>) = if column_oriented {
+            (
+                ((params.start_col + 1)..=params.end_col)
+                    .filter(|&c| sheet.get_cell(params.start_row, c).and_then(|cell| cell.formula_string()).is_some())
+                    .map(|c| (params.start_row, c))
+                    .collect(),
+                ((params.start_row + 1)..=params.end_row)
+                    .map(|r| (r, value_at(r, params.start_col)))
+                    .collect(),
+            )
+        } else {
+            (
+                ((params.start_row + 1)..=params.end_row)
+                    .filter(|&r| sheet.get_cell(r, params.start_col).and_then(|cell| cell.formula_string()).is_some())
+                    .map(|r| (r, params.start_col))
+                    .collect(),
+                ((params.start_col + 1)..=params.end_col)
+                    .map(|c| (c, value_at(params.start_row, c)))
+                    .collect(),
+            )
+        };
 
-    // Past the protection gate and the orientation check: results are written below.
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut grid = grid.authorize(&effect);
-    let mut grids = grids.authorize(&effect);
+        // Past the protection gate and the orientation check: results are written below.
+        let effect = DocumentEffect::mutates(file_state);
+        let _grid = grid.authorize(&effect);
+        let _grids = grids.authorize(&effect);
+        (effect, run_sheet, original_input, formula_cells, inputs)
+    };
 
     let mut result_cells = Vec::new();
-    let mut updated_cells = Vec::new();
+    let mut computed: Vec<((u32, u32), CellValue)> = Vec::new();
 
-    if is_col_input {
-        // Column-oriented: input values down the left column
-        let input_row = params.col_input_row.unwrap();
-        let input_col = params.col_input_col.unwrap();
-
-        // Save original input cell value
-        let original_input = grids[sheet_idx]
-            .get_cell(input_row, input_col)
-            .cloned();
-
-        // Collect formulas from the top row (start_row, start_col+1..end_col)
-        let mut formulas: Vec<Option<String>> = Vec::new();
-        for c in (params.start_col + 1)..=params.end_col {
-            let formula = grids[sheet_idx]
-                .get_cell(params.start_row, c)
-                .and_then(|cell| cell.formula_string());
-            formulas.push(formula);
-        }
-
-        // For each input value (down left column)
-        for r in (params.start_row + 1)..=params.end_row {
-            let input_val = grids[sheet_idx]
-                .get_cell(r, params.start_col)
-                .map(|c| c.value.clone())
-                .unwrap_or(CellValue::Empty);
-
-            // Set the input cell to this value
-            set_cell_value(&mut grids[sheet_idx], input_row, input_col, &input_val);
-
-            // Evaluate each formula
-            for (fi, formula_opt) in formulas.iter().enumerate() {
-                let c = params.start_col + 1 + fi as u32;
-                if let Some(formula) = formula_opt {
-                    let eval_result = evaluate_formula_multi_sheet(
-                        &grids, &sheet_names, sheet_idx, formula,
-                    );
-                    let display = cell_value_to_string(&eval_result);
-                    let numeric = cell_value_to_f64(&eval_result);
-
-                    result_cells.push(DataTableCell {
-                        row: r,
-                        col: c,
-                        value: display.clone(),
-                        numeric_value: numeric,
-                    });
-
-                    // Write result to grid
-                    let style_index = grids[sheet_idx]
-                        .get_cell(r, c)
-                        .map_or(0, |cell| cell.style_index);
-                    let mut new_cell = match &eval_result {
-                        CellValue::Number(n) => Cell::new_number(*n),
-                        _ => Cell::new_text(display.clone()),
-                    };
-                    new_cell.style_index = style_index;
-                    grids[sheet_idx].set_cell(r, c, new_cell.clone());
-                    if sheet_idx == active_sheet {
-                        grid.set_cell(r, c, new_cell);
-                    }
-                }
+    for (line, input_val) in &inputs {
+        let write = [(input_pos, Some(input_cell(state, run_sheet, input_pos.0, input_pos.1, input_val)))];
+        let values = match substitute_and_read(state, states, &effect, run_sheet, &write, &formula_cells) {
+            Ok(values) => values,
+            Err(e) => {
+                let _ = write_cells_and_recalc_in(
+                    state, states, &effect, run_sheet, &[(input_pos, original_input.clone())],
+                    RecalcMode::Always, &mut Vec::new(),
+                );
+                return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
             }
-        }
-
-        // Restore original input cell
-        restore_cell(&mut grids[sheet_idx], input_row, input_col, &original_input);
-        if sheet_idx == active_sheet {
-            restore_cell(&mut grid, input_row, input_col, &original_input);
-        }
-
-    } else {
-        // Row-oriented: input values across the top row
-        let input_row = params.row_input_row.unwrap();
-        let input_col = params.row_input_col.unwrap();
-
-        let original_input = grids[sheet_idx]
-            .get_cell(input_row, input_col)
-            .cloned();
-
-        // Collect formulas from the left column (start_row+1..end_row, start_col)
-        let mut formulas: Vec<Option<String>> = Vec::new();
-        for r in (params.start_row + 1)..=params.end_row {
-            let formula = grids[sheet_idx]
-                .get_cell(r, params.start_col)
-                .and_then(|cell| cell.formula_string());
-            formulas.push(formula);
-        }
-
-        // For each input value (across top row)
-        for c in (params.start_col + 1)..=params.end_col {
-            let input_val = grids[sheet_idx]
-                .get_cell(params.start_row, c)
-                .map(|cell| cell.value.clone())
-                .unwrap_or(CellValue::Empty);
-
-            // Set the input cell to this value
-            set_cell_value(&mut grids[sheet_idx], input_row, input_col, &input_val);
-
-            // Evaluate each formula
-            for (fi, formula_opt) in formulas.iter().enumerate() {
-                let r = params.start_row + 1 + fi as u32;
-                if let Some(formula) = formula_opt {
-                    let eval_result = evaluate_formula_multi_sheet(
-                        &grids, &sheet_names, sheet_idx, formula,
-                    );
-                    let display = cell_value_to_string(&eval_result);
-                    let numeric = cell_value_to_f64(&eval_result);
-
-                    result_cells.push(DataTableCell {
-                        row: r,
-                        col: c,
-                        value: display.clone(),
-                        numeric_value: numeric,
-                    });
-
-                    let style_index = grids[sheet_idx]
-                        .get_cell(r, c)
-                        .map_or(0, |cell| cell.style_index);
-                    let mut new_cell = match &eval_result {
-                        CellValue::Number(n) => Cell::new_number(*n),
-                        _ => Cell::new_text(display.clone()),
-                    };
-                    new_cell.style_index = style_index;
-                    grids[sheet_idx].set_cell(r, c, new_cell.clone());
-                    if sheet_idx == active_sheet {
-                        grid.set_cell(r, c, new_cell);
-                    }
-                }
-            }
-        }
-
-        // Restore original input cell
-        restore_cell(&mut grids[sheet_idx], input_row, input_col, &original_input);
-        if sheet_idx == active_sheet {
-            restore_cell(&mut grid, input_row, input_col, &original_input);
+        };
+        for (&(fr, fc), eval_result) in formula_cells.iter().zip(values) {
+            // The body cell: the input's line, the formula's column (or row).
+            let (r, c) = if column_oriented { (*line, fc) } else { (fr, *line) };
+            result_cells.push(DataTableCell {
+                row: r,
+                col: c,
+                value: cell_value_to_string(&eval_result),
+                numeric_value: cell_value_to_f64(&eval_result),
+            });
+            computed.push(((r, c), eval_result));
         }
     }
 
-    // Build updated cells for grid refresh
-    for r in params.start_row..=params.end_row {
-        for c in params.start_col..=params.end_col {
-            if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c, &locale) {
-                updated_cells.push(cd);
-            }
-        }
-    }
-
-    // Re-evaluate formulas back with restored input
-    re_evaluate_formulas(
-        &mut grid,
-        &mut grids,
-        &sheet_names,
-        sheet_idx,
-        active_sheet,
-    );
-
-    DataTableResult {
-        cells: result_cells,
-        updated_cells,
-        error: None,
-    }
+    finish_table(
+        state,
+        states,
+        &effect,
+        run_sheet,
+        &[(input_pos, original_input)],
+        &result_cells,
+        computed,
+    )
 }
 
 // ============================================================================
@@ -347,12 +357,40 @@ pub fn data_table_one_var(
 ///   - Top row (start_row, start_col+1..end_col): row input values
 ///   - Left column (start_row+1..end_row, start_col): column input values
 ///   - Body (start_row+1..end_row, start_col+1..end_col): computed results
-#[tauri::command]
+/// `(async)`: a run is many trials, each a recalculation of the changing
+/// cells' dependents; as a sync command the whole run sat on the WebView2 UI
+/// thread and the window showed Not Responding until it ended.
+#[tauri::command(async)]
 pub fn data_table_two_var(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: DataTableTwoVarParams,
 ) -> DataTableResult {
+    let states = WhatIfStates {
+        user_files: &user_files_state,
+        pivots: &pivot_state,
+        pane_control: &pane_control_state,
+        ribbon_filter: &ribbon_filter_state,
+    };
+    data_table_two_var_impl(&state, &file_state, &states, params)
+}
+
+/// The body of [`data_table_two_var`], callable without a Tauri runtime.
+pub(crate) fn data_table_two_var_impl(
+    state: &AppState,
+    file_state: &FileState,
+    states: &WhatIfStates<'_>,
+    params: DataTableTwoVarParams,
+) -> DataTableResult {
+    // ONE what-if run at a time, taken before every gate (see `begin_whatif_run`).
+    let _run = match begin_whatif_run(state) {
+        Ok(run) => run,
+        Err(e) => return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) },
+    };
     // See data_table_one_var: same surface, quadratically more of it.
     let _pass = crate::eval_budget::begin_pass(
         crate::eval_budget::EvalSurface::Background,
@@ -368,220 +406,112 @@ pub fn data_table_two_var(
         params.sheet_index
     );
 
-    // Sheet protection over the table rectangle, which this command rewrites
-    // wholesale (and whose input cell it overwrites temporarily). Uses
-    // params.sheet_index, so a protected background sheet is covered too.
-    if let Err(e) = crate::protection::check_sheet_protection_range(
-        &state,
-        params.sheet_index,
-        params.start_row.min(params.end_row),
-        params.start_col.min(params.end_col),
-        params.start_row.max(params.end_row),
-        params.start_col.max(params.end_col),
-    ) {
-        return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
-    }
-
-    let grid = state.grid.lock_pending().unwrap();
-    let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
-
     let sheet_idx = params.sheet_index;
+    let row_input_pos = (params.row_input_row, params.row_input_col);
+    let col_input_pos = (params.col_input_row, params.col_input_col);
+    let formula_pos = (params.start_row, params.start_col);
 
-    // The formula is in the top-left cell
-    let formula = match grids[sheet_idx]
-        .get_cell(params.start_row, params.start_col)
-        .and_then(|cell| cell.formula_string())
-    {
-        Some(f) => f,
-        None => {
+    let (effect, run_sheet, originals, col_inputs, row_inputs) = {
+        let grid = state.grid.lock_pending().unwrap();
+        let grids = state.grids.lock_pending().unwrap();
+        let Some(sheet) = grids.get(sheet_idx) else {
+            return DataTableResult {
+                cells: Vec::new(),
+                updated_cells: Vec::new(),
+                error: Some(format!("Sheet index {} out of range", sheet_idx)),
+            };
+        };
+        // Sheet protection over the table rectangle (rewritten wholesale, its
+        // input cells overwritten temporarily), background sheets included --
+        // asked under the guards the run reads its cells under (rev13A; see the
+        // one-variable table).
+        if let Err(e) = check_run_protection_held(state, &grid, &grids, sheet_idx, |kinds, protection, sheet, styles| {
+            crate::protection::check_sheet_protection_range_in(
+                kinds,
+                protection,
+                sheet,
+                styles,
+                sheet_idx,
+                params.start_row.min(params.end_row),
+                params.start_col.min(params.end_col),
+                params.start_row.max(params.end_row),
+                params.start_col.max(params.end_col),
+            )
+        }) {
+            return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
+        }
+        // The run's sheet by stable id, under the same guards as its cells.
+        let run_sheet = RunSheet::at(state, sheet_idx);
+
+        // The formula is in the top-left cell
+        if sheet
+            .get_cell(formula_pos.0, formula_pos.1)
+            .and_then(|cell| cell.formula_string())
+            .is_none()
+        {
             return DataTableResult {
                 cells: Vec::new(),
                 updated_cells: Vec::new(),
                 error: Some("The top-left cell of the table must contain a formula.".to_string()),
             };
         }
+
+        let value_at = |r: u32, c: u32| sheet.get_cell(r, c).map(|cell| cell.value.clone()).unwrap_or(CellValue::Empty);
+        // Original input cells (one entry when both inputs are the same cell)
+        let mut originals = vec![
+            (col_input_pos, sheet.get_cell(col_input_pos.0, col_input_pos.1).cloned()),
+            (row_input_pos, sheet.get_cell(row_input_pos.0, row_input_pos.1).cloned()),
+        ];
+        if row_input_pos == col_input_pos {
+            originals.truncate(1);
+        }
+        let col_inputs: Vec<(u32, CellValue)> = ((params.start_row + 1)..=params.end_row)
+            .map(|r| (r, value_at(r, params.start_col)))
+            .collect();
+        let row_inputs: Vec<(u32, CellValue)> = ((params.start_col + 1)..=params.end_col)
+            .map(|c| (c, value_at(params.start_row, c)))
+            .collect();
+
+        // Past the protection gate and the "top-left cell must contain a formula" check.
+        let effect = DocumentEffect::mutates(file_state);
+        let _grid = grid.authorize(&effect);
+        let _grids = grids.authorize(&effect);
+        (effect, run_sheet, originals, col_inputs, row_inputs)
     };
-
-    // Past the protection gate and the "top-left cell must contain a formula" check.
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut grid = grid.authorize(&effect);
-    let mut grids = grids.authorize(&effect);
-
-    // Save original input cell values
-    let original_row_input = grids[sheet_idx]
-        .get_cell(params.row_input_row, params.row_input_col)
-        .cloned();
-    let original_col_input = grids[sheet_idx]
-        .get_cell(params.col_input_row, params.col_input_col)
-        .cloned();
 
     let mut result_cells = Vec::new();
+    let mut computed: Vec<((u32, u32), CellValue)> = Vec::new();
 
     // For each combination of row and column input values
-    for r in (params.start_row + 1)..=params.end_row {
-        let col_input_val = grids[sheet_idx]
-            .get_cell(r, params.start_col)
-            .map(|c| c.value.clone())
-            .unwrap_or(CellValue::Empty);
-
-        // Set column input cell
-        set_cell_value(
-            &mut grids[sheet_idx],
-            params.col_input_row,
-            params.col_input_col,
-            &col_input_val,
-        );
-
-        for c in (params.start_col + 1)..=params.end_col {
-            let row_input_val = grids[sheet_idx]
-                .get_cell(params.start_row, c)
-                .map(|cell| cell.value.clone())
-                .unwrap_or(CellValue::Empty);
-
-            // Set row input cell
-            set_cell_value(
-                &mut grids[sheet_idx],
-                params.row_input_row,
-                params.row_input_col,
-                &row_input_val,
-            );
-
-            // Evaluate the formula
-            let eval_result =
-                evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, &formula);
-            let display = cell_value_to_string(&eval_result);
-            let numeric = cell_value_to_f64(&eval_result);
-
-            result_cells.push(DataTableCell {
-                row: r,
-                col: c,
-                value: display.clone(),
-                numeric_value: numeric,
-            });
-
-            // Write result to grid
-            let style_index = grids[sheet_idx]
-                .get_cell(r, c)
-                .map_or(0, |cell| cell.style_index);
-            let mut new_cell = match &eval_result {
-                CellValue::Number(n) => Cell::new_number(*n),
-                _ => Cell::new_text(display.clone()),
-            };
-            new_cell.style_index = style_index;
-            grids[sheet_idx].set_cell(r, c, new_cell.clone());
-            if sheet_idx == active_sheet {
-                grid.set_cell(r, c, new_cell);
+    for (r, col_input_val) in &col_inputs {
+        for (c, row_input_val) in &row_inputs {
+            // Both inputs in one write (when they are the same cell, the row
+            // input's value lands last, as it did before).
+            let mut writes = vec![
+                (col_input_pos, Some(input_cell(state, run_sheet, col_input_pos.0, col_input_pos.1, col_input_val))),
+                (row_input_pos, Some(input_cell(state, run_sheet, row_input_pos.0, row_input_pos.1, row_input_val))),
+            ];
+            if row_input_pos == col_input_pos {
+                writes.remove(0);
             }
-        }
-    }
-
-    // Restore original input cells
-    restore_cell(
-        &mut grids[sheet_idx],
-        params.row_input_row,
-        params.row_input_col,
-        &original_row_input,
-    );
-    restore_cell(
-        &mut grids[sheet_idx],
-        params.col_input_row,
-        params.col_input_col,
-        &original_col_input,
-    );
-    if sheet_idx == active_sheet {
-        restore_cell(&mut grid, params.row_input_row, params.row_input_col, &original_row_input);
-        restore_cell(&mut grid, params.col_input_row, params.col_input_col, &original_col_input);
-    }
-
-    // Build updated cells
-    let mut updated_cells = Vec::new();
-    for r in params.start_row..=params.end_row {
-        for c in params.start_col..=params.end_col {
-            if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c, &locale) {
-                updated_cells.push(cd);
-            }
-        }
-    }
-
-    // Re-evaluate with restored input values
-    re_evaluate_formulas(
-        &mut grid,
-        &mut grids,
-        &sheet_names,
-        sheet_idx,
-        active_sheet,
-    );
-
-    DataTableResult {
-        cells: result_cells,
-        updated_cells,
-        error: None,
-    }
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Set a cell's value in the grid (preserving style).
-fn set_cell_value(grid: &mut Grid, row: u32, col: u32, value: &CellValue) {
-    let style_index = grid.get_cell(row, col).map_or(0, |c| c.style_index);
-    let mut cell = match value {
-        CellValue::Number(n) => Cell::new_number(*n),
-        CellValue::Text(t) => Cell::new_text(t.clone()),
-        CellValue::Boolean(b) => Cell::new_boolean(*b),
-        CellValue::Empty => Cell::default(),
-        _ => Cell::new_text(cell_value_to_string(value)),
-    };
-    cell.style_index = style_index;
-    grid.set_cell(row, col, cell);
-}
-
-/// Restore a cell from saved state.
-fn restore_cell(grid: &mut Grid, row: u32, col: u32, original: &Option<Cell>) {
-    match original {
-        Some(cell) => grid.set_cell(row, col, cell.clone()),
-        None => grid.set_cell(row, col, Cell::default()),
-    }
-}
-
-/// Re-evaluate formula cells after data table computation.
-/// This is a simplified recalc for the formula cells that may have been
-/// affected by the temporary input value changes.
-fn re_evaluate_formulas(
-    grid: &mut Grid,
-    grids: &mut [Grid],
-    sheet_names: &[String],
-    sheet_idx: usize,
-    active_sheet: usize,
-) {
-    let _governor = crate::eval_budget::inherit_or(crate::eval_budget::EvalSurface::Background);
-    // Walk through all cells in the sheet and re-evaluate any formula cells
-    // This is a simple approach; a production system would use the dependency graph
-    let max_row = grids[sheet_idx].max_row;
-    let max_col = grids[sheet_idx].max_col;
-    if max_row > 0 || max_col > 0 {
-        for r in 0..=max_row {
-            for c in 0..=max_col {
-                if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-                    if let Some(formula) = cell.formula_string() {
-                        let new_value = evaluate_formula_multi_sheet(
-                            grids, sheet_names, sheet_idx, &formula,
-                        );
-                        let mut updated = cell;
-                        updated.value = new_value;
-                        grids[sheet_idx].set_cell(r, c, updated.clone());
-                        if sheet_idx == active_sheet {
-                            grid.set_cell(r, c, updated);
-                        }
-                    }
+            let eval_result = match substitute_and_read(state, states, &effect, run_sheet, &writes, &[formula_pos]) {
+                Ok(mut values) => values.pop().unwrap_or(CellValue::Empty),
+                Err(e) => {
+                    let _ = write_cells_and_recalc_in(
+                        state, states, &effect, run_sheet, &originals, RecalcMode::Always, &mut Vec::new(),
+                    );
+                    return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
                 }
-            }
+            };
+            result_cells.push(DataTableCell {
+                row: *r,
+                col: *c,
+                value: cell_value_to_string(&eval_result),
+                numeric_value: cell_value_to_f64(&eval_result),
+            });
+            computed.push(((*r, *c), eval_result));
         }
     }
+
+    finish_table(state, states, &effect, run_sheet, &originals, &result_cells, computed)
 }

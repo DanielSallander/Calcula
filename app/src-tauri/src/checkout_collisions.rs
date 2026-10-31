@@ -169,10 +169,12 @@ impl WorkbookHolds {
             .read()
             .map_err(|e| e.to_string())?
             .iter()
-            .map(|(key, nr)| {
-                let key = key.to_uppercase();
-                (key.clone(), HeldItem { id: key, name: nr.name.clone(), stamp: None })
-            })
+            // The map is already keyed by `name_resolution::name_key` (Excel's
+            // defined-name rule), which is what the incoming side below is
+            // keyed by. Re-uppercasing it (`to_uppercase`) was harmless only
+            // for ASCII; the incoming side's `to_uppercase` never met a
+            // ligature key (`PÆRESALG` against `PAERESALG`).
+            .map(|(key, nr)| (key.clone(), HeldItem { id: key.clone(), name: nr.name.clone(), stamp: None }))
             .collect();
         Ok(Self { modules, notebooks, names })
     }
@@ -244,7 +246,10 @@ pub(crate) fn find_checkout_collisions(
         check(CollisionKind::Notebook, &notebook.id, holds.notebooks.get(&notebook.id));
     }
     for name in incoming.names {
-        let key = name.name.to_uppercase();
+        // Excel's defined-name rule, the key the materializer skips by: a
+        // `Pæresalg` the workbook holds is the application's `PAERESALG`, and
+        // `Straße` is `STRASSE`.
+        let key = crate::name_resolution::name_key(&name.name);
         check(CollisionKind::Name, &key, holds.names.get(&key));
     }
     found.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.id.cmp(&b.id)));

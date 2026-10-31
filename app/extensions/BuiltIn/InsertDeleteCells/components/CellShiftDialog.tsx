@@ -15,6 +15,7 @@ import {
   CHOICE_LABELS,
   DELETE_CHOICES,
   INSERT_CHOICES,
+  INSERT_COPIED_CHOICES,
   type CellShiftChoice,
   type CellShiftMode,
 } from "../lib/cellShift";
@@ -22,6 +23,11 @@ import {
 /** What the opener hands the dialog. */
 export interface CellShiftDialogData {
   mode: CellShiftMode;
+  /**
+   * Insert over a pending COPY (Excel's Insert Copied Cells): the same
+   * "Insert" title, with Shift cells right / Shift cells down only [LIVE].
+   */
+  copied?: boolean;
   /** The radio chosen when the dialog opens. */
   initial: CellShiftChoice;
   /** OK: the choice. Called after the dialog has closed. */
@@ -111,13 +117,19 @@ function readData(data: Record<string, unknown> | undefined): CellShiftDialogDat
   const mode = data?.mode;
   const onChoose = data?.onChoose;
   if ((mode !== "insert" && mode !== "delete") || typeof onChoose !== "function") return null;
-  return { mode, initial: data?.initial as CellShiftChoice, onChoose: onChoose as CellShiftDialogData["onChoose"] };
+  return {
+    mode,
+    copied: mode === "insert" && data?.copied === true,
+    initial: data?.initial as CellShiftChoice,
+    onChoose: onChoose as CellShiftDialogData["onChoose"],
+  };
 }
 
 export function CellShiftDialog({ isOpen, onClose, data }: DialogProps): React.ReactElement | null {
   const win = useDialogWindow({ minWidth: 220, minHeight: 200, resizable: false });
   const parsed = readData(data);
-  const choices: readonly CellShiftChoice[] = parsed?.mode === "delete" ? DELETE_CHOICES : INSERT_CHOICES;
+  const choices: readonly CellShiftChoice[] =
+    parsed?.mode === "delete" ? DELETE_CHOICES : parsed?.copied ? INSERT_COPIED_CHOICES : INSERT_CHOICES;
   const [choice, setChoice] = useState<CellShiftChoice>(choices[0]);
   const firstRadio = useRef<HTMLInputElement | null>(null);
 
@@ -133,7 +145,7 @@ export function CellShiftDialog({ isOpen, onClose, data }: DialogProps): React.R
     });
     // `win` is stable per mount; re-run only when the dialog (re)opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, parsed?.mode, parsed?.initial]);
+  }, [isOpen, parsed?.mode, parsed?.copied, parsed?.initial]);
 
   const handleOk = useCallback(() => {
     if (!parsed) return;

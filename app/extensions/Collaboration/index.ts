@@ -102,6 +102,7 @@ import { parseNumber } from "@api/locale";
 import { openApplicationInspectorWindow } from "./lib/openApplicationInspectorWindow";
 import { designateWritebackRegion } from "./lib/designateWritebackRegion";
 import { installInspectorFormPreviewBridge } from "./lib/inspectorFormPreview";
+import { runRefreshDataCommand } from "./lib/refreshDataCommand";
 import {
   syncWritebackValidators,
   resetWritebackValidators,
@@ -111,7 +112,6 @@ import { registerCommitGuard } from "@api/commitGuards";
 import { runWritebackValidator } from "@api/writebackValidators";
 import {
   saveWritebackDraft,
-  refreshData,
   getSheetIdForIndex,
   detachSheet,
   resetSubscription,
@@ -715,36 +715,13 @@ function activate(context: ExtensionContext): void {
     id: "externalData:refreshData",
     label: "Refresh Data",
     icon: IconRefreshData,
-    action: async () => {
-      try {
-        const result = await refreshData();
-
-        if (result.needsConfiguration.length > 0) {
-          // Show connection dialog for data sources that need manual setup
-          context.ui.dialogs.show(CONNECTION_DIALOG_ID, {
-            dataSources: result.needsConfiguration,
-          });
-        } else if (result.sourcesRefreshed > 0) {
-          // Data sources verified — notify the grid (pivot refresh pulls
-          // the actual data through the BI connections)
-          emitAppEvent(AppEvents.SHEET_CHANGED, {});
-          context.ui.notifications.showToast(
-            `${result.sourcesRefreshed} data source(s) connected and verified`,
-            { type: "success", duration: 3000 },
-          );
-        } else {
-          context.ui.notifications.showToast(
-            "No data sources found in subscriptions",
-            { type: "info", duration: 3000 },
-          );
-        }
-      } catch (err) {
-        context.ui.notifications.showToast(
-          `Refresh failed: ${err}`,
-          { type: "error", duration: 5000 },
-        );
-      }
-    },
+    // The command, and the clipboard ending Excel's Refresh All has, live in
+    // lib/refreshDataCommand.ts (rev15B).
+    action: () =>
+      runRefreshDataCommand({
+        showConnectionDialog: (dataSources) => context.ui.dialogs.show(CONNECTION_DIALOG_ID, { dataSources }),
+        showToast: (message, options) => context.ui.notifications.showToast(message, options),
+      }),
   });
   cleanupFns.push(() => context.ui.menus.unregisterItem("externalData", "externalData:refreshData"));
 

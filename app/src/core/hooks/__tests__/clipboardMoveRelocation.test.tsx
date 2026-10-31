@@ -113,9 +113,20 @@ vi.mock("../../lib/dialogs", () => ({
   confirmAsync: vi.fn(async () => true),
 }));
 
-import { useClipboard, type UseClipboardReturn } from "../useClipboard";
+import {
+  useClipboard,
+  getInternalClipboard,
+  MOVE_PAST_THE_EDGE,
+  PASTE_PAST_THE_EDGE,
+  type UseClipboardReturn,
+} from "../useClipboard";
+import * as tauriApi from "../../lib/tauri-api";
+import * as dialogs from "../../lib/dialogs";
 import { GridProvider, useGridContext } from "../../state/GridContext";
 import { setSelection } from "../../state/gridActions";
+import { AppEvents as ApiAppEvents } from "../../../api/events";
+import { followCell } from "../../../api/structuralFollow";
+import type { StructuralMoveDelta } from "../../types";
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
@@ -271,5 +282,204 @@ describe("Cut + Paste is a move too", () => {
     await settle();
     expect(writes()).toEqual([{ row: 5, col: 1, value: "=A1@5,0" }]);
     expect(api.relocateCellReferences).not.toHaveBeenCalled();
+  });
+});
+
+// Round 11 (lane clip3, structdelta NEW-row-column-reorder-not-followed): a
+// drag of whole rows or columns is Excel's MOVE of a block -- it OVERWRITES
+// the lines it lands on, and the lines it passes over stay where they are
+// [LIVE 2026-10-30, clip3/probe-rowmove-watch.ps1: Range("3:4").Cut
+// Range("A10") moves the watches on C3/C4 to C10/C11, keeps C6's, removes the
+// ones on C10/C11, and =C10 becomes #REF!]. It used to announce nothing and
+// tell the backend not to record the move (`recordMove: false`), so a watch or
+// a bookmark on a dragged row stayed behind, and so did its Undo.
+describe("a drag of whole rows or columns is followed like any moved block", () => {
+  function movedAnnouncements(): Array<{ moves: Array<Record<string, unknown>>; source: string }> {
+    const seen: Array<{ moves: Array<Record<string, unknown>>; source: string }> = [];
+    window.addEventListener(ApiAppEvents.CELLS_MOVED, (e) => {
+      seen.push((e as CustomEvent).detail);
+    });
+    return seen;
+  }
+
+  it("moving rows records the move with the backend and announces CELLS_MOVED for the whole rows", async () => {
+    const seen = movedAnnouncements();
+    model.cells.set("2,2", { display: "c3", formula: null, styleIndex: 0 });
+    await act(async () => {
+      await hook.moveRows(2, 3, 9);
+    });
+    await settle();
+    const call = api.relocateCellReferences.mock.calls[0] ?? [];
+    expect(call.length, "the relocation was told not to record the move (a row drag is a block move)").toBe(6);
+    expect(seen.length, "the row drag announced no CELLS_MOVED: a watch on C3 stays behind").toBe(1);
+    const [move] = seen[0].moves;
+    expect(seen[0].source).toBe("edit");
+    expect(move).toMatchObject({
+      kind: "move",
+      fromSheetIndex: 0,
+      fromStartRow: 2,
+      fromEndRow: 3,
+      fromStartCol: 0,
+      toSheetIndex: 0,
+      toRow: 9,
+      toCol: 0,
+    });
+    // [LIVE] what a follower then does with it: C3 lands on C10, C6 (passed
+    // over) stays, C10 (overwritten) is gone.
+    const m = move as unknown as StructuralMoveDelta;
+    expect(followCell(m, 0, 2, 2)).toEqual({ sheetIndex: 0, row: 9, col: 2 });
+    expect(followCell(m, 0, 5, 2)).toEqual({ sheetIndex: 0, row: 5, col: 2 });
+    expect(followCell(m, 0, 9, 2)).toBeNull();
+  });
+
+  it("moving columns records the move and announces CELLS_MOVED for the whole columns", async () => {
+    const seen = movedAnnouncements();
+    model.cells.set("0,1", { display: "5", formula: null, styleIndex: 0 });
+    await act(async () => {
+      await hook.moveColumns(1, 1, 4);
+    });
+    await settle();
+    expect((api.relocateCellReferences.mock.calls[0] ?? []).length, "the column drag was told not to record the move").toBe(6);
+    expect(seen.length, "the column drag announced no CELLS_MOVED").toBe(1);
+    expect(seen[0].moves[0]).toMatchObject({ fromStartRow: 0, fromStartCol: 1, fromEndCol: 1, toRow: 0, toCol: 4 });
+  });
+});
+
+// Round 12 (lane clip4), reviewer rev10A's minors on round 10:
+//  - a drag-move SWALLOWED a refused relocation (or a refused source clear),
+//    committed and still announced CELLS_MOVED; a refused destination write
+//    was CANCELLED, which drops the undo record and keeps the writes. A move
+//    is now all or nothing, as a cut's paste is: every refusal takes the whole
+//    gesture back to the point marked before it wrote, and nothing is
+//    announced.
+//  - a drag or paste that ran past the grid's last row wrote the part that
+//    fit, cleared the WHOLE source and announced the WHOLE block as moved.
+//    Excel refuses it [LIVE 2026-10-30, clip4/probe-edge.ps1]: A1:A3 copied
+//    and pasted at D1048575 -> "You can't paste this here because the Copy
+//    area and paste area aren't the same size"; Range("A1:A3").Cut
+//    Range("B1048575") -> "This selection isn't valid", A1 untouched.
+describe("a move is all or nothing, and nothing lands past the sheet's edge", () => {
+  const LAST_ROW = 1_048_575;
+
+  beforeEach(() => {
+    vi.mocked(tauriApi.rollBackToUndoSavepoint).mockClear();
+    vi.mocked(tauriApi.commitUndoTransaction).mockClear();
+    vi.mocked(tauriApi.cancelUndoTransaction).mockClear();
+    vi.mocked(dialogs.alertAsync).mockClear();
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      hook.clearClipboardState();
+    });
+  });
+
+  function movedAnnouncements(): unknown[] {
+    const seen: unknown[] = [];
+    window.addEventListener(ApiAppEvents.CELLS_MOVED, (e) => {
+      seen.push((e as CustomEvent).detail);
+    });
+    return seen;
+  }
+
+  it("a REFUSED relocation takes the whole drag back: rolled back, never committed, no CELLS_MOVED", async () => {
+    const seen = movedAnnouncements();
+    model.cells.set("0,1", { display: "5", formula: null, styleIndex: 0 });
+    api.relocateCellReferences.mockRejectedValueOnce(new Error("the relocation was refused"));
+    await act(async () => {
+      await hook.moveCells({ startRow: 0, startCol: 1, endRow: 0, endCol: 1, type: "cells" }, 4, 1);
+    });
+    await settle();
+    expect(vi.mocked(tauriApi.rollBackToUndoSavepoint), "the refused move was not taken back").toHaveBeenCalledWith({
+      transaction: 7,
+      changes: 0,
+    });
+    expect(vi.mocked(tauriApi.commitUndoTransaction), "a refused move was committed").not.toHaveBeenCalled();
+    expect(seen, "a move that was taken back announced CELLS_MOVED").toEqual([]);
+    expect(vi.mocked(dialogs.alertAsync).mock.calls.at(-1)?.[0]).toContain("the relocation was refused");
+  });
+
+  it("a REFUSED source clear takes the whole drag back too (it used to be swallowed)", async () => {
+    const seen = movedAnnouncements();
+    model.cells.set("0,1", { display: "5", formula: null, styleIndex: 0 });
+    api.clearCell.mockRejectedValueOnce(new Error("the cell is locked"));
+    await act(async () => {
+      await hook.moveCells({ startRow: 0, startCol: 1, endRow: 0, endCol: 1, type: "cells" }, 4, 1);
+    });
+    await settle();
+    expect(vi.mocked(tauriApi.rollBackToUndoSavepoint)).toHaveBeenCalledTimes(1);
+    expect(api.relocateCellReferences, "the move went on after its source refused").not.toHaveBeenCalled();
+    expect(vi.mocked(tauriApi.commitUndoTransaction)).not.toHaveBeenCalled();
+    expect(seen).toEqual([]);
+  });
+
+  it("control: a drag that succeeds commits and announces the move it made", async () => {
+    const seen = movedAnnouncements();
+    model.cells.set("0,1", { display: "5", formula: null, styleIndex: 0 });
+    await act(async () => {
+      await hook.moveCells({ startRow: 0, startCol: 1, endRow: 0, endCol: 1, type: "cells" }, 4, 1);
+    });
+    await settle();
+    expect(vi.mocked(tauriApi.rollBackToUndoSavepoint)).not.toHaveBeenCalled();
+    expect(vi.mocked(tauriApi.commitUndoTransaction)).toHaveBeenCalledTimes(1);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("[LIVE] a drag whose block would run past the last row is refused whole: nothing written, cleared or announced", async () => {
+    const seen = movedAnnouncements();
+    model.cells.set("0,1", { display: "a1", formula: null, styleIndex: 0 });
+    model.cells.set("2,1", { display: "a3", formula: null, styleIndex: 0 });
+    await act(async () => {
+      await hook.moveCells({ startRow: 0, startCol: 1, endRow: 2, endCol: 1, type: "cells" }, LAST_ROW - 1, 1);
+    });
+    await settle();
+    expect(writes(), "the part that fit was written").toEqual([]);
+    expect(api.clearCell, "the source was cleared: the overhanging cells were lost").not.toHaveBeenCalled();
+    expect(seen, "a block that landed nowhere was announced as moved").toEqual([]);
+    expect(vi.mocked(dialogs.alertAsync)).toHaveBeenCalledWith(MOVE_PAST_THE_EDGE);
+  });
+
+  it("[LIVE] a CUT pasted where it would run past the last row is refused whole, and the cut stays pending", async () => {
+    const seen = movedAnnouncements();
+    model.cells.set("0,1", { display: "a1", formula: null, styleIndex: 0 });
+    model.cells.set("2,1", { display: "a3", formula: null, styleIndex: 0 });
+    await select(0, 1, 2, 1);
+    await act(async () => {
+      await hook.cut();
+    });
+    sys.text = sys.written.at(-1) ?? null;
+    await select(LAST_ROW - 1, 1);
+    await act(async () => {
+      await hook.paste();
+    });
+    await settle();
+    expect(writes()).toEqual([]);
+    expect(api.clearCell).not.toHaveBeenCalled();
+    expect(api.relocateCellReferences).not.toHaveBeenCalled();
+    expect(seen).toEqual([]);
+    expect(vi.mocked(dialogs.alertAsync)).toHaveBeenCalledWith(MOVE_PAST_THE_EDGE);
+    expect(getInternalClipboard()?.isCut, "a refused paste ended the cut").toBe(true);
+  });
+
+  it("[LIVE] a COPY pasted where it would run past the last row is refused whole; at a row where it fits it pastes", async () => {
+    model.cells.set("0,1", { display: "a1", formula: null, styleIndex: 0 });
+    await select(0, 1, 2, 1);
+    await act(async () => {
+      await hook.copy();
+    });
+    sys.text = sys.written.at(-1) ?? null;
+    await select(LAST_ROW - 1, 1);
+    await act(async () => {
+      await hook.paste();
+    });
+    await settle();
+    expect(writes()).toEqual([]);
+    expect(vi.mocked(dialogs.alertAsync)).toHaveBeenCalledWith(PASTE_PAST_THE_EDGE);
+    await select(LAST_ROW - 2, 1);
+    await act(async () => {
+      await hook.paste();
+    });
+    await settle();
+    expect(writes().map((w) => w.row)).toEqual([LAST_ROW - 2, LAST_ROW - 1, LAST_ROW]);
   });
 });

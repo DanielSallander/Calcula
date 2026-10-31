@@ -22,6 +22,9 @@ export function createMonteCarloDriver(cfg: MonteCarloSpec): Driver {
 
     async applyFrame(): Promise<void> {
       const res = await animRerollAndRead(cfg.sheetIndex, cfg.outcomeRow, cfg.outcomeCol);
+      // A trial refused (a what-if run is going) stops the run and says why,
+      // rather than silently recording nothing for every remaining trial.
+      if (res.error) throw new Error(res.error);
       if (res.value != null && Number.isFinite(res.value)) mcPush(res.value);
     },
 

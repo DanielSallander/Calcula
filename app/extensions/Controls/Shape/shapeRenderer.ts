@@ -847,6 +847,31 @@ export function shapeHasScript(instanceId: string): boolean {
   return shapesWithScripts.has(instanceId);
 }
 
+/**
+ * Replace the WHOLE set of scripted shapes with `ids` -- the backend's own
+ * list, read after an undo or redo of a structural edit, which moves a shape's
+ * script binding back with it in the backend (the backend's list is the
+ * authority, not a replay of the payload's `deltas`). Returns
+ * whether the set changed.
+ */
+export function replaceShapeScriptMarks(ids: Iterable<string>): boolean {
+  const next = new Set(ids);
+  let changed = next.size !== shapesWithScripts.size;
+  if (!changed) {
+    for (const id of next) {
+      if (!shapesWithScripts.has(id)) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (changed) {
+    shapesWithScripts.clear();
+    for (const id of next) shapesWithScripts.add(id);
+  }
+  return changed;
+}
+
 /** Invalidate cached data for a specific shape control. */
 export function invalidateShapeCache(controlId: string): void {
   staleEntries.add(controlId);

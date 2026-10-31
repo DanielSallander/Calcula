@@ -126,6 +126,7 @@ async function loadBookmarksInner(): Promise<void> {
         addCellBookmark(bm.row, bm.col, bm.sheetIndex, bm.sheetName, {
           label: bm.label,
           color: bm.color,
+          ...(typeof bm.sheetId === "string" && bm.sheetId ? { sheetId: bm.sheetId } : {}),
         });
       }
     }

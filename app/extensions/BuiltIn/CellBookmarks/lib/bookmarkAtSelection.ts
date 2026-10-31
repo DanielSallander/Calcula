@@ -25,6 +25,8 @@ interface ActiveCell {
   col: number;
   sheetIndex: number;
   sheetName: string;
+  /** The sheet's stable id, when the grid state carries it. */
+  sheetId?: string;
 }
 
 /** Core's active cell, or null when there is no selection. */
@@ -36,7 +38,14 @@ function activeCell(): ActiveCell | null {
     col: state.selection.startCol,
     sheetIndex: state.sheetContext.activeSheetIndex,
     sheetName: state.sheetContext.activeSheetName,
+    ...(state.sheetContext.activeSheetId ? { sheetId: state.sheetContext.activeSheetId } : {}),
   };
+}
+
+/** Bookmark `cell`, under its sheet's stable id when the grid state carries it. */
+function bookmarkCell(cell: ActiveCell): void {
+  if (cell.sheetId) addBookmark(cell.row, cell.col, cell.sheetIndex, cell.sheetName, { sheetId: cell.sheetId });
+  else addBookmark(cell.row, cell.col, cell.sheetIndex, cell.sheetName);
 }
 
 /** Add a bookmark on the active cell (warns when it already has one). */
@@ -48,7 +57,7 @@ export function addBookmarkAtSelection(): void {
     showToast("Cell already bookmarked", { variant: "warning" });
     return;
   }
-  addBookmark(cell.row, cell.col, cell.sheetIndex, cell.sheetName);
+  bookmarkCell(cell);
   showToast("Bookmark added", { variant: "success" });
 }
 
@@ -61,7 +70,7 @@ export function toggleBookmarkAtSelection(): void {
     removeBookmark(cell.row, cell.col, cell.sheetIndex);
     showToast("Bookmark removed", { variant: "info" });
   } else {
-    addBookmark(cell.row, cell.col, cell.sheetIndex, cell.sheetName);
+    bookmarkCell(cell);
     showToast("Bookmark added", { variant: "success" });
   }
 }

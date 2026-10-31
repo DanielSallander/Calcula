@@ -3,7 +3,7 @@
 
 use crate::api_types::{
     CellData, CellTargetRef, FillParam, FormattingParams, FormattingResult, IndexListArg, MergedRegion, PreviewResult,
-    StyleData, StyleEntry,
+    StyleCheckArea, StyleData, StyleEntry,
 };
 use crate::cell_target::ResolvedCellTarget;
 use serde::{Deserialize, Serialize};
@@ -33,144 +33,410 @@ pub fn get_all_styles(state: State<AppState>) -> Vec<StyleData> {
 }
 
 /// Set a cell's style index.
+///
+/// `target` (BUG-0513, owner finding G3): the cell is a floating grid's cell --
+/// written on its backing sheet ONLY, inside the write extent, gated by the
+/// HOST's protection (its Format Cells option; on a protected host the cell
+/// keeps its Locked flag), and recorded against the backing sheet in the
+/// caller's open undo step. Format Painter, Paste Formatting and Paste (No Borders) reach a
+/// floating grid's cells through it exactly as they reach a sheet's.
+///
+/// `check_area` (ALL OR NOTHING): the call is a CHECK of the whole rectangle a
+/// gesture is about to style cell by cell -- the same gates, asked once over
+/// the rectangle, and nothing written (`row`, `col` and `style_index` are not
+/// used; answers `None`). A Format Painter stroke over A1:A3 whose A3 was
+/// refused used to paint A1 and A2 first, and the stroke's cancel then dropped
+/// its undo record: two cells changed with no Ctrl+Z. Excel refuses a
+/// protected format whole, before anything changes [LIVE, Excel 16, Format
+/// Cells not allowed: Paste Special > Formats onto A1:A3 raises the
+/// protected-sheet error and nothing changes]. The gate is the Format Cells
+/// option alone (`gate_cell_style_rect`), so today the check refuses exactly
+/// when Format Cells is not allowed.
+///
+/// `cells` (the style-only BATCH): every listed cell styled as one call would
+/// style it, in ONE call -- gated once, all or nothing, one undo step (or the
+/// caller's open one); `row`, `col` and `style_index` are not used and the
+/// answer is `None` (`set_cell_styles_core`). A tiled Paste Formatting of one
+/// cell over a column used to be one call per cell.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn set_cell_style(
     state: State<AppState>,
     file_state: State<FileState>,
     row: u32,
     col: u32,
     style_index: usize,
+    target: Option<CellTargetRef>,
+    check_area: Option<StyleCheckArea>,
+    cells: Option<Vec<crate::api_types::CellStyleWrite>>,
 ) -> Result<Option<CellData>, String> {
-    // Sheet protection, before any lock below.
-    //
-    // Returns Result (it used to return a bare Option) so a refusal can reach
-    // the user. This command takes an ARBITRARY style index and is reachable
-    // from Format Painter and Paste-Formats, so once `CellStyle.locked` is
-    // authoritative it becomes the sharpest unlock vector there is: painting
-    // format from an unlocked cell onto a locked one would otherwise silently
-    // unlock it on a protected sheet.
-    {
-        let active_sheet = *state.active_sheet.read().unwrap();
-        crate::protection::check_sheet_protection_range(
-            &state, active_sheet, row, col, row, col,
-        )?;
-        // The two protection axes are additive: this is FORMATTING, so the
-        // formatCells option flag applies exactly as it does in apply_formatting.
-        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "format cells")?;
+    if let Some(area) = check_area {
+        check_cell_style_area_core(&state, area, target.as_ref())?;
+        return Ok(None);
     }
+    if let Some(cells) = cells {
+        set_cell_styles_core(&state, &file_state, &cells, target.as_ref())?;
+        return Ok(None);
+    }
+    set_cell_style_core(&state, &file_state, row, col, style_index, target.as_ref())
+}
+
+/// `set_cell_style`'s CHECK (`check_area`): every gate a style write asks of
+/// one cell, asked of the whole rectangle, holding nothing and writing
+/// nothing -- no effect, no undo record. A target resolves first and the
+/// rectangle must lie inside its write extent.
+pub(crate) fn check_cell_style_area_core(
+    state: &AppState,
+    area: StyleCheckArea,
+    target: Option<&CellTargetRef>,
+) -> Result<(), String> {
+    let rect = (
+        area.start_row.min(area.end_row),
+        area.start_col.min(area.end_col),
+        area.start_row.max(area.end_row),
+        area.start_col.max(area.end_col),
+    );
+    let resolved = match target {
+        Some(target) => {
+            let t = crate::cell_target::resolve_cell_target(state, target)?;
+            crate::cell_target::ensure_in_extent(&t, rect.0, rect.1, rect.2, rect.3)?;
+            Some(t)
+        }
+        None => None,
+    };
+    gate_cell_style_rect(state, resolved.as_ref(), rect)
+}
+
+/// The protection gate of a style write over `rect` (inclusive
+/// `(r0, c0, r1, c1)`), holding nothing: the Format Cells option -- the
+/// HOST's for a cell target (`gate_host_action`), the active sheet's
+/// otherwise -- and the canvas rule. Shared by the one-cell write and the
+/// whole-rectangle check, so the check can never pass a cell the write would
+/// refuse.
+///
+/// FORMATTING ASKS ONLY THE OPTION, NEVER THE LOCK FLAGS (Excel parity). On a
+/// protected sheet that allows Format Cells, Excel formats LOCKED cells --
+/// Bold, a number format, a border, a fill, a cell style and Paste Special >
+/// Formats all land on a locked cell -- and keeps every destination's Locked
+/// flag [LIVE, Excel 16 COM, 2026-10-30, probe1-3.ps1]. The lock flags guard
+/// CONTENT; what they guarded here (a paint from an unlocked cell UNLOCKING a
+/// locked one) is closed instead by the writer keeping the cell's Locked flag
+/// while the sheet is protected (`keep_cell_lock`). Without Format Cells
+/// every cell is refused, the unlocked ones too, as Excel refuses them.
+fn gate_cell_style_rect(
+    state: &AppState,
+    resolved: Option<&ResolvedCellTarget>,
+    _rect: (u32, u32, u32, u32),
+) -> Result<(), String> {
+    match resolved {
+        Some(t) => crate::cell_target::gate_host_action(state, t.host_index, t.backing_index, "formatCells", "format cells"),
+        None => {
+            let active_sheet = *state.active_sheet.read().unwrap();
+            crate::protection::check_sheet_action(state, active_sheet, "formatCells", "format cells")
+        }
+    }
+}
+
+/// Under the held grid and style guards: the Format Cells option of the sheet
+/// WRITTEN (the HOST's for a cell target) asked again, so the option the gate
+/// passed holding nothing cannot change before the write, and whether that
+/// sheet is protected -- a protected sheet's style writes keep every cell's
+/// Locked flag (`keep_cell_lock`). LOCKS: `sheet_kinds` then
+/// `sheet_protection`, read and released -- after `style_registry`, the order
+/// `gate_style_targets` uses; call before the undo stack.
+pub(crate) fn format_protection_under_guards(
+    state: &AppState,
+    resolved: Option<&ResolvedCellTarget>,
+    sheet: usize,
+    what: &str,
+) -> Result<bool, String> {
+    let sheet_kinds = state.sheet_kinds.read().unwrap();
+    let stored = state.sheet_protection.read().unwrap();
+    let view;
+    let protection: &crate::protection::ProtectionStorage = match resolved {
+        Some(t) => {
+            view = crate::cell_target::target_protection_view(&stored, t);
+            &view
+        }
+        None => &stored,
+    };
+    crate::protection::check_sheet_action_in(&sheet_kinds, protection, sheet, "formatCells", what)?;
+    Ok(protection.get(&sheet).is_some_and(|p| p.protected))
+}
+
+/// The OWN style index to write at `(row, col)` so the cell keeps the Locked
+/// flag `locked` it had before the write -- the rule of every style write on a
+/// PROTECTED sheet (Excel [LIVE, Excel 16 COM, Format Cells allowed]: Paste
+/// Special > Formats of an unlocked cell onto a locked one leaves it locked,
+/// of a locked cell onto an unlocked one leaves it unlocked, and Paste All
+/// does the same; only the Locked flag is kept -- Hidden travels with the
+/// format). `own` is the index the writer chose; 0 shows the line format at
+/// the cell. Unchanged when the look already has that flag; otherwise the
+/// look with the flag replaced, interned explicitly so it never reads as
+/// "inherit".
+pub(crate) fn keep_cell_lock(
+    styles: &mut engine::StyleRegistry,
+    grid: &engine::Grid,
+    row: u32,
+    col: u32,
+    own: usize,
+    locked: bool,
+) -> usize {
+    let shown = if own != 0 { own } else { line_format_index_at(grid, row, col) };
+    if styles.get(shown).locked == locked {
+        return own;
+    }
+    let mut style = styles.get(shown).clone();
+    style.locked = locked;
+    styles.get_or_create_explicit(style)
+}
+
+/// `set_cell_style` without the Tauri wrappers (tests drive the real body).
+pub(crate) fn set_cell_style_core(
+    state: &AppState,
+    file_state: &FileState,
+    row: u32,
+    col: u32,
+    style_index: usize,
+    target: Option<&CellTargetRef>,
+) -> Result<Option<CellData>, String> {
+    // A cell target resolves, holding nothing, before any guard below.
+    let resolved = match target {
+        Some(target) => {
+            let t = crate::cell_target::resolve_cell_target(state, target)?;
+            crate::cell_target::ensure_in_extent(&t, row, col, row, col)?;
+            Some(t)
+        }
+        None => None,
+    };
+
+    // Sheet protection, before any lock below: the Format Cells option (the
+    // HOST's for a cell target) -- the same gate a whole-rectangle CHECK asks
+    // (`check_cell_style_area_core`). Returns Result (it used to return a bare
+    // Option) so a refusal can reach the user.
+    //
+    // This command takes an ARBITRARY style index and is reachable from Format
+    // Painter and Paste-Formats, so it is the sharpest unlock vector there is:
+    // painting format from an unlocked cell onto a locked one would unlock it
+    // on a protected sheet. Excel formats a locked cell when Format Cells is
+    // allowed but KEEPS its Locked flag [LIVE], so the write below does too
+    // (`keep_cell_lock`), decided under the held guards.
+    gate_cell_style_rect(state, resolved.as_ref(), (row, col, row, col))?;
+
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // The sheet written: the active sheet, or the target's backing sheet --
+    // re-checked under the held grid guards (`sheet_ids` after `grids`).
+    let sheet = match &resolved {
+        Some(t) => {
+            crate::cell_target::ensure_target_still_at(state, t)?;
+            t.backing_index
+        }
+        None => active_sheet,
+    };
+    if sheet != active_sheet && sheet >= grids.len() {
+        return Err("Floating range backing sheet is missing".to_string());
+    }
+    // WRITE (once authorized), not read: the explicit Normal or a lock-keeping
+    // look may have to be interned (below).
+    let styles = state.style_registry.lock_pending().unwrap();
+    // Asked again under the guards the write uses: the option, and whether the
+    // sheet written is protected (then the cell keeps its Locked flag).
+    let protected = format_protection_under_guards(state, resolved.as_ref(), sheet, "format cells")?;
 
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    // WRITE, not read: the explicit Normal may have to be interned (below).
-    let mut styles = state.style_registry.write(&effect).unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut styles = styles.authorize(&effect);
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
+    let merges = report_merges(state, sheet, active_sheet);
     let locale = state.locale.lock().unwrap();
+
+    // The grid written, and the active sheet's second copy when it is the one.
+    let (grid, mirror): (&mut engine::Grid, Option<&mut engine::Grid>) = if sheet == active_sheet {
+        (&mut *grid, grids.get_mut(active_sheet))
+    } else {
+        (&mut grids[sheet], None)
+    };
 
     // Every caller names the LOOK the cell must show -- the source cell's
     // displayed index (drag-move, Format Painter, Paste Special > Formats) --
     // so index 0 means Normal, which on a stored cell is "inherit": under a
     // row/column format it is the explicit Normal (BUG-0354 follow-up; Excel
     // [LIVE]: Paste Special > Formats of a plain cell onto a bold row is plain).
-    let style_index = own_index_for_requested_look(&mut styles, &grid, row, col, style_index);
-
-    // Record previous state for undo
-    let previous_cell = grid.get_cell(row, col).cloned();
-
-    // Get merge span info
-    let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
-    let (row_span, col_span) = if let Some(region) = merge_info {
-        (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+    // Asked of the sheet WRITTEN, so a floating grid's own line formats decide.
+    let style_index = own_index_for_requested_look(&mut styles, grid, row, col, style_index);
+    // A protected sheet: the cell keeps the Locked flag it had (Excel [LIVE]).
+    let style_index = if protected {
+        let locked = crate::protection::cell_is_locked(grid, &styles, row, col);
+        keep_cell_lock(&mut styles, grid, row, col, style_index, locked)
     } else {
-        (1, 1)
+        style_index
     };
 
-    Ok(if let Some(cell) = grid.get_cell(row, col) {
-        let mut updated_cell = cell.clone();
-        updated_cell.style_index = style_index;
-        grid.set_cell(row, col, updated_cell.clone());
+    // Record undo, against the sheet the cell is on.
+    let previous_cell = grid.get_cell(row, col).cloned();
+    undo_stack.record_cell_change(sheet, row, col, previous_cell);
 
-        if active_sheet < grids.len() {
-            grids[active_sheet].set_cell(row, col, updated_cell.clone());
+    // The cell keeps its value, formula and rich text; only its style moves. A
+    // missing cell is created empty, carrying the style.
+    let mut updated_cell = grid.get_cell(row, col).cloned().unwrap_or(Cell {
+        value: CellValue::Empty,
+        ast: None,
+        style_index,
+        rich_text: None,
+    });
+    updated_cell.style_index = style_index;
+    grid.set_cell(row, col, updated_cell.clone());
+    if let Some(m) = mirror {
+        m.set_cell(row, col, updated_cell.clone());
+    }
+
+    // Get merge span info
+    let (row_span, col_span) = match merges.iter().find(|r| r.start_row == row && r.start_col == col) {
+        Some(region) => (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1),
+        None => (1, 1),
+    };
+
+    // The cell keeps its OWN index (written above); what is DISPLAYED is the
+    // resolved one. An index of 0 is left only where no row/column format
+    // would show through it (see `own_index_for_requested_look`).
+    let effective_style_index = grid.effective_style_index(row, col);
+    let style = styles.get(effective_style_index);
+    let result = format_cell_value_with_color(&updated_cell.value, style, &locale);
+    let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
+        symbol: a.symbol,
+        symbol_before: a.symbol_before,
+        value: a.value,
+    });
+
+    Ok(Some(CellData {
+        row,
+        col,
+        display: result.text, overflow: result.overflow,
+        display_color: result.color,
+        formula: updated_cell.formula_string().map(|f| format!("={}", f)),
+        style_index: effective_style_index,
+        row_span,
+        col_span,
+        sheet_index: None,
+        rich_text: updated_cell.rich_text.as_ref().map(|r| crate::api_types::rich_text_runs_to_data(r)),
+        accounting_layout,
+    }))
+}
+
+/// `set_cell_style`'s style-only BATCH (`cells`): each write as
+/// `set_cell_style_core` makes it -- the requested LOOK
+/// (`own_index_for_requested_look`), the Locked flag kept on a protected sheet
+/// (`keep_cell_lock`), on the active sheet or a target's backing sheet -- but
+/// ONE call for them all:
+///   - GATED ONCE, ALL OR NOTHING: the Format Cells option (the HOST's for a
+///     target) before any lock, and again under the held grid and style guards;
+///     a target's whole bounding rectangle must lie inside its write extent.
+///     A refusal writes nothing.
+///   - ONE UNDO STEP: the caller's open step, else one of its own.
+///   - `keep_borders`: the cell keeps every border side it shows (Paste
+///     Special > All Except Borders: the source's whole style but its borders
+///     [LIVE, Excel 16 COM, 2026-10-04]) -- decided here from the cell's own
+///     style, so the frontend no longer reads each destination and puts each
+///     side back with its own call.
+/// An empty list does nothing and dirties nothing.
+pub(crate) fn set_cell_styles_core(
+    state: &AppState,
+    file_state: &FileState,
+    writes: &[crate::api_types::CellStyleWrite],
+    target: Option<&CellTargetRef>,
+) -> Result<(), String> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let rect = writes.iter().fold((u32::MAX, u32::MAX, 0u32, 0u32), |r, w| {
+        (r.0.min(w.row), r.1.min(w.col), r.2.max(w.row), r.3.max(w.col))
+    });
+    // A cell target resolves, holding nothing, before any guard below.
+    let resolved = match target {
+        Some(target) => {
+            let t = crate::cell_target::resolve_cell_target(state, target)?;
+            crate::cell_target::ensure_in_extent(&t, rect.0, rect.1, rect.2, rect.3)?;
+            Some(t)
         }
+        None => None,
+    };
+    // The same gate one cell's write asks, asked once for the whole set.
+    gate_cell_style_rect(state, resolved.as_ref(), rect)?;
 
-        // Record undo
-        undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sheet = match &resolved {
+        Some(t) => {
+            crate::cell_target::ensure_target_still_at(state, t)?;
+            t.backing_index
+        }
+        None => active_sheet,
+    };
+    if sheet != active_sheet && sheet >= grids.len() {
+        return Err("Floating range backing sheet is missing".to_string());
+    }
+    let styles = state.style_registry.lock_pending().unwrap();
+    // Asked again under the guards the writes use (see `set_cell_style_core`).
+    let protected = format_protection_under_guards(state, resolved.as_ref(), sheet, "format cells")?;
 
-        // The cell keeps its OWN index (written above); what is DISPLAYED is the
-        // resolved one. An index of 0 is left only where no row/column format
-        // would show through it (see `own_index_for_requested_look`).
-        let effective_style_index = grid.effective_style_index(row, col);
-        let style = styles.get(effective_style_index);
-        let result = format_cell_value_with_color(&updated_cell.value, style, &locale);
+    // Every gate above has passed; from here this command commits.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut styles = styles.authorize(&effect);
+    let mut undo_stack = state.undo_stack.lock().unwrap();
 
-        let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
-            symbol: a.symbol,
-            symbol_before: a.symbol_before,
-            value: a.value,
-        });
-
-        // Mark workbook as dirty
-        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-
-        Some(CellData {
-            row,
-            col,
-            display: result.text, overflow: result.overflow,
-            display_color: result.color,
-            formula: updated_cell.formula_string().map(|f| format!("={}", f)),
-            style_index: effective_style_index,
-            row_span,
-            col_span,
-            sheet_index: None,
-            rich_text: None,
-            accounting_layout,
-        })
+    let (grid, mut mirror): (&mut engine::Grid, Option<&mut engine::Grid>) = if sheet == active_sheet {
+        (&mut *grid, grids.get_mut(active_sheet))
     } else {
-        // Create a new empty cell with the style
-        let cell = Cell {
+        (&mut grids[sheet], None)
+    };
+
+    let opened_transaction = !undo_stack.has_open_transaction();
+    if opened_transaction {
+        undo_stack.begin_transaction(format!("Format {} cells", writes.len()));
+    }
+    for w in writes {
+        let (row, col) = (w.row, w.col);
+        let mut style_index = own_index_for_requested_look(&mut styles, grid, row, col, w.style_index);
+        if w.keep_borders.unwrap_or(false) {
+            let own_borders = styles.get(grid.effective_style_index(row, col)).borders.clone();
+            let shown = if style_index != 0 { style_index } else { line_format_index_at(grid, row, col) };
+            if styles.get(shown).borders != own_borders {
+                let mut style = styles.get(shown).clone();
+                style.borders = own_borders;
+                style_index = styles.get_or_create_explicit(style);
+            }
+        }
+        if protected {
+            let locked = crate::protection::cell_is_locked(grid, &styles, row, col);
+            style_index = keep_cell_lock(&mut styles, grid, row, col, style_index, locked);
+        }
+        let previous_cell = grid.get_cell(row, col).cloned();
+        undo_stack.record_cell_change(sheet, row, col, previous_cell.clone());
+        let mut updated_cell = previous_cell.unwrap_or(Cell {
             value: CellValue::Empty,
             ast: None,
             style_index,
             rich_text: None,
-        };
-        grid.set_cell(row, col, cell.clone());
-
-        if active_sheet < grids.len() {
-            grids[active_sheet].set_cell(row, col, cell);
+        });
+        updated_cell.style_index = style_index;
+        if let Some(m) = mirror.as_deref_mut() {
+            m.set_cell(row, col, updated_cell.clone());
         }
-
-        // Record undo (previous was None since cell didn't exist)
-        undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
-
-        // Mark workbook as dirty
-        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-
-        // Displayed index resolves the row/column tiers; the cell above keeps
-        // the caller's explicit index.
-        let effective_style_index = grid.effective_style_index(row, col);
-
-        Some(CellData {
-            row,
-            col,
-            display: String::new(),
-            // Empty: nothing to overflow, and text never marks.
-            overflow: crate::api_types::OverflowClass::Text,
-            display_color: None,
-            formula: None,
-            style_index: effective_style_index,
-            row_span,
-            col_span,
-            sheet_index: None,
-            rich_text: None,
-            accounting_layout: None,
-        })
-    })
+        grid.set_cell(row, col, updated_cell);
+    }
+    if opened_transaction {
+        undo_stack.commit_transaction();
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -631,31 +897,46 @@ impl<'t> StyleTargets<'t> {
     }
 }
 
-/// What a style command's protection gate is asked about.
-#[derive(Clone, Copy)]
-enum StyleArea<'p> {
-    /// A rectangle: the RANGE form of the gate, which never enumerates it
-    /// (Select All is 17.2 billion positions).
-    Range(CellRect),
-    /// Listed rows x columns: the cell form (the caller bounds the product).
-    Cells { rows: &'p [u32], cols: &'p [u32] },
+/// Which cell attributes a style command changes, for its protection gate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StyleChange {
+    /// Only the look (font, fill, borders, number format, alignment, ...).
+    Look,
+    /// The Locked or Hidden flag too (the Protection tab, a script's
+    /// `locked` / `formulaHidden`).
+    Protection,
 }
 
-/// Gate EVERY target sheet -- the formatCells option and the locked cells --
-/// against the HELD guards, before anything is written: one protected sheet
-/// refuses the whole group. `what` names the operation in the refusal.
+/// The refusal of a Locked / Hidden change on a protected sheet.
+fn protection_flag_refusal() -> String {
+    "Cannot change whether cells are locked or hidden while the sheet is protected. \
+     Unprotect the sheet first (Review > Unprotect Sheet)."
+        .to_string()
+}
+
+/// Gate EVERY target sheet against the HELD guards, before anything is
+/// written: one protected sheet refuses the whole group. `what` names the
+/// operation in the refusal.
+///
+/// A protected sheet is asked ONLY its Format Cells option -- never the cells'
+/// lock flags. Excel formats LOCKED cells when Format Cells is allowed (Bold,
+/// a number format, a border, a fill and a cell style all land on a locked
+/// cell [LIVE, Excel 16 COM, 2026-10-30]); the lock flags guard content. A
+/// format delta never moves the Locked flag, so a cell keeps it; a change OF
+/// the Locked or Hidden flag (`StyleChange::Protection`) is refused on a
+/// protected sheet whatever its options, as Excel refuses `Range.Locked` and
+/// `Range.FormulaHidden` there [LIVE].
 ///
 /// With a cell target (P3) the backing sheet is first re-checked to still be
 /// the target's (`ensure_target_still_at`: `sheet_ids` after `grids`), and the
 /// protection asked is the HOST's, through the derived view
-/// (`cell_target::target_protection_view`): the lock flags come from the
-/// backing cells, the protected flag and the options from the host.
+/// (`cell_target::target_protection_view`).
 fn gate_style_targets(
     state: &AppState,
     locks: &StyleLocks<'_>,
     targets: &[usize],
     cell_target: Option<&ResolvedCellTarget>,
-    area: StyleArea<'_>,
+    change: StyleChange,
     what: &str,
 ) -> Result<(), String> {
     if let Some(t) = cell_target {
@@ -674,28 +955,12 @@ fn gate_style_targets(
         None => &stored,
     };
     for &sheet in targets {
-        let Some(grid) = locks.sheet_grid(sheet) else { continue };
+        if locks.sheet_grid(sheet).is_none() {
+            continue;
+        }
         crate::protection::check_sheet_action_in(&sheet_kinds, protection, sheet, "formatCells", what)?;
-        match area {
-            StyleArea::Range(rect) => crate::protection::check_sheet_protection_range_in(
-                &sheet_kinds,
-                protection,
-                grid,
-                &locks.styles,
-                sheet,
-                rect.start_row,
-                rect.start_col,
-                rect.end_row,
-                rect.end_col,
-            )?,
-            StyleArea::Cells { rows, cols } => crate::protection::check_sheet_protection_cells_in(
-                &sheet_kinds,
-                protection,
-                grid,
-                &locks.styles,
-                sheet,
-                rows.iter().flat_map(move |r| cols.iter().map(move |c| (*r, *c))),
-            )?,
+        if change == StyleChange::Protection && protection.get(&sheet).is_some_and(|p| p.protected) {
+            return Err(protection_flag_refusal());
         }
     }
     Ok(())
@@ -743,11 +1008,12 @@ fn format_cells_on_sheets(
 
     let locks = StyleLocks::take(state);
     let (targets, report_sheet) = locks.route_targets(&route);
-    let area = match rect {
-        Some(r) => StyleArea::Range(r),
-        None => StyleArea::Cells { rows, cols },
+    let change = if parsed.params.locked.is_some() || parsed.params.formula_hidden.is_some() {
+        StyleChange::Protection
+    } else {
+        StyleChange::Look
     };
-    gate_style_targets(state, &locks, &targets, route.cell_target(), area, "format cells")?;
+    gate_style_targets(state, &locks, &targets, route.cell_target(), change, "format cells")?;
     if targets.is_empty() {
         // Nothing to format (a group of only the active sheet, or indices past
         // the workbook): nothing written, and the document stays clean -- this
@@ -3206,7 +3472,7 @@ fn border_preset_on_sheets(
 
     let locks = StyleLocks::take(state);
     let (targets, report_sheet) = locks.route_targets(&route);
-    gate_style_targets(state, &locks, &targets, route.cell_target(), StyleArea::Range(rect), "apply borders")?;
+    gate_style_targets(state, &locks, &targets, route.cell_target(), StyleChange::Look, "apply borders")?;
     let mut plans: Vec<(usize, RangeStylePlan)> = Vec::new();
     for &sheet in &targets {
         let Some(grid) = locks.sheet_grid(sheet) else { continue };
@@ -3733,11 +3999,7 @@ fn adjust_number_format_decimals_at(
     };
 
     // The same gates as apply_formatting, and only for a REAL change.
-    let area = match rect {
-        Some(r) => StyleArea::Range(r),
-        None => StyleArea::Cells { rows, cols },
-    };
-    gate_style_targets(state, &locks, &targets, route.cell_target(), area, "format cells")?;
+    gate_style_targets(state, &locks, &targets, route.cell_target(), StyleChange::Look, "format cells")?;
 
     let set_format = |style: &mut CellStyle| style.number_format = next.clone();
     let mut plans: Vec<(usize, RangeStylePlan)> = Vec::new();

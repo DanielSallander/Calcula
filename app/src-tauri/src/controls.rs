@@ -826,14 +826,11 @@ pub(crate) fn set_control_property_with(
     if GEOMETRY_PROPERTIES.contains(&property_name.as_str()) {
         crate::protection::check_sheet_action(state, sheet_index, "editObjects", "move, resize or rotate a control")?;
     }
-    // LOCK OBJECTS: is this a POSITION or SIZE write on a locked page? Decided
-    // before the store is locked (a leaf read of `sheet_kinds`), applied below
-    // only to an EXISTING control whose value actually changes -- a create is
-    // an insert, and re-writing the value it has is no move.
-    let locked_position_write = POSITION_SIZE_PROPERTIES.contains(&property_name.as_str()) && {
-        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
-        crate::sheets::canvas_objects_locked_in(&kinds, sheet_index)
-    };
+    // LOCK OBJECTS: is this a POSITION or SIZE write? Decided below, under the
+    // store (BUG-0443), and only for an EXISTING control whose value actually
+    // changes -- a create is an insert, and re-writing the value it has is no
+    // move.
+    let position_write = POSITION_SIZE_PROPERTIES.contains(&property_name.as_str());
 
     // The `editObjects` answer for a CREATE (wave-B B5), computed before the
     // store is locked -- the gate takes its own locks, as in the geometry
@@ -858,14 +855,17 @@ pub(crate) fn set_control_property_with(
     if !pending.contains_key(&key) {
         create_gate?;
     }
-    if locked_position_write {
+    if position_write {
         if let Some(existing) = pending.get(&key) {
             let unchanged = existing
                 .properties
                 .get(&property_name)
                 .is_some_and(|p| p.value_type == value_type && p.value == value);
+            // Asked holding the store the write lands in (a leaf read of
+            // `sheet_kinds`), so a Lock Objects toggle cannot slip between
+            // the decision and the write.
             if !unchanged {
-                return Err(crate::sheets::canvas_objects_locked_refusal("move or resize a control"));
+                crate::sheets::ensure_canvas_objects_unlocked(state, sheet_index, "move or resize a control")?;
             }
         }
     }
@@ -1008,20 +1008,18 @@ pub(crate) fn set_control_metadata_core(
     // literals and the uid -- and written only by the save path.
     //
     // UNDO. This is the creation door, so the PRE-mutation store is the undo
-    // snapshot; captured under a read guard before `mutates` constructs, and
-    // recorded after the write guard is dropped (the undo stack is taken after
+    // snapshot; captured under the same hold of the store as the write
+    // (`lock_pending`), before `mutates` constructs, and recorded after the
+    // guard is dropped (the undo stack is taken after
     // the store, never while holding it -- see `record_controls_undo`).
-    let previous: Vec<((usize, u32, u32), ControlMetadata)> = state
-        .controls
-        .read()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
+    let pending = state.controls.lock_pending().map_err(|e| e.to_string())?;
+    let previous: Vec<((usize, u32, u32), ControlMetadata)> =
+        pending.iter().map(|(k, v)| (*k, v.clone())).collect();
     // LOCK OBJECTS: a REPLACE of an existing control that changes its position
     // or size is a move by another name, refused on a locked page; a create
-    // (nothing at the cell) is an insert, which a locked page allows.
-    if let Some((_, existing)) = previous.iter().find(|(k, _)| *k == (sheet_index, row, col)) {
+    // (nothing at the cell) is an insert, which a locked page allows. Decided
+    // holding the store the write lands in (BUG-0443).
+    if let Some(existing) = pending.get(&(sheet_index, row, col)) {
         let moves = POSITION_SIZE_PROPERTIES.iter().any(|name| {
             let before = existing.properties.get(*name).map(|p| (&p.value_type, &p.value));
             let after = metadata.properties.get(*name).map(|p| (&p.value_type, &p.value));
@@ -1033,7 +1031,7 @@ pub(crate) fn set_control_metadata_core(
     }
     let effect = DocumentEffect::mutates(&file_state);
     {
-        let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
+        let mut controls = pending.authorize(&effect);
         // THE UID (WP-D): a replace keeps the existing control's, a create
         // keeps the incoming one only when no other control carries it (a
         // paste arrives with its SOURCE's uid and is re-minted). The stored
@@ -1185,15 +1183,6 @@ pub(crate) fn move_control_core(
         refuse_formula_value_type(name, &prop.value_type)?;
     }
     crate::protection::check_sheet_action(state, sheet_index, "editObjects", "move a control")?;
-    // LOCK OBJECTS, read before the store is locked (a leaf read). Applied
-    // below: a new ANCHOR re-places the control (the in-cell toggle draws it at
-    // its cell), and an override of x / y / width / height / offsets that
-    // differs from what the control has moves or resizes it.
-    let page_locked = {
-        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
-        crate::sheets::canvas_objects_locked_in(&kinds, sheet_index)
-    };
-
     let from_key = (sheet_index, from.0, from.1);
     let to_key = (sheet_index, to.0, to.1);
     let pending = state.controls.lock_pending().map_err(|e| e.to_string())?;
@@ -1209,17 +1198,20 @@ pub(crate) fn move_control_core(
             sheet_index, to.0, to.1
         ));
     }
-    if page_locked {
-        let moves_geometry = overrides.iter().any(|(name, prop)| {
-            POSITION_SIZE_PROPERTIES.contains(&name.as_str())
-                && existing
-                    .properties
-                    .get(name)
-                    .map_or(true, |p| p.value_type != prop.value_type || p.value != prop.value)
-        });
-        if to_key != from_key || moves_geometry {
-            return Err(crate::sheets::canvas_objects_locked_refusal("move a control"));
-        }
+    // LOCK OBJECTS, decided holding the store the move lands in (a leaf read
+    // of `sheet_kinds`, BUG-0443): a new ANCHOR re-places the control (the
+    // in-cell toggle draws it at its cell), and an override of x / y / width /
+    // height / offsets that differs from what the control has moves or
+    // resizes it.
+    let moves_geometry = overrides.iter().any(|(name, prop)| {
+        POSITION_SIZE_PROPERTIES.contains(&name.as_str())
+            && existing
+                .properties
+                .get(name)
+                .map_or(true, |p| p.value_type != prop.value_type || p.value != prop.value)
+    });
+    if to_key != from_key || moves_geometry {
+        crate::sheets::ensure_canvas_objects_unlocked(state, sheet_index, "move a control")?;
     }
     // A MOVE carries the control's uid (and so its bindings) unchanged.
     let mut moved = existing.clone();
@@ -1639,18 +1631,8 @@ pub(crate) fn set_control_geometry_core(
     let mut sheets: Vec<usize> = encoded.iter().map(|((sheet, _, _), _)| *sheet).collect();
     sheets.sort_unstable();
     sheets.dedup();
-    // LOCK OBJECTS, decided HERE from a snapshot of the kinds -- before the
-    // store is locked, like the protection gate -- and applied below to the
-    // controls that actually CHANGE, so a re-sync of the same geometry on a
-    // locked page is still a clean no-op. One locked control refuses the
-    // whole batch: a cross-family arrange is one step, never half of one.
-    let mut locked_sheets: HashSet<usize> = HashSet::new();
     for sheet in sheets {
         crate::protection::check_sheet_action(state, sheet, "editObjects", "move or resize a control")?;
-        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
-        if crate::sheets::canvas_objects_locked_in(&kinds, sheet) {
-            locked_sheets.insert(sheet);
-        }
     }
 
     // Resolve, decide and write under ONE hold of the store (`lock_pending`),
@@ -1677,8 +1659,15 @@ pub(crate) fn set_control_geometry_core(
     if changed.is_empty() {
         return Ok(0);
     }
-    if changed.iter().any(|((sheet, _, _), _)| locked_sheets.contains(sheet)) {
-        return Err(crate::sheets::canvas_objects_locked_refusal("move or resize a control"));
+    // LOCK OBJECTS, decided holding the store the batch lands in (BUG-0443),
+    // for the controls that actually CHANGE, so a re-sync of the same geometry
+    // on a locked page is still a clean no-op. One locked control refuses the
+    // whole batch: a cross-family arrange is one step, never half of one.
+    let mut changed_sheets: Vec<usize> = changed.iter().map(|((sheet, _, _), _)| *sheet).collect();
+    changed_sheets.sort_unstable();
+    changed_sheets.dedup();
+    for sheet in changed_sheets {
+        crate::sheets::ensure_canvas_objects_unlocked(state, sheet, "move or resize a control")?;
     }
     let previous: Vec<(ControlKey, ControlMetadata)> =
         pending.iter().map(|(k, v)| (*k, v.clone())).collect();

@@ -11,12 +11,12 @@ import {
   vCubeValue, vCubeKpi, vCubeMembers, vBiModelInfo, vBiModelMutation,
   vBiModelValidate, vBiModelLineage, vBiModelBatch,
   vConnectorRegister, vConnectorRemove,
-  vScheduleEvery, vScheduleAt, vScheduleCancel, vScheduleOnce,
+  vScheduleEvery, vScheduleAt, vScheduleCancel, vScheduleOnce, vScheduleExpose,
   vWritebackRegionId, vWritebackSaveDraft, vWritebackListSubmissions, vWritebackReview,
   vDistRegistry, vDistPackageRef, vDistNextVersion, vDistPublishPreview,
   vDistPublish, vDistPublishModel,
-  vKey, vKV, vUdf, vRangeRef, vRangeWrite, MAX_RANGE_CELLS,
-  vRangeFormat, vRangeFormatUnlocked, vRowColOp, vDimension, vFreeze,
+  vKey, vKV, vUdf, vRangeRef, vRangeWrite, MAX_RANGE_CELLS, vFormatRangeRef, MAX_FORMAT_RECT_CELLS,
+  vRangeFormat, vRangeFormatUnlocked, vRowColOp, vDimension, vDimensionRuns, MAX_DIMENSION_RUNS, vFreeze,
   vNamedStyleApply, vNamedStyleCreate, vNamedStyleName,
   vAutoFitSpan, MAX_AUTOFIT_SPAN, vFillRange,
   vHiddenSpan, vHiddenQuery, MAX_HIDDEN_SPAN,
@@ -199,9 +199,9 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   // FORMATTING (B2). Same reach as sheet.setRangeValues — the sheet currently
   // shown — but it changes appearance instead of content, so it is strictly less
   // destructive than the write row above it.
-  "sheet.setRangeFormat":  { tier: "restricted", class: "mutate", validate: vRangeFormat, limits: { maxCells: MAX_RANGE_CELLS },
+  "sheet.setRangeFormat":  { tier: "restricted", class: "mutate", validate: vRangeFormat, limits: { maxCells: MAX_FORMAT_RECT_CELLS },
                              desc: "Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders)" },
-  "sheet.clearRangeFormat":{ tier: "restricted", class: "mutate", validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
+  "sheet.clearRangeFormat":{ tier: "restricted", class: "mutate", validate: vFormatRangeRef, limits: { maxCells: MAX_FORMAT_RECT_CELLS },
                              desc: "Remove all formatting from a block of cells on the sheet currently shown (the values are kept)" },
   // FORMAT READ-BACK (Wave 3). The other half of the two rows above: a format
   // read is addressed exactly like a value read (same validators, same clamp),
@@ -240,9 +240,9 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   // the protection attributes locked / formulaHidden (Wave 3 item 8). The
   // restricted rows keep refusing them — a distributed script is forced to the
   // restricted tier at pull, so distributed code can never unlock cells.
-  "api.setRangeFormat":    { tier: "unlocked", class: "mutate", validate: vRangeFormatUnlocked, limits: { maxCells: MAX_RANGE_CELLS },
+  "api.setRangeFormat":    { tier: "unlocked", class: "mutate", validate: vRangeFormatUnlocked, limits: { maxCells: MAX_FORMAT_RECT_CELLS },
                              desc: "Change how cells look on any sheet (font, colour, alignment, number format, borders), including whether a cell is locked while its sheet is protected" },
-  "api.clearRangeFormat":  { tier: "unlocked", class: "mutate", validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
+  "api.clearRangeFormat":  { tier: "unlocked", class: "mutate", validate: vFormatRangeRef, limits: { maxCells: MAX_FORMAT_RECT_CELLS },
                              desc: "Remove all formatting from a block of cells (the values are kept)" },
   // FORMAT READ-BACK (Wave 3, item 1) — the inverse of api.setRangeFormat.
   // Same address validators as the value reads, and strictly less disclosure
@@ -385,6 +385,15 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "List every hyperlink on a sheet, with where each one points" },
   "api.setRowHeight":      { tier: "unlocked", class: "mutate", validate: vDimension, desc: "Change a row's height" },
   "api.setColumnWidth":    { tier: "unlocked", class: "mutate", validate: vDimension, desc: "Change a column's width" },
+  // The BATCH forms (Excel's Rows("18:22").RowHeight = h / Cells.RowHeight = h):
+  // one call over inclusive runs, the same backend command and undo step as
+  // the Row Height... / Column Width... dialogs, so Select All sets the
+  // sheet's standard size. What a recorded macro replays a batch resize as.
+  // Same tier and no capability, as the one-line forms.
+  "api.setRowHeights":     { tier: "unlocked", class: "mutate", validate: vDimensionRuns, limits: { maxRuns: MAX_DIMENSION_RUNS },
+                             desc: "Change the height of every row in a set of row runs (one undo step)" },
+  "api.setColumnWidths":   { tier: "unlocked", class: "mutate", validate: vDimensionRuns, limits: { maxRuns: MAX_DIMENSION_RUNS },
+                             desc: "Change the width of every column in a set of column runs (one undo step)" },
   // AUTO-FIT (Wave 3, item 11): the SAME canvas-measured best-fit the
   // double-click resize runs — same measurement code, same
   // @api/autoFitContributors registry, so a pivot overlay or in-cell filter
@@ -525,7 +534,7 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Select a block of cells (or several blocks) and scroll it into view, exactly as if you had clicked it" },
   "api.scrollTo":          { tier: "unlocked", class: "mutate", validate: vScrollTo,
                              desc: "Scroll the grid so a cell is on screen, without changing what is selected" },
-  "api.clearRange":        { tier: "unlocked", class: "mutate", validate: vClearRange, limits: { maxCells: MAX_RANGE_CELLS },
+  "api.clearRange":        { tier: "unlocked", class: "mutate", validate: vClearRange, limits: { maxCells: MAX_FORMAT_RECT_CELLS },
                              desc: "Clear a block of cells on a sheet — everything, only their contents, or only their formatting (one undo step)" },
   "api.getSheets":         { tier: "unlocked", class: "read",   validate: vNone,
                              desc: "List the sheets in this workbook, with each one's kind (worksheet or canvas), visibility, tab colour and whether it is a temporary drill-through sheet" },
@@ -1364,6 +1373,27 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   // so it buys refresh, never reach.
   "ext.invalidateCellStyles": { tier: "restricted", class: "emit", validate: vNone,
                              desc: "Re-ask its own cell-styling contributor for the colours of the cells on screen" },
+  // The callee of a sandboxed extension's SCHEDULED JOB (BUG-0616 #3; Excel's
+  // Application.OnTime calls a named procedure). An extension could schedule
+  // (`cap.scheduleEvery` / `At`, which store a method NAME) but had no way to
+  // publish a method under that name, so every job it set up failed at every
+  // firing. This row publishes one of its functions under a name for ITS OWN
+  // jobs only: the host keeps it in the extension's mount (never in the
+  // cross-script exposed-method registry, so no script, form or other
+  // extension can call it), and only the scheduler's firing of a job this
+  // extension itself created in this session reaches it.
+  //
+  // NO CAPABILITY ON THIS ROW, deliberately (ext2, round 11): publishing a name
+  // grants nothing -- nothing can call it until a JOB exists, and creating the
+  // job (`cap.scheduleEvery` / `At`) is what needs the `schedule` consent, which
+  // Rust re-checks at every firing. Carrying the capability here made an add-in
+  // that publishes from `activate` raise a consent prompt at every launch, even
+  // with no job at all, and a decline broke its activation. The DECLARED
+  // ceiling still applies: the host refuses the call from an extension whose
+  // manifest does not declare `schedule` (extensionWorkerHost.ts).
+  "ext.scheduleExpose":    { tier: "restricted", class: "mutate",
+                             validate: vScheduleExpose, limits: { perMinute: 60 },
+                             desc: "Name one of its own functions so that its own schedules can run it (nothing else can call it)" },
   // ---- add-in FORMS (M4). The same host-painted widget tree an object script
   //      gets, behind rows of their OWN rather than reusing `form.*`, because
   //      the object-script sentences promise things that are not true here: a

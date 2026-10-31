@@ -38,6 +38,7 @@ import {
   rowsFromCells,
 } from "../scriptFormBindings";
 import { MAX_RANGE_CELLS } from "../validators";
+import { sheetNamesEqual } from "../../sheetNames";
 import type { FormOption, FormSpec, FormValue } from "../scriptFormSpec";
 import type { ScriptCell } from "../../scriptableObjects";
 import { cellShape, type PreviewGrid } from "./grid";
@@ -134,7 +135,7 @@ export function resolveFormSourcesFromPreviewGrid(opts: {
  */
 export function namesTheActiveSheet(sheetName: string, activeName: string | undefined): boolean {
   if (activeName === undefined) return false;
-  return sheetName === activeName || sheetName.toLowerCase() === activeName.toLowerCase();
+  return sheetNamesEqual(sheetName, activeName);
 }
 
 /**

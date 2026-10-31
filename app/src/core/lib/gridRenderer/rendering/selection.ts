@@ -9,6 +9,7 @@ import type { FreezeConfig, DimensionOverrides, GridConfig, Viewport } from "../
 import { calculateFreezePaneLayout } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
+import { sheetNamesEqual } from "../../../../api/sheetNames";
 
 // ─── Split Zone Helpers ─────────────────────────────────────────────
 
@@ -234,7 +235,7 @@ export function drawSelection(state: RenderState): void {
 
   // FIX: When editing a formula and viewing a different sheet, don't draw the source sheet's selection
   if (editing && formulaSourceSheetName && currentSheetName) {
-    const isOnDifferentSheet = currentSheetName.toLowerCase() !== formulaSourceSheetName.toLowerCase();
+    const isOnDifferentSheet = !sheetNamesEqual(currentSheetName, formulaSourceSheetName);
     if (isOnDifferentSheet) {
       return;
     }

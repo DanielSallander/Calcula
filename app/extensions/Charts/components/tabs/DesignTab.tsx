@@ -14,7 +14,11 @@ import type {
   ComboMarkOptions,
   ComboSeriesMark,
 } from "../../types";
-import { comboDefaultSeriesMark } from "../../rendering/comboChartPainter";
+import {
+  comboDefaultSeriesMark,
+  comboSecondarySeries,
+  setComboSeriesSecondary,
+} from "../../rendering/comboChartPainter";
 import { isCartesianChart, markFurniture } from "../../types";
 import { listChartMarks, getChartMarkMeta } from "@api/chartMarks";
 import { CHART_TYPES } from "../chartTypeCatalog";
@@ -570,17 +574,14 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
       return (
         <FieldGroup>
           <Label>Combo Options</Label>
-          <CheckboxLabel>
-            <input
-              type="checkbox"
-              checked={(opts as any).secondaryYAxis ?? false}
-              onChange={(e) => updateMarkOptions({ secondaryYAxis: e.target.checked })}
-            />
-            Secondary Y axis (right)
-          </CheckboxLabel>
+          {/* BUG-0445: this was one chart-wide "Secondary Y axis" checkbox that
+              wrote only the flag, so no series ever moved to the axis. Excel's
+              Combo dialog has a Secondary Axis box per SERIES, and so does
+              "Series as" above. */}
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
-            First series renders as bars, others as lines. Stacking above sets
-            clustered or stacked columns. Customize in Spec tab.
+            Choose Column or Line per series, and tick Secondary Axis to plot a
+            series against a value axis on the right. Stacking above sets
+            clustered or stacked columns.
           </div>
         </FieldGroup>
       );
@@ -945,6 +946,13 @@ function ComboSeriesMarksSection({ spec, onSpecChange, previewSeriesNames }: Des
     for (let i = 0; i < names.length; i++) seriesMarks[i] = i === si ? mark : current(i);
     onSpecChange({ markOptions: { ...opts, seriesMarks } });
   };
+  // Excel's Combo dialog: a Secondary Axis box per series (BUG-0445). Ticking
+  // it plots THAT series against a right-hand value axis; the axis exists while
+  // any series is on it.
+  const onSecondary = new Set(comboSecondarySeries(opts, names.length));
+  const setSecondary = (si: number, on: boolean): void => {
+    onSpecChange({ markOptions: setComboSeriesSecondary(opts, names.length, si, on) });
+  };
   return (
     <FieldGroup>
       <Label>Series as</Label>
@@ -963,6 +971,16 @@ function ComboSeriesMarksSection({ spec, onSpecChange, previewSeriesNames }: Des
               </option>
             ))}
           </Select>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              aria-label={`${name} on secondary axis`}
+              data-testid={`chart-dialog-combo-secondary-${si}`}
+              checked={onSecondary.has(si)}
+              onChange={(e) => setSecondary(si, e.target.checked)}
+            />
+            Secondary Axis
+          </CheckboxLabel>
         </div>
       ))}
     </FieldGroup>

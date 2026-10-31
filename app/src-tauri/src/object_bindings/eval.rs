@@ -446,7 +446,7 @@ pub fn prepare_one(
         Expression::CellRef { sheet: Some(s), col, row, .. } => world
             .sheet_names
             .iter()
-            .position(|n| n.eq_ignore_ascii_case(s))
+            .position(|n| identity::sheet_names_equal(n, s))
             .and_then(|i| world.sheet_ids.get(i))
             .map(|id| (*id, row.saturating_sub(1), col_index(col))),
         _ => None,
@@ -508,7 +508,7 @@ impl Deps<'_> {
     fn sheet(&self, name: Option<&String>) -> Option<identity::SheetId> {
         match name {
             None => self.host,
-            Some(n) => self.names.iter().position(|s| s.eq_ignore_ascii_case(n)).and_then(|i| self.ids.get(i).copied()),
+            Some(n) => self.names.iter().position(|s| identity::sheet_names_equal(s, n)).and_then(|i| self.ids.get(i).copied()),
         }
     }
 
@@ -518,8 +518,8 @@ impl Deps<'_> {
         if formula::is_all_sheets_wildcard(a) || formula::is_all_sheets_wildcard(b) {
             return self.ids.to_vec();
         }
-        let ia = self.names.iter().position(|s| s.eq_ignore_ascii_case(a));
-        let ib = self.names.iter().position(|s| s.eq_ignore_ascii_case(b));
+        let ia = self.names.iter().position(|s| identity::sheet_names_equal(s, a));
+        let ib = self.names.iter().position(|s| identity::sheet_names_equal(s, b));
         match (ia, ib) {
             (Some(x), Some(y)) => (x.min(y)..=x.max(y)).filter_map(|i| self.ids.get(i).copied()).collect(),
             _ => Vec::new(),
@@ -734,7 +734,7 @@ fn keys_in_scope(
         Scope::Names(names) => {
             let mut out: HashSet<BindingKey> = HashSet::new();
             for n in names {
-                if let Some(keys) = runtime.name_dependents.get(&n.to_uppercase()) {
+                if let Some(keys) = runtime.name_dependents.get(&crate::name_resolution::name_key(n)) {
                     out.extend(keys.iter().cloned());
                 }
             }

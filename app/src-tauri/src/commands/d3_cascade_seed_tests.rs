@@ -323,10 +323,16 @@ fn relocating_references_reaches_a_cross_sheet_reader() {
 #[test]
 fn relocate_cell_references_seeds_the_shared_cascade() {
     // The wiring half, and the failure mode is silent (stale values, no error).
-    // The `relocate_cell_references` command is a one-line delegation to its
-    // `_core` body, which `move_relocation_tests` also drives in-process.
+    // The `relocate_cell_references` command and its `_core` (which
+    // `move_relocation_tests` drives in-process) both delegate to
+    // `relocate_cell_references_recording`, the one body (round 10: it takes
+    // whether the step records the block as moved).
     const STRUCTURE_RS: &str = include_str!("structure.rs");
-    let body = body_of(STRUCTURE_RS, "relocate_cell_references_core");
+    assert!(
+        body_of(STRUCTURE_RS, "relocate_cell_references_core").contains("relocate_cell_references_recording("),
+        "`relocate_cell_references_core` no longer delegates to the one body"
+    );
+    let body = body_of(STRUCTURE_RS, "relocate_cell_references_recording");
     assert!(
         body.contains("recalc_after_active_sheet_bulk_rewrite("),
         "`relocate_cell_references` rewrites formulas, re-evaluates them and \

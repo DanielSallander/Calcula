@@ -45,6 +45,8 @@
 // cell itself would race every other insert between its check and the write.
 // See `ButtonControlPlacement`.
 
+import { sheetNamesEqual } from "./sheetNames";
+
 /**
  * The control property that LINKS a button to a recorded macro by its module id.
  *
@@ -490,7 +492,7 @@ export function serializePageNavigatorOverrides(list: readonly PageNavigatorOver
  * The override that applies to `page` (THE one matching rule):
  *   1. the override whose sheetId === page.sheetId; else
  *   2. an override whose sheetId names NO page in `allPages`, whose sheetName === page.name; else
- *   3. the same, case-folded (toLocaleLowerCase), as sheet names compare.
+ *   3. the same by Excel's sheet-name case rule (@api/sheetNames), as sheet names compare.
  * An override whose id matches some OTHER live page never applies by name.
  */
 export function matchPageNavigatorOverride(
@@ -508,8 +510,7 @@ export function matchPageNavigatorOverride(
   const orphans = overrides.filter((o) => o.sheetId === "" || !liveIds.has(o.sheetId));
   const exact = orphans.find((o) => o.sheetName === page.name);
   if (exact) return exact;
-  const folded = page.name.toLocaleLowerCase();
-  return orphans.find((o) => o.sheetName.toLocaleLowerCase() === folded);
+  return orphans.find((o) => sheetNamesEqual(o.sheetName, page.name));
 }
 
 /** WHERE a navigator goes and what the caller may ask; everything else (colours,

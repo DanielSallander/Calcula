@@ -478,4 +478,52 @@ describe("undo activates the sheet it restored", () => {
     expect(fired).toEqual([]);
     expect(observedSheetIndex).toBe(0);
   });
+
+  it("hands STRUCTURAL_UNDO the backend's structural deltas and whether it was an Undo or a Redo (BUG-0614)", async () => {
+    // A store whose coordinates the backend never holds (a Watch Window entry,
+    // a bookmark) moves by the deltas the STEP reported (UndoResult.
+    // structuralDeltas), never by its description (@api/structuralFollow).
+    const heard: unknown[] = [];
+    const listen = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener(AppEvents.STRUCTURAL_UNDO, listen);
+    const undone = [
+      { kind: "colDelete", sheetIndex: 0, at: 3, count: 1, band: null },
+      { kind: "rowDelete", sheetIndex: 0, at: 1, count: 2, band: null },
+    ];
+    const redone = [
+      { kind: "rowInsert", sheetIndex: 0, at: 1, count: 2, band: null },
+      { kind: "colInsert", sheetIndex: 0, at: 3, count: 1, band: null },
+    ];
+    try {
+      undoAnswer = restoreResult({ structuralRestore: true, description: "Run macro", structuralDeltas: undone });
+      redoAnswer = restoreResult({ structuralRestore: true, description: "Run macro", structuralDeltas: redone });
+      await pressUndo();
+      await pressRedo();
+    } finally {
+      window.removeEventListener(AppEvents.STRUCTURAL_UNDO, listen);
+    }
+    expect(heard).toEqual([
+      { description: "Run macro", source: "undo", deltas: undone },
+      { description: "Run macro", source: "redo", deltas: redone },
+    ]);
+  });
+
+  it("announces the moved block of an undone Cut + Paste on CELLS_MOVED, not as a structural restore", async () => {
+    const moved: unknown[] = [];
+    const structural: unknown[] = [];
+    const onMoved = (e: Event) => moved.push((e as CustomEvent).detail);
+    const onStructural = (e: Event) => structural.push((e as CustomEvent).detail);
+    window.addEventListener(AppEvents.CELLS_MOVED, onMoved);
+    window.addEventListener(AppEvents.STRUCTURAL_UNDO, onStructural);
+    const back = { kind: "move", fromSheetIndex: 0, fromStartRow: 7, fromStartCol: 5, fromEndRow: 7, fromEndCol: 5, toSheetIndex: 0, toRow: 4, toCol: 2 };
+    try {
+      undoAnswer = restoreResult({ description: "Paste", structuralDeltas: [back] });
+      await pressUndo();
+    } finally {
+      window.removeEventListener(AppEvents.CELLS_MOVED, onMoved);
+      window.removeEventListener(AppEvents.STRUCTURAL_UNDO, onStructural);
+    }
+    expect(moved).toEqual([{ moves: [back], source: "undo" }]);
+    expect(structural).toEqual([]);
+  });
 });

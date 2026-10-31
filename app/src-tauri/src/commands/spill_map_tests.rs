@@ -1077,7 +1077,7 @@ fn every_command_that_cannot_carry_an_array_refuses_one() {
         // P3 S4: the off-sheet body is the `_at` twin (the public name is a
         // wrapper); fill and merge on a floating grid ask too.
         (DATA_RS, "sort_range_off_sheet_at"),
-        (DATA_RS, "fill_range"),
+        (DATA_RS, "fill_range_core"),
         (DATA_RS, "fill_range_on_target"),
         (MERGE_RS, "merge_cells_core"),
         (MERGE_RS, "merge_cells_off_sheet"),
@@ -1304,9 +1304,11 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         // border presets and adjust_number_format_decimals through
         // write_range_style_plan.
         ("commands/styles.rs", "write_style_delta", "style_index only — no formula is removed, so no range is orphaned"),
-        ("commands/styles.rs", "set_cell_style", "style_index only"),
+        ("commands/styles.rs", "set_cell_style_core", "style_index only (the body of set_cell_style; BUG-0513 split it out so the floating-grid route is driven by tests)"),
+        ("commands/styles.rs", "set_cell_styles_core", "style_index only (set_cell_style's style-only batch, `cells`: the one-cell write over a list; value and formula untouched)"),
         ("commands/styles.rs", "set_cell_rich_text_core", "rich-text runs only (the body of set_cell_rich_text; P3 split it out so tests drive it)"),
         ("cell_target.rs", "set_backing_style", "style_index only -- no formula is removed (update_cells_batch_on_target refuses spilled cells first)"),
+        ("cell_target.rs", "keep_backing_lock", "style_index only (puts back the cell's Locked flag on a protected host) -- no formula is removed (update_cells_batch_on_target refuses spilled cells first)"),
         ("commands/styles.rs", "write_range_style_plan", "style_index and row/column style tiers only"),
         ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
         ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
@@ -1323,7 +1325,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; every origin keeps its formula"),
         ("commands/structure.rs", "shift_cross_sheet_formulas", "re-points references inside surviving formulas"),
         ("commands/structure.rs", "shift_cross_sheet_formulas_for_off_sheet_edit", "re-points references inside surviving formulas"),
-        ("commands/structure.rs", "relocate_cell_references_core", "re-points references (the `relocate_cell_references` command is a one-line delegation to it); seeds the shared cascade for the values"),
+        ("commands/structure.rs", "relocate_cell_references_recording", "re-points references (the `relocate_cell_references` command and `relocate_cell_references_core` are one-line delegations to it); seeds the shared cascade for the values"),
         // -- The structural edits move the map in lockstep --------------------
         ("commands/structure.rs", "insert_rows_impl", "shift_flat_cell_stores moves BOTH spill maps with the edit (keys and values), and drops a sheet's claims when an origin is deleted"),
         ("commands/structure.rs", "insert_columns_impl", "shift_flat_cell_stores, as insert_rows_impl"),
@@ -1338,21 +1340,11 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("commands/structure_cells.rs", "inherit_neighbour_styles", "writes only EMPTY, style-only cells into lines an insertion just emptied (after every spill was moved or torn down); removes no origin"),
         ("commands/data.rs", "clear_hyperlinks_apply_to", "style_index only on existing cells (value and formula kept), so no spill origin is removed or overwritten"),
         ("commands/structure_cells.rs", "shift_spills_in_band", "IS Insert/Delete Cells' spill-map maintenance: a spill that moves whole is re-keyed in BOTH maps; a cut one loses both entries and its output cells together, and shift_cells_impl re-seeds its origin into the shared cascade"),
-        // -- Transient / self-evaluating: writes it also un-writes ------------
-        ("data_tables.rs", "data_table_one_var", "what-if table: substitutes into a borrowed probe cell and restores it"),
-        ("data_tables.rs", "data_table_two_var", "what-if table: as above"),
-        ("data_tables.rs", "re_evaluate_formulas", "the what-if table's own evaluation step"),
-        ("data_tables.rs", "restore_cell", "restores the probe cell the loop borrowed"),
-        ("data_tables.rs", "set_cell_value", "sets the probe cell the loop borrowed"),
-        ("goal_seek.rs", "goal_seek", "iterates to a root over a borrowed input cell"),
-        ("goal_seek.rs", "evaluate_target", "one goal-seek trial"),
-        ("goal_seek.rs", "finalize_result", "writes the converged value into the same input cell"),
-        ("solver.rs", "solver_solve", "runs its own objective loop over borrowed variable cells"),
-        ("solver.rs", "solver_revert", "restores the pre-solve values the loop captured"),
-        ("solver.rs", "set_variables_and_evaluate", "one solver trial"),
-        ("scenario_manager.rs", "scenario_show", "transient scenario preview (see the transient-write pattern)"),
-        ("scenario_manager.rs", "scenario_summary", "builds a report block from values it evaluated"),
-        ("animation_commands.rs", "apply_set_ops_and_recalc", "transient frame playback"),
+        // (The what-if routes' "writes it also un-writes" entries went with
+        // BUG-0613: they write through whatif_recalc::write_cells_and_recalc_on,
+        // whose active-sheet cascade tears a vacated origin down from its seeds
+        // and whose background-sheet branch runs release_spills_orphaned_by_grid.)
+        ("whatif_recalc.rs", "restore_journal_values", "VALUE only, and only on a cell that still holds its formula (ast kept): a manual-mode animation restore puts back the stored values its frames recalculated, so no origin is removed or overwritten"),
         // -- Whole-sheet / whole-workbook evaluation --------------------------
         ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of the sheet-scoped pass"),
         ("pivot/operations.rs", "recalculate_sheet_formulas", "whole-sheet evaluation; removes no origin"),
@@ -1478,7 +1470,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("commands/data.rs", "clear_rect_on_background_sheet"),
         ("commands/data.rs", "clear_cell"),
         ("commands/data.rs", "sort_range"),
-        ("commands/data.rs", "fill_range"),
+        ("commands/data.rs", "fill_range_core"),
         ("commands/data.rs", "remove_duplicates"),
         // The command's writing body (testability split — the `update_cell_on_sheets`
         // wrapper itself writes nothing, and neither does `update_cell_on_sheets_inner`,

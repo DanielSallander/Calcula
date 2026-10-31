@@ -9,7 +9,7 @@ import type { OverlayProps } from "@api/uiTypes";
 import { emitAppEvent, AppEvents } from "@api/events";
 
 import type { ChartSpec, ChartFilters } from "../types";
-import { markFurniture } from "../types";
+import { isCartesianChart, markFurniture } from "../types";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache, getCachedChartData } from "../rendering/chartRenderer";
 import { closePopup } from "../rendering/quickAccessButtons";
@@ -266,6 +266,35 @@ function ElementsPanel({
           <div className={styles.sectionTitle}>Chart Elements</div>
         </div>
         {titleRow}
+      </>
+    );
+  }
+  // A chart WITHOUT AXES (pie, doughnut, funnel, radar, treemap, sunburst) is
+  // offered Chart Title, Legend and Data Labels only, as Excel's Chart Elements
+  // button on a pie is (BUG-0446). Live Excel 16 (2026-10-30): a pie or
+  // doughnut has HasAxis = False on both axes, refuses the value gridlines
+  // element, and keeps HasDataTable False when it is set -- so axis titles,
+  // gridlines, axis labels and a data table are settings no painter of these
+  // marks reads.
+  if (!isCartesianChart(spec.mark)) {
+    return (
+      <>
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Chart Elements</div>
+        </div>
+        {titleRow}
+        <div className={styles.divider} />
+        <div className={styles.item} onClick={() => updateSpec({ legend: { ...spec.legend, visible: !spec.legend.visible } })}>
+          <input type="checkbox" checked={spec.legend.visible} onChange={() => {}} />
+          <label>Legend</label>
+        </div>
+        <div className={styles.item} onClick={() => {
+          const current = spec.dataLabels?.enabled ?? false;
+          updateSpec({ dataLabels: { ...(spec.dataLabels ?? {}), enabled: !current } as any });
+        }}>
+          <input type="checkbox" checked={spec.dataLabels?.enabled ?? false} onChange={() => {}} />
+          <label>Data Labels</label>
+        </div>
       </>
     );
   }

@@ -573,3 +573,105 @@ fn inserting_or_deleting_lines_on_any_sheet_leaves_a_3d_reference_as_written() {
     );
     assert!(values.is_empty(), "a 3-D reference reads the wrong cells after the edit:\n  {}", values.join("\n  "));
 }
+
+// ===========================================================================
+// A BARE NON-ASCII SHEET QUALIFIER (rev13C MAJOR)
+// ===========================================================================
+
+/// Sheet1, Översikt, E, Straße -- with a workbook-scoped name over each of the
+/// two non-ASCII sheets, stored BARE the way Excel saves them in an .xlsx
+/// (`<definedName name="Rate">Översikt!$B$1</definedName>`, [LIVE]).
+fn non_ascii_book() -> Fx {
+    let fx = Fx::new(4);
+    let seed = crate::document_effect::test_seed_effect();
+    {
+        let mut names = fx.state.sheet_names.write(&seed).unwrap();
+        names[1] = "Översikt".to_string();
+        names[2] = "E".to_string();
+        names[3] = "Straße".to_string();
+    }
+    let mut store = fx.state.named_ranges.write(&seed).unwrap();
+    for (name, refers_to) in [("RATE", "=Översikt!$B$1"), ("STR", "=Straße!A1")] {
+        store.insert(
+            name.to_string(),
+            crate::named_ranges::NamedRange {
+                name: name.to_string(),
+                sheet_index: None,
+                refers_to: refers_to.to_string(),
+                comment: None,
+                folder: None,
+            },
+        );
+    }
+    drop(store);
+    fx
+}
+
+fn refers_to(fx: &Fx, name: &str) -> String {
+    fx.state.named_ranges.read().unwrap().get(name).expect("name").refers_to.clone()
+}
+
+/// rev13C MAJOR, through the commands. Excel [LIVE, Excel 16, rev13C's
+/// namedn.ps1] saves the name bare and moves it on `Rows(1).Insert` on
+/// Översikt: `=Översikt!$B$2`. The shifters read the qualifier ASCII-only, so
+/// the `Ö` was taken for the lead delimiter and the qualifier for `versikt`
+/// (`Straße` read as `e`): the name stayed on `$B$1` -- and `=Straße!A1` would
+/// have moved with a row inserted on a sheet named E.
+#[test]
+fn a_bare_non_ascii_qualifier_in_a_defined_name_follows_its_sheet() {
+    let fx = non_ascii_book();
+    insert_rows(&fx, 0, 1, Some(1));
+    assert_eq!(refers_to(&fx, "RATE"), "=Översikt!$B$2", "the name follows a row inserted on Översikt");
+    assert_eq!(refers_to(&fx, "STR"), "=Straße!A1", "control: a name on another sheet stays");
+
+    let fx = non_ascii_book();
+    insert_rows(&fx, 0, 1, Some(2));
+    assert_eq!(refers_to(&fx, "STR"), "=Straße!A1", "a row inserted on sheet E must not move =Straße!A1");
+
+    let fx = non_ascii_book();
+    insert_columns(&fx, 0, 1, Some(3));
+    assert_eq!(refers_to(&fx, "STR"), "=Straße!B1", "the name follows a column inserted on Straße");
+    assert_eq!(refers_to(&fx, "RATE"), "=Översikt!$B$1", "control: a name on another sheet stays");
+}
+
+/// The same letter class at the text level: a non-ASCII letter is part of an
+/// IDENTIFIER on both edges of a match (the lexer's `is_letter`), so `ÖA1` and
+/// `A1ä` are names, not cell references, and a trim-reference dot beside a
+/// non-ASCII qualifier keeps the qualifier whole.
+#[test]
+fn a_non_ascii_letter_before_a_cell_shape_makes_it_a_name() {
+    // Lead edge, sheet-aware shifter: a name spelled `ÖA1` is not the cell A1.
+    assert_eq!(shift_formula_rows_sheet_aware("=ÖA1+A1", "Sheet1", "Sheet1", 0, 1), "=ÖA1+A2");
+}
+
+#[test]
+fn a_non_ascii_letter_before_a_cell_shape_makes_it_a_name_for_a_fill_too() {
+    // Lead edge, the sheet-blind fill shifter (`CELL_REF_OR_RANGE_RE`).
+    assert_eq!(shift_formula_internal("=ÅB12+B12", 1, 0), "=ÅB12+B13");
+}
+
+#[test]
+fn a_non_ascii_letter_after_a_cell_shape_makes_it_a_name() {
+    // Trailing edge: `A1ä` is one name to the lexer.
+    assert_eq!(shift_formula_rows_sheet_aware("=A1ä+A1", "Sheet1", "Sheet1", 0, 1), "=A1ä+A2");
+}
+
+#[test]
+fn a_trim_dot_beside_a_non_ascii_qualifier_keeps_it_whole() {
+    // A trim dot used to send every UTF-8 byte of the segment through
+    // `as char`, mangling `Ö` into two Latin-1 characters.
+    assert_eq!(
+        shift_formula_rows_sheet_aware("=SUM(Översikt!A1:.A8)", "Sheet1", "Översikt", 0, 1),
+        "=SUM(Översikt!A2:.A9)"
+    );
+}
+
+#[test]
+fn whole_lines_and_3d_spans_read_a_bare_non_ascii_qualifier_whole() {
+    assert_eq!(shift_formula_cols_sheet_aware("=SUM(Översikt!B:B)", "Sheet1", "Översikt", 0, 1), "=SUM(Översikt!C:C)");
+    assert_eq!(shift_formula_rows_sheet_aware("=SUM(Översikt!3:4)", "Sheet1", "Översikt", 0, 1), "=SUM(Översikt!4:5)");
+    // The 3-D span guard sees `:Straße!` whole, so a row inserted on sheet E
+    // (the span's first sheet) leaves it as written -- read as `e`, the tail
+    // used to be taken for a reference to sheet E and moved.
+    assert_eq!(shift_formula_rows_sheet_aware("=SUM(E:Straße!A5)", "Sheet1", "E", 0, 1), "=SUM(E:Straße!A5)");
+}

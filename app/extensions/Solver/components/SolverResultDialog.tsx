@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/Solver/components/SolverResultDialog.tsx
 // PURPOSE: Solver Result dialog - shows solution status with Accept/Revert options.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
 import {
@@ -9,6 +9,8 @@ import {
   columnToLetter,
 } from "@api";
 import type { SolverResultData, SolverVariableValue } from "@api";
+import { alertAsync } from "@api/dialogs";
+import { emitAppEvent, AppEvents } from "@api/events";
 
 // ============================================================================
 // Styles
@@ -139,7 +141,6 @@ export function SolverResultDialog(props: DialogProps): React.ReactElement | nul
   const win = useDialogWindow({ minWidth: 320, minHeight: 260 });
 
   const resultData = (data as Record<string, unknown>)?.result as SolverResultData | undefined;
-  const sheetIndex = ((data as Record<string, unknown>)?.sheetIndex as number) ?? 0;
 
   if (!resultData) return null;
 
@@ -163,17 +164,54 @@ export function SolverResultDialog(props: DialogProps): React.ReactElement | nul
     onClose();
   }, [onClose]);
 
+  // Restore Original Values names the run's sheet by its STABLE id (the result
+  // carries it), never by the index it had when the run started: a tab dragged
+  // while this dialog is open used to receive the original values. A refusal
+  // (the sheet was deleted meanwhile) is said, not swallowed.
+  //
+  // A REFUSED Restore KEEPS THE DIALOG OPEN, as Goal Seek's refused Cancel
+  // does: the backend refuses while another what-if run is going or an
+  // animation holds cells on loan -- things the user can end and then press
+  // Restore again -- and closing after the alert left Solver's values with no
+  // way back. A result that names no sheet (no stable id on file) cannot be
+  // restored at all, and used to close silently with the trial values kept; it
+  // now says so, and Keep Solver Solution closes. The run, and the Restore,
+  // leave the workbook calculated (Excel, under manual calculation too), so the
+  // cells are announced and the status bar asks the calculation state again.
+  const revertingRef = useRef(false);
   const handleRevert = useCallback(async () => {
-    if (resultData.originalValues.length > 0) {
-      try {
-        await solverRevert(sheetIndex, resultData.originalValues);
-        window.dispatchEvent(new CustomEvent("grid:refresh"));
-      } catch (err) {
-        console.error("[Solver] Revert failed:", err);
+    if (revertingRef.current) return;
+    if (resultData.originalValues.length === 0) {
+      onClose();
+      return;
+    }
+    if (!resultData.sheetId) {
+      await alertAsync(
+        "Solver could not restore the original values: the sheet the run worked on has no stable identity. " +
+          "Use Undo to take the values back, or Keep Solver Solution to close.",
+      );
+      return;
+    }
+    revertingRef.current = true;
+    let refusal = "";
+    try {
+      const answer = await solverRevert(resultData.sheetId, resultData.originalValues);
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      refusal = typeof answer?.error === "string" ? answer.error.trim() : "";
+      if (refusal === "") {
+        emitAppEvent(AppEvents.CELLS_UPDATED);
       }
+    } catch (err) {
+      console.error("[Solver] Revert failed:", err);
+      refusal = String(err);
+    }
+    revertingRef.current = false;
+    if (refusal !== "") {
+      await alertAsync(`Solver could not restore the original values: ${refusal}`);
+      return;
     }
     onClose();
-  }, [resultData, sheetIndex, onClose]);
+  }, [resultData, onClose]);
 
   return (
     <div style={styles.backdrop}>

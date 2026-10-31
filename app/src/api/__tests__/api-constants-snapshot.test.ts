@@ -70,7 +70,17 @@ describe('AppEvents', () => {
     // door, and a script, an MCP tool or a .calp refresh can move it without
     // the Canvas ribbon tab. Payload-free like SHEET_DISPLAY_FLAGS_CHANGED; the
     // canvas sheet extension re-reads get_sheets on it.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`77`);
+    //
+    // 78 since CELLS_MOVED (round 10, BUG-0614): a Cut + Paste or a drag that
+    // MOVED sheet cells, and the Undo / Redo of one, announced with the moved
+    // block's coordinates, so the stores whose coordinates the backend never
+    // holds (a Watch Window entry, a cell bookmark) follow the cells as
+    // Excel's Watch Window does.
+    //
+    // 79 since DATA_COMMAND_APPLIED (round 11): a Sort, a Remove Duplicates or
+    // a Text to Columns rewrote cells in place -- Excel ends the clipboard
+    // mode, a copy's and a cut's, on each [LIVE], and Core's clipboard listens.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`79`);
   });
 
   it('all values use the app: prefix', () => {

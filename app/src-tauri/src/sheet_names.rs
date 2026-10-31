@@ -50,14 +50,20 @@ pub const ILLEGAL_SHEET_NAME_CHARS: [char; 7] = [':', '\\', '/', '?', '*', '[', 
 /// Reserved by Excel for the change-history sheet of a shared workbook.
 pub const RESERVED_SHEET_NAME: &str = "History";
 
-/// Validate a name a USER typed. Returns the name to store (trimmed), or the
-/// message to show them.
+/// Validate a name a USER typed. Returns the name to store -- exactly as
+/// typed -- or the message to show them.
 ///
-/// Trimming is deliberate and matches what this command already did: a name
-/// typed with a trailing space is a name with a trailing space in every formula
-/// that mentions it, and nobody means that.
+/// NOT TRIMMED (Excel parity). Excel keeps a leading or trailing space, and a
+/// name of spaces only, through every door [LIVE, Excel 16, 2026-10-31,
+/// protfill/probe2-3.ps1]: Home > Format > Rename Sheet typed ` Data ` names the
+/// sheet ` Data ` (six characters) and typed two spaces names it `  `;
+/// `Worksheet.Name` accepts ` 'x`, `x' ` and a leading tab; ` Data ` and `Data`
+/// are two different sheets (` DATA ` beside ` Data ` is the duplicate); a
+/// formula spells it `=' Data '!A1`; and Copy Sheet makes ` Data  (2)`. Only
+/// the empty name is refused. This used to trim, so such a name could not be
+/// typed and a copy of a loaded one lost its spaces.
 pub fn validate_sheet_name(raw: &str) -> Result<String, String> {
-    let name = raw.trim();
+    let name = raw;
     if name.is_empty() {
         return Err("Sheet name cannot be empty".to_string());
     }
@@ -77,7 +83,7 @@ pub fn validate_sheet_name(raw: &str) -> Result<String, String> {
     if name.starts_with('\'') || name.ends_with('\'') {
         return Err("Sheet name cannot begin or end with an apostrophe".to_string());
     }
-    if name.eq_ignore_ascii_case(RESERVED_SHEET_NAME) {
+    if identity::sheet_names_equal(name, RESERVED_SHEET_NAME) {
         return Err(format!(
             "\"{}\" is reserved and cannot be used as a sheet name",
             RESERVED_SHEET_NAME
@@ -90,45 +96,243 @@ pub fn validate_sheet_name(raw: &str) -> Result<String, String> {
 ///
 /// CASE-INSENSITIVELY, which is the half the old check got wrong: sheet lookup
 /// is case-insensitive everywhere else in this crate (`index_of_sheet`, the
-/// cross-sheet dependency keys, `eq_ignore_ascii_case` in the rename), so
+/// cross-sheet dependency keys, the rename's reference repair), so
 /// allowing `sheet1` beside `Sheet1` created two sheets that every consumer
 /// downstream believed were one. `ignore_index` is the sheet being renamed —
 /// renaming `Data` to `Data` is not a collision with itself.
 ///
-/// AND BEYOND ASCII (rev6A#8). The comparison was `eq_ignore_ascii_case`, so
-/// `Ärende` and `ärende` could coexist -- while the engine looks a sheet up by
-/// its name UPPERCASED (`MultiSheetContext`, the cube pre-fetch's per-sheet
-/// map), which makes the two one sheet there: `='ärende'!A1` read whichever
-/// was registered last, and a Calculate Now served one sheet's cube cells the
-/// other's members. Excel refuses that pair [LIVE, Excel 16: "That name is
-/// already taken"]. Names that uppercase alike are refused, which is also
-/// what the engine's lookups need: `Straße` beside `STRASSE` (Rust uppercases
-/// `ß` to `SS`) is refused too, although Excel accepts it [LIVE] -- two sheets
-/// every engine lookup would treat as one cannot be allowed.
+/// BY EXCEL'S CASE RULE, beyond ASCII and no further (rev6A#8, then the
+/// sheet-name round). The comparison was first `eq_ignore_ascii_case`, so
+/// `Ärende` and `ärende` could coexist, which Excel refuses [LIVE]; it then
+/// became "uppercases alike" with Rust's FULL uppercasing, which also refused
+/// `STRASSE` beside `Straße` (`ß` uppercases to `SS`) -- a pair Excel ACCEPTS
+/// [LIVE] -- and still let `ß` stand beside `ẞ`, which Excel refuses. The rule
+/// is now `identity::sheet_names_equal`, Excel's measured per-character case
+/// equivalence (see `core/identity/src/sheet_name_case.rs` for the probe), and
+/// every sheet-name lookup in the engine keys by the same rule
+/// (`identity::sheet_name_key`), so two names this accepts are never one sheet
+/// to a lookup.
 pub fn ensure_sheet_name_is_free(
     name: &str,
     existing: &[String],
     ignore_index: Option<usize>,
 ) -> Result<(), String> {
-    let folded = name.to_uppercase();
     for (i, other) in existing.iter().enumerate() {
         if Some(i) == ignore_index {
             continue;
         }
-        if other.eq_ignore_ascii_case(name) || other.to_uppercase() == folded {
+        if identity::sheet_names_equal(other, name) {
             return Err(format!("Sheet '{}' already exists", other));
         }
     }
     Ok(())
 }
 
+/// Make a list of sheet names that came from a FILE unique by Excel's rule,
+/// renaming in place. Returns `(index, old name, new name)` per rename.
+///
+/// A document can hold two names the rule calls one: a `.cala` saved while
+/// the rule was ASCII-only (`Ärende` beside `ärende`), one saved while `ß` and
+/// `ẞ` were allowed together, or a workbook a third-party writer produced.
+/// Loading refuses nothing (module note), so the document opens -- but every
+/// lookup keys by `identity::sheet_name_key`, and two sheets with one key
+/// would leave one of them unreachable by name. So DETERMINISTICALLY: the
+/// sheet with the LOWER tab index keeps its name, and each later one is
+/// renamed the way Excel names a copy -- `ärende (2)`, `(3)`, ... -- with
+/// `unique_sheet_name` against every name already settled. A formula that
+/// pointed at the renamed sheet must follow it; `settle_loaded_sheet_names`
+/// does that with `rename_grid_qualifiers_exactly`, which re-points only
+/// qualifiers spelled EXACTLY (case-sensitively) as the renamed sheet was AND
+/// in a spelling the lexer cannot have produced from a bare name -- the only
+/// evidence of which of the two a formula meant. A bare ASCII qualifier is
+/// stored uppercased whatever was typed, so it stays with the keeper.
+pub fn dedupe_loaded_sheet_names(names: &mut [String]) -> Vec<(usize, String, String)> {
+    let mut renames = Vec::new();
+    for i in 1..names.len() {
+        let clashes = names[..i].iter().any(|earlier| identity::sheet_names_equal(earlier, &names[i]));
+        if !clashes {
+            continue;
+        }
+        // Settled names: every earlier one, plus every later one (a later
+        // sheet's own name must not be taken by this rename either).
+        let others: Vec<String> = names
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, n)| n.clone())
+            .collect();
+        let old = names[i].clone();
+        let new = unique_sheet_name(&old, &others);
+        names[i] = new.clone();
+        renames.push((i, old, new));
+    }
+    renames
+}
+
+/// The LOAD step `open_file` runs over a file's sheet names and grids (index
+/// for index): `dedupe_loaded_sheet_names`, then every formula spelled exactly
+/// as a renamed sheet was follows it. Returns the names to install. A file
+/// whose names are already unique comes back untouched.
+pub fn settle_loaded_sheet_names(mut names: Vec<String>, grids: &mut [engine::Grid]) -> Vec<String> {
+    let renames = dedupe_loaded_sheet_names(&mut names);
+    follow_loaded_renames_in_grids(&renames, grids);
+    names
+}
+
+/// What the load-time rename did, for the ONE notice the user is given on
+/// open (`load_rename_notice`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LoadedRenameReport {
+    /// `(old name, new name)` per renamed sheet, in tab order.
+    pub renamed: Vec<(String, String)>,
+    /// Cell formulas that followed a renamed sheet.
+    pub cell_formulas: usize,
+    /// Every other reference that followed: defined names, chart sources,
+    /// conditional formats, validations, page targets, pane dropdowns,
+    /// slicer formulas, property bindings and pivot sheet names.
+    pub other_references: usize,
+}
+
+/// The LOAD step `open_file` runs: [`settle_loaded_sheet_names`] over the
+/// file's grids AND every other store of the file that names a sheet, BEFORE
+/// any of them is installed. Returns the names to install and what moved.
+///
+/// The rename used to reach cell formulas only (it was a log line besides):
+/// a defined name, a chart's source, a conditional format or validation, a
+/// navigate button's page target, a pane dropdown, a slicer formula, a
+/// property binding or a pivot spelled exactly as the renamed sheet kept the
+/// OLD spelling -- which every lookup now resolves, by Excel's rule, to the
+/// sheet that KEPT the name. So the cell `='ärende'!B1` read the renamed sheet
+/// while the name `Rate` (`='ärende'!$B$1`) read the other one. Every kind now
+/// follows by the same evidence (`calp::sheet_renames::SheetRenames::
+/// exact_spelling`), and `workbook.sheets` carries the new names so a restore
+/// that maps by name agrees.
+pub fn settle_loaded_workbook_sheet_names(
+    workbook: &mut persistence::Workbook,
+    grids: &mut [engine::Grid],
+) -> (Vec<String>, LoadedRenameReport) {
+    let mut names: Vec<String> = workbook.sheets.iter().map(|s| s.name.clone()).collect();
+    let renames = dedupe_loaded_sheet_names(&mut names);
+    if renames.is_empty() {
+        return (names, LoadedRenameReport::default());
+    }
+    let cell_formulas = follow_loaded_renames_in_grids(&renames, grids);
+    let other_references = follow_loaded_renames_in_workbook(workbook, &renames);
+    for (index, _, new) in &renames {
+        if let Some(sheet) = workbook.sheets.get_mut(*index) {
+            sheet.name = new.clone();
+        }
+    }
+    let report = LoadedRenameReport {
+        renamed: renames.iter().map(|(_, old, new)| (old.clone(), new.clone())).collect(),
+        cell_formulas,
+        other_references,
+    };
+    (names, report)
+}
+
+/// Every NON-GRID reference in `workbook` spelled exactly as a renamed sheet
+/// was follows it (see [`settle_loaded_workbook_sheet_names`]). Returns how
+/// many references changed.
+pub fn follow_loaded_renames_in_workbook(
+    workbook: &mut persistence::Workbook,
+    renames: &[(usize, String, String)],
+) -> usize {
+    let set = calp::sheet_renames::SheetRenames::exact_spelling(
+        renames.iter().map(|(_, old, new)| (old.as_str(), new.as_str())),
+    );
+    if set.is_empty() {
+        return 0;
+    }
+    let mut changed = 0usize;
+    for nr in workbook.named_ranges.iter_mut() {
+        if let Some(renamed) = set.rename_formula(&nr.refers_to) {
+            nr.refers_to = renamed;
+            changed += 1;
+        }
+    }
+    for chart in workbook.charts.iter_mut() {
+        if calp::chart_refs::rename_chart_spec_sheet_names(&mut chart.spec, &set) {
+            changed += 1;
+        }
+    }
+    let rules = set.rename_pulled_rules(calp::sheet_renames::PulledRules {
+        conditional_formats: &mut workbook.conditional_formats,
+        data_validations: &mut workbook.data_validations,
+        controls: &mut workbook.controls,
+        pane_controls: &mut workbook.pane_controls,
+    });
+    changed += rules.conditional_formats + rules.data_validations + rules.controls + rules.pane_controls;
+    changed += set.rename_slicer_formulas(&mut workbook.slicers);
+    changed += set.rename_binding_formulas(&mut workbook.object_bindings);
+    // A pivot names its destination and source sheets as plain strings in its
+    // saved definition (`PivotDefinition.destination_sheet` / `source_sheet`,
+    // snake_case on disk). Raw strings keep their case, so the exact spelling
+    // is evidence here as it is for a chart source.
+    for saved in workbook.pivot_definitions.iter_mut() {
+        for field in ["destination_sheet", "source_sheet"] {
+            if let Some(serde_json::Value::String(name)) = saved.definition.get_mut(field) {
+                if let Some(to) = set.target(name) {
+                    *name = to.to_string();
+                    changed += 1;
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// The one non-blocking notice `open_file` gives when it renamed a sheet on
+/// load, or `None` when it renamed none.
+pub fn load_rename_notice(report: &LoadedRenameReport) -> Option<String> {
+    if report.renamed.is_empty() {
+        return None;
+    }
+    let pairs: Vec<String> =
+        report.renamed.iter().map(|(old, new)| format!("'{}' is now '{}'", old, new)).collect();
+    Some(format!(
+        "This workbook had sheets whose names Excel treats as the same name, so {} renamed on open: {}. \
+         References spelled exactly as the renamed sheet followed it ({} formula(s), {} other reference(s)).",
+        if report.renamed.len() == 1 { "one was" } else { "some were" },
+        pairs.join("; "),
+        report.cell_formulas,
+        report.other_references
+    ))
+}
+
+/// The grid half of the load-time rename. Returns how many formulas followed.
+fn follow_loaded_renames_in_grids(renames: &[(usize, String, String)], grids: &mut [engine::Grid]) -> usize {
+    let mut total = 0usize;
+    for (index, old, new) in renames {
+        let followed: usize = grids
+            .iter_mut()
+            .map(|g| rename_grid_qualifiers_exactly(g, old, new))
+            .sum();
+        crate::log_warn!(
+            "LOAD",
+            "sheet {} '{}' shares its name with an earlier sheet by Excel's case rule; \
+             renamed to '{}' ({} formula(s) spelled exactly '{}' follow it)",
+            index,
+            old,
+            new,
+            followed,
+            old
+        );
+        total += followed;
+    }
+    total
+}
+
 /// COERCE an arbitrary string into a legal sheet name. Never fails.
 ///
 /// For names the app GENERATES rather than accepts — the pivot "Show Report
 /// Filter Pages" command builds one per field value, and a field value can be
-/// anything at all. Illegal characters become `_`, the result is trimmed and cut
-/// to the length limit, and a name that coerces away to nothing becomes
-/// `Sheet`.
+/// anything at all. Illegal characters become `_`, the result is cut to the
+/// length limit and loses any apostrophe at either end, and a name that
+/// coerces away to nothing becomes `Sheet`. Spaces are KEPT, at the ends too:
+/// they are legal in Excel (see `validate_sheet_name`), and `unique_sheet_name`
+/// builds a COPY's name from the source sheet's through here -- Excel copies
+/// ` Data ` as ` Data  (2)` [LIVE].
 ///
 /// THE RESULT IS ALWAYS A NAME `validate_sheet_name` ACCEPTS, unchanged -- the
 /// promise every caller builds on (Show Report Filter Pages plans its pages
@@ -138,27 +342,19 @@ pub fn sanitize_sheet_name(raw: &str) -> String {
         .chars()
         .map(|c| if ILLEGAL_SHEET_NAME_CHARS.contains(&c) { '_' } else { c })
         .collect();
-    // Truncate FIRST, then trim: cutting at 31 characters can leave a trailing
-    // space or apostrophe that the trim below has to remove.
+    // Truncate FIRST, then strip: cutting at 31 characters can leave a
+    // trailing apostrophe that the strip below has to remove.
     let truncated: String = replaced.chars().take(MAX_SHEET_NAME_CHARS).collect();
-    // Trimmed UNTIL NOTHING MOVES. Whitespace and apostrophes hide each other:
-    // one pass of whitespace, apostrophes, whitespace turned `' 'x` into `'x`
-    // and `x' '` into `x'` -- names entry refuses for their end apostrophe --
-    // so Show Report Filter Pages planned a page the add path then refused,
-    // and the value got no page and no error (fix round 5). Every pass that
-    // does not stop removes at least one character, so this ends.
-    let mut trimmed: &str = &truncated;
-    loop {
-        let next = trimmed.trim().trim_matches('\'');
-        if next.len() == trimmed.len() {
-            break;
-        }
-        trimmed = next;
-    }
+    // Only APOSTROPHES at the very ends are illegal; spaces are not, so one
+    // strip of apostrophes leaves a name with none at either end (`' 'x`
+    // becomes ` 'x`, which Excel accepts [LIVE]). The old loop also trimmed
+    // whitespace, until nothing moved, because a trimmed space could expose an
+    // apostrophe (fix round 5); with spaces kept, nothing is exposed.
+    let trimmed: &str = truncated.trim_matches('\'');
     if trimmed.is_empty() {
         return "Sheet".to_string();
     }
-    if trimmed.eq_ignore_ascii_case(RESERVED_SHEET_NAME) {
+    if identity::sheet_names_equal(trimmed, RESERVED_SHEET_NAME) {
         // One character shorter than the limit is always available here.
         return format!("{}_", trimmed);
     }
@@ -169,18 +365,51 @@ pub fn sanitize_sheet_name(raw: &str) -> String {
 /// Suffixes are `(2)`, `(3)`, ... , the spelling a sheet COPY uses, and the base is
 /// SHORTENED to make room, because `format!("{} ({})", base, n)` on a base that
 /// is already 31 characters produces a name the rule would refuse.
+///
+/// The cut stem is NOT trimmed: Excel keeps a space the cut leaves [LIVE,
+/// Worksheet.Copy]: `ABCDEFGHIJKLMNOPQRSTUVWXYZ 1234` copies as
+/// `ABCDEFGHIJKLMNOPQRSTUVWXYZ  (2)`, two spaces -- the same spelling
+/// `calp::pull::collision_sheet_name` gives a pulled sheet.
+///
+/// A NAME THAT ALREADY ENDS IN A COPY NUMBER counts on from it, as Excel does
+/// [LIVE, Excel 16, Worksheet.Copy]: `Data (2)` copies as `Data (3)` (with or
+/// without a `Data` beside it), `Data (2)` beside `Data (3)` as `Data (4)`,
+/// `Data(2)` as `Data(3)`, `Data (02)` and `Data ( 2)` as `Data (3)`, `Data ()`
+/// as `Data (1)`, `Data (5)` as `Data (6)` -- never `Data (2) (2)`. See
+/// [`copy_number_suffix`] for what counts as a copy number; anything else
+/// (`Data (x)`, `Data (+2)`, `Data (2.5)`, `Data (40000)`) gets ` (2)` appended.
+/// The counted-on name keeps the stem exactly (`stem(n)`); when that is longer
+/// than the limit, the stem is cut and the suffix spelled ` (n)`, as for any
+/// copy: `ABCDEFGHIJKLMNOPQRSTUVWXYZA (9)` copies as
+/// `ABCDEFGHIJKLMNOPQRSTUVWXYZ (10)`.
 pub fn unique_sheet_name(base: &str, existing: &[String]) -> String {
     let base = sanitize_sheet_name(base);
     if ensure_sheet_name_is_free(&base, existing, None).is_ok() {
         return base;
     }
+    if let Some((stem, number)) = copy_number_suffix(&base) {
+        let mut n = number as usize + 1;
+        loop {
+            let counted = format!("{stem}({n})");
+            let candidate = if counted.chars().count() <= MAX_SHEET_NAME_CHARS {
+                counted
+            } else {
+                calp::pull::collision_sheet_name(stem, n)
+            };
+            if ensure_sheet_name_is_free(&candidate, existing, None).is_ok() {
+                return candidate;
+            }
+            n += 1;
+            if n > number as usize + existing.len() + 2 && n > 100_000 {
+                return format!("Sheet{}", n);
+            }
+        }
+    }
     let mut counter = 2usize;
     loop {
-        let suffix = format!(" ({})", counter);
-        let room = MAX_SHEET_NAME_CHARS.saturating_sub(suffix.chars().count());
-        let stem: String = base.chars().take(room).collect();
-        let stem = stem.trim_end().to_string();
-        let candidate = format!("{}{}", stem, suffix);
+        // One spelling of a copy name for the whole product: the install door
+        // (`calp::pull`) and this one cut the stem the same way.
+        let candidate = calp::pull::collision_sheet_name(&base, counter);
         if ensure_sheet_name_is_free(&candidate, existing, None).is_ok() {
             return candidate;
         }
@@ -191,6 +420,35 @@ pub fn unique_sheet_name(base: &str, existing: &[String]) -> String {
             return format!("Sheet{}", counter);
         }
     }
+}
+
+/// The copy number a sheet name already ends in, as Excel's Copy Sheet reads it
+/// [LIVE, Excel 16]: `(stem, n)` when the name ends in `(`, optional spaces,
+/// optional ASCII digits, optional spaces, `)`, with the value at most 32767 --
+/// `stem` is everything before that `(`, kept exactly. Empty digits are 0
+/// (`Data ()` copies as `Data (1)`), leading zeros are read (`Data (02)` as
+/// `Data (3)`). Not a copy number: a sign, a decimal point, an exponent, a
+/// space between digits, a value above 32767 (`Data (32767)` copies as
+/// `Data (32768)` but `Data (32768)` as `Data (32768) (2)`).
+fn copy_number_suffix(name: &str) -> Option<(&str, u32)> {
+    let rest = name.strip_suffix(')')?;
+    let open = rest.rfind('(')?;
+    let inner = rest[open + 1..].trim_matches(' ');
+    if !inner.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let digits = inner.trim_start_matches('0');
+    let number: u32 = if digits.is_empty() {
+        0
+    } else if digits.len() > 5 {
+        return None;
+    } else {
+        digits.parse().ok()?
+    };
+    if number > 32767 {
+        return None;
+    }
+    Some((&rest[..open], number))
 }
 
 /// Why a name that arrived from a FILE would have been refused at entry, or
@@ -266,6 +524,111 @@ pub fn restamp_grid_sheet_casing(grid: &mut engine::Grid, sheet_names: &[String]
     changed
 }
 
+/// Re-point every sheet qualifier in `grid` spelled EXACTLY `old`
+/// (case-sensitively) to `new` -- the formula half of
+/// `dedupe_loaded_sheet_names`. Returns how many formulas changed.
+///
+/// Exact, not by Excel's rule: the load-time rename exists because two sheets
+/// had names the rule calls one, so the rule cannot tell a formula's two
+/// candidates apart; the exact spelling is the only evidence there is. A
+/// qualifier spelled some third way (`ÄRENDE` beside `Ärende` and `ärende`)
+/// stays with the sheet that kept the name -- deterministic, and the same
+/// answer every lookup now gives it.
+///
+/// AND ONLY A SPELLING THAT SURVIVES THE LEXER (`spelling_survives_the_lexer`,
+/// rev10C). A bare qualifier is stored uppercased, so in a file holding `Data`
+/// (kept) and `DATA` (renamed) every bare `=Data!A1` is stored `DATA` -- the
+/// exact old name -- and was moved to `DATA (2)`, so formulas meant for the
+/// keeper read the other sheet with no error. An all-uppercase spelling a bare
+/// name parses to is no evidence, and stays with the keeper like any other.
+pub fn rename_grid_qualifiers_exactly(grid: &mut engine::Grid, old: &str, new: &str) -> usize {
+    let mut changed = 0usize;
+    for cell in grid.cells.values_mut() {
+        let Some(ast) = cell.ast.as_deref_mut() else { continue };
+        if !has_sheet_qualifier(ast) {
+            continue;
+        }
+        let mut hit = false;
+        rename_exact(ast, old, new, &mut hit);
+        if hit {
+            changed += 1;
+        }
+    }
+    changed
+}
+
+fn rename_exact_slot(slot: &mut String, old: &str, new: &str, hit: &mut bool) {
+    if slot == old && spelling_survives_the_lexer(slot) {
+        *slot = new.to_string();
+        *hit = true;
+    }
+}
+
+/// Whether a stored qualifier's exact spelling is EVIDENCE of which sheet the
+/// formula meant (rev10C). ONE definition, shared with the load-time rename of
+/// every other store (`calp::sheet_renames::SheetRenames::exact_spelling`), so
+/// a cell and a defined name cannot disagree about it -- see
+/// `calp::sheet_renames::spelling_survives_the_lexer`.
+fn spelling_survives_the_lexer(spelling: &str) -> bool {
+    calp::sheet_renames::spelling_survives_the_lexer(spelling)
+}
+
+fn rename_exact(ast: &mut parser::ast::Expression, old: &str, new: &str, hit: &mut bool) {
+    use parser::ast::Expression as E;
+    match ast {
+        E::CellRef { sheet, .. } | E::ColumnRef { sheet, .. } | E::RowRef { sheet, .. } => {
+            if let Some(s) = sheet {
+                rename_exact_slot(s, old, new, hit);
+            }
+        }
+        E::Range { sheet, start, end, .. } => {
+            if let Some(s) = sheet {
+                rename_exact_slot(s, old, new, hit);
+            }
+            rename_exact(start, old, new, hit);
+            rename_exact(end, old, new, hit);
+        }
+        E::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
+            rename_exact_slot(start_sheet, old, new, hit);
+            rename_exact_slot(end_sheet, old, new, hit);
+            rename_exact(reference, old, new, hit);
+        }
+        E::Literal(_) | E::NamedRef { .. } | E::TableRef { .. } => {}
+        E::BinaryOp { left, right, .. } => {
+            rename_exact(left, old, new, hit);
+            rename_exact(right, old, new, hit);
+        }
+        E::UnaryOp { operand, .. } => rename_exact(operand, old, new, hit),
+        E::FunctionCall { args, .. } => {
+            for a in args {
+                rename_exact(a, old, new, hit);
+            }
+        }
+        E::IndexAccess { target, index } => {
+            rename_exact(target, old, new, hit);
+            rename_exact(index, old, new, hit);
+        }
+        E::ArrayLiteral { rows } => {
+            for e in rows.iter_mut().flatten() {
+                rename_exact(e, old, new, hit);
+            }
+        }
+        E::ListLiteral { elements } => {
+            for e in elements {
+                rename_exact(e, old, new, hit);
+            }
+        }
+        E::DictLiteral { entries } => {
+            for (k, v) in entries {
+                rename_exact(k, old, new, hit);
+                rename_exact(v, old, new, hit);
+            }
+        }
+        E::SpillRef { cell, .. } => rename_exact(cell, old, new, hit),
+        E::ImplicitIntersection { operand } => rename_exact(operand, old, new, hit),
+    }
+}
+
 /// The gate: does this tree mention a sheet at all? Allocation-free, so the
 /// dominant case (no cross-sheet reference anywhere) never reaches the renderer.
 fn has_sheet_qualifier(ast: &parser::ast::Expression) -> bool {
@@ -301,7 +664,7 @@ fn has_sheet_qualifier(ast: &parser::ast::Expression) -> bool {
 fn official_spelling(qualifier: &str, sheet_names: &[String]) -> Option<String> {
     let found = sheet_names
         .iter()
-        .find(|n| n.eq_ignore_ascii_case(qualifier))?;
+        .find(|n| identity::sheet_names_equal(n, qualifier))?;
     (found != qualifier).then(|| found.clone())
 }
 
@@ -461,10 +824,22 @@ mod tests {
     }
 
     #[test]
-    fn blank_and_whitespace_only_names_are_refused_and_others_are_trimmed() {
+    /// Excel [LIVE, Excel 16, 2026-10-31, protfill/probe2-3.ps1]: the Rename
+    /// UI keeps ` Data ` (six characters) and accepts a name of two spaces;
+    /// only the empty name is refused. Entry used to trim and refuse both.
+    fn only_the_empty_name_is_refused_and_spaces_are_kept_like_excel() {
         assert!(validate_sheet_name("").is_err());
-        assert!(validate_sheet_name("   ").is_err());
-        assert_eq!(validate_sheet_name("  Data  ").as_deref(), Ok("Data"));
+        assert_eq!(validate_sheet_name("  ").as_deref(), Ok("  "), "Excel's Rename UI accepts two spaces");
+        assert_eq!(validate_sheet_name(" Data ").as_deref(), Ok(" Data "), "Excel keeps the spaces at both ends");
+        assert_eq!(validate_sheet_name(" 'x").as_deref(), Ok(" 'x"), "an apostrophe after a space is not at the end");
+        assert!(validate_sheet_name(" Data'").is_err(), "an apostrophe at the end is still refused");
+        // ` Data ` and `Data` are two sheets; ` DATA ` is the duplicate.
+        let existing = vec![" Data ".to_string()];
+        assert!(ensure_sheet_name_is_free("Data", &existing, None).is_ok());
+        assert!(ensure_sheet_name_is_free(" DATA ", &existing, None).is_err());
+        // Copy Sheet keeps the stem's spaces: Excel copies ` Data ` as ` Data  (2)`.
+        assert_eq!(unique_sheet_name(" Data ", &existing), " Data  (2)");
+        assert_eq!(unique_sheet_name("  ", &["  ".to_string()]), "   (2)", "Excel copies `  ` as `   (2)`");
     }
 
     #[test]
@@ -487,17 +862,29 @@ mod tests {
     }
 
     /// rev6A#8: the comparison was ASCII-only, so `Ärende` and `ärende` could
-    /// coexist while every engine lookup (`MultiSheetContext`, the cube
-    /// pre-fetch's per-sheet map) folds a name with `to_uppercase` and so saw
-    /// one sheet. Excel refuses the pair [LIVE].
+    /// coexist. Excel refuses the pair [LIVE]. The sheet-name round then made
+    /// the rule EXACTLY Excel's: `STRASSE` beside `Straße` was refused while
+    /// the rule folded with Rust's full uppercasing (`ß` -> `SS`), and Excel
+    /// ACCEPTS it [LIVE] -- that assertion is deliberately inverted here --
+    /// while `ß` beside `ẞ`, and the Kelvin sign beside `K`, are refused.
     #[test]
     fn a_duplicate_is_refused_ignoring_case_beyond_ascii() {
         let existing = vec!["\u{c4}rende".to_string(), "Stra\u{df}e".to_string()];
         assert!(ensure_sheet_name_is_free("\u{e4}rende", &existing, None).is_err(), "Ärende beside ärende");
         assert!(ensure_sheet_name_is_free("\u{c4}RENDE", &existing, None).is_err());
         assert!(
-            ensure_sheet_name_is_free("STRASSE", &existing, None).is_err(),
-            "two names every engine lookup folds alike are one sheet there"
+            ensure_sheet_name_is_free("STRASSE", &existing, None).is_ok(),
+            "Excel accepts STRASSE beside Stra\u{df}e [LIVE]: case folding never expands"
+        );
+        assert!(
+            ensure_sheet_name_is_free("STRA\u{1e9e}E", &existing, None).is_err(),
+            "Excel refuses STRA\u{1e9e}E (capital sharp s) beside Stra\u{df}e [LIVE]"
+        );
+        let kelvin = vec!["K".to_string()];
+        assert!(ensure_sheet_name_is_free("\u{212a}", &kelvin, None).is_err(), "Excel refuses the Kelvin sign beside K");
+        assert!(
+            ensure_sheet_name_is_free("\u{130}", &["i".to_string()], None).is_ok(),
+            "Excel has no Turkish rule: dotted capital I beside i is accepted"
         );
         assert!(ensure_sheet_name_is_free("\u{e4}rende", &existing, Some(0)).is_ok(), "its own case-variant");
         assert!(ensure_sheet_name_is_free("\u{c5}rende", &existing, None).is_ok(), "another letter is another name");
@@ -505,6 +892,258 @@ mod tests {
             unique_sheet_name("\u{e4}rende", &existing),
             "\u{e4}rende (2)",
             "a generated name steps past the case-variant too"
+        );
+    }
+
+    /// A document saved under an older rule can hold two names the rule now
+    /// calls one. It still opens: the lower tab index keeps its name, every
+    /// later one is renamed like a copy, and only qualifiers spelled exactly as
+    /// the renamed sheet was follow it.
+    #[test]
+    fn a_loaded_pair_the_rule_calls_one_is_renamed_deterministically() {
+        let loaded = vec![
+            "\u{c4}rende".to_string(),
+            "Data".to_string(),
+            "\u{e4}rende".to_string(),
+            "STRASSE".to_string(),
+            "Stra\u{df}e".to_string(),
+            "\u{e4}rende (2)".to_string(),
+        ];
+        let mut probe = loaded.clone();
+        let renames = dedupe_loaded_sheet_names(&mut probe);
+        assert_eq!(
+            renames,
+            vec![(2, "\u{e4}rende".to_string(), "\u{e4}rende (3)".to_string())],
+            "only the later case-variant is renamed, past the (2) a later sheet already holds; \
+             STRASSE beside Stra\u{df}e is two names"
+        );
+
+        // The step `open_file` runs, over the file's grids: Data's formulas.
+        let mut grids: Vec<engine::Grid> = (0..loaded.len()).map(|_| engine::Grid::new()).collect();
+        for (row, text) in ["='\u{e4}rende'!A1", "='\u{c4}rende'!A1", "=SUM('\u{e4}rende:Data'!B2)", "=Data!A1"]
+            .iter()
+            .enumerate()
+        {
+            let ast = parser::parse(text).expect("fixture formula parses");
+            let mut cell = engine::Cell::new_formula(text.to_string());
+            cell.ast = Some(Box::new(ast));
+            grids[1].set_cell(row as u32, 0, cell);
+        }
+        let names = settle_loaded_sheet_names(loaded.clone(), &mut grids);
+        assert_eq!(names[0], "\u{c4}rende", "the lower tab index keeps its name");
+        assert_eq!(names[2], "\u{e4}rende (3)");
+        for (i, a) in names.iter().enumerate() {
+            for b in &names[i + 1..] {
+                assert!(!identity::sheet_names_equal(a, b), "{a:?} and {b:?} are still one name");
+            }
+        }
+        let grid = &grids[1];
+        let shown = |row: u32| {
+            engine::ast_render::render_formula_raw(grid.get_cell(row, 0).unwrap().ast.as_deref().unwrap())
+        };
+        assert!(shown(0).contains("\u{e4}rende (3)"), "{}", shown(0));
+        assert!(!shown(1).contains("(3)"), "the keeper's own spelling stays: {}", shown(1));
+        assert!(shown(2).contains("\u{e4}rende (3)"), "{}", shown(2));
+    }
+
+    /// rev10C: the lexer uppercases a BARE qualifier, so in a file holding
+    /// `Data` (kept) and `DATA` (renamed) every bare `=Data!A1` is stored
+    /// `DATA` -- the renamed sheet's exact old name -- and the exact-spelling
+    /// rule moved the keeper's references to `DATA (2)`. An uppercase spelling
+    /// a bare name parses to is no evidence; one only quoting can produce is.
+    #[test]
+    fn a_loaded_ascii_pair_leaves_bare_references_with_the_keeper() {
+        let loaded = vec!["Data".to_string(), "DATA".to_string(), "Report".to_string(), "data".to_string()];
+        let mut grids: Vec<engine::Grid> = (0..loaded.len()).map(|_| engine::Grid::new()).collect();
+        let fixtures = [
+            "=Data!A1",          // bare: stored DATA -- meant for the keeper
+            "=DATA!A1",          // bare: stored DATA -- no evidence either way
+            "=SUM(Data:Report!A1)", // bare 3-D: stored DATA:REPORT
+            "='data'!A1",        // quoted lowercase: only quoting keeps it
+        ];
+        for (row, text) in fixtures.iter().enumerate() {
+            let ast = parser::parse(text).expect("fixture formula parses");
+            let mut cell = engine::Cell::new_formula(text.to_string());
+            cell.ast = Some(Box::new(ast));
+            grids[2].set_cell(row as u32, 0, cell);
+        }
+        let names = settle_loaded_sheet_names(loaded, &mut grids);
+        assert_eq!(names, vec!["Data", "DATA (2)", "Report", "data (3)"], "deterministic: later ones renamed");
+        let grid = &grids[2];
+        let shown = |row: u32| {
+            engine::ast_render::render_formula_raw(grid.get_cell(row, 0).unwrap().ast.as_deref().unwrap())
+        };
+        for row in 0..3 {
+            assert!(
+                !shown(row).contains("(2)"),
+                "a bare reference stays with the keeper Data, not the renamed DATA (2): {}",
+                shown(row)
+            );
+        }
+        assert!(shown(3).contains("data (3)"), "a quoted lowercase spelling is evidence: {}", shown(3));
+    }
+
+    /// names2 remaining (round 13): the load-time rename reached cell formulas
+    /// only. A defined name, a chart source, a conditional format, a navigate
+    /// button's page target and a pivot spelled exactly as the renamed sheet
+    /// kept the old spelling -- which every lookup resolves, by Excel's rule,
+    /// to the KEEPER -- so `='ärende'!B1` in a cell read the renamed sheet and
+    /// the name `Rate` (`='ärende'!$B$1`) read the other one. Every kind now
+    /// follows by the same evidence, references to the keeper stay, and the
+    /// user gets one notice.
+    #[test]
+    fn a_load_time_rename_carries_every_reference_kind_and_says_so() {
+        use serde_json::json;
+        let mut wb = persistence::Workbook::new();
+        wb.sheets = vec![
+            persistence::Sheet::new("\u{c4}rende".to_string()),
+            persistence::Sheet::new("\u{e4}rende".to_string()),
+            persistence::Sheet::new("Report".to_string()),
+        ];
+        let sid = wb.sheets[2].id;
+        let named = |name: &str, refers_to: &str| persistence::SavedNamedRange {
+            name: name.to_string(),
+            refers_to: refers_to.to_string(),
+            sheet_id: None,
+            comment: None,
+            folder: None,
+        };
+        let entity = || identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        wb.named_ranges = vec![named("Rate", "='\u{e4}rende'!$B$1"), named("Keep", "='\u{c4}rende'!$B$1")];
+        wb.charts = vec![persistence::SavedChart {
+            id: entity(),
+            sheet_id: sid,
+            spec: json!({ "mark": "bar", "data": "'\u{e4}rende'!A1:A3" }),
+        }];
+        wb.conditional_formats = vec![persistence::SavedSheetConditionalFormats {
+            sheet_id: sid,
+            rules: json!([
+                { "rule": { "type": "expression", "formula": "='\u{e4}rende'!$A$1>0" } },
+                { "rule": { "type": "expression", "formula": "='\u{c4}rende'!$A$1>0" } }
+            ]),
+        }];
+        wb.controls = vec![persistence::SavedSheetControls {
+            sheet_id: sid,
+            controls: json!([{
+                "controlType": "button",
+                "properties": {
+                    "action": { "valueType": "static", "value": "navigate" },
+                    "actionTargetName": { "valueType": "static", "value": "\u{e4}rende" }
+                }
+            }]),
+        }];
+        wb.pivot_definitions = vec![persistence::SavedPivotDefinition {
+            id: entity(),
+            source_type: "grid".to_string(),
+            source_sheet_index: Some(0),
+            definition: json!({ "destination_sheet": "\u{e4}rende", "source_sheet": "\u{c4}rende" }),
+        }];
+        let mut grids: Vec<engine::Grid> = (0..3).map(|_| engine::Grid::new()).collect();
+
+        let (names, report) = settle_loaded_workbook_sheet_names(&mut wb, &mut grids);
+
+        assert_eq!(names, vec!["\u{c4}rende", "\u{e4}rende (2)", "Report"]);
+        assert_eq!(wb.sheets[1].name, "\u{e4}rende (2)", "the restores that map by name see the new name");
+        assert_eq!(wb.named_ranges[0].refers_to, "='\u{e4}rende (2)'!$B$1", "the defined name follows its sheet");
+        assert_eq!(wb.named_ranges[1].refers_to, "='\u{c4}rende'!$B$1", "the keeper's name stays");
+        assert_eq!(wb.charts[0].spec["data"], json!("'\u{e4}rende (2)'!A1:A3"), "the chart source follows");
+        assert_eq!(wb.conditional_formats[0].rules[0]["rule"]["formula"], json!("='\u{e4}rende (2)'!$A$1>0"));
+        assert_eq!(wb.conditional_formats[0].rules[1]["rule"]["formula"], json!("='\u{c4}rende'!$A$1>0"));
+        assert_eq!(
+            wb.controls[0].controls[0]["properties"]["actionTargetName"]["value"],
+            json!("\u{e4}rende (2)"),
+            "a navigate button's page target follows"
+        );
+        assert_eq!(wb.pivot_definitions[0].definition["destination_sheet"], json!("\u{e4}rende (2)"));
+        assert_eq!(wb.pivot_definitions[0].definition["source_sheet"], json!("\u{c4}rende"));
+        assert_eq!(report.other_references, 5, "name, chart, CF, page target, pivot destination");
+
+        let notice = load_rename_notice(&report).expect("a rename is told to the user");
+        assert!(notice.contains("'\u{e4}rende' is now '\u{e4}rende (2)'"), "{notice}");
+        assert_eq!(load_rename_notice(&LoadedRenameReport::default()), None, "no rename, no notice");
+    }
+
+    /// NEW-unique-sheet-name-trims-cut-stem (calpkey): the cut stem kept a
+    /// trailing space in Excel [LIVE, Worksheet.Copy] and was trimmed here.
+    #[test]
+    fn a_generated_copy_name_is_cut_like_excels() {
+        let spaced = "ABCDEFGHIJKLMNOPQRSTUVWXYZ 1234";
+        assert_eq!(spaced.chars().count(), 31, "fixture");
+        assert_eq!(
+            unique_sheet_name(spaced, &[spaced.to_string()]),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ  (2)",
+            "Excel keeps the space the cut leaves: two spaces before (2) [LIVE]"
+        );
+        let a31 = "A".repeat(31);
+        let a27 = "A".repeat(27);
+        assert_eq!(unique_sheet_name(&a31, &[a31.clone()]), format!("{a27} (2)"));
+        assert_eq!(unique_sheet_name(&a31, &[a31.clone(), format!("{a27} (2)")]), format!("{a27} (3)"));
+        let digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZ12345";
+        assert_eq!(unique_sheet_name(digits, &[digits.to_string()]), "ABCDEFGHIJKLMNOPQRSTUVWXYZ1 (2)");
+        assert_eq!(unique_sheet_name("Short", &["Short".to_string()]), "Short (2)");
+    }
+
+    /// rev12C: Copy Sheet of a name that already ends in a copy number counted
+    /// on from it in Excel and appended a second suffix here (`Data (2) (2)`).
+    /// Every expectation is Excel 16's Worksheet.Copy result [LIVE, 2026-10-30].
+    ///
+    /// SABOTAGE: `copy_number_suffix` returns `None` at once -- `Data (2)`
+    /// copies as `Data (2) (2)`.
+    #[test]
+    fn copying_a_numbered_name_counts_on_like_excel() {
+        let copy = |source: &str, sheets: &[&str]| {
+            let existing: Vec<String> = sheets.iter().map(|s| s.to_string()).collect();
+            unique_sheet_name(source, &existing)
+        };
+        assert_eq!(copy("Data (2)", &["Data", "Data (2)"]), "Data (3)");
+        assert_eq!(copy("Data (2)", &["Data (2)"]), "Data (3)");
+        assert_eq!(copy("Data (2)", &["Data (2)", "Data (3)"]), "Data (4)");
+        assert_eq!(copy("data (2)", &["data (2)", "DATA (3)"]), "data (4)", "taken case-insensitively");
+        assert_eq!(copy("Data", &["Data", "Data (2)"]), "Data (3)");
+        assert_eq!(copy("Data(2)", &["Data(2)"]), "Data(3)", "the stem is kept exactly");
+        assert_eq!(copy("Data  (2)", &["Data  (2)"]), "Data  (3)");
+        assert_eq!(copy("Data (02)", &["Data (02)"]), "Data (3)");
+        assert_eq!(copy("Data ( 2)", &["Data ( 2)"]), "Data (3)");
+        assert_eq!(copy("Data (2 )", &["Data (2 )"]), "Data (3)");
+        assert_eq!(copy("Data ()", &["Data ()"]), "Data (1)");
+        assert_eq!(copy("Data ( )", &["Data ( )"]), "Data (1)");
+        assert_eq!(copy("Data (0)", &["Data (0)"]), "Data (1)");
+        assert_eq!(copy("Data (1)", &["Data (1)"]), "Data (2)");
+        assert_eq!(copy("Data (5)", &["Data (5)"]), "Data (6)");
+        assert_eq!(copy("(2)", &["(2)"]), "(3)");
+        assert_eq!(copy("Data (2) (2)", &["Data (2) (2)"]), "Data (2) (3)");
+        assert_eq!(copy("Data (2", &["Data (2", "Data (2 (2)"]), "Data (2 (3)");
+        assert_eq!(copy("Data (32767)", &["Data (32767)"]), "Data (32768)");
+        // Not a copy number: a suffix is appended.
+        for (source, expected) in [
+            ("Data (x)", "Data (x) (2)"),
+            ("Data (2)x", "Data (2)x (2)"),
+            ("Data (+2)", "Data (+2) (2)"),
+            ("Data (2.5)", "Data (2.5) (2)"),
+            ("Data (1e2)", "Data (1e2) (2)"),
+            ("Data (2 3)", "Data (2 3) (2)"),
+            ("Data (32768)", "Data (32768) (2)"),
+            ("Data (65535)", "Data (65535) (2)"),
+            ("Data (2147483647)", "Data (2147483647) (2)"),
+        ] {
+            assert_eq!(copy(source, &[source]), expected, "copy of {source:?}");
+        }
+        // Too long to count on in place: cut, and spelled ` (n)`.
+        assert_eq!(
+            copy("ABCDEFGHIJKLMNOPQRSTUVWXYZA (2)", &["ABCDEFGHIJKLMNOPQRSTUVWXYZA (2)"]),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZA (3)"
+        );
+        assert_eq!(
+            copy("ABCDEFGHIJKLMNOPQRSTUVWXYZA (9)", &["ABCDEFGHIJKLMNOPQRSTUVWXYZA (9)"]),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ (10)"
+        );
+        assert_eq!(
+            copy("ABCDEFGHIJKLMNOPQRSTUVWXYZAB(9)", &["ABCDEFGHIJKLMNOPQRSTUVWXYZAB(9)"]),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ (10)"
+        );
+        assert_eq!(
+            copy("ABCDEFGHIJKLMNOPQRSTUVWXYZ  (9)", &["ABCDEFGHIJKLMNOPQRSTUVWXYZ  (9)"]),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ (10)"
         );
     }
 
@@ -536,11 +1175,14 @@ mod tests {
     /// `' 'x` into `'x` (fix round 5), a name entry refuses; the fixed list
     /// above never tried a space BETWEEN two apostrophes.
     #[test]
-    fn sanitizing_trims_until_no_space_or_apostrophe_is_left_at_either_end() {
-        assert_eq!(sanitize_sheet_name("' 'x"), "x");
-        assert_eq!(sanitize_sheet_name("x' '"), "x");
-        assert_eq!(sanitize_sheet_name(" ' ' History ' "), "History_");
-        assert_eq!(sanitize_sheet_name("' ' '"), "Sheet");
+    fn sanitizing_leaves_no_apostrophe_at_either_end_and_keeps_spaces() {
+        // Spaces are legal at the ends (Excel [LIVE]); only an END apostrophe
+        // is stripped, and nothing is left to expose another one.
+        assert_eq!(sanitize_sheet_name("' 'x"), " 'x");
+        assert_eq!(sanitize_sheet_name("x' '"), "x' ");
+        assert_eq!(sanitize_sheet_name(" Data "), " Data ");
+        assert_eq!(sanitize_sheet_name("'History'"), "History_");
+        assert_eq!(sanitize_sheet_name("'''"), "Sheet");
 
         const ALPHABET: [char; 5] = [' ', '\'', '\t', ':', 'x'];
         let mut words: Vec<String> = vec![String::new()];

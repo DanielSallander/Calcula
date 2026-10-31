@@ -167,6 +167,10 @@ export type {
   ColorSwatchVariant,
   ColorSwatchSize,
 } from "./primitives/Color";
+/** ONE way to drive an OS colour picker (`<input type="color">`): preview on
+ *  every `input` step, COMMIT once on the closing `change` (one undo step). */
+export { useNativeColorPick, pickerHex } from "./primitives/useNativeColorPick";
+export type { NativeColorPickOptions, NativeColorPickProps } from "./primitives/useNativeColorPick";
 
 export { Tile, TileGallery } from "./primitives/Tile";
 export type { TileProps, TileSize, TileGalleryProps, TileGalleryItem } from "./primitives/Tile";

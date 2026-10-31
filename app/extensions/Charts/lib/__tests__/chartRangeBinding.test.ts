@@ -256,3 +256,28 @@ describe("X15: the display text round-trips through the dialog's own reader", ()
     ]);
   });
 });
+
+// The sheet prefix binds by Excel's sheet-name case rule (@api/sheetNames):
+// the Angstrom sign is not a-ring (toLowerCase merged them) and sigma is
+// capital sigma's name (toLowerCase split them). Both [LIVE].
+describe("a sheet prefix binds by Excel's sheet-name case rule", () => {
+  const sheets: SheetInfo[] = [
+    { index: 0, name: "Sheet1", sheetId: "id-0", visibility: "visible" },
+    { index: 1, name: "Q\u00E5", sheetId: "id-1", visibility: "visible" },
+    { index: 2, name: "Q\u03A3", sheetId: "id-2", visibility: "visible" },
+  ];
+  const ctx: RangeBindingContext = { sheets, currentSheetIndex: 0, currentSheetName: "Sheet1", currentIsCanvas: false };
+  it("keeps apart a pair toLowerCase merges", () => {
+    expect(bindRangeText("'Q\u212B'!A1:B2", ctx).ok).toBe(false);
+  });
+  it("merges a pair toLowerCase splits", () => {
+    const b = bindRangeText("'Q\u03C3'!A1:B2", ctx);
+    expect(b.ok && b.ref.sheetIndex).toBe(2);
+  });
+  it("binds the active sheet before the list arrives by the same rule", () => {
+    const early: RangeBindingContext = { sheets: [], currentSheetIndex: 2, currentSheetName: "Q\u03A3", currentIsCanvas: false };
+    expect(bindRangeText("'Q\u03C3'!A1:B2", early).ok).toBe(true);
+    const early2: RangeBindingContext = { sheets: [], currentSheetIndex: 1, currentSheetName: "Q\u00E5", currentIsCanvas: false };
+    expect(bindRangeText("'Q\u212B'!A1:B2", early2).ok).toBe(false);
+  });
+});

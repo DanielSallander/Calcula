@@ -6,6 +6,9 @@ import {
   computeComboLayout,
   computeComboHitGeometry,
   paintComboChart,
+  comboSecondarySeries,
+  comboSwitchSecondarySeries,
+  setComboSeriesSecondary,
 } from "./comboChartPainter";
 import type {
   ChartSpec,
@@ -120,6 +123,68 @@ describe("computeComboLayout", () => {
 
     expect(layoutWithSec.margin.right).toBeGreaterThan(layoutNoSec.margin.right);
     expect(layoutWithSec.plotArea.width).toBeLessThan(layoutNoSec.plotArea.width);
+  });
+
+  it("reserves NO right-hand strip when no series is on the secondary axis (BUG-0445)", () => {
+    const layoutNoSec = computeComboLayout(600, 400, makeSpec(), sampleData, DEFAULT_CHART_THEME);
+    for (const opts of [
+      { secondaryYAxis: true },
+      { secondaryYAxis: true, secondaryAxisSeries: [] },
+      { secondaryYAxis: true, secondaryAxisSeries: [7] }, // no such series
+      // EVERY series: Excel puts them all back on primary (ext2, [LIVE]).
+      { secondaryYAxis: true, secondaryAxisSeries: [0, 1] },
+    ]) {
+      const layout = computeComboLayout(600, 400, makeSpec(opts), sampleData, DEFAULT_CHART_THEME);
+      expect(layout.margin.right).toBe(layoutNoSec.margin.right);
+      expect(layout.plotArea.width).toBe(layoutNoSec.plotArea.width);
+    }
+  });
+});
+
+describe("combo secondary-axis writers (BUG-0445)", () => {
+  it("setComboSeriesSecondary keeps the flag and the list in step", () => {
+    const on = setComboSeriesSecondary({}, 3, 2, true);
+    expect(on).toEqual({ secondaryYAxis: true, secondaryAxisSeries: [2] });
+    expect(comboSecondarySeries(on, 3)).toEqual([2]);
+    const off = setComboSeriesSecondary(on, 3, 2, false);
+    expect(off).toEqual({ secondaryYAxis: false, secondaryAxisSeries: [] });
+  });
+
+  // [LIVE] Excel 16: with S2,S3 on secondary, S1 -> secondary gives AxisGroup
+  // 1,1,1 and no secondary axis; a one-series chart's series stays at 1.
+  it("moving the LAST primary series to the secondary axis puts every series back on primary (Excel)", () => {
+    const two = setComboSeriesSecondary({}, 3, 1, true);
+    const both = setComboSeriesSecondary(two, 3, 2, true);
+    expect(comboSecondarySeries(both, 3)).toEqual([1, 2]);
+    expect(setComboSeriesSecondary(both, 3, 0, true)).toEqual({ secondaryYAxis: false, secondaryAxisSeries: [] });
+    expect(setComboSeriesSecondary({}, 1, 0, true)).toEqual({ secondaryYAxis: false, secondaryAxisSeries: [] });
+  });
+
+  it("the band switch moves the line series (Excel's Column - Line on Secondary Axis)", () => {
+    expect(comboSwitchSecondarySeries({}, 3)).toEqual([1, 2]);
+    expect(comboSwitchSecondarySeries({ stackMode: "stacked" }, 3)).toEqual([2]);
+    // Columns only: the last series, so the switch is never a no-op.
+    expect(comboSwitchSecondarySeries({ seriesMarks: { 0: "bar", 1: "bar" } }, 2)).toEqual([1]);
+    expect(comboSwitchSecondarySeries({}, 1)).toEqual([]);
+  });
+
+  it("a series on the secondary axis is drawn against its own scale and the right-hand axis is labelled", () => {
+    const data = makeData(
+      ["Q1", "Q2"],
+      [
+        { name: "Revenue", values: [1000, 2000] },
+        { name: "Margin", values: [0.1, 0.2] },
+      ],
+    );
+    const spec = makeSpec(setComboSeriesSecondary({}, 2, 1, true));
+    const layout = computeComboLayout(600, 400, spec, data, DEFAULT_CHART_THEME);
+    const ctx = makeCtx();
+    paintComboChart(ctx, data, spec, layout, DEFAULT_CHART_THEME);
+    // Right-hand tick labels sit right of the plot area.
+    const right = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => (c[1] as number) > layout.plotArea.x + layout.plotArea.width,
+    );
+    expect(right.length).toBeGreaterThan(0);
   });
 });
 

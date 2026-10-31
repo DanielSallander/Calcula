@@ -275,19 +275,23 @@ pub fn resolve_name_collisions(
     taken: &mut Vec<String>,
     skip: &std::collections::HashSet<SheetId>,
 ) {
+    // Keyed by Excel's sheet-name rule (`identity::sheet_name_key`): Unicode
+    // lowercasing kept `ς` apart from `Σ`, which Excel calls one name.
     let mut taken_lower: std::collections::HashSet<String> =
-        taken.iter().map(|n| n.to_lowercase()).collect();
+        taken.iter().map(|n| identity::sheet_name_key(n)).collect();
 
     for (package_sheet_id, name) in names.iter_mut() {
         if skip.contains(package_sheet_id) {
             continue;
         }
         let mut resolved = name.clone();
-        if taken_lower.contains(&resolved.to_lowercase()) {
+        if taken_lower.contains(&identity::sheet_name_key(&resolved)) {
             let mut n = 2usize;
             loop {
-                let candidate = format!("{} ({})", name, n);
-                if !taken_lower.contains(&candidate.to_lowercase()) {
+                // Never longer than Excel's 31 characters: the stem is cut to
+                // fit the suffix ([`collision_sheet_name`]).
+                let candidate = collision_sheet_name(name, n);
+                if !taken_lower.contains(&identity::sheet_name_key(&candidate)) {
                     resolved = candidate;
                     break;
                 }
@@ -297,9 +301,44 @@ pub fn resolve_name_collisions(
         if resolved != *name {
             *name = resolved.clone();
         }
-        taken_lower.insert(resolved.to_lowercase());
+        taken_lower.insert(identity::sheet_name_key(&resolved));
         taken.push(resolved);
     }
+}
+
+/// Excel's limit on a sheet name, in characters.
+pub const MAX_SHEET_NAME_CHARS: usize = 31;
+
+/// The `n`th collision name for `name`, as Excel names a copied sheet:
+/// `name (n)`, with the stem cut so the whole name is at most 31 characters.
+/// [LIVE, Excel 16: copying `"A" x 31` gives `"A" x 27 + " (2)"`; copying
+/// `"ABCDEFGHIJKLMNOPQRSTUVWXYZ 1234"` gives `"ABCDEFGHIJKLMNOPQRSTUVWXYZ  (2)"`
+/// -- the cut stem keeps its trailing space, two spaces before the suffix.]
+/// A 35-character name used to come out of a 31-character one, which the
+/// host's rename refuses at entry, so the tab could not even be renamed back.
+pub fn collision_sheet_name(name: &str, n: usize) -> String {
+    let suffix = format!(" ({})", n);
+    let room = MAX_SHEET_NAME_CHARS.saturating_sub(suffix.chars().count());
+    let stem: String = name.chars().take(room).collect();
+    format!("{stem}{suffix}")
+}
+
+/// Is `local` the name `published` was given by an install's collision rename
+/// ([`resolve_name_collisions`]) -- `published` itself, or its `n`th collision
+/// name for some `n` -- by Excel's sheet-name rule? The one test a push uses to
+/// tell a collision rename (safe to undo) from the author's own rename.
+pub fn is_collision_sheet_name(local: &str, published: &str) -> bool {
+    if identity::sheet_names_equal(local, published) {
+        return true;
+    }
+    let Some(rest) = local.strip_suffix(')') else { return false };
+    let Some(open) = rest.rfind(" (") else { return false };
+    let digits = &rest[open + 2..];
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(n) = digits.parse::<usize>() else { return false };
+    identity::sheet_names_equal(local, &collision_sheet_name(published, n))
 }
 
 /// The visibility value that marks a sheet as a floating range's OBJECT-backed
@@ -659,6 +698,10 @@ pub fn pull_with_options(
             cells,
             column_widths,
             row_heights,
+            // The author's per-sheet standard sizes, repaired like the layout:
+            // only a positive, finite size is one.
+            default_row_height: metadata.default_row_height.filter(|px| px.is_finite() && *px > 0.0),
+            default_column_width: metadata.default_column_width.filter(|px| px.is_finite() && *px > 0.0),
             styles,
             merged_regions: metadata.merged_regions,
             freeze_row: metadata.freeze_row,
@@ -4470,5 +4513,84 @@ mod tests {
         assert!(matches!(err, CalpError::PublisherKeyChanged { .. }), "got {:?}", err);
         let msg = err.to_string();
         assert!(msg.contains("changed since first use"), "msg: {}", msg);
+    }
+
+    /// The subscribe/update INSTALL door names arriving sheets by Excel's rule,
+    /// the same one Rename Sheet applies (`identity::sheet_names_equal`): an
+    /// application bringing `ärende` into a workbook holding `Ärende` -- or `ς`
+    /// beside `Σ` -- gets `(2)`, because Excel refuses both pairs [LIVE];
+    /// `STRASSE` beside `Straße` installs under its own name, because Excel
+    /// accepts it [LIVE]. The ASCII-only / lowercasing comparison installed the
+    /// first pair (rev8A) and kept `ς` apart from `Σ`.
+    #[test]
+    fn an_installed_sheet_collides_by_excels_case_rule() {
+        let id = || SheetId::from_bytes(identity::generate_uuid_v7());
+        let mut taken: Vec<String> = vec!["\u{c4}rende".to_string(), "Stra\u{df}e".to_string(), "\u{3a3}".to_string()];
+        let mut names: Vec<(SheetId, String)> = vec![
+            (id(), "\u{e4}rende".to_string()),
+            (id(), "STRASSE".to_string()),
+            (id(), "\u{3c2}".to_string()),
+            (id(), "\u{e4}RENDE (2)".to_string()),
+        ];
+        resolve_name_collisions(&mut names, &mut taken, &std::collections::HashSet::new());
+        let got: Vec<&str> = names.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(
+            got,
+            vec!["\u{e4}rende (2)", "STRASSE", "\u{3c2} (2)", "\u{e4}RENDE (2) (2)"],
+            "an arriving name that Excel calls the same as a taken one is renamed; one Excel calls distinct is not"
+        );
+        for (i, a) in taken.iter().enumerate() {
+            for b in &taken[i + 1..] {
+                assert!(!identity::sheet_names_equal(a, b), "{a:?} and {b:?} were both installed");
+            }
+        }
+    }
+
+    /// A COLLISION NAME FITS IN 31 CHARACTERS, as Excel's copy names do [LIVE,
+    /// Excel 16: `"A" x 31` -> `"A" x 27 + " (2)"`, then `" (3)"`; a stem cut
+    /// after a space keeps it]. A 31-character application sheet name that
+    /// collided used to install as 35 characters, a name the host refuses at
+    /// entry. And a push still recognises the cut name as the collision rename
+    /// it is (`is_collision_sheet_name`), so it is restored, not refused as the
+    /// author's own rename.
+    ///
+    /// SABOTAGE: build the candidate as `format!("{} ({})", name, n)` again --
+    /// the "Excel's copy names" assertion fails (35-character names).
+    #[test]
+    fn a_collision_name_is_cut_to_excels_31_characters() {
+        let id = || SheetId::from_bytes(identity::generate_uuid_v7());
+        let long = "A".repeat(31);
+        let spaced = "ABCDEFGHIJKLMNOPQRSTUVWXYZ 1234".to_string();
+        let mut taken: Vec<String> = vec![long.clone(), spaced.clone(), "Short".to_string()];
+        let mut names: Vec<(SheetId, String)> = vec![
+            (id(), long.clone()),
+            (id(), long.clone()),
+            (id(), spaced.clone()),
+            (id(), "Short".to_string()),
+        ];
+        resolve_name_collisions(&mut names, &mut taken, &std::collections::HashSet::new());
+        let got: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
+        assert_eq!(
+            got,
+            vec![
+                format!("{} (2)", "A".repeat(27)),
+                format!("{} (3)", "A".repeat(27)),
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ  (2)".to_string(),
+                "Short (2)".to_string(),
+            ],
+            "Excel's copy names [LIVE]"
+        );
+        for n in &got {
+            assert!(n.chars().count() <= MAX_SHEET_NAME_CHARS, "{n:?} is longer than Excel allows");
+        }
+        // The push's test: a cut collision name is the published name's.
+        assert!(is_collision_sheet_name(&got[0], &long));
+        assert!(is_collision_sheet_name(&got[1], &long));
+        assert!(is_collision_sheet_name(&got[2], &spaced));
+        assert!(is_collision_sheet_name("short (2)", "Short"), "by Excel's case rule");
+        assert!(is_collision_sheet_name(&long, &long));
+        assert!(!is_collision_sheet_name("Shorter (2)", "Short"));
+        assert!(!is_collision_sheet_name("Short (x)", "Short"));
+        assert!(!is_collision_sheet_name(&format!("{} (2)", "B".repeat(27)), &long));
     }
 }

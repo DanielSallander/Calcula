@@ -42,8 +42,12 @@ fn layout(wb: &Workbook, index: usize) -> CanvasLayout {
     }
 }
 
+fn families(wb: &Workbook) -> crate::sheets::ObjectFamilyStores<'_> {
+    crate::sheets::ObjectFamilyStores { slicers: &wb.slicer, timelines: &wb.timelines, pivots: &wb.pivots }
+}
+
 fn patch(wb: &Workbook, index: usize, p: CanvasLayoutPatch) -> Result<CanvasLayout, String> {
-    crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(index), &p).map(|c| c.layout)
+    crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, &families(wb), Some(index), &p).map(|c| c.layout)
 }
 
 fn lock(wb: &Workbook, index: usize, on: bool) {
@@ -196,19 +200,20 @@ fn a_locked_page_refuses_the_ai_tools_chart_placement() {
     let chart = chart_on(canvas, 100.0);
     wb.state.charts.write(&crate::document_effect::test_seed_effect()).unwrap().push(chart.clone());
     lock(&wb, canvas, true);
-    let effect = crate::document_effect::test_seed_effect();
     let place = crate::mcp::objects::ChartPlacement { x: Some(300.0), ..Default::default() };
     let id = chart.id.to_string();
-    assert_refused_by_lock(
-        crate::mcp::objects::update_chart_core(&wb.state, &effect, &id, None, None, None, &place),
-        "mcp update_chart",
-    );
+    // The refusal leaves the document CLEAN and records nothing: the AI door
+    // mints its DocumentEffect only after the Lock Objects decision.
+    assert_clean_refusal(&wb, "mcp update_chart", || {
+        crate::mcp::objects::update_chart_core(&wb.state, &wb.file, &id, None, None, None, &place)
+    });
     assert_eq!(stored_chart_x(&wb, chart.id), 100.0);
-    // A rename only: allowed.
-    crate::mcp::objects::update_chart_core(&wb.state, &effect, &id, None, Some("Renamed"), None, &Default::default())
+    // A rename only: allowed, and it DOES dirty (positive control).
+    crate::mcp::objects::update_chart_core(&wb.state, &wb.file, &id, None, Some("Renamed"), None, &Default::default())
         .expect("a rename is not a move");
+    assert!(wb.file.is_dirty(), "a rename the AI made must dirty the document");
     lock(&wb, canvas, false);
-    crate::mcp::objects::update_chart_core(&wb.state, &effect, &id, None, None, None, &place).expect("unlocked moves");
+    crate::mcp::objects::update_chart_core(&wb.state, &wb.file, &id, None, None, None, &place).expect("unlocked moves");
     assert_eq!(stored_chart_x(&wb, chart.id), 300.0);
 }
 
@@ -473,4 +478,132 @@ fn a_locked_page_refuses_a_canvas_pivot_box_move_but_not_a_rename() {
     lock(&wb, canvas, false);
     update(request(Some(pivot_engine::CanvasFrame { x: 400.0, ..frame.clone() }), None)).expect("an unlocked page moves the box");
     assert_eq!(stored().x, 400.0);
+}
+
+// ---------------------------------------------------------------------------
+// 3. A move RACING the toggle (BUG-0443)
+// ---------------------------------------------------------------------------
+//
+// The lock used to be checked under a `sheet_kinds` read released before the
+// door wrote its store, so a toggle landing in between let ONE move through
+// AFTER `set_canvas_layout` had returned with the page locked. Now every door
+// decides the lock holding its own store, and turning the lock on runs a
+// barrier over every geometry store. These freeze a REAL door right after its
+// decision ("unlocked") through the test hook in
+// `sheets::canvas_objects_locked_now`, turn the lock on from a second thread,
+// and pin that the toggle does not return until the frozen move has landed.
+//
+// SABOTAGE (each fails `toggle_returned_while_the_move_was_in_flight`):
+//   * delete the `lock_objects_barrier(state, families)` call in
+//     `set_canvas_layout_inner` -- both tests;
+//   * move `update_chart_against`'s Lock Objects decision back out of the
+//     `lock_pending` hold -- the chart test;
+//   * drop the slicer store from `lock_objects_barrier` -- the slicer test
+//     only (the barrier must reach the stores that are NOT in `AppState`).
+
+/// How long the toggle is given to (wrongly) return while the door is frozen.
+const FROZEN_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The race's one decisive observation is
+/// `toggle_returned_while_the_move_was_in_flight`. There is deliberately no
+/// separate "the move landed before the toggle returned" flag: asking the
+/// store at the toggle's return BLOCKS on a door frozen inside its own store
+/// hold, so such a read reports `true` whether or not the barrier ordered
+/// anything -- it could not fail by construction. Whether the move landed at
+/// all is asserted by each test on the store afterwards.
+struct RaceOutcome<R> {
+    door: R,
+    toggle_returned_while_the_move_was_in_flight: bool,
+}
+
+/// Run `door` on its own thread, frozen right after its Lock Objects decision;
+/// while it is frozen, turn page `canvas`'s lock on from a second thread; then
+/// let the door go and wait for both.
+fn race_a_move_against_the_lock<R: Send>(
+    wb: &Workbook,
+    canvas: usize,
+    door: impl FnOnce() -> R + Send,
+) -> RaceOutcome<R> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    let (decided_tx, decided_rx) = mpsc::channel::<()>();
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let toggle_returned = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let door_thread = scope.spawn(|| {
+            crate::sheets::PARK_AFTER_LOCK_DECISION_FOR_TEST
+                .with(|h| *h.borrow_mut() = Some((decided_tx, resume_rx)));
+            door()
+        });
+        decided_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("fixture: the door never reached its Lock Objects decision");
+        let toggle_thread = scope.spawn(|| {
+            lock(wb, canvas, true);
+            toggle_returned.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(FROZEN_WINDOW);
+        let returned_early = toggle_returned.load(Ordering::SeqCst);
+        resume_tx.send(()).expect("the frozen door is waiting");
+        let door_out = door_thread.join().expect("the door thread panicked");
+        toggle_thread.join().expect("the toggle thread panicked");
+        RaceOutcome { door: door_out, toggle_returned_while_the_move_was_in_flight: returned_early }
+    })
+}
+
+fn assert_ordered_before_the_lock<R: std::fmt::Debug>(race: &RaceOutcome<Result<R, String>>, door: &str) {
+    assert!(
+        race.door.is_ok(),
+        "{door}: the move decided 'unlocked' before the toggle, so it completes: {:?}",
+        race.door
+    );
+    assert!(
+        !race.toggle_returned_while_the_move_was_in_flight,
+        "{door}: Lock Objects returned while a move that saw the page unlocked was still in flight -- \
+         that move lands AFTER the page is locked (BUG-0443)"
+    );
+}
+
+#[test]
+fn a_chart_move_racing_lock_objects_lands_before_the_toggle_returns_never_after() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb);
+    let chart = chart_on(canvas, 100.0);
+    wb.state.charts.write(&crate::document_effect::test_seed_effect()).unwrap().push(chart.clone());
+    let moved = with_json(&chart, |v| v["x"] = serde_json::json!(260.0));
+
+    let race = race_a_move_against_the_lock(
+        &wb,
+        canvas,
+        || crate::chart_commands::update_chart_core(&wb.state, &wb.file, moved.clone(), None),
+    );
+    assert_ordered_before_the_lock(&race, "update_chart");
+    assert_eq!(stored_chart_x(&wb, chart.id), 260.0, "the in-flight move landed");
+    assert!(layout(&wb, canvas).objects_locked, "the toggle landed too");
+
+    // And the lock holds from there on: the next move is refused.
+    let again = with_json(&moved, |v| v["x"] = serde_json::json!(400.0));
+    assert_refused_by_lock(crate::chart_commands::update_chart_core(&wb.state, &wb.file, again, None), "update_chart after the lock");
+    assert_eq!(stored_chart_x(&wb, chart.id), 260.0);
+}
+
+#[test]
+fn a_slicer_move_racing_lock_objects_lands_before_the_toggle_returns_never_after() {
+    // The slicer's geometry lives in `SlicerState`, outside `AppState`: the
+    // barrier has to reach it through the toggle's `families`.
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb);
+    let id = insert_slicer(&wb, canvas);
+
+    let race = race_a_move_against_the_lock(
+        &wb,
+        canvas,
+        || crate::slicer::commands::update_slicer_position_core(&wb.state, &wb.file, &wb.slicer, id, 50.0, 300.0, 180.0, 240.0),
+    );
+    assert_ordered_before_the_lock(&race, "update_slicer_position");
+    assert_eq!(wb.slicer.slicers.read().unwrap()[&id].x, 50.0, "the in-flight move landed");
+
+    let again = crate::slicer::commands::update_slicer_position_core(&wb.state, &wb.file, &wb.slicer, id, 90.0, 300.0, 180.0, 240.0);
+    assert_refused_by_lock(again, "update_slicer_position after the lock");
+    assert_eq!(wb.slicer.slicers.read().unwrap()[&id].x, 50.0);
 }

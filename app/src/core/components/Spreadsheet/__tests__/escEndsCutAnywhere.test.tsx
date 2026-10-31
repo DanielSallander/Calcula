@@ -100,7 +100,7 @@ import { GridProvider, useGridContext } from "../../../state/GridContext";
 import { getInitialState } from "../../../state/gridReducer";
 import { setActiveSheet, setSelection } from "../../../state/gridActions";
 import { __resetExternalEditForTests } from "../../../lib/formulaEditTarget";
-import { isCutModeLive, getInternalClipboard, endCutMode } from "../../../hooks/useClipboard";
+import { isCutModeLive, getInternalClipboard, endClipboardMode } from "../../../hooks/useClipboard";
 import type { CellTarget } from "../../../lib/selectionOwner";
 import type { GridState } from "../../../types";
 
@@ -193,7 +193,7 @@ beforeEach(async () => {
 afterEach(async () => {
   // Whatever a test left pending ends here, so the next one starts clean.
   await act(async () => {
-    endCutMode();
+    endClipboardMode();
   });
   await act(async () => {
     root.unmount();
@@ -246,6 +246,50 @@ describe("Esc ends a pending cut wherever the user is", () => {
     const event = await press("Escape");
     expect(isCutModeLive(), "Esc left the floating grid's cut pending").toBe(false);
     expect(getInternalClipboard()).toBeNull();
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  // BUG-0616 item 5: Excel ends COPY mode on Esc too [LIVE, clipexcel/probe-copy.ps1]
+  // -- CutCopyMode 0, the clipboard emptied, Paste greyed out.
+  it("a COPY made on Sheet1 ends on Esc on Sheet2 as well (no ants drawn there)", async () => {
+    await act(async () => {
+      dispatchOut(setSelection({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, type: "cells" }));
+    });
+    await settle();
+    await act(async () => {
+      await selectionLogic.clipboardHandlers.copy();
+    });
+    await settle();
+    expect(getInternalClipboard(), "precondition: the copy is pending").not.toBeNull();
+    await act(async () => {
+      dispatchOut(setActiveSheet(1, "Sheet2", undefined, "S2"));
+    });
+    await settle();
+    expect(selectionLogic.clipboardState.mode, "precondition: no ants on Sheet2").toBe("none");
+
+    const event = await press("Escape");
+    expect(getInternalClipboard(), "Esc on Sheet2 left the copy pasteable").toBeNull();
+    expect(gridState.clipboard.mode, "the ants on Sheet1 stayed up").toBe("none");
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("a FLOATING GRID's copy (no ants at all) ends on Esc", async () => {
+    const grid: CellTarget = {
+      kind: "object",
+      ownerId: "floatingRange",
+      ref: { kind: "floatingRange", id: "fr-1" },
+      selection: { startRow: 1, startCol: 1, endRow: 1, endCol: 1, type: "cells" },
+      bounds: { rows: 10, cols: 5 },
+      label: "Float1",
+      wholeObject: false,
+    };
+    await act(async () => {
+      await selectionLogic.clipboardHandlers.copy(undefined, { target: grid });
+    });
+    await settle();
+    expect(getInternalClipboard(), "precondition: the floating grid's copy is pending").not.toBeNull();
+    const event = await press("Escape");
+    expect(getInternalClipboard(), "Esc left the floating grid's copy pasteable").toBeNull();
     expect(event.defaultPrevented).toBe(true);
   });
 

@@ -77,6 +77,8 @@ vi.mock("../../lib/chartStore", () => ({
 }));
 vi.mock("../../rendering/chartRenderer", () => ({ invalidateChartCache: vi.fn() }));
 vi.mock("../../lib/chartDataReader", () => ({
+  // The series list's header labels (BUG-0448): none in these tests.
+  readRangeHeaderLabels: vi.fn(async () => []),
   autoDetectSeries: (...args: unknown[]) => h.autoDetectSeries(...args),
   readChartDataResolved: vi.fn(async (spec: unknown) => ({
     spec,

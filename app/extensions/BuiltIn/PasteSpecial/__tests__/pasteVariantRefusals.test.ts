@@ -26,6 +26,8 @@ const h = vi.hoisted(() => ({
   opened: [] as string[],
   current: true,
   canvas: false,
+  /** settledInternalClipboard() refused: the source kept changing (it told the user itself). */
+  settledRefused: false,
 }));
 
 vi.mock("@api/ui", () => ({
@@ -52,6 +54,7 @@ vi.mock("@api/lib", async (importOriginal) => {
   return {
     ...real,
     getInternalClipboard: () => h.clipboard,
+    settledInternalClipboard: async () => (h.settledRefused ? null : h.clipboard),
     getCell: vi.fn(async () => null),
     getStyle: vi.fn(async () => ({ borderTop: { style: "none", color: "#000000", width: 0 } })),
     updateCell: write("updateCell"),
@@ -116,6 +119,7 @@ beforeEach(() => {
   h.opened = [];
   h.current = true;
   h.canvas = false;
+  h.settledRefused = false;
   handlers.clear();
   extension.activate({
     commands: {
@@ -192,6 +196,16 @@ describe.each(VARIANTS)("%s", (id) => {
     h.canvas = true;
     await run(id);
     expectRefused(id, /canvas/);
+  });
+
+  // Round 16 (clip7's remaining (b)): the settle refused a source that kept
+  // changing and told the user to paste again; the copy is still pending, so
+  // the door must not add "nothing copied" (and must write nothing).
+  it("the copied cells kept changing (the settle refused, the copy still pending): nothing written, no second sentence", async () => {
+    h.settledRefused = true;
+    await run(id);
+    expect(h.writes, `${id} wrote anyway`).toEqual([]);
+    expect(h.alerts, `${id} told the user nothing is copied while a copy is pending`).toEqual([]);
   });
 
   it("positive control: a current copy, no guard, a worksheet -- it writes and says nothing", async () => {

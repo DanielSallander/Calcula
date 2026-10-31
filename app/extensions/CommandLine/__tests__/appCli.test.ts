@@ -262,6 +262,19 @@ describe("goto", () => {
     expect(ok).toBe(false);
     expect(lines.some((l) => l.cls === "err" && l.text.includes("Bogus"))).toBe(true);
   });
+
+  // rev10C: the backend now REFUSES a name whose sheet is not in the
+  // workbook (it used to fall back to sheet 0); the CLI says why, and moves
+  // nowhere.
+  it("passes the backend's refusal of a name whose sheet is gone to the user", async () => {
+    const why = "Named range 'Rate' refers to the sheet 'Gone', which is not in this workbook (='Gone'!$B$1).";
+    const { ok, lines, calls } = await runApp("goto Rate", {
+      resolveNamedRangeCoords: () => Promise.reject(why),
+    });
+    expect(ok).toBe(false);
+    expect(calls.navigateToRange).toBeUndefined();
+    expect(lines.some((l) => l.cls === "err" && l.text.includes("'Gone'"))).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -936,5 +949,23 @@ describe("ls / show", () => {
     const out = allText(lines);
     expect(out).toContain("Sheet1");
     expect(out).toContain("A1:B3");
+  });
+
+  // rev12C: `show name` swallowed the backend's refusal and printed only
+  // "(not a range)"; it now says why, as `goto` does.
+  it("show name passes the backend's refusal reason to the user", async () => {
+    const why = "Named range 'Total' refers to the sheet 'Gone', which is not in this workbook (='Gone'!$B$1).";
+    const { ok, lines } = await runApp("show name Total", {
+      resolveNamedRangeCoords: () => Promise.reject(why),
+    });
+    expect(ok).toBe(true);
+    const out = allText(lines);
+    expect(out).toContain("(not a range)");
+    expect(out).toContain("the sheet 'Gone', which is not in this workbook");
+  });
+
+  it("show name prints the resolved range when the name resolves", async () => {
+    const { lines } = await runApp("show name Total");
+    expect(allText(lines)).toContain("Sheet1!A1:B9");
   });
 });

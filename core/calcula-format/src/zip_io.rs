@@ -20,9 +20,12 @@ use crate::features::script_authoring::{SCRIPT_AUTHORING_FEATURE, SCRIPT_AUTHORI
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION, PINNED_FILTER_MIN_FORMAT_VERSION,
     CANVAS_INTERACTIONS_FEATURE, CANVAS_OBJECTS_LOCKED_FEATURE, CANVAS_SHEET_MIN_FORMAT_VERSION,
-    CANVAS_WALLPAPER_FEATURE, RIBBON_FILTER_VISUAL_TARGETS_FEATURE,
+    CANVAS_WALLPAPER_FEATURE, RIBBON_FILTER_VISUAL_TARGETS_FEATURE, SHEET_DEFAULT_SIZES_FEATURE,
+    CALCULATION_MODE_FEATURE,
     CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION,
     OBJECT_BINDINGS_FEATURE, OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PIVOT_STYLE_FEATURE, VISUAL_CONTAINER_FEATURE,
+    SPARKLINE_GROUP_AREAS_FEATURE,
+    CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
     SPILL_EXTENT_MIN_FORMAT_VERSION,
@@ -74,6 +77,16 @@ fn workbook_carries_a_visual_container(workbook: &Workbook) -> bool {
                 })
             })
         })
+}
+
+/// Does a sheet's opaque sparkline blob hold a group with more than one AREA
+/// (a non-empty `moreAreas`)? See SPARKLINE_GROUP_AREAS_FEATURE.
+fn sparkline_blob_has_areas(groups_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(groups_json).ok().is_some_and(|v| {
+        v.as_array().is_some_and(|groups| {
+            groups.iter().any(|g| g.get("moreAreas").and_then(|m| m.as_array()).is_some_and(|m| !m.is_empty()))
+        })
+    })
 }
 
 /// Build the complete `.cala` ZIP into a byte buffer (no file I/O). The host
@@ -206,6 +219,19 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         manifest.features.push("pending_recalc".to_string());
         stamp_feature_format_version(&mut manifest, PENDING_RECALC_MIN_FORMAT_VERSION);
     }
+    // The incomplete-calculation mark (Excel's calcCompleted="0"): the same
+    // lie as a dropped pending set -- an older reader would vouch for values
+    // that may be stale -- so a feature id AND a version link, only when set.
+    if workbook.calculation_incomplete {
+        manifest.features.push(CALCULATION_INCOMPLETE_FEATURE.to_string());
+        stamp_feature_format_version(&mut manifest, CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION);
+    }
+    // The calculation mode (Excel's calcMode="manual"): a feature id and NO
+    // version link -- an older reader loses the mode, it is not misled about a
+    // value (see CALCULATION_MODE_FEATURE). Declared only when manual.
+    if workbook.calculation_manual {
+        manifest.features.push(CALCULATION_MODE_FEATURE.to_string());
+    }
     // User-hidden rows/columns: an authority that lives nowhere else, so an
     // older reader would not merely ignore it — it would rebuild the effective
     // hidden set from filter+outline on its next save and bring the user's
@@ -310,6 +336,18 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if layouts().any(|l| l.objects_locked) {
         manifest.features.push(CANVAS_OBJECTS_LOCKED_FEATURE.to_string());
     }
+    // A sheet's own STANDARD row height / column width: a feature id and no
+    // version link -- an older reader shows the sheet at the standard sizes,
+    // a visible loss, never a lie (see SHEET_DEFAULT_SIZES_FEATURE). Declared
+    // only when some sheet carries one; the read rides metadata.json and is
+    // unconditional.
+    if workbook
+        .sheets
+        .iter()
+        .any(|s| s.default_row_height.is_some() || s.default_column_width.is_some())
+    {
+        manifest.features.push(SHEET_DEFAULT_SIZES_FEATURE.to_string());
+    }
     // VISUAL INTERACTIONS (P4) and a ribbon filter's "Selected visuals" list:
     // feature ids and, as decided, NO version link (see
     // CANVAS_INTERACTIONS_FEATURE for the recorded owner question). Each is
@@ -335,6 +373,14 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         })
     }) {
         manifest.features.push(PAGE_NAVIGATOR_FEATURE.to_string());
+    }
+    // A sparkline group of SEVERAL AREAS (Excel keeps a group one group across
+    // an edit that parts its sparklines): a feature id and DELIBERATELY NO
+    // version link -- an older reader draws the first area only, a visible
+    // loss, never a lie (see SPARKLINE_GROUP_AREAS_FEATURE). Declared only when
+    // some group actually has a non-empty `moreAreas`.
+    if workbook.sparklines.iter().any(|s| sparkline_blob_has_areas(&s.groups_json)) {
+        manifest.features.push(SPARKLINE_GROUP_AREAS_FEATURE.to_string());
     }
     // The VISUAL CONTAINER (D-FORMAT) and the persisted PIVOT STYLE: feature
     // ids and DELIBERATELY NO version link -- an older reader drops a border,
@@ -386,10 +432,6 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         stamp_feature_format_version(&mut manifest, FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
-
-    // Store default dimensions in manifest
-    manifest.default_row_height = workbook.default_row_height;
-    manifest.default_column_width = workbook.default_column_width;
 
     // Write manifest.json
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -684,6 +726,20 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         zip.start_file("pending_recalc.json", options.clone())?;
         zip.write_all(pending_json.as_bytes())?;
     }
+    // The incomplete-calculation mark (BUG-0615#2). Written ONLY when set: the
+    // file's absence is the "values are current" statement.
+    if workbook.calculation_incomplete {
+        let state_json = serde_json::to_string_pretty(&SavedCalcState { calculation_incomplete: true })?;
+        zip.start_file(CALC_STATE_FILE, options.clone())?;
+        zip.write_all(state_json.as_bytes())?;
+    }
+    // The calculation mode, written ONLY when manual: the file's absence is
+    // "automatic", as a missing calcMode is in Excel's calcPr.
+    if workbook.calculation_manual {
+        let mode_json = serde_json::to_string_pretty(&SavedCalcMode { mode: "manual".to_string() })?;
+        zip.start_file(CALC_MODE_FILE, options.clone())?;
+        zip.write_all(mode_json.as_bytes())?;
+    }
     if !workbook.sheet_protections.is_empty() {
         let prot_json = serde_json::to_string_pretty(&workbook.sheet_protections)?;
         zip.start_file("sheet_protections.json", options.clone())?;
@@ -859,6 +915,9 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
             column_styles: sheet_column_styles,
             column_widths: col_widths,
             row_heights: row_heights,
+            // Arrive from metadata.json below, like zoom.
+            default_row_height: None,
+            default_column_width: None,
             styles: style_list.clone(),
             merged_regions: Vec::new(),
             freeze_row: None,
@@ -1274,6 +1333,13 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     // Absent for any workbook that was fully calculated when it was saved.
     let pending_recalc: Option<persistence::SavedPendingRecalc> =
         read_optional_json::<persistence::SavedPendingRecalc>(&mut archive, "pending_recalc.json")?;
+    // Absent for any workbook whose values were current when it was saved.
+    let calculation_incomplete = read_optional_json::<SavedCalcState>(&mut archive, CALC_STATE_FILE)?
+        .is_some_and(|state| state.calculation_incomplete);
+    // Absent for a workbook saved under automatic calculation. Read whether or
+    // not the manifest declares the feature id.
+    let calculation_manual = read_optional_json::<SavedCalcMode>(&mut archive, CALC_MODE_FILE)?
+        .is_some_and(|saved| saved.mode.eq_ignore_ascii_case("manual"));
     let controls: Vec<persistence::SavedSheetControls> =
         read_optional_json::<Vec<persistence::SavedSheetControls>>(&mut archive, "controls.json")?
             .unwrap_or_default();
@@ -1350,8 +1416,6 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         theme,
         scripts,
         notebooks,
-        default_row_height: manifest.default_row_height,
-        default_column_width: manifest.default_column_width,
         properties,
         charts,
         sparklines,
@@ -1377,6 +1441,8 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         sheet_protections,
         workbook_protection,
         pending_recalc,
+        calculation_incomplete,
+        calculation_manual,
         // The version this file WAS written at, carried inbound so the host's
         // load path can run a one-time recovery for anything a pre-feature
         // writer could not record. Never read by the writer.
@@ -1389,6 +1455,33 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
 /// serde text: a user opening a workbook must learn WHICH part of the file
 /// could not be read.
 const CHARTS_JSON_UNREADABLE: &str = "charts.json in this file could not be read";
+
+/// The archive entry holding [`SavedCalcState`].
+const CALC_STATE_FILE: &str = "calc_state.json";
+
+/// Manifest feature id for `calc_state.json` (see
+/// `CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION`).
+const CALCULATION_INCOMPLETE_FEATURE: &str = "calculation_incomplete";
+
+/// `calc_state.json`: the workbook's calculation state as saved -- today one
+/// fact, `Workbook::calculation_incomplete` (Excel's `calcCompleted="0"`).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCalcState {
+    #[serde(default)]
+    calculation_incomplete: bool,
+}
+
+/// The archive entry holding [`SavedCalcMode`].
+const CALC_MODE_FILE: &str = "calc_mode.json";
+
+/// `calc_mode.json`: the calculation mode the workbook was saved under
+/// (`Workbook::calculation_manual`), written only for "manual".
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCalcMode {
+    mode: String,
+}
 
 /// Read `charts.json` (absent -> empty). Reads the rows as plain JSON values
 /// first and upgrades any pre-v10 row in place ([`upgrade_saved_chart_rows`])
@@ -1558,6 +1651,8 @@ mod tests {
             column_styles: std::collections::HashMap::new(),
             column_widths: col_widths,
             row_heights: row_heights,
+            default_row_height: None,
+            default_column_width: None,
             styles,
             merged_regions: Vec::new(),
             freeze_row: None,
@@ -1594,8 +1689,6 @@ mod tests {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
-            default_row_height: persistence::DEFAULT_ROW_HEIGHT_PX,
-            default_column_width: persistence::DEFAULT_COLUMN_WIDTH_PX,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             sparklines: Vec::new(),
@@ -1620,6 +1713,8 @@ mod tests {
             sheet_protections: Vec::new(),
             workbook_protection: None,
             pending_recalc: None,
+            calculation_incomplete: false,
+            calculation_manual: false,
             floating_ranges: Vec::new(),
             format_version: 0,
             object_bindings: Vec::new(),
@@ -2208,6 +2303,33 @@ mod tests {
         assert!(manifest.features.iter().any(|f| f == "pending_recalc"));
     }
 
+    /// BUG-0615#2. A manual-calculation workbook saved without recalculating
+    /// holds values that may be stale; Excel writes `calcCompleted="0"` and
+    /// reopens it as needing calculation [LIVE]. The mark survives the
+    /// round-trip, takes its link in the version chain (an older reader would
+    /// vouch for the stale values), and a calculated workbook carries neither
+    /// the file nor the stamp.
+    ///
+    /// SABOTAGE: read `calc_state.json` as always absent.
+    #[test]
+    fn the_incomplete_calculation_mark_round_trips_and_stamps_v12() {
+        let mut workbook = make_test_workbook();
+        workbook.calculation_incomplete = true;
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        assert!(loaded.calculation_incomplete, "the mark was lost on the round-trip");
+        let manifest = read_calcula_manifest(&bytes).unwrap();
+        assert_eq!(manifest.format_version, CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == CALCULATION_INCOMPLETE_FEATURE));
+
+        let calculated = make_test_workbook();
+        let bytes = write_calcula_bytes(&calculated).unwrap();
+        assert!(!read_calcula_bytes(&bytes).unwrap().calculation_incomplete);
+        let manifest = read_calcula_manifest(&bytes).unwrap();
+        assert!(manifest.format_version < CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == CALCULATION_INCOMPLETE_FEATURE));
+    }
+
     /// An ORDINARY (level-1) slicer must NOT stamp the pinned-filter version —
     /// only an actual pin warrants demanding a newer reader.
     #[test]
@@ -2329,6 +2451,41 @@ mod tests {
         let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(manifest.format_version, SHEET_VIEW_MIN_FORMAT_VERSION);
         assert!(manifest.features.iter().any(|f| f == "sheet_view"));
+    }
+
+    /// BUG-0352/0353: the standard row height and column width are PER SHEET
+    /// (Excel's `<sheetFormatPr>`, probed live), so each sheet's own values
+    /// round-trip and a sheet that never set one stays at the standard. A
+    /// feature id is declared and the version is NOT raised: an older reader
+    /// shows standard sizes, a visible loss, never a lie.
+    #[test]
+    fn per_sheet_standard_sizes_round_trip_by_feature_id_without_a_version_link() {
+        let mut workbook = make_test_workbook();
+        let mut second = workbook.sheets[0].clone();
+        second.id = SheetId::from_bytes(identity::generate_uuid_v7());
+        second.name = "Other".to_string();
+        workbook.sheets.push(second);
+        workbook.sheets[0].default_row_height = Some(30.0);
+        workbook.sheets[0].default_column_width = Some(145.0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("standard.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.sheets[0].default_row_height, Some(30.0), "sheet 1's standard row height");
+        assert_eq!(loaded.sheets[0].default_column_width, Some(145.0), "sheet 1's standard column width");
+        assert_eq!(loaded.sheets[1].default_row_height, None, "sheet 2 never set one: the standard");
+        assert_eq!(loaded.sheets[1].default_column_width, None, "sheet 2 never set one: the standard");
+
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.features.iter().any(|f| f == SHEET_DEFAULT_SIZES_FEATURE));
+        let plain = make_test_workbook();
+        let plain_path = dir.path().join("plain.cala");
+        write_calcula(&plain, &plain_path).unwrap();
+        let plain_manifest = read_calcula_manifest(&std::fs::read(&plain_path).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, plain_manifest.format_version, "no version link");
+        assert!(!plain_manifest.features.iter().any(|f| f == SHEET_DEFAULT_SIZES_FEATURE));
     }
 
     /// A 100%, unsplit workbook must NOT be stamped up the chain -- otherwise
@@ -2535,6 +2692,60 @@ mod tests {
         assert_eq!(loaded.sheets[0].kind, persistence::SheetKind::Canvas(layout));
     }
 
+    /// THE CALCULATION MODE (round 12, Excel's rule): a workbook saved under
+    /// MANUAL calculation says so (`calc_mode.json`, Excel's
+    /// `<calcPr calcMode="manual"/>`), and the open adopts it. A manifest
+    /// FEATURE ID and NO link in the version chain -- an older reader loses the
+    /// mode and opens the workbook in its session's mode, a visible loss that
+    /// misreads no value (whether the values are current is the separate,
+    /// linked `calc_state.json`). So a manual workbook stamps exactly what an
+    /// automatic one does, and an automatic one writes neither the file nor
+    /// the id. The READ is unconditional: a manifest without the id still
+    /// loads the mode.
+    ///
+    /// SABOTAGE: read `calc_mode.json` as always absent.
+    #[test]
+    fn calculation_mode_declares_a_feature_id_but_never_raises_the_version() {
+        let automatic = make_test_workbook();
+        let auto_bytes = write_calcula_bytes(&automatic).unwrap();
+        assert!(!read_calcula_bytes(&auto_bytes).unwrap().calculation_manual);
+        let auto_manifest = read_calcula_manifest(&auto_bytes).unwrap();
+        assert!(!auto_manifest.features.iter().any(|f| f == CALCULATION_MODE_FEATURE));
+
+        let mut manual = make_test_workbook();
+        manual.calculation_manual = true;
+        let bytes = write_calcula_bytes(&manual).unwrap();
+        assert!(
+            read_calcula_bytes(&bytes).unwrap().calculation_manual,
+            "a workbook saved under manual calculation reopened without its mode"
+        );
+        let manifest = read_calcula_manifest(&bytes).unwrap();
+        assert!(manifest.features.iter().any(|f| f == CALCULATION_MODE_FEATURE), "{:?}", manifest.features);
+        assert_eq!(
+            manifest.format_version, auto_manifest.format_version,
+            "the calculation mode must not raise the version: an older reader merely loses it"
+        );
+
+        // Unconditional read: strip the id from the manifest, the mode stays.
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).unwrap();
+            let name = entry.name().to_string();
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+            if name == "manifest.json" {
+                let mut m: serde_json::Value = serde_json::from_slice(&data).unwrap();
+                m["features"].as_array_mut().unwrap().retain(|f| f != CALCULATION_MODE_FEATURE);
+                data = serde_json::to_vec(&m).unwrap();
+            }
+            out.start_file(name, FileOptions::<()>::default()).unwrap();
+            std::io::Write::write_all(&mut out, &data).unwrap();
+        }
+        let stripped = out.finish().unwrap().into_inner();
+        assert!(read_calcula_bytes(&stripped).unwrap().calculation_manual, "the read must not depend on the id");
+    }
+
     /// A canvas whose interactions hold one default and two pairs (P4).
     fn canvas_with_interactions() -> persistence::CanvasLayout {
         let r = |kind: &str, id: &str| persistence::CanvasObjectRef { kind: kind.to_string(), id: id.to_string() };
@@ -2708,6 +2919,36 @@ mod tests {
         }
     }
 
+    /// BUG-0616#4: a sparkline group of SEVERAL AREAS (Excel keeps a group one
+    /// group across an edit that parts its sparklines) declares a manifest
+    /// FEATURE ID and takes NO link in the format-version chain -- an older
+    /// reader draws the first area only, a visible loss, never a lie. The
+    /// areas survive the archive byte for byte; a one-area group declares
+    /// nothing.
+    #[test]
+    fn sparkline_group_areas_declare_a_feature_id_but_never_raise_the_version() {
+        let one_area = r#"[{"id":1,"type":"line","location":{"startRow":1,"startCol":4,"endRow":5,"endCol":4},"dataRange":{"startRow":1,"startCol":0,"endRow":5,"endCol":2}}]"#;
+        let two_areas = r#"[{"id":1,"type":"line","location":{"startRow":1,"startCol":4,"endRow":5,"endCol":4},"dataRange":{"startRow":1,"startCol":0,"endRow":5,"endCol":2},"moreAreas":[{"location":{"startRow":1,"startCol":5,"endRow":5,"endCol":5},"dataRange":{"startRow":1,"startCol":1,"endRow":5,"endCol":3}}]}]"#;
+        let dir = tempfile::tempdir().unwrap();
+        let written = |blob: &str, file: &str| {
+            let mut workbook = make_test_workbook();
+            let sheet = workbook.sheets[0].id;
+            workbook.sparklines = vec![persistence::SavedSparkline { sheet_id: sheet, groups_json: blob.to_string() }];
+            let path = dir.path().join(file);
+            write_calcula(&workbook, &path).unwrap();
+            let loaded = read_calcula(&path).unwrap();
+            let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+            (manifest, loaded)
+        };
+        let (plain, _) = written(one_area, "one.cala");
+        let (areas, loaded) = written(two_areas, "two.cala");
+        assert!(!plain.features.iter().any(|f| f == SPARKLINE_GROUP_AREAS_FEATURE), "{:?}", plain.features);
+        assert!(areas.features.iter().any(|f| f == SPARKLINE_GROUP_AREAS_FEATURE), "{:?}", areas.features);
+        assert_eq!(areas.format_version, plain.format_version, "areas must never raise the format version");
+        assert_eq!(loaded.sparklines.len(), 1);
+        assert_eq!(loaded.sparklines[0].groups_json, two_areas, "the areas survive the archive");
+    }
+
     /// D-NAV: a PAGE NAVIGATOR declares a manifest FEATURE ID and takes NO link
     /// in the format-version chain -- an older reader paints it as a dead grey
     /// button, a visible loss, never a lie. A canvas carrying one stamps exactly
@@ -2841,7 +3082,8 @@ mod tests {
         ] {
             assert!(earlier < FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION, "{earlier}");
         }
-        assert_eq!(FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
+        assert!(FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION < CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION);
+        assert_eq!(CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
     }
 
     /// A split ALONE stamps it too: the split is as unrecoverable as the zoom.
@@ -3907,18 +4149,18 @@ mod tests {
         assert!(err.starts_with("charts.json in this file could not be read"), "{err}");
     }
 
-    /// v12 -- one above this build -- is refused through the reader gate,
-    /// while a v10 file (a binding) and a v11 file (a floating grid that hides
-    /// a row) open.
+    /// v13 -- one above this build -- is refused through the reader gate,
+    /// while a v10 file (a binding), a v11 file (a floating grid that hides
+    /// a row) and a v12 file (an incomplete calculation) open.
     #[test]
-    fn a_v12_file_is_refused() {
-        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 12);
+    fn a_v13_file_is_refused() {
+        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 13);
         let workbook = make_test_workbook();
         let bytes = write_calcula_bytes(&workbook).unwrap();
         let v12 = rewrite_archive(&bytes, |name, content| {
             (name == "manifest.json").then(|| {
                 let mut m: Manifest = serde_json::from_slice(content).unwrap();
-                m.format_version = 12;
+                m.format_version = 13;
                 serde_json::to_vec_pretty(&m).unwrap()
             })
         });
@@ -3931,6 +4173,12 @@ mod tests {
 
         let bytes = write_calcula_bytes(&with_hidden_lines(vec![1], Vec::new())).unwrap();
         assert_eq!(manifest_of(&bytes).format_version, 11);
+        assert!(read_calcula_bytes(&bytes).is_ok());
+
+        let mut incomplete = make_test_workbook();
+        incomplete.calculation_incomplete = true;
+        let bytes = write_calcula_bytes(&incomplete).unwrap();
+        assert_eq!(manifest_of(&bytes).format_version, 12);
         assert!(read_calcula_bytes(&bytes).is_ok());
     }
 

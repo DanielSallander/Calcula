@@ -66,6 +66,11 @@ pub struct SheetDigest {
     pub freeze_col: Option<u32>,
     pub col_widths: BTreeMap<u32, f64>,
     pub row_heights: BTreeMap<u32, f64>,
+    /// The sheet's own STANDARD row height / column width (`None` = the
+    /// application standard). Per sheet since BUG-0352, and in the digest so
+    /// the save/reload oracle can see one lost.
+    pub default_row_height: Option<f64>,
+    pub default_column_width: Option<f64>,
     /// Rows/columns the user hid by hand, ascending. In the digest because the
     /// save/reload oracle was structurally blind to them: hiding a row produced
     /// an identical digest before and after a round-trip, which is exactly how
@@ -465,6 +470,8 @@ pub(crate) fn build_workbook_state_digest(
                     freeze_col: None,
                     col_widths: BTreeMap::new(),
                     row_heights: BTreeMap::new(),
+                    default_row_height: None,
+                    default_column_width: None,
                     user_hidden_rows: Vec::new(),
                     user_hidden_cols: Vec::new(),
                     row_styles: BTreeMap::new(),
@@ -548,6 +555,8 @@ pub(crate) fn build_workbook_state_digest(
                 freeze_col: fc.and_then(|f| f.freeze_col),
                 col_widths,
                 row_heights,
+                default_row_height: grid.default_row_height,
+                default_column_width: grid.default_column_width,
                 user_hidden_rows,
                 user_hidden_cols,
                 row_styles,
@@ -884,12 +893,10 @@ pub(crate) fn build_workbook_state_digest(
     }
 
     digest_phase(11);
-    let default_row_height = *state.default_row_height.read().map_err(|e| e.to_string())?;
-    let default_column_width = *state.default_column_width.read().map_err(|e| e.to_string())?;
+    // The standard row height / column width are per sheet now (each
+    // SheetDigest's defaultRowHeight / defaultColumnWidth, BUG-0352).
     let reference_style = state.reference_style.lock().map_err(|e| e.to_string())?.clone();
     digest.defaults = serde_json::json!({
-        "defaultRowHeight": default_row_height,
-        "defaultColumnWidth": default_column_width,
         "referenceStyle": reference_style,
     });
 

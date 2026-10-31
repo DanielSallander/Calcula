@@ -345,7 +345,7 @@ impl RefreshSheetNames {
     pub fn local_name(&self, publisher_name: &str) -> Option<&str> {
         self.local_names
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(publisher_name))
+            .find(|(k, _)| identity::sheet_names_equal(k, publisher_name))
             .map(|(_, v)| v.as_str())
     }
 
@@ -354,7 +354,7 @@ impl RefreshSheetNames {
     pub fn is_blocked_destination(&self, publisher_name: &str) -> bool {
         self.blocked_destinations
             .iter()
-            .any(|n| n.eq_ignore_ascii_case(publisher_name))
+            .any(|n| identity::sheet_names_equal(n, publisher_name))
     }
 
     /// The reference rewrite this resolution implies: every publisher name whose

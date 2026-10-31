@@ -67,8 +67,20 @@ describe("vSheetRef accepts an index or a name, and nothing else", () => {
 
   it("rejects a name that could never be a sheet name", () => {
     expect(vSheetRef([""])).not.toBe(true);
-    expect(vSheetRef(["   "])).not.toBe(true);
     expect(vSheetRef(["x".repeat(256)])).not.toBe(true);
+  });
+
+  // A name of spaces only IS a sheet name: Excel accepts it [LIVE, Excel 16,
+  // 2026-10-31] and so does `checkSheetName` (addSheet/renameSheet/copySheet),
+  // so a script that created "   " must be able to address it by name. This
+  // row used to assert the opposite -- a sheet a script could make but never
+  // name again (rev15C).
+  it("addresses every name creation accepts, a name of spaces only included", () => {
+    expect(vSheetRename([0, "   "])).toBe(true);
+    expect(vSheetRef(["   "])).toBe(true);
+    expect(vSheetRename(["   ", "X"])).toBe(true);
+    expect(vSheetRef([" Data "])).toBe(true);
+    expect(resolveSheetRefIn([{ index: 0, name: "Sheet1" }, { index: 1, name: "   " }], "   ", "setActiveSheet")).toBe(1);
   });
 
   it("rejects every other type", () => {

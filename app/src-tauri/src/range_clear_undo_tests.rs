@@ -138,3 +138,32 @@ fn an_empty_range_clear_records_nothing_and_leaves_the_document_clean() {
     assert_eq!(depth(&book), before);
     assert!(!book.file.is_dirty());
 }
+
+/// BUG-0373: the comment and note INDICATOR reads normalise their rectangle,
+/// as `get_hyperlinks_in_range` does -- a selection drawn upward and leftward
+/// (end before start) finds the same items as the same selection drawn down.
+#[test]
+fn indicator_reads_find_the_same_items_whichever_way_the_range_was_drawn() {
+    let b = book();
+    let sorted_comments = |r0, c0, r1, c1| {
+        let mut v: Vec<(u32, u32)> = crate::comments::comment_indicators_in_range(&b.state, r0, c0, r1, c1)
+            .into_iter()
+            .map(|i| (i.row, i.col))
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let sorted_notes = |r0, c0, r1, c1| {
+        let mut v: Vec<(u32, u32)> = crate::notes::note_indicators_in_range(&b.state, r0, c0, r1, c1)
+            .into_iter()
+            .map(|i| (i.row, i.col))
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(sorted_comments(0, 0, 3, 3), vec![(1, 1), (2, 2)]);
+    assert_eq!(sorted_comments(3, 3, 0, 0), vec![(1, 1), (2, 2)], "an upward-drawn range found no comments");
+    assert_eq!(sorted_comments(0, 3, 3, 0), vec![(1, 1), (2, 2)], "a leftward-drawn range found no comments");
+    assert_eq!(sorted_notes(0, 0, 3, 3), vec![(1, 2)]);
+    assert_eq!(sorted_notes(3, 3, 0, 0), vec![(1, 2)], "an upward-drawn range found no notes");
+}

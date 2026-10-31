@@ -18,27 +18,56 @@ import { formatNumber } from "@api/locale";
 // --- The backend door, mocked wholesale ------------------------------------
 const cancelCalculation = vi.fn(async () => true);
 const getPendingRecalc = vi.fn(async () => null as unknown);
+const getCalculationState = vi.fn(async () => "done");
 let progressHandler: ((payload: unknown) => void) | null = null;
 const unlisten = vi.fn();
 const listenForEvent = vi.fn(async (_event: string, handler: (p: unknown) => void) => {
   progressHandler = handler;
   return unlisten;
 });
-const onAppEvent = vi.fn(() => () => {});
+// The app-event bus, recorded so a test can fire an event the item listens to.
+const appEventHandlers = new Map<string, Array<() => void>>();
+const onAppEvent = vi.fn((event: string, handler: () => void) => {
+  const list = appEventHandlers.get(event) ?? [];
+  list.push(handler);
+  appEventHandlers.set(event, list);
+  return () => {
+    appEventHandlers.set(
+      event,
+      (appEventHandlers.get(event) ?? []).filter((h) => h !== handler),
+    );
+  };
+});
 const emitAppEvent = vi.fn();
 
 vi.mock("@api", () => ({
   cancelCalculation: (...a: unknown[]) => cancelCalculation(...(a as [])),
   getPendingRecalc: (...a: unknown[]) => getPendingRecalc(...(a as [])),
+  getCalculationState: (...a: unknown[]) => getCalculationState(...(a as [])),
   listenForEvent: (...a: unknown[]) =>
     listenForEvent(...(a as [string, (p: unknown) => void])),
-  onAppEvent: (...a: unknown[]) => onAppEvent(...(a as [])),
+  onAppEvent: (...a: unknown[]) => onAppEvent(...(a as [string, () => void])),
   emitAppEvent: (...a: unknown[]) => emitAppEvent(...(a as [])),
   AppEvents: {
     RECALCULATION_COMPLETED: "app:recalculation-completed",
     RECALC_INCOMPLETE: "app:recalc-incomplete",
+    CELL_VALUES_CHANGED: "app:cell-values-changed",
+    CELLS_UPDATED: "app:cells-updated",
+    AFTER_SAVE: "app:after-save",
+    AFTER_OPEN: "app:after-open",
   },
 }));
+
+function fireAppEvent(event: string): void {
+  for (const handler of appEventHandlers.get(event) ?? []) handler();
+}
+
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 
 import {
   CalculationStatusItem,
@@ -87,6 +116,9 @@ beforeEach(() => {
   cancelCalculation.mockClear();
   getPendingRecalc.mockClear();
   getPendingRecalc.mockResolvedValue(null);
+  getCalculationState.mockReset();
+  getCalculationState.mockResolvedValue("done");
+  appEventHandlers.clear();
   listenForEvent.mockClear();
   progressHandler = null;
 });
@@ -225,5 +257,56 @@ describe("the stale marker after a cancel", () => {
     expect(container.querySelector("[data-testid='calc-stale']")?.textContent).toBe(
       "Calculate (2)"
     );
+  });
+});
+
+describe("an incomplete calculation with no cancelled pass (Excel's xlPending)", () => {
+  // [LIVE] Excel 16, manual calculation: after a precedent of a formula changes,
+  // after the save, and after the file is reopened, CalculationState is
+  // xlPending and the status bar says "Calculate"; F9 clears it.
+
+  it("says 'Calculate' when the backend reports pending on mount (a reopened workbook)", async () => {
+    getCalculationState.mockResolvedValue("pending");
+    mount();
+    await settle();
+    const stale = container.querySelector("[data-testid='calc-stale']");
+    expect(stale?.textContent).toBe("Calculate");
+    expect(stale?.getAttribute("title")).toContain("F9");
+  });
+
+  it("re-asks after an edit, and clears after a completed recalculation", async () => {
+    mount();
+    await settle();
+    expect(container.textContent).toBe("");
+
+    // A manual-calculation edit a formula depends on.
+    getCalculationState.mockResolvedValue("pending");
+    act(() => fireAppEvent("app:cell-values-changed"));
+    await settle();
+    expect(container.querySelector("[data-testid='calc-stale']")?.textContent).toBe("Calculate");
+
+    // F9.
+    getCalculationState.mockResolvedValue("done");
+    act(() => fireAppEvent("app:recalculation-completed"));
+    await settle();
+    expect(container.textContent).toBe("");
+  });
+
+  it("re-asks after a save and after an open", async () => {
+    mount();
+    await settle();
+    const before = getCalculationState.mock.calls.length;
+    act(() => fireAppEvent("app:after-save"));
+    act(() => fireAppEvent("app:after-open"));
+    act(() => fireAppEvent("app:cells-updated"));
+    await settle();
+    expect(getCalculationState.mock.calls.length).toBe(before + 3);
+  });
+
+  it("claims nothing when the read fails", async () => {
+    getCalculationState.mockRejectedValue(new Error("ipc down"));
+    mount();
+    await settle();
+    expect(container.textContent).toBe("");
   });
 });

@@ -24,6 +24,7 @@
 import { getGridStateSnapshot } from "@api/grid";
 import { columnToLetter } from "@api/types";
 import type { InsightBundle, RangeInsightsRequest } from "@api/insightsService";
+import { shiftRangeByEdit, type StructuralFollowStep } from "@api/structuralFollow";
 import {
   analyzeModel as analyzeModelCommand,
   analyzeRange as analyzeRangeCommand,
@@ -239,6 +240,39 @@ export function refreshBundleFor(origin: InsightsOrigin, bundle: InsightBundle):
   const current = state.origin;
   if (!current || JSON.stringify(current) !== JSON.stringify(origin)) return;
   set({ status: "ready", bundle, error: null, computedAt: Date.now() });
+}
+
+/**
+ * Follow one whole-line edit (or its undo / redo) on any sheet (BUG-0614): a
+ * RANGE origin -- what the shown answer was computed from -- moves, grows or
+ * shrinks with its cells, and its label follows ("Sheet1!B2:D40" ->
+ * "Sheet1!B3:D41"), so "Show on sheet" lands on the cells that were analysed.
+ * When every analysed cell was deleted the origin is dropped (the answer
+ * stays readable; it has nothing left to point at). Returns true on a change.
+ */
+export function applyStructuralStepToOrigin(step: StructuralFollowStep): boolean {
+  const origin = state.origin;
+  if (!origin || origin.kind !== "range" || origin.request.sheetIndex !== step.edit.sheetIndex) return false;
+  const was = origin.request;
+  const next = shiftRangeByEdit(step.edit, was);
+  if (next === null) {
+    set({ origin: null });
+    return true;
+  }
+  if (next.startRow === was.startRow && next.endRow === was.endRow && next.startCol === was.startCol && next.endCol === was.endCol) {
+    return false;
+  }
+  const label = state.originLabel;
+  const bang = label === null ? -1 : label.lastIndexOf("!");
+  const single = next.startRow === next.endRow && next.startCol === next.endCol;
+  const address = single
+    ? a1(next.startRow, next.startCol)
+    : `${a1(next.startRow, next.startCol)}:${a1(next.endRow, next.endCol)}`;
+  set({
+    origin: { kind: "range", request: next },
+    originLabel: label !== null && bang >= 0 ? `${label.slice(0, bang + 1)}${address}` : label,
+  });
+  return true;
 }
 
 /** Publish a bundle, unless a newer run has already started. */

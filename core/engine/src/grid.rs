@@ -40,6 +40,19 @@ pub struct Grid {
     /// `<col s="..">` tier. Consulted after [`Grid::row_styles`].
     pub column_styles: FxHashMap<u32, usize>,
 
+    /// This SHEET's standard row height in px, for every row without a height
+    /// of its own -- Excel's `<sheetFormatPr defaultRowHeight customHeight="1">`.
+    /// `None` = the application standard (`persistence::DEFAULT_ROW_HEIGHT_PX`;
+    /// the engine does not know the number). Per sheet, as in Excel: Select All
+    /// + Row Height sets THIS (one value, not 1,048,576 explicit heights), and a
+    /// new sheet starts at the standard (BUG-0352/0353, probed in live Excel).
+    pub default_row_height: Option<f64>,
+
+    /// This SHEET's standard column width in px (Excel's Format > Default
+    /// Width..., `<sheetFormatPr defaultColWidth>`). `None` = the application
+    /// standard (`persistence::DEFAULT_COLUMN_WIDTH_PX`). Per sheet, as in Excel.
+    pub default_column_width: Option<f64>,
+
     /// What this sheet's cube and custom-function calls answered, by argument
     /// fingerprint -- DERIVED state, never saved. A clone SHARES it; see
     /// [`crate::cube::CallMemo`] for why, and for the rule it serves.
@@ -55,6 +68,8 @@ impl Grid {
             max_col: 0,
             row_styles: FxHashMap::default(),
             column_styles: FxHashMap::default(),
+            default_row_height: None,
+            default_column_width: None,
             call_memo: crate::cube::CallMemo::default(),
         }
     }
@@ -66,9 +81,16 @@ impl Grid {
     /// true of the rebuilt sheet as of the one it replaces; a plain
     /// [`Grid::new`] would forget them all, and a recalculation without data
     /// would then refuse every cube and custom-function cell on the sheet.
+    ///
+    /// The sheet's standard row height and column width are kept too: they are
+    /// sheet properties, not cells, and no cell snapshot records them -- a
+    /// rebuild from `Grid::new()` would silently reset a sheet whose user had
+    /// set them (Select All + Row Height) back to the application standard.
     pub fn new_sharing_call_memo(sheet: &Grid) -> Self {
         let mut grid = Grid::new();
         grid.call_memo = sheet.call_memo.clone();
+        grid.default_row_height = sheet.default_row_height;
+        grid.default_column_width = sheet.default_column_width;
         grid
     }
 

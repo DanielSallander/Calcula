@@ -2294,3 +2294,86 @@ fn lpad_and_rpad_are_builtin_text_functions() {
         }
     }
 }
+
+
+/// A bare identifier is folded ONE CHARACTER FOR ONE by Excel's sheet-name
+/// case rule, never by Rust's full `to_uppercase` (which expands the sharp s
+/// to SS and so turns `Straße` into the different sheet `STRASSE`), and a
+/// non-ASCII letter is part of it, as Excel reads `=Översikt!A1` bare
+/// [LIVE, Excel 16, 2026-10-30].
+#[test]
+fn a_bare_non_ascii_sheet_name_is_folded_per_character_never_expanded() {
+    let mut lexer = Lexer::new("Straße!A1");
+    let tok = lexer.next_token();
+    assert_eq!(tok, Token::Identifier("STRAẞE".to_string()), "the sharp s was expanded or dropped");
+    assert_eq!(lexer.next_token(), Token::Exclamation);
+
+    match parse("=Straße!A1").expect("a bare non-ASCII sheet name parses, as in Excel") {
+        Expression::CellRef { sheet: Some(s), col, row, .. } => {
+            assert_eq!(s.chars().count(), 6, "the fold must preserve length: {s}");
+            assert!(identity::sheet_names_equal(&s, "Straße"));
+            assert!(!identity::sheet_names_equal(&s, "STRASSE"));
+            assert_eq!((col.as_str(), row), ("A", 1));
+        }
+        other => panic!("not a qualified cell ref: {other:?}"),
+    }
+    match parse("=Översikt!B2").expect("=Översikt!B2 parses bare") {
+        Expression::CellRef { sheet: Some(s), .. } => assert_eq!(s, "ÖVERSIKT"),
+        other => panic!("not a qualified cell ref: {other:?}"),
+    }
+    match parse("=SUM(Straße:ärende!A1)").expect("a bare non-ASCII 3-D range parses") {
+        Expression::FunctionCall { args, .. } => match &args[0] {
+            Expression::Sheet3DRef { start_sheet, end_sheet, .. } => {
+                assert_eq!(start_sheet, "STRAẞE");
+                assert_eq!(end_sheet, "ÄRENDE");
+            }
+            other => panic!("not a 3-D ref: {other:?}"),
+        },
+        other => panic!("not a call: {other:?}"),
+    }
+    // Function names and cell references are ASCII: unchanged.
+    match parse("=sum(a1)").expect("parses") {
+        Expression::FunctionCall { func, .. } => assert_eq!(func.to_canonical_name(), "SUM"),
+        other => panic!("not a call: {other:?}"),
+    }
+}
+
+/// rev13C minor: the sheet-name table folds the KELVIN SIGN (U+212A) onto ASCII
+/// `K`, and the lexer used that table for every identifier, so `\u{212A}1`
+/// became the cell K1. Excel refuses `=\u{212A}1` and answers #NAME? for
+/// `=SUM(\u{212A}1)` [LIVE, rev13C kelvin.ps1]: a folded character must never
+/// turn an identifier into a reference or an ASCII function name.
+#[test]
+fn a_non_ascii_character_never_folds_an_identifier_into_a_cell_reference() {
+    let mut lexer = Lexer::new("\u{212A}1");
+    assert_eq!(
+        lexer.next_token(),
+        Token::Identifier("\u{212A}1".to_string()),
+        "the Kelvin sign was folded into ASCII K"
+    );
+    match parse("=SUM(\u{212A}1)").expect("parses") {
+        Expression::FunctionCall { args, .. } => {
+            assert!(!matches!(args[0], Expression::CellRef { .. }), "the Kelvin sign read as cell K1: {:?}", args[0]);
+        }
+        other => panic!("not a call: {other:?}"),
+    }
+    // Ordinary non-ASCII letters still fold per character, as before.
+    let mut lexer = Lexer::new("\u{f6}versikt");
+    assert_eq!(lexer.next_token(), Token::Identifier("\u{d6}VERSIKT".to_string()));
+    // A bare Kelvin-sign SHEET qualifier still reads as one.
+    match parse("=\u{212A}elvin!A1").expect("parses") {
+        Expression::CellRef { sheet: Some(s), .. } => assert!(identity::sheet_names_equal(&s, "\u{212A}elvin")),
+        other => panic!("not a qualified cell ref: {other:?}"),
+    }
+}
+
+/// Excel evaluates `=\u{131}F(TRUE,1,2)` to 1 [LIVE, rev13C kelvin.ps1]: its
+/// function lookup reads the dotless i as I.
+#[test]
+fn a_dotless_i_in_a_function_name_reads_as_i() {
+    match parse("=\u{131}F(TRUE,1,2)").expect("parses") {
+        // The BUILT-IN, not a custom function that merely renders as IF.
+        Expression::FunctionCall { func, .. } => assert!(matches!(func, BuiltinFunction::If), "{func:?}"),
+        other => panic!("not a call: {other:?}"),
+    }
+}

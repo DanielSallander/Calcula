@@ -436,6 +436,21 @@ export interface CellData {
 }
 
 /**
+ * What `set_calculation_mode` answers (mirrors Rust `CalculationModeChange`):
+ * the mode in effect afterwards, and -- when the request took calculation out
+ * of manual -- the active sheet's cells the Calculate Now it ran repainted
+ * (Excel: setting calculation to automatic recalculates). `null` when nothing
+ * was recalculated. The switch is answered even when that recalculation then
+ * failed: `recalculationError` says why (the mode is still the one in effect,
+ * and the values stay "pending").
+ */
+export interface CalculationModeChange {
+  mode: string;
+  recalculated: CellData[] | null;
+  recalculationError: string | null;
+}
+
+/**
  * Which of Excel's overflow rules a value is entitled to (mirrors Rust
  * `OverflowClass`). `unrepresentable` is the width-INDEPENDENT refusal.
  */
@@ -501,6 +516,17 @@ export interface UpdateCellResult {
   needsStyleRefresh?: boolean;
   /** Whether slicer computed properties changed a slicer — refresh slicer overlays */
   slicerChanged?: boolean;
+  /**
+   * A GROUPED entry (`updateCell` with `groupSheets`): the other grouped sheets
+   * the same call actually wrote, in its one undo step. Absent otherwise.
+   * Mirrors Rust `UpdateCellResult.group_written`.
+   */
+  groupWritten?: number[];
+  /**
+   * A GROUPED entry whose replication was refused: the reason. The edit's own
+   * sheet was written all the same. Mirrors Rust `UpdateCellResult.group_error`.
+   */
+  groupError?: string;
 }
 
 /**
@@ -516,7 +542,9 @@ export interface DimensionData {
 }
 
 /**
- * Default row height and column width for the workbook.
+ * The ACTIVE sheet's standard row height and column width. Each sheet keeps
+ * its own, as in Excel (the application standard when it set none); the grid
+ * re-reads them on every sheet switch.
  */
 export interface DefaultDimensions {
   /** Default row height in pixels */
@@ -2651,7 +2679,57 @@ export interface CellShiftResult {
   confirm: string | null;
   /** The range spanned every column (row): entire rows (columns) were inserted / deleted. */
   wholeLines: boolean;
+  /**
+   * The shift as COORDINATES when cells moved by a partial band (null on the
+   * whole-line route and on a stop to ask): what `@api/structuralFollow`
+   * hands the stores whose coordinates the backend never holds.
+   */
+  delta?: StructuralDelta | null;
 }
+
+/**
+ * The perpendicular extent of a PARTIAL structural edit (Insert / Delete
+ * Cells), inclusive: the columns a row-wise shift moves, or the rows a
+ * column-wise one does (Rust `api_types::DeltaBand`).
+ */
+export interface DeltaBand {
+  start: number;
+  end: number;
+}
+
+/** A row / column insert or delete (or one confined to a band), as a structural delta. */
+export interface StructuralLineDelta {
+  kind: "rowInsert" | "rowDelete" | "colInsert" | "colDelete";
+  /** The sheet whose lines moved (0-based). */
+  sheetIndex: number;
+  /** The first row (column) inserted or deleted, 0-based. */
+  at: number;
+  /** How many rows (columns). */
+  count: number;
+  /** Present for Insert / Delete Cells: only the cells inside this band move. */
+  band?: DeltaBand | null;
+}
+
+/** A block of cells a cut-paste (or a drag) MOVED, as a structural delta. */
+export interface StructuralMoveDelta {
+  kind: "move";
+  fromSheetIndex: number;
+  fromStartRow: number;
+  fromStartCol: number;
+  fromEndRow: number;
+  fromEndCol: number;
+  toSheetIndex: number;
+  /** Where the block's top-left cell landed. */
+  toRow: number;
+  toCol: number;
+}
+
+/**
+ * One coordinate change a step made (Rust `api_types::StructuralDelta`, an
+ * internally tagged enum): an Undo / Redo reports the ones it reversed or
+ * replayed (`UndoResult.structuralDeltas`), from the step itself.
+ */
+export type StructuralDelta = StructuralLineDelta | StructuralMoveDelta;
 
 /** Excel's Insert dialog shifts: `insert_cells`'s `shift` argument. */
 export type InsertCellsShift = "right" | "down";
@@ -2672,6 +2750,18 @@ export type DeleteCellsShift = "left" | "up";
  * read from an ambient selection.
  */
 export type CellTargetRef = { kind: "floatingRange"; id: string };
+
+/**
+ * The whole rectangle (inclusive) a multi-cell style gesture is about to
+ * write, CHECKED by `set_cell_style` before its first cell changes (mirrors
+ * Rust `api_types::StyleCheckArea`; `setCellStyle`'s `opts.checkArea`).
+ */
+export interface StyleCheckArea {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
 
 /** How a target cell's value aligns under General: Excel's value kinds. */
 export type TargetCellValueKind = "number" | "text" | "boolean" | "error" | "empty";

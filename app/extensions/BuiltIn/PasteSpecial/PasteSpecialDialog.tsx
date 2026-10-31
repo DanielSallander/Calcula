@@ -8,7 +8,7 @@ import React, { useState, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
 import { useGridState } from "@api";
-import { getInternalClipboard } from "@api/lib";
+import { getInternalClipboard, settledInternalClipboard } from "@api/lib";
 import type { CellTarget } from "@api/cellTarget";
 import { executePasteSpecial, executePasteLink } from "./pasteSpecialExecute";
 import type { PasteAttribute, PasteOperation } from "./types";
@@ -87,8 +87,15 @@ export function PasteSpecialDialog(props: DialogProps): React.ReactElement | nul
 
     setIsExecuting(true);
     try {
+      // The snapshot as its source holds it NOW (a re-read still under way
+      // is waited for); gone when the copy ended meanwhile.
+      const fresh = await settledInternalClipboard();
+      if (!fresh) {
+        onClose();
+        return;
+      }
       await executePasteSpecial(
-        clipboard!,
+        fresh,
         selection,
         { pasteAttribute, operation, skipBlanks, transpose },
         totalRows,
@@ -123,7 +130,12 @@ export function PasteSpecialDialog(props: DialogProps): React.ReactElement | nul
 
     setIsExecuting(true);
     try {
-      await executePasteLink(clipboard!, selection, totalRows, totalCols, "Paste Link", target);
+      const fresh = await settledInternalClipboard();
+      if (!fresh) {
+        onClose();
+        return;
+      }
+      await executePasteLink(fresh, selection, totalRows, totalCols, "Paste Link", target);
       onClose();
     } catch (err) {
       console.error("[PasteSpecialDialog] Paste Link failed:", err);

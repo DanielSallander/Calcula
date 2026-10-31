@@ -35,8 +35,33 @@ pub struct IterationSettings {
 /// `api.setCalculationMode("Manual ")` silently flipped the workbook to
 /// automatic — the exact opposite of what it asked for — and the author never
 /// learned why their batch writes were recalculating per-cell.
+///
+/// `(async)`, for the reason Calculate Now is (BUG-0615#3): the switch takes
+/// `grid` and `grids` (see [`set_calculation_mode_impl`]), which a running
+/// Calculate Now holds for its whole pass, and a sync command body runs on the
+/// WebView2 UI thread -- so choosing Manual or Automatic during a long
+/// recalculation froze the whole window until the pass ended. On a worker
+/// thread the window stays live and the switch applies when the pass is done.
+/// An `async fn` whose two blocking halves (the switch, and the recalculation
+/// below) run on the blocking pool, never on the UI thread.
+///
+/// LEAVING MANUAL FOR AUTOMATIC IS A RECALCULATION, as in Excel [LIVE, Excel
+/// 16 COM: manual, `B1 = A1*2`, A1 changed to 5 -> B1 = 2 and xlPending;
+/// `Application.Calculation = xlAutomatic` -> B1 = 10 and xlDone]. This
+/// command runs it itself -- the whole-workbook Calculate Now, with the cube
+/// pre-fetch F9 makes -- and answers the cells it repainted, so EVERY route to
+/// automatic agrees: the Formulas menu, a script's
+/// `setCalculationMode("automatic")`, the release when a script that held
+/// manual ends, and the workbook-swap sweep. Only the menu used to chain
+/// Calculate Now after the switch; every other route left an AUTOMATIC
+/// workbook "pending" (the status bar's Calculate, a save stamped
+/// `calculation_incomplete`) until somebody pressed F9.
 #[tauri::command]
-pub fn set_calculation_mode(state: State<AppState>, mode: String) -> Result<String, String> {
+pub async fn set_calculation_mode(
+    window: tauri::Window,
+    mode: String,
+) -> Result<crate::api_types::CalculationModeChange, String> {
+    use tauri::Manager;
     log_enter_info!("CMD", "set_calculation_mode", "mode={}", mode);
 
     let valid_mode = match mode.to_lowercase().as_str() {
@@ -51,10 +76,264 @@ pub fn set_calculation_mode(state: State<AppState>, mode: String) -> Result<Stri
         }
     };
 
-    set_calculation_mode_impl(&state, &valid_mode);
+    // The ticket is drawn BEFORE the switch can block (see
+    // `set_calculation_mode_in_order`) -- but when this async body STARTS, not
+    // when the IPC arrived: two requests sent together can start in either
+    // order. So the app's own callers never send them together: the lib
+    // wrapper (`setCalculationMode`, tauri-api.ts) sends a switch only once
+    // the previous one has settled, and the Formulas menu shows the mode this
+    // answers. The ticket still orders bodies that do overlap (a raw invoke).
+    let ticket = MODE_SWITCH_TICKETS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let switching = window.clone();
+    let (in_effect, left_manual) = tokio::task::spawn_blocking(move || {
+        let state = switching.state::<AppState>();
+        switch_calculation_mode_in_order(&state, &valid_mode, ticket, &MODE_SWITCH_APPLIED)
+    })
+    .await
+    .map_err(|e| format!("the calculation mode switch failed: {}", e))?;
 
-    log_exit_info!("CMD", "set_calculation_mode", "set to {}", valid_mode);
-    Ok(valid_mode)
+    // THE SWITCH HAS APPLIED. Whatever the recalculation below does, the
+    // answer is the mode in effect (rev12B, round 13: a failed pass used to
+    // reject the call although the mode had changed, so a script was told its
+    // switch failed when it had not). A failure is reported beside it.
+    //
+    // And the recalculation is for AUTOMATIC calculation: a later request that
+    // put calculation back in manual while this one waited (two switches in
+    // flight) leaves nothing to recalculate -- the values stay marked
+    // possibly stale, "pending", as manual calculation leaves them.
+    let mut recalculation_error: Option<String> = None;
+    let recalculated = if left_manual && still_automatic(&window.state::<AppState>()) {
+        // The cube pre-fetch F9 makes (`recalcAll` in the frontend), so a cube
+        // formula whose arguments changed under manual is answered from the
+        // model rather than refused. No std lock is held across the await.
+        let cube_results = {
+            let state = window.state::<AppState>();
+            let bi_state = window.state::<crate::bi::types::BiState>();
+            crate::bi::cube::build_full_refresh_prefetch(&state, &bi_state).await
+        };
+        let calculating = window.clone();
+        let (cells, failed) = tokio::task::spawn_blocking(move || {
+            let state = calculating.state::<AppState>();
+            recalculate_if_still_automatic(&state, |state| {
+                recalculate_after_leaving_manual(
+                    Some(calculating.clone()),
+                    state,
+                    &calculating.state::<UserFilesState>(),
+                    &calculating.state::<PivotState>(),
+                    &calculating.state::<crate::pane_control::PaneControlState>(),
+                    &calculating.state::<crate::ribbon_filter::RibbonFilterState>(),
+                    Some(cube_results),
+                )
+            })
+        })
+        .await
+        .unwrap_or_else(|e| (None, Some(format!("the recalculation on leaving manual calculation failed: {}", e))));
+        if let Some(e) = &failed {
+            log_warn!("CMD", "{}", e);
+        }
+        recalculation_error = failed;
+        cells
+    } else {
+        None
+    };
+
+    log_exit_info!(
+        "CMD",
+        "set_calculation_mode",
+        "in effect {}, recalculated {}",
+        in_effect,
+        recalculated.as_ref().map_or(0, Vec::len)
+    );
+    Ok(crate::api_types::CalculationModeChange { mode: in_effect, recalculated, recalculation_error })
+}
+
+/// Whether calculation is automatic NOW -- what the recalculation after
+/// leaving manual checks before it starts, so a later switch back to manual
+/// that applied while it waited is not followed by a Calculate Now.
+pub(crate) fn still_automatic(state: &AppState) -> bool {
+    state.calculation_mode.lock().map(|mode| *mode != "manual").unwrap_or(false)
+}
+
+/// The blocking half of [`set_calculation_mode`]'s recalculation: run `pass`
+/// only while calculation is still automatic, and answer its cells or its
+/// failure -- never an `Err`, because the switch it follows has applied and
+/// the caller reports that either way.
+pub(crate) fn recalculate_if_still_automatic(
+    state: &AppState,
+    pass: impl FnOnce(&AppState) -> Result<Vec<CellData>, String>,
+) -> (Option<Vec<CellData>>, Option<String>) {
+    if !still_automatic(state) {
+        return (None, None);
+    }
+    match pass(state) {
+        Ok(cells) => (Some(cells), None),
+        // The pass asked again under its grid locks and found manual: a later
+        // switch applied in between, and nothing ran (not a failure).
+        Err(e) if e == PASS_SKIPPED_UNDER_MANUAL => (None, None),
+        Err(e) => (None, Some(format!("the recalculation on leaving manual calculation failed: {}", e))),
+    }
+}
+
+/// rev12B (round 13) nits on `set_calculation_mode`'s recalculation.
+#[cfg(test)]
+mod mode_switch_answer_tests {
+    use super::*;
+
+    /// A pass that fails after the switch has applied is answered as a failure
+    /// BESIDE the switch, never as an `Err` of the whole call.
+    ///
+    /// SABOTAGE: answer `(None, None)` on `Err` -- fails at "FAILURE LOST".
+    #[test]
+    fn a_failed_pass_is_reported_beside_the_applied_switch() {
+        let state = crate::create_app_state();
+        set_calculation_mode_impl(&state, "automatic");
+        let (cells, failed) = recalculate_if_still_automatic(&state, |_| Err("sheet index out of range".to_string()));
+        assert!(cells.is_none());
+        assert!(
+            failed.as_deref().is_some_and(|e| e.contains("sheet index out of range")),
+            "FAILURE LOST: {:?}",
+            failed
+        );
+        assert_eq!(*state.calculation_mode.lock().unwrap(), "automatic", "the switch stays applied");
+    }
+
+    /// Two switches in flight: "automatic" (which left manual) waits, a later
+    /// "manual" applies, and only then does the first one's recalculation get
+    /// its turn -- it must not run a Calculate Now under manual.
+    ///
+    /// SABOTAGE: drop the `still_automatic` check -- fails at "RAN UNDER MANUAL".
+    #[test]
+    fn the_recalculation_does_not_run_once_a_later_switch_made_it_manual() {
+        let state = crate::create_app_state();
+        set_calculation_mode_impl(&state, "manual");
+        let mut ran = false;
+        let (cells, failed) = recalculate_if_still_automatic(&state, |_| {
+            ran = true;
+            Ok(Vec::new())
+        });
+        assert!(!ran, "RAN UNDER MANUAL: the recalculation ran after a later switch to manual applied");
+        assert_eq!((cells.is_none(), failed), (true, None));
+
+        set_calculation_mode_impl(&state, "automatic");
+        let (cells, _) = recalculate_if_still_automatic(&state, |_| Ok(Vec::new()));
+        assert!(cells.is_some(), "control: under automatic it runs");
+    }
+
+    /// rev14C nit (round 16): the still-automatic check ran BEFORE the pass
+    /// took `grid` / `grids`, so a "manual" switch that applied in between was
+    /// followed by a whole Calculate Now under manual. The pass now asks again
+    /// under its own grid locks. Here the switch lands exactly in that gap:
+    /// after the check, before the pass.
+    ///
+    /// SABOTAGE: pass `false` for `only_while_automatic` in
+    /// `recalculate_after_leaving_manual` -- fails at "RAN UNDER MANUAL".
+    #[test]
+    fn a_switch_to_manual_between_the_check_and_the_pass_runs_no_pass() {
+        let state = crate::create_app_state();
+        let files = crate::persistence::UserFilesState::default();
+        let pivots = crate::pivot::PivotState::new();
+        let pane = crate::pane_control::PaneControlState::new();
+        let filters = crate::ribbon_filter::RibbonFilterState::new();
+        set_calculation_mode_impl(&state, "automatic");
+        let (cells, failed) = recalculate_if_still_automatic(&state, |state| {
+            set_calculation_mode_impl(state, "manual"); // the switch, in the gap
+            recalculate_after_leaving_manual(None, state, &files, &pivots, &pane, &filters, None)
+        });
+        assert!(cells.is_none(), "RAN UNDER MANUAL: a Calculate Now ran after the switch to manual applied");
+        assert_eq!(failed, None, "a pass that did not run is not a failure");
+
+        set_calculation_mode_impl(&state, "automatic");
+        let (cells, failed) = recalculate_if_still_automatic(&state, |state| {
+            recalculate_after_leaving_manual(None, state, &files, &pivots, &pane, &filters, None)
+        });
+        assert_eq!(failed, None);
+        assert!(cells.is_some(), "control: still automatic, the pass runs");
+    }
+}
+
+/// The recalculation [`set_calculation_mode`] runs when calculation LEAVES
+/// manual for automatic: Calculate Now over the whole workbook, Excel's
+/// `Application.Calculation = xlAutomatic`. The switch has already marked every
+/// sheet's values possibly stale (`switch_calculation_mode_in_order`), so a
+/// cube or custom-function call the pass cannot answer is refused rather than
+/// kept, and a completed pass clears the mark (state "done"); a pass the user
+/// cancels leaves its remainder pending, as an interrupted Excel recalculation
+/// does. Takes its own locks; the caller holds none.
+pub(crate) fn recalculate_after_leaving_manual(
+    window: Option<tauri::Window>,
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    cube_results: Option<engine::CubePrefetch>,
+) -> Result<Vec<CellData>, String> {
+    run_calculation_pass_gated(
+        CalcScope::Workbook,
+        window,
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        cube_results,
+        // Calculation is automatic now, which vouches by itself (the marks
+        // still refuse what may be stale); this flag is read only under manual.
+        false,
+        // ...and only while it STILL is, asked under the pass's own grid locks.
+        true,
+    )
+}
+
+/// The order mode switches were REQUESTED in (one per `set_calculation_mode`
+/// call), and the latest one applied.
+static MODE_SWITCH_TICKETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MODE_SWITCH_APPLIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// LAST REQUEST WINS, IN REQUEST ORDER. The switch is `(async)` (above), so two
+/// switches made while a Calculate Now holds the grid -- Manual, then Automatic
+/// -- wait for `grid` on two pool threads, and which one gets it first is not
+/// FIFO: the backend could end in Manual while the menu, which follows the last
+/// click, showed Automatic. Each request carries the ticket it drew when its
+/// body started (not on IPC arrival: the frontend serialises its own switches,
+/// see `set_calculation_mode`);
+/// under the `calculation_mode` lock a ticket older than the last one applied
+/// changes nothing (a later request has already decided the mode). Returns the
+/// mode in effect afterwards.
+pub(crate) fn set_calculation_mode_in_order(
+    state: &AppState,
+    mode: &str,
+    ticket: u64,
+    applied: &std::sync::atomic::AtomicU64,
+) -> String {
+    switch_calculation_mode_in_order(state, mode, ticket, applied).0
+}
+
+/// [`set_calculation_mode_in_order`], also answering whether THIS request took
+/// calculation out of manual -- the switch that must be followed by a
+/// recalculation ([`recalculate_after_leaving_manual`]), decided under the same
+/// lock that applies it, so two racing requests cannot both (or neither) claim
+/// it.
+pub(crate) fn switch_calculation_mode_in_order(
+    state: &AppState,
+    mode: &str,
+    ticket: u64,
+    applied: &std::sync::atomic::AtomicU64,
+) -> (String, bool) {
+    // Lock order as `set_calculation_mode_impl`: grid, grids, calculation_mode.
+    let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    let mut calc_mode = state.calculation_mode.lock().unwrap();
+    if ticket < applied.load(std::sync::atomic::Ordering::SeqCst) {
+        return (calc_mode.clone(), false);
+    }
+    applied.store(ticket, std::sync::atomic::Ordering::SeqCst);
+    let left_manual = *calc_mode == "manual" && mode != "manual";
+    if left_manual {
+        note_values_may_be_stale_on(&grid, &grids);
+    }
+    *calc_mode = mode.to_string();
+    (calc_mode.clone(), left_manual)
 }
 
 /// The body of [`set_calculation_mode`], callable without a Tauri runtime.
@@ -68,9 +347,10 @@ pub fn set_calculation_mode(state: State<AppState>, mode: String) -> Result<Stri
 /// edited since it was opened or saved; once it LEAVES manual that question no
 /// longer tells (an edit under automatic is ordinary), so leaving marks every
 /// sheet's stored values as possibly stale (`CallMemo::note_values_may_be_stale`)
-/// until a completed Calculate Now evaluates every formula again. A script's
-/// `setCalculationMode("automatic")` recalculates nothing, so without the mark
-/// the stale values would outlive the switch.
+/// until a completed Calculate Now evaluates every formula again. The command
+/// runs that Calculate Now itself (`set_calculation_mode`, Excel's rule); this
+/// body does not, so a caller of it alone (the cube tests) keeps the mark, and
+/// the mark is what a pass the user cancels leaves behind.
 ///
 /// Lock order: `grid`, `grids`, then the leaf `calculation_mode` -- held
 /// together, so no calculation pass can start between the mode changing and
@@ -93,6 +373,22 @@ fn note_values_may_be_stale_on(grid: &engine::Grid, grids: &[engine::Grid]) {
     for sheet in grids {
         sheet.call_memo().note_values_may_be_stale();
     }
+}
+
+/// Whether any sheet's stored values may be stale (`CallMemo::values_may_be_stale`)
+/// -- what a save writes as `Workbook::calculation_incomplete`, Excel's
+/// `calcCompleted="0"` (BUG-0615#2). For a caller that already holds the grids.
+pub(crate) fn values_may_be_stale_in(grid: &engine::Grid, grids: &[engine::Grid]) -> bool {
+    grid.call_memo().values_may_be_stale() || grids.iter().any(|sheet| sheet.call_memo().values_may_be_stale())
+}
+
+/// For `persistence::restore_pending_recalc_on_load`: the workbook just opened
+/// was saved with calculation incomplete, so every sheet's values may be stale
+/// until a completed Calculate Now (BUG-0615#2). Takes `grid`, `grids` (reads).
+pub(crate) fn note_stored_values_may_be_stale(state: &AppState) {
+    let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    note_values_may_be_stale_on(&grid, &grids);
 }
 
 /// For `persistence::save_file` when it saves WITHOUT recalculating
@@ -166,22 +462,52 @@ pub fn set_iteration_settings(
 
 /// Get the current calculation state: "done" or "pending".
 ///
-/// "pending" means a recalculation was CANCELLED and some cells still hold
-/// pre-pass values — Excel's "Calculate" state. The frontend shows that word in
-/// the status bar instead of "Ready", which is the whole affordance for "this
-/// workbook has un-recalculated cells".
+/// "pending" means calculation is incomplete -- a recalculation was CANCELLED
+/// and some cells still hold pre-pass values, or a manual-calculation edit left
+/// formulas un-recalculated (see [`calculation_state_impl`]) -- Excel's
+/// "Calculate" state. The frontend shows that word in the status bar instead
+/// of "Ready", which is the whole affordance for "this workbook has
+/// un-recalculated cells".
 ///
 /// "calculating" is not reported here: a running pass publishes itself through
 /// the `app:calc-progress` event stream instead, which is both more informative
 /// (it carries counts and elapsed time) and reachable while the pass runs.
-#[tauri::command]
-pub fn get_calculation_state(state: State<AppState>) -> String {
-    let stale = state
+// ASYNC, never on the UI thread: the answer reads `grid`/`grids`, which a
+// running Calculate Now holds for its whole pass (BUG-0615#3's freeze).
+#[tauri::command(async)]
+pub fn get_calculation_state(state: State<'_, AppState>) -> String {
+    calculation_state_impl(&state).to_string()
+}
+
+/// The body of [`get_calculation_state`]: "pending" for EITHER kind of
+/// incomplete calculation, Excel's `CalculationState = xlPending`:
+///
+/// - a cancelled pass's remainder (`pending_recalc`), and
+/// - stored values some sheet's results cache says may be stale
+///   ([`values_may_be_stale_in`]): a manual-calculation write a formula
+///   depends on (`commands::data::note_manual_write_left_formulas_uncalculated`),
+///   a manual save of an edited document, or a workbook saved that way and
+///   reopened (`Workbook::calculation_incomplete`, Excel's `calcCompleted="0"`).
+///   A completed Calculate Now clears it.
+///
+/// [LIVE] Excel 16, manual calculation: after changing a precedent of a
+/// formula, CalculationState is xlPending; it stays xlPending after the save
+/// (CalculateBeforeSave off) and after the file is reopened; Calculate makes it
+/// xlDone. This answered "done" for all three, because it read only the
+/// cancelled pass's record. Takes `grid`, `grids` (reads), then
+/// `pending_recalc`.
+pub(crate) fn calculation_state_impl(state: &AppState) -> &'static str {
+    let stale_values = {
+        let grid = state.grid.read().unwrap();
+        let grids = state.grids.read().unwrap();
+        values_may_be_stale_in(&grid, &grids)
+    };
+    let cancelled_remainder = state
         .pending_recalc
         .read()
         .ok()
         .is_some_and(|p| p.as_ref().is_some_and(|pr| !pr.is_empty()));
-    if stale { "pending".to_string() } else { "done".to_string() }
+    if stale_values || cancelled_remainder { "pending" } else { "done" }
 }
 
 // ============================================================================
@@ -295,10 +621,14 @@ fn evaluate_single_formula(
 ///   references that this pass has already changed -- tracked here, footprints
 ///   included.
 ///
-/// A cell that may not be kept is refused WHOLE: its formula's own answer
-/// around a refused call is no answer (`=IFERROR(MYFN(A1),0)` would say 0; the
-/// engine now answers the refusal itself, `Evaluator::evaluate`'s sticky
-/// override). A recalculation that runs because a precedent changed -- an
+/// A cell that may not be kept is written as the engine answered it: a refused
+/// call of a KNOWN custom function, or a cube call, is the formula's whole
+/// answer (`=IFERROR(MYFN(A1),0)` would say 0; `Evaluator::evaluate`'s sticky
+/// override), while a name the workbook does not define stays Excel's
+/// `#NAME?`, which an IFERROR handles (BUG-0615#1). The manual-calculation mark
+/// outlives a save: a save while any sheet is marked writes
+/// `Workbook::calculation_incomplete` (Excel's `calcCompleted="0"`) and the
+/// open marks every sheet again (BUG-0615#2). A recalculation that runs because a precedent changed -- an
 /// edit's cascade, the cross-sheet walk, a fill, a background write -- never
 /// keeps: there, a call the cache cannot answer has changed arguments.
 ///
@@ -322,7 +652,11 @@ struct KeepWithoutData {
     /// What this pass has changed so far: a cell whose value changed, plus the
     /// old and new footprint of an array whose spilled result changed.
     changed: std::collections::HashSet<(usize, u32, u32)>,
-    changed_by_sheet: std::collections::HashMap<usize, Vec<(u32, u32)>>,
+    /// The same cells indexed per sheet by column and by row, so a range,
+    /// column or row reference is answered by an ordered lookup rather than a
+    /// walk of every changed cell (BUG-0615#4: a pass that changed N cells
+    /// asked of M range references was O(N x M)).
+    changed_by_sheet: std::collections::HashMap<usize, ChangedCells>,
     /// Sheets this recalculation has NOT finished yet, for one that visits its
     /// sheets one at a time ([`recalculate_installed_sheet_values`]): anything
     /// on them may still change, so a reference to one counts as changed. Empty
@@ -333,6 +667,204 @@ struct KeepWithoutData {
 /// A formula cell's whole stored result: its value, and the values of the
 /// cells it spilled into (none for a scalar).
 type StoredResult = (engine::CellValue, Vec<((u32, u32), engine::CellValue)>);
+
+/// One sheet's changed cells, indexed for [`KeepWithoutData::reads_a_changed_cell`]:
+/// column -> the changed rows in it, and the set of rows holding any change.
+/// A rectangle asks only the changed COLUMNS inside it (at most 16,384, each
+/// one ordered lookup), a whole-column reference one range probe, a whole-row
+/// reference one more -- never a walk of every changed cell.
+#[derive(Default)]
+struct ChangedCells {
+    by_col: std::collections::BTreeMap<u32, std::collections::BTreeSet<u32>>,
+    rows: std::collections::BTreeSet<u32>,
+}
+
+impl ChangedCells {
+    fn insert(&mut self, row: u32, col: u32) {
+        self.by_col.entry(col).or_default().insert(row);
+        self.rows.insert(row);
+    }
+
+    /// Any changed cell in rows `r0..=r1` and columns `c0..=c1` (either pair
+    /// in any order).
+    fn any_in(&self, r0: u32, r1: u32, c0: u32, c1: u32) -> bool {
+        let (r0, r1) = (r0.min(r1), r0.max(r1));
+        let (c0, c1) = (c0.min(c1), c0.max(c1));
+        self.by_col.range(c0..=c1).any(|(_, rows)| rows.range(r0..=r1).next().is_some())
+    }
+
+    /// Any changed cell in columns `c0..=c1`.
+    fn any_in_cols(&self, c0: u32, c1: u32) -> bool {
+        self.by_col.range(c0.min(c1)..=c0.max(c1)).next().is_some()
+    }
+
+    /// Any changed cell in rows `r0..=r1`.
+    fn any_in_rows(&self, r0: u32, r1: u32) -> bool {
+        self.rows.range(r0.min(r1)..=r0.max(r1)).next().is_some()
+    }
+}
+
+#[cfg(test)]
+mod changed_cells_index_tests {
+    use super::KeepWithoutData;
+
+    fn keep_with(changed: &[(usize, u32, u32)]) -> KeepWithoutData {
+        let mut keep = KeepWithoutData {
+            automatic: true,
+            stale: vec![false, false],
+            pending: Default::default(),
+            changed: Default::default(),
+            changed_by_sheet: Default::default(),
+            unsettled: Default::default(),
+        };
+        for &(sheet, row, col) in changed {
+            keep.note(sheet, row, col);
+        }
+        keep
+    }
+
+    /// The answer by brute force over the changed set: what the index must
+    /// reproduce exactly.
+    fn brute(changed: &[(usize, u32, u32)], sheet: usize, r0: u32, r1: u32, c0: u32, c1: u32) -> bool {
+        changed.iter().any(|&(s, r, c)| s == sheet && r >= r0 && r <= r1 && c >= c0 && c <= c1)
+    }
+
+    fn reads(keep: &KeepWithoutData, formula: &str) -> bool {
+        let names = vec!["Sheet1".to_string(), "Sheet2".to_string()];
+        let expr = parser::parse(formula).expect("parses");
+        keep.reads_a_changed_cell(&expr, 0, &names)
+    }
+
+    /// BUG-0615#4. A large changed set (a pass that rewrote 40,000 cells),
+    /// asked of rectangles, whole columns and whole rows on both sheets: the
+    /// indexed answer is exactly the brute-force one. Pins the RESULT, not the
+    /// timing.
+    ///
+    /// SABOTAGE: make `ChangedCells::any_in` ignore the row bounds.
+    #[test]
+    fn a_large_changed_set_answers_every_reference_exactly() {
+        // Sheet1: every 7th row of columns C..=F, rows 1000..11000; Sheet2: a
+        // diagonal.
+        let mut changed: Vec<(usize, u32, u32)> = Vec::new();
+        for row in (1000..11_000u32).step_by(1) {
+            if row % 7 == 0 {
+                for col in 2..=5u32 {
+                    changed.push((0, row, col));
+                }
+            }
+        }
+        for i in 0..30_000u32 {
+            changed.push((1, i, i % 200));
+        }
+        let keep = keep_with(&changed);
+
+        // (formula, sheet, r0, r1, c0, c1) -- 0-based bounds for the oracle.
+        let cases: Vec<(String, usize, u32, u32, u32, u32)> = vec![
+            ("=SUM(A1:B20000)".into(), 0, 0, 19_999, 0, 1),
+            ("=SUM(C1:C999)".into(), 0, 0, 998, 2, 2),
+            ("=SUM(C1001:C1007)".into(), 0, 1000, 1006, 2, 2),
+            ("=SUM(C1002:C1006)".into(), 0, 1001, 1005, 2, 2),
+            ("=SUM(F10500:D10490)".into(), 0, 10_489, 10_499, 3, 5),
+            ("=SUM(G1:Z100000)".into(), 0, 0, 99_999, 6, 25),
+            ("=SUM(Sheet2!A1:A1)".into(), 1, 0, 0, 0, 0),
+            ("=SUM(Sheet2!B1:B1)".into(), 1, 0, 0, 1, 1),
+            ("=SUM(Sheet2!GS1:GZ5)".into(), 1, 0, 4, 200, 207),
+            ("=SUM(Sheet2!E29000:E29100)".into(), 1, 28_999, 29_099, 4, 4),
+        ];
+        for (formula, sheet, r0, r1, c0, c1) in &cases {
+            assert_eq!(
+                reads(&keep, formula),
+                brute(&changed, *sheet, *r0, *r1, *c0, *c1),
+                "{formula}: the index disagrees with the changed set"
+            );
+        }
+        // Whole columns and rows.
+        assert!(reads(&keep, "=SUM(D:D)"), "column D holds changes");
+        assert!(!reads(&keep, "=SUM(G:H)"), "columns G:H hold none");
+        assert!(reads(&keep, "=SUM(1002:1002)"), "row 1002 (0-based 1001 = 7 x 143) holds changes");
+        assert!(!reads(&keep, "=SUM(1003:1008)"), "rows 1003..1008 (0-based 1002..1007) hold none");
+        assert!(!reads(&keep, "=SUM(Sheet1!20000:30000)"), "Sheet1 has no change past row 11000");
+        assert!(reads(&keep, "=SUM(Sheet2!20000:20000)"), "Sheet2's diagonal crosses row 20000");
+        // A single cell still answers through the exact set.
+        assert!(reads(&keep, "=C1002*2"));
+        assert!(!reads(&keep, "=C1003*2"));
+    }
+
+    /// BUG-0615#3. The mode switch takes `grid` / `grids`, which a running
+    /// Calculate Now holds for its whole pass; as a SYNC command it waited for
+    /// them on the WebView2 UI thread and froze the window. Whether a command
+    /// body runs on the UI thread is decided by its attribute alone, so the
+    /// attribute is what is pinned (a Tauri runtime cannot run in-process).
+    ///
+    /// Round 12: the command became an `async fn` (it awaits the cube
+    /// pre-fetch of the recalculation that leaving manual runs), whose locking
+    /// halves run on the blocking pool -- also never on the UI thread.
+    ///
+    /// SABOTAGE: drop `async` from `set_calculation_mode`.
+    #[test]
+    fn the_calculation_mode_switch_never_runs_on_the_ui_thread() {
+        let src = include_str!("calculation.rs");
+        let (at, is_async_fn) = match src.find("pub async fn set_calculation_mode(") {
+            Some(at) => (at, true),
+            None => (src.find("pub fn set_calculation_mode(").expect("the command exists"), false),
+        };
+        let attribute = src[..at].rfind("#[tauri::command").expect("it is a command");
+        assert!(
+            is_async_fn || src[attribute..at].starts_with("#[tauri::command(async)]"),
+            "set_calculation_mode is a sync command: it blocks the UI thread behind a running Calculate Now"
+        );
+    }
+
+    /// EXCEL: LEAVING MANUAL FOR AUTOMATIC IS A RECALCULATION, and the command
+    /// runs it itself so every route agrees (the pass is
+    /// `manual_calc_state_tests::leaving_manual_for_automatic_recalculates_and_settles_the_state`).
+    /// The command needs a Tauri runtime, so its wiring is pinned here: it
+    /// switches through `switch_calculation_mode_in_order` and, when that says
+    /// calculation left manual, recalculates AFTER the switch.
+    ///
+    /// SABOTAGE: drop the `recalculate_after_leaving_manual` call.
+    #[test]
+    fn the_mode_command_recalculates_when_it_leaves_manual() {
+        let src = include_str!("calculation.rs");
+        let at = src.find("pub async fn set_calculation_mode(").expect("the command exists");
+        let end = at + src[at..].find("\n}\n").expect("the command ends");
+        let body: String = src[at..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let switch = body.find("switch_calculation_mode_in_order(").expect("the command switches in request order");
+        let recalc = body
+            .find("recalculate_after_leaving_manual(")
+            .expect("leaving manual for automatic no longer recalculates: an automatic workbook stays pending");
+        assert!(switch < recalc, "the recalculation must follow the switch");
+        assert!(body.contains("if left_manual"), "the recalculation is for the switch out of manual only");
+    }
+
+    /// Two switches made during a running pass -- Manual (ticket 1), then
+    /// Automatic (ticket 2) -- wait on two pool threads, and the lock is not
+    /// FIFO. Whichever applies first, the LATER request is the mode in effect,
+    /// as the menu's checkmark (which follows the last click) says.
+    ///
+    /// SABOTAGE: drop the stale-ticket return in `set_calculation_mode_in_order`.
+    #[test]
+    fn two_mode_switches_apply_in_request_order_whatever_order_they_get_the_lock() {
+        let state = crate::create_app_state();
+        let applied = std::sync::atomic::AtomicU64::new(0);
+        // Automatic (the later request) gets the lock first...
+        assert_eq!(super::set_calculation_mode_in_order(&state, "automatic", 2, &applied), "automatic");
+        // ...then the earlier Manual request arrives at the lock: it is stale.
+        assert_eq!(
+            super::set_calculation_mode_in_order(&state, "manual", 1, &applied),
+            "automatic",
+            "an older switch reports the mode a later one set"
+        );
+        assert_eq!(*state.calculation_mode.lock().unwrap(), "automatic", "the last request wins");
+        // In order, each applies.
+        assert_eq!(super::set_calculation_mode_in_order(&state, "manual", 3, &applied), "manual");
+        assert_eq!(*state.calculation_mode.lock().unwrap(), "manual");
+    }
+}
 
 impl KeepWithoutData {
     fn new(
@@ -418,7 +950,7 @@ impl KeepWithoutData {
 
     fn note(&mut self, sheet: usize, row: u32, col: u32) {
         if self.changed.insert((sheet, row, col)) {
-            self.changed_by_sheet.entry(sheet).or_default().push((row, col));
+            self.changed_by_sheet.entry(sheet).or_default().insert(row, col);
         }
     }
 
@@ -486,13 +1018,9 @@ impl KeepWithoutData {
             return false;
         }
         // A sheet qualifier is matched the way the evaluator resolves it
-        // (`MultiSheetContext` folds with `to_uppercase`), and one that names
-        // no sheet counts as changed -- erring towards "yes".
-        let find = |n: &str| {
-            sheet_names
-                .iter()
-                .position(|s| s.eq_ignore_ascii_case(n) || s.to_uppercase() == n.to_uppercase())
-        };
+        // (`MultiSheetContext` keys by `identity::sheet_name_key`), and one
+        // that names no sheet counts as changed -- erring towards "yes".
+        let find = |n: &str| sheet_names.iter().position(|s| identity::sheet_names_equal(s, n));
         let target = |name: &Option<String>| -> Option<usize> {
             match name {
                 None => Some(sheet),
@@ -502,14 +1030,9 @@ impl KeepWithoutData {
         // A sheet this recalculation has not finished may still change
         // anywhere: every reference into it counts as changed.
         let unsettled = |on: usize| on != sheet && self.unsettled.contains(&on);
-        let touches = |on: usize, hit: &dyn Fn(u32, u32) -> bool| -> bool {
-            unsettled(on)
-                || self
-                    .changed_by_sheet
-                    .get(&on)
-                    .is_some_and(|cells| cells.iter().any(|&(r, c)| hit(r, c)))
+        let touches = |on: usize, hit: &dyn Fn(&ChangedCells) -> bool| -> bool {
+            unsettled(on) || self.changed_by_sheet.get(&on).is_some_and(hit)
         };
-        let between = |x: u32, a: u32, b: u32| x >= a.min(b) && x <= a.max(b);
         match expr {
             E::CellRef { sheet: on, col, row, .. } => target(on).is_none_or(|t| {
                 unsettled(t) || self.changed.contains(&(t, row.saturating_sub(1), column_index(col)))
@@ -521,17 +1044,17 @@ impl KeepWithoutData {
                 ) => {
                     let (r0, r1) = (r0.saturating_sub(1), r1.saturating_sub(1));
                     let (c0, c1) = (column_index(c0), column_index(c1));
-                    target(on).is_none_or(|t| touches(t, &|r, c| between(r, r0, r1) && between(c, c0, c1)))
+                    target(on).is_none_or(|t| touches(t, &|cells| cells.any_in(r0, r1, c0, c1)))
                 }
                 _ => true,
             },
             E::ColumnRef { sheet: on, start_col, end_col, .. } => {
                 let (c0, c1) = (column_index(start_col), column_index(end_col));
-                target(on).is_none_or(|t| touches(t, &|_, c| between(c, c0, c1)))
+                target(on).is_none_or(|t| touches(t, &|cells| cells.any_in_cols(c0, c1)))
             }
             E::RowRef { sheet: on, start_row, end_row, .. } => {
                 let (r0, r1) = (start_row.saturating_sub(1), end_row.saturating_sub(1));
-                target(on).is_none_or(|t| touches(t, &|r, _| between(r, r0, r1)))
+                target(on).is_none_or(|t| touches(t, &|cells| cells.any_in_rows(r0, r1)))
             }
             E::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
                 match (find(start_sheet), find(end_sheet)) {
@@ -834,15 +1357,11 @@ pub(crate) fn workbook_circular_cells(
     let mut cross_edges: Vec<(Node, Node)> = Vec::new();
     let mut same_sheet_edges: Vec<(Node, Node)> = Vec::new();
 
-    // Sheet name -> index, matched case-insensitively because the lexer
-    // UPPERCASES bare identifiers (`=Sheet1!A2` is stored as `SHEET1!A2`).
-    // Same normalisation `normalize_cross_sheet_refs` performs for the
-    // dependency maps; done inline here because this walk wants the INDEX, and
-    // resolving straight to it avoids materialising the canonical name.
-    let sheet_index_of = |name: &str| -> Option<usize> {
-        sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
-    };
-
+    // Sheet name -> index is `crate::resolve_cross_sheet_ref`, matched
+    // case-insensitively because the lexer UPPERCASES bare identifiers
+    // (`=Sheet1!A2` is stored as `SHEET1!A2`) -- the same normalisation
+    // `normalize_cross_sheet_refs` performs for the dependency maps, resolved
+    // straight to the INDEX this walk wants.
     for (sheet_idx, grid) in grids.iter().enumerate() {
         for (&(row, col), cell) in &grid.cells {
             let Some(ast) = &cell.ast else { continue };
@@ -857,16 +1376,21 @@ pub(crate) fn workbook_circular_cells(
                 same_sheet_edges.push(((sheet_idx, r, c), node));
             }
             for (name, r, c) in &refs.cross_sheet_cells {
-                let Some(target_sheet) = sheet_index_of(name) else {
-                    continue; // reference to a sheet that no longer exists
-                };
-                // A PREFIXED reference to the cell's own sheet
-                // (`=Sheet1!A1` written on Sheet1) is a same-sheet edge that
-                // `ExtractedRefs::cells` never reports, so the local detector
-                // misses it too. Recorded as a sheet SELF-loop below, which is
-                // what makes the projection treat it as cyclic.
-                sheet_edges.insert((target_sheet, sheet_idx));
-                cross_edges.push(((target_sheet, *r, *c), node));
+                // A name no sheet has reads nothing; a 3D span reads every
+                // sheet it covers, and a whole column or row (`WHOLE_LINE`)
+                // the target sheet's cells in it (calcref, round 18).
+                let (targets, line) = crate::resolve_cross_sheet_ref(name, *r, *c, sheet_names);
+                for target_sheet in targets {
+                    // A PREFIXED reference to the cell's own sheet
+                    // (`=Sheet1!A1` written on Sheet1) is a same-sheet edge that
+                    // `ExtractedRefs::cells` never reports, so the local detector
+                    // misses it too. Recorded as a sheet SELF-loop below, which is
+                    // what makes the projection treat it as cyclic.
+                    sheet_edges.insert((target_sheet, sheet_idx));
+                    for (tr, tc) in crate::cross_sheet_line_cells(line, grids.get(target_sheet)) {
+                        cross_edges.push(((target_sheet, tr, tc), node));
+                    }
+                }
             }
         }
     }
@@ -1187,11 +1711,9 @@ fn build_workbook_plan(
 
     type Node = (usize, u32, u32);
 
-    // Sheet name -> index, matched case-insensitively because the lexer
-    // UPPERCASES bare identifiers (`=Sheet1!A2` is stored as `SHEET1!A2`).
-    let sheet_index_of = |name: &str| -> Option<usize> {
-        sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
-    };
+    // Sheet name -> index is `crate::resolve_cross_sheet_ref`, matched
+    // case-insensitively because the lexer UPPERCASES bare identifiers
+    // (`=Sheet1!A2` is stored as `SHEET1!A2`).
 
     // ONE walk of every AST in the workbook: the nodes and the raw edges.
     let mut cells: Vec<(Node, String)> = Vec::new();
@@ -1215,9 +1737,14 @@ fn build_workbook_plan(
                 // A PREFIXED reference to the cell's own sheet (`=Sheet1!A1`
                 // written on Sheet1) resolves to a same-sheet edge here, which
                 // is what `ExtractedRefs::cells` never reports and the
-                // sheet-local detector therefore always missed.
-                if let Some(target) = sheet_index_of(name) {
-                    raw_edges.push(((target, *r, *c), node));
+                // sheet-local detector therefore always missed. A 3D span
+                // orders after every sheet it covers, a whole column or row
+                // after the target sheet's cells in it (calcref, round 18).
+                let (targets, line) = crate::resolve_cross_sheet_ref(name, *r, *c, sheet_names);
+                for target in targets {
+                    for (tr, tc) in crate::cross_sheet_line_cells(line, grids.get(target)) {
+                        raw_edges.push(((target, tr, tc), node));
+                    }
                 }
             }
         }
@@ -1409,6 +1936,57 @@ pub(crate) fn run_calculation_pass_with(
     cube_results: Option<engine::CubePrefetch>,
     manual_document_unedited: bool,
 ) -> Result<Vec<CellData>, String> {
+    run_calculation_pass_gated(
+        scope,
+        window,
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        cube_results,
+        manual_document_unedited,
+        false,
+    )
+}
+
+/// What [`run_calculation_pass_gated`] answers when it was told to run only
+/// while calculation is automatic and found it manual under its grid locks:
+/// nothing ran (see [`recalculate_if_still_automatic`]).
+pub(crate) const PASS_SKIPPED_UNDER_MANUAL: &str = "the recalculation did not run: calculation is manual now";
+
+/// [`run_calculation_pass_with`], and with `only_while_automatic` the pass
+/// ASKS THE MODE AGAIN once it holds `grid` and `grids` for writing -- the
+/// guards a switch to manual reads under (`set_calculation_mode_impl`) -- and
+/// runs only if calculation is still automatic, answering
+/// [`PASS_SKIPPED_UNDER_MANUAL`] otherwise. The check before the pass
+/// (`still_automatic`) left a window between it and the locks in which a
+/// "manual" switch could apply and be followed by a whole Calculate Now under
+/// manual (rev14C, round 16).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_calculation_pass_gated(
+    scope: CalcScope,
+    window: Option<tauri::Window>,
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    cube_results: Option<engine::CubePrefetch>,
+    manual_document_unedited: bool,
+    only_while_automatic: bool,
+) -> Result<Vec<CellData>, String> {
+    // WHICH NAMES ARE THE WORKBOOK'S CUSTOM FUNCTIONS (BUG-0615#1): read from
+    // its Custom Functions libraries into every sheet's results cache, so a
+    // refused call of one is answered whole while a name it does not define
+    // stays Excel's `#NAME?` for an IFERROR to handle. Before any grid lock
+    // (it takes the script store, then `grid` / `grids` for reading).
+    if let Some(script_state) = window
+        .as_ref()
+        .and_then(|w| tauri::Manager::try_state::<crate::scripting::types::ScriptState>(w))
+    {
+        crate::bi::cube::note_library_custom_functions(state, &script_state);
+    }
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
     // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
@@ -1491,6 +2069,11 @@ pub(crate) fn run_calculation_pass_with(
 
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    // Under the guards a switch to manual takes: a switch either applied
+    // before them (and the pass does not run) or waits for the pass to end.
+    if only_while_automatic && !still_automatic(state) {
+        return Err(PASS_SKIPPED_UNDER_MANUAL.to_string());
+    }
     let sheet_names = state.sheet_names.read().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
 
@@ -1830,11 +2413,18 @@ pub(crate) fn run_calculation_pass_with(
 
         // A CALL WITH NO DATA (see `KeepWithoutData`): a cell nothing it reads
         // has changed keeps its stored result whole -- value and spill, never
-        // fed to an operator -- and any other is refused WHOLE, never answered
-        // around the refusal (`=IFERROR(MYFN(A1),0)` would say 0).
+        // fed to an operator. Any other is written as the ENGINE answered it:
+        // a refused call of a KNOWN custom function or a cube call is already
+        // the formula's whole result (`Evaluator::evaluate`'s sticky override,
+        // so `=IFERROR(MYFN(A1),0)` never says 0), while a name the workbook
+        // does not define is Excel's `#NAME?`, which an IFERROR around it
+        // handles -- `=IFERROR(UNKNOWNFN(RAND()),0)` is 0 in Excel (BUG-0615#1;
+        // this used to overwrite every such answer with the refusal). The
+        // commands tell the caches which names the workbook's libraries
+        // define first (`bi::cube::note_library_custom_functions`).
         let result = match refusal {
             None => result,
-            Some(refused) => {
+            Some(_) => {
                 if keep.may_keep(
                     &grids,
                     &sheet_names,
@@ -1853,11 +2443,7 @@ pub(crate) fn run_calculation_pass_with(
                     progress.tick(cells_done);
                     continue;
                 }
-                if result.is_error() {
-                    result
-                } else {
-                    engine::EvalResult::Error(refused)
-                }
+                result
             }
         };
 
@@ -2302,6 +2888,16 @@ pub(crate) fn recalculate_sheet_values(
 /// by the update or changed by this recalculation, and is refused whole
 /// otherwise. The sheets are visited one at a time, so a reference to one not
 /// yet visited counts as changed: its cells may still move.
+///
+/// THE ORDER (rev8A). A sheet is visited AFTER the installed sheets its
+/// formulas read ([`installed_sheet_order`]), so when a cell is judged, the
+/// sheets it reads are settled and their changes are known exactly. Visited
+/// in index order instead, `Report!B4 =MYFN(Data!A2)*2` on an earlier Report
+/// counted every reference into the later Data as changed -- a literal no
+/// recalculation can change included -- and the update refused an unchanged
+/// composite, and the next save kept the refusal. Report first, data after is
+/// the common layout. Only sheets that read each other (a cycle) still meet an
+/// unsettled sheet, and there the rule stays conservative.
 pub(crate) fn recalculate_installed_sheet_values(
     state: &AppState,
     user_files_state: &UserFilesState,
@@ -2310,20 +2906,82 @@ pub(crate) fn recalculate_installed_sheet_values(
     written: &[(usize, u32, u32)],
     control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
 ) {
-    let mut order: Vec<usize> = sheets.to_vec();
-    order.sort_unstable();
-    order.dedup();
     // Read with `grids` alone and released before any sheet is visited (each
-    // visit takes `grid`, then `grids`, itself); `pending_recalc` is a leaf.
-    let mut keep = {
+    // visit takes `grid`, then `grids`, itself); `pending_recalc` and
+    // `sheet_names` are leaves.
+    let (order, mut keep) = {
         let Ok(grids) = state.grids.read() else { return };
+        let Ok(sheet_names) = state.sheet_names.read() else { return };
+        let order = installed_sheet_order(&grids, &sheet_names, sheets);
         let pending = state.pending_recalc.read().ok().and_then(|p| p.clone());
-        KeepWithoutData::for_installed_sheets(&grids, pending.as_ref().filter(|p| !p.is_empty()), written)
+        (order, KeepWithoutData::for_installed_sheets(&grids, pending.as_ref().filter(|p| !p.is_empty()), written))
     };
     for (visited, &sheet) in order.iter().enumerate() {
         keep.unsettled = order[visited + 1..].iter().copied().collect();
         recalculate_sheet_values_with(state, user_files_state, pivot_state, sheet, control_states, Some(&mut keep));
     }
+}
+
+/// The order [`recalculate_installed_sheet_values`] visits `sheets` in: each
+/// after every installed sheet its formulas name (`Data!A2`, `Data!A:A`,
+/// `Jan:Mar!B5`), ties and cycles broken by index. A visit writes only its
+/// own sheet, so a sheet visited earlier is settled for good.
+///
+/// Read from the stored formulas: a reference the order misses (one behind a
+/// defined name) is still safe -- a sheet not yet visited counts as changed
+/// ([`KeepWithoutData::reads_a_changed_cell`]) -- it can only refuse a cell
+/// that could have been kept.
+fn installed_sheet_order(grids: &[engine::Grid], sheet_names: &[String], sheets: &[usize]) -> Vec<usize> {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    let installed: BTreeSet<usize> = sheets.iter().copied().filter(|&s| s < grids.len()).collect();
+    // The same fold the evaluator and the keep rule use for a qualifier.
+    let find = |n: &str| sheet_names.iter().position(|s| identity::sheet_names_equal(s, n));
+    fn reads(expr: &engine::Expression, find: &dyn Fn(&str) -> Option<usize>, out: &mut HashSet<usize>) {
+        use engine::Expression as E;
+        match expr {
+            E::CellRef { sheet: Some(on), .. }
+            | E::Range { sheet: Some(on), .. }
+            | E::ColumnRef { sheet: Some(on), .. }
+            | E::RowRef { sheet: Some(on), .. } => {
+                out.extend(find(on));
+            }
+            E::Sheet3DRef { start_sheet, end_sheet, .. } => {
+                if let (Some(a), Some(b)) = (find(start_sheet), find(end_sheet)) {
+                    out.extend(a.min(b)..=a.max(b));
+                }
+            }
+            _ => {}
+        }
+        for sub in engine::cube::sub_expressions(expr) {
+            reads(sub, find, out);
+        }
+    }
+    let mut needs: HashMap<usize, HashSet<usize>> = HashMap::new();
+    for &sheet in &installed {
+        let mut read: HashSet<usize> = HashSet::new();
+        for cell in grids[sheet].cells.values() {
+            if let Some(ast) = cell.get_ast() {
+                reads(ast, &find, &mut read);
+            }
+        }
+        read.retain(|other| *other != sheet && installed.contains(other));
+        needs.insert(sheet, read);
+    }
+    let mut order: Vec<usize> = Vec::with_capacity(installed.len());
+    let mut left = installed;
+    while !left.is_empty() {
+        // The lowest-indexed sheet whose installed precedents are all settled;
+        // in a cycle none is, and the lowest-indexed one left goes first.
+        let next = left
+            .iter()
+            .copied()
+            .find(|sheet| needs[sheet].iter().all(|other| !left.contains(other)))
+            .or_else(|| left.iter().next().copied())
+            .expect("a sheet is left");
+        left.remove(&next);
+        order.push(next);
+    }
+    order
 }
 
 /// The body of [`recalculate_sheet_values`] and
@@ -2455,8 +3113,19 @@ fn recalculate_sheet_values_with(
                     *row,
                     *col,
                 );
-                if !refs.cells.is_empty() {
-                    local_deps.insert((*row, *col), refs.cells);
+                // A reference QUALIFIED with this sheet's own name
+                // (`=SUM(Sheet1!G:G)`, `=Sheet1!A1` on Sheet1, a 3D span over
+                // it) is a cross-sheet entry, never in `refs.cells`; it orders
+                // this sheet's evaluation all the same (calcref, round 18).
+                let mut precedents = refs.cells;
+                for (name, r, c) in &refs.cross_sheet_cells {
+                    let (targets, line) = crate::resolve_cross_sheet_ref(name, *r, *c, &sheet_names);
+                    if targets.contains(&sheet_index) {
+                        precedents.extend(crate::cross_sheet_line_cells(line, grids.get(sheet_index)));
+                    }
+                }
+                if !precedents.is_empty() {
+                    local_deps.insert((*row, *col), precedents);
                 }
             }
         }
@@ -2922,7 +3591,7 @@ pub(crate) fn recalc_visibility_dependents_core(
         for ((src_name, _r, _c), deps) in cross.iter() {
             let Some(src_idx) = sheet_names
                 .iter()
-                .position(|n| n.eq_ignore_ascii_case(src_name))
+                .position(|n| identity::sheet_names_equal(n, src_name))
             else {
                 continue;
             };

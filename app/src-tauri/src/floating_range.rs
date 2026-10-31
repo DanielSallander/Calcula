@@ -681,18 +681,9 @@ pub(crate) fn update_floating_range_inner(
             )?
         }
     }
-    // LOCK OBJECTS on the host page: a patch that MOVES the range or RESIZES
-    // its window (position, row/column count, cell sizes) is refused before
-    // the effect. Its chrome (title, headers) is formatting and goes through.
-    // Decided from the row as the lookup found it; the store lock below then
-    // re-reads the row it writes.
-    if geometry_differs(&row, &patched(&row, &patch)) {
-        crate::sheets::ensure_canvas_objects_unlocked(
-            state,
-            host_index_of(state, &row)?,
-            "move or resize a floating range",
-        )?;
-    }
+    // The host page whose Lock Objects the store hold below asks -- resolved
+    // here, so the store is never held across the sheet-id lookup.
+    let host_index = host_index_of(state, &row)?;
 
     let (previous, updated) = {
         // Held from the lookup to the write: the row the patch is computed
@@ -712,6 +703,14 @@ pub(crate) fn update_floating_range_inner(
             // undo entry, no write.
             drop(pending);
             return info_for(state, updated);
+        }
+        // LOCK OBJECTS on the host page: a patch that MOVES the range or
+        // RESIZES its window (position, row/column count, cell sizes, hidden
+        // lines) is refused before the effect. Its chrome (title, headers) is
+        // formatting and goes through. Decided from the row this hold writes,
+        // holding the store (BUG-0443), so a toggle cannot slip between.
+        if geometry_differs(&previous, &updated) {
+            crate::sheets::ensure_canvas_objects_unlocked(state, host_index, "move or resize a floating range")?;
         }
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut rows = pending.authorize(&effect);

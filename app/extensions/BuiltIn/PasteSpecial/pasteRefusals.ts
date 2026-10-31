@@ -57,7 +57,7 @@ export const pasteRefusalSentence = {
     `${label} is not available on a canvas sheet: a canvas has no cells to paste into. ${NOTHING_CHANGED}`,
   noSelection: (label: string): string =>
     `${label}: select the cells to paste into first. ${NOTHING_CHANGED}`,
-  /** A paste with no route onto a floating grid's cells (style only, comments, validation, column widths). */
+  /** A paste with no route onto a floating grid's cells (comments, validation, column widths). */
   notOnFloatingGrid: (label: string): string =>
     `${label} is not available inside a floating grid yet. ${NOTHING_CHANGED}`,
   /** Paste Link after the sheet the cells were copied from was deleted: nothing left to link to (BUG-0348). */
@@ -89,6 +89,12 @@ export const pasteRefusalSentence = {
    */
   formattingNotApplied: (count: number, reason: string): string =>
     `Paste Special pasted ${count} cell(s) without their formatting:\n${reason}`,
+  /**
+   * A paste whose CONTENT would land on a locked cell of a protected sheet:
+   * refused whole, as Excel refuses it (used when the backend gave no reason).
+   */
+  lockedCell: (label: string, address: string): string =>
+    `${label}: ${address} is locked on this protected sheet. Unprotect the sheet to paste there. ${NOTHING_CHANGED}`,
   /** The protection state could not be read, so a hidden formula could not be ruled out. */
   protectionUnknown: (label: string): string =>
     `${label} could not check whether this sheet hides formulas, so the operation was not applied. ${NOTHING_CHANGED}`,

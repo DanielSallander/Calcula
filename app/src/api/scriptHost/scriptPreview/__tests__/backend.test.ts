@@ -54,6 +54,23 @@ describe("the gap discipline", () => {
     expect(respond(state, "api.getCellValue", [0, 0, undefined])).toBe("keep");
   });
 
+  it("compares sheet names by Excel's case rule, as the product does", () => {
+    // The product refuses `SHEET1` beside `Sheet1` (and `ärende` beside
+    // `Ärende`); an exact-match duplicate check let the preview report success
+    // for an add the real run throws on.
+    const state = createPreviewState({ grid: new PreviewGrid(), sheetNames: ["Sheet1", "Ärende"], activeSheet: 0 });
+    expect(() => respond(state, "api.addSheet", ["SHEET1"])).toThrow(/already exists/);
+    expect(() => respond(state, "api.addSheet", ["äRENDE"])).toThrow(/already exists/);
+    expect(state.sheetNames).toEqual(["Sheet1", "Ärende"]);
+    // `Straße` and `STRASSE` are two names to Excel: no expansion.
+    const two = createPreviewState({ grid: new PreviewGrid(), sheetNames: ["Straße"], activeSheet: 0 });
+    expect(respond(two, "api.addSheet", ["STRASSE"])).toMatchObject({ name: "STRASSE" });
+    // The active sheet named in another case is the active sheet, as the
+    // broker's resolver (exact, then by the case rule) finds it.
+    const s = stateWith([[0, 0, "keep"]]);
+    expect(respond(s, "api.getCellValue", [0, 0, "sheet1"])).toBe("keep");
+  });
+
   it("gaps every unqualified call after addSheet moved the active sheet", () => {
     const state = stateWith([[0, 0, "before"]]);
     expect(respond(state, "api.addSheet", ["Fresh"])).toMatchObject({ name: "Fresh" });

@@ -4,8 +4,8 @@
 //          AFTER_OPEN; so typing into the new workbook's Sheet1 never also
 //          writes its Sheet2 off screen. Driven through the REAL file-api
 //          replacement paths, the real sheet-grouping store and the REAL
-//          useEditing commit against a fake backend whose
-//          `update_cell_on_sheets` answers the sheets it wrote.
+//          useEditing commit against a fake backend whose grouped
+//          `update_cell` answers the sheets it wrote.
 // CONTEXT: Review rev5C#2 (BUG-0350). The group is Core module state keyed by
 //          sheet INDEX, and only a tab click, an ordinary switch outside it and
 //          a renumbering changed it. newFile / openFileAtPath /
@@ -45,21 +45,21 @@ vi.mock("../../lib/tauri-api", () => ({
     activeIndex: backend.active,
   })),
   setActiveSheet: vi.fn(async () => undefined),
-  updateCell: vi.fn(async (row: number, col: number, value: string) => {
+  // Rust's `update_cell`: with `groupSheets` (a grouped entry, ONE call since
+  // round 19 -- `update_cell_grouped`) it also writes the other grouped sheets,
+  // its ACTIVE sheet skipped, and answers the sheets it actually wrote.
+  updateCell: vi.fn(async (row: number, col: number, value: string, groupSheets?: number[]) => {
     backend.writes.push({ sheet: backend.active, value });
-    return { cells: [{ row, col, display: value, formula: null }] };
-  }),
-  // Rust's `update_cell_on_sheets`: the ACTIVE sheet is skipped (`update_cell`
-  // wrote it), and the answer is the sheets it actually wrote.
-  updateCellOnSheets: vi.fn(async (indices: number[], _row: number, _col: number, value: string) => {
-    backend.replications.push([...indices]);
+    const cells = [{ row, col, display: value, formula: null }];
+    if (!groupSheets || groupSheets.length === 0) return { cells };
+    backend.replications.push([...groupSheets]);
     const wrote: number[] = [];
-    for (const index of indices) {
+    for (const index of groupSheets) {
       if (index === backend.active) continue;
       backend.writes.push({ sheet: index, value });
       wrote.push(index);
     }
-    return wrote;
+    return { cells, groupWritten: wrote };
   }),
 }));
 

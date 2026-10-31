@@ -1235,7 +1235,8 @@ is what the code had.
 |---|---|---|
 | Working-copy link matches target | refuse | Publishing into an application this workbook is not a working copy of. The remedy is an explicit "publish as a NEW application" choice — never a fallthrough that silently creates one from a typo. |
 | Not a subscriber of the target | refuse | The identity trap (§2.3). |
-| No pending cancelled recalculation | refuse | Publishing values that are lies. (Existed already.) |
+| Calculation complete | recalculate, refuse only if that fails | Publishing values that are lies. Like Excel's "Recalculate workbook before saving" (on by default), a push whose calculation is incomplete -- a manual-calculation edit, or a cancelled pass -- first runs the full F9 pass (`recalculate_before_publish`) and is refused only when that pass itself does not complete. A package cannot say "calculation incomplete", so the calculate-before-save setting does not apply to it. |
+| One key, one application | re-key | A model this workbook took from ANOTHER application (a subscription, or a working copy of a different one) is filed under the publishing application's own deterministic id for it (`data_source_rekeys_for_target`), and every carried store that names it follows (`rekey_carried_data_sources`). Only a working copy pushing its own application keeps the source id. Two applications therefore never file their models under one id, and a subscriber to both never holds two connections under one key. The subscriber side refuses (`CALP_DATA_SOURCE_SHARED`) a subscribe, checkout or refresh that would bring a model under an id another connection already serves. |
 | Change summary present | refuse | A history nobody can read. |
 | Push mode: create-new vs update | refuse | Creating an application by mis-typing a name; updating one that does not exist. |
 | Base version == head, or a merge was resolved | refuse / confirm | Losing a co-developer's version. |

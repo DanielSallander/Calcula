@@ -747,7 +747,7 @@ describe("add-in forms (M4)", () => {
     // AFTER_NEW -> resetObjectScriptManager -> hostResetAll). Read from source
     // so the test above cannot go on standing in for a path that has moved.
     const src = fs.readFileSync(path.resolve(__dirname, "../host.ts"), "utf8");
-    const start = src.indexOf("export function hostResetAll()");
+    const start = src.indexOf("export function hostResetAll(");
     expect(start, "hostResetAll must still exist under that name").toBeGreaterThan(-1);
     const next = src.indexOf("\nexport ", start + 1);
     const body = src.slice(start, next === -1 ? undefined : next);

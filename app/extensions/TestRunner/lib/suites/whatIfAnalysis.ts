@@ -407,8 +407,8 @@ export const whatIfAnalysisSuite: TestSuite = {
         );
 
         // Revert
-        if (result.originalValues.length > 0) {
-          await solverRevert(0, result.originalValues);
+        if (result.originalValues.length > 0 && result.sheetId) {
+          await solverRevert(result.sheetId, result.originalValues);
         }
       },
     },

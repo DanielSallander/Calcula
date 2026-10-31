@@ -15,14 +15,17 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const isModified = vi.fn();
+/** The load (workbook.openAtPath): what actually replaces the document. */
 const open = vi.fn();
+const pick = vi.fn();
 const confirmAsync = vi.fn();
 const alertAsync = vi.fn();
 
 vi.mock("@api/system", () => ({
   workbook: {
     isModified: (...a: unknown[]) => isModified(...a),
-    open: (...a: unknown[]) => open(...a),
+    pickFileToOpen: (...a: unknown[]) => pick(...a),
+    openAtPath: (...a: unknown[]) => open(...a),
     new: vi.fn(),
     save: vi.fn(),
     saveAs: vi.fn(),
@@ -47,6 +50,7 @@ describe("File > Open unsaved-changes guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     open.mockResolvedValue([{ row: 0, col: 0, value: "x" }]);
+    pick.mockResolvedValue("C:/Users/me/Book2.cala");
     Object.defineProperty(window, "location", {
       configurable: true,
       value: { reload },
@@ -116,5 +120,43 @@ describe("File > Open unsaved-changes guard", () => {
 
     expect(open).not.toHaveBeenCalled();
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  // Round 18 (misc17 NEW-open-picker-dirty-window): the workbook stays live
+  // while the picker is open. A change that lands meanwhile (a push recording
+  // its version, a scheduled job) turned a CLEAN workbook dirty after the only
+  // question, and open_file discarded it unasked.
+  // SABOTAGE: drop the after-picker re-check in fileOpen -> fails at
+  // "turned dirty while the picker was open and was discarded unasked".
+  it("asks AGAIN when the workbook turned dirty while the picker was open; Cancel loads nothing", async () => {
+    isModified.mockResolvedValueOnce(false).mockResolvedValue(true);
+    confirmAsync.mockResolvedValue(false);
+    await fileOpen();
+    expect(pick).toHaveBeenCalledTimes(1);
+    expect(confirmAsync, "turned dirty while the picker was open and was discarded unasked").toHaveBeenCalledTimes(1);
+    expect(open, "Cancel on the second question still loaded the file").not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("...and loads the chosen file when the user agrees", async () => {
+    isModified.mockResolvedValueOnce(false).mockResolvedValue(true);
+    confirmAsync.mockResolvedValue(true);
+    await fileOpen();
+    expect(open).toHaveBeenCalledWith("C:/Users/me/Book2.cala");
+  });
+
+  it("a picker the user cancels loads nothing and asks nothing more", async () => {
+    isModified.mockResolvedValue(false);
+    pick.mockResolvedValue(null);
+    await fileOpen();
+    expect(open).not.toHaveBeenCalled();
+    expect(confirmAsync).not.toHaveBeenCalled();
+  });
+
+  it("a workbook still clean after the picker is loaded without a question", async () => {
+    isModified.mockResolvedValue(false);
+    await fileOpen();
+    expect(confirmAsync).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledWith("C:/Users/me/Book2.cala");
   });
 });

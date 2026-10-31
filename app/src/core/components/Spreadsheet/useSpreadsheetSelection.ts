@@ -14,7 +14,7 @@ import {
   useClipboard,
   useFillHandle,
 } from "../../hooks";
-import { isCutModeLive } from "../../hooks/useClipboard";
+import { isClipboardModeLive } from "../../hooks/useClipboard";
 import { useGridState, useGridContext } from "../../state";
 import {
   getCell,
@@ -44,7 +44,7 @@ import {
   type UndoTransactionCloses,
 } from "../../lib/undoTransactionOwnership";
 import type { UndoResult } from "../../lib/tauri-api";
-import type { FormattingOptions } from "../../types";
+import type { FormattingOptions, StructuralMoveDelta } from "../../types";
 import { measureOptimalColumnWidth, measureOptimalRowHeight, getCellFromPixel } from "../../lib/gridRenderer";
 import { effectiveGridConfig, paintedDisplayHeadings } from "../../lib/gridRenderer/layout/headerVisibility";
 import { getActiveGridTheme } from "../../theme/skinLoader";
@@ -954,8 +954,19 @@ export function useSpreadsheetSelection({
 
       // Refresh style cache (undo may revert formatting changes)
       // Notify extensions about structural change so they can update their state
+      // `deltas` are the coordinate changes this restore made, in the order
+      // made, read by the backend from the step itself (an undone insert reads
+      // as the delete that took its lines back; a grouped step lists every
+      // edit; a cut-paste is a move): a store whose cell coordinates the
+      // backend never holds moves by them (@api/structuralFollow).
+      const deltas = result.structuralDeltas ?? [];
       if (result.structuralRestore) {
-        emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
+        emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description, source, deltas });
+      } else {
+        // A step that moved cells but restored no structure (an Undo / Redo
+        // of a Cut + Paste): the moved blocks, on their own announcement.
+        const moves = deltas.filter((d): d is StructuralMoveDelta => d.kind === "move");
+        if (moves.length > 0) emitAppEvent(AppEvents.CELLS_MOVED, { moves, source });
       }
 
       // Report the change DOMAINS this restore touched and let the Shell
@@ -2033,9 +2044,10 @@ export function useSpreadsheetSelection({
     // Object keyboard handling on a canvas belongs to the object families.
     enabled: isFocused && state.surface !== "canvas",
     onClearClipboard: clearClipboardState,
-    // A pending CUT counts wherever it is: on a sheet other than its source (no
-    // ants drawn here) and in a floating grid (no ants at all), Esc ends it too.
-    hasClipboardContent: clipboardMode !== "none" || isCutModeLive(),
+    // A pending COPY or CUT counts wherever it is: on a sheet other than its
+    // source (no ants drawn here) and in a floating grid (no ants at all), Esc
+    // ends it too (Excel ends CutCopyMode on Esc for both [LIVE], BUG-0616 item 5).
+    hasClipboardContent: clipboardMode !== "none" || isClipboardModeLive(),
     onDelete: handleDeleteContents,
     onSelectColumn: selectColumn,
     onSelectRow: selectRow,

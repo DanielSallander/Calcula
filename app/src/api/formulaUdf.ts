@@ -44,11 +44,13 @@ import {
   getCustomFunction,
   getAllCustomFunctions,
   getVolatileCustomFunctionNames,
+  subscribeToCustomFunctions,
   asCellErrorSentinel,
   thrownCellErrorLiteral,
   type CustomFunctionDef,
 } from "./formulaFunctions";
 import { setUdfResolveHook, type UdfPendingEdit } from "../core/lib/tauri-api";
+import { reportCustomFunctionRegistry } from "./customFunctionRegistryReport";
 
 // ============================================================================
 // Wire format — mirrors the Rust UdfValue (scripting/udf.rs). Tagged union;
@@ -343,10 +345,12 @@ export async function resolveUdfsForEdit(
 // ============================================================================
 
 let installed = false;
+let unsubscribeRegistry: (() => void) | null = null;
 
 /** Wire UDF evaluation into Core's write paths (single-cell AND batch).
  *  Idempotent; call once at startup (e.g. from the FormulaAutocomplete
- *  extension's activate). */
+ *  extension's activate). Also reports the registry to the backend now and on
+ *  every change (`reportCustomFunctionRegistry`). */
 export function installUdfEvaluation(): void {
   if (installed) return;
   installed = true;
@@ -355,12 +359,25 @@ export function installUdfEvaluation(): void {
     if (!resolution) return undefined;
     return { results: resolution.results, volatileCells: resolution.volatileCells };
   });
+  // Coalesced: an install registers its functions one by one.
+  let scheduled = false;
+  unsubscribeRegistry = subscribeToCustomFunctions(() => {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      scheduled = false;
+      void reportCustomFunctionRegistry();
+    });
+  });
+  void reportCustomFunctionRegistry();
 }
 
 /** Remove the hook (tests / teardown). */
 export function uninstallUdfEvaluation(): void {
   installed = false;
   setUdfResolveHook(null);
+  unsubscribeRegistry?.();
+  unsubscribeRegistry = null;
 }
 
 // Exposed for unit tests of the conversion layer.

@@ -243,17 +243,33 @@ describe("Row Height...", () => {
     expect(h.setRowHeights.mock.calls).toEqual([[[[0, 16_383]], 30]]);
   });
 
-  it("more rows than that are still refused before the dialog opens -- each would carry a stored height", async () => {
-    // A whole-COLUMN selection spans every row of the sheet. The batch made the
-    // CALL cheap; what is still per row is the stored height, which every
-    // structural undo step, every dimension refresh and the scroll arithmetic
-    // carry (see the file header).
-    select({ startRow: 0, endRow: 1_048_575, startCol: 2, endCol: 2, type: "columns" });
+  it("more rows than that (but not every row) are still refused before the dialog opens -- each would carry a stored height", async () => {
+    // The batch made the CALL cheap; what is still per row is the stored
+    // height, which every structural undo step, every dimension refresh and
+    // the scroll arithmetic carry (see the file header).
+    select({ startRow: 1, endRow: 1_048_575, startCol: 2, endCol: 2, type: "cells" });
     await CommandRegistry.execute(CoreCommands.ROW_HEIGHT);
     expect(h.openDialog).not.toHaveBeenCalled();
     expect(h.setRowHeights).not.toHaveBeenCalled();
     expect(toasts.length).toBe(1);
     expect(MAX_LINES_PER_FORMAT_COMMAND).toBeLessThan(1_048_576);
+  });
+
+  // BUG-0353, CHANGED DELIBERATELY: this case used to be the refusal above. A
+  // span over EVERY row -- Select All, or a whole-column selection -- is
+  // Excel's way of setting the sheet's STANDARD row height (live Excel 16:
+  // Select All + Row Height 30 and Columns("C") + Row Height 25 each write
+  // `<sheetFormatPr defaultRowHeight customHeight="1">` and no row heights),
+  // and the backend stores that one value for it, so it is sent, not refused.
+  it.each([
+    ["Select All", { startRow: 0, endRow: 1_048_575, startCol: 0, endCol: 16_383, type: "cells" as const }],
+    ["a whole-column selection", { startRow: 0, endRow: 1_048_575, startCol: 2, endCol: 2, type: "columns" as const }],
+  ])("%s + Row Height is sent as ONE run over every row (the sheet's standard height)", async (_label, sel) => {
+    select(sel);
+    await CommandRegistry.execute(CoreCommands.ROW_HEIGHT);
+    expect(toasts.length).toBe(0);
+    await openedDialog().onResult!(30);
+    expect(h.setRowHeights.mock.calls).toEqual([[[[0, 1_048_575]], 30]]);
   });
 
   it("no selection, nothing", async () => {

@@ -60,6 +60,23 @@ let calculateBeforeSave = true;
 // ============================================================================
 
 /**
+ * The checkmark shows the mode the BACKEND answered as in effect, not the one
+ * last clicked: the two can differ (a script switched it, or a switch was
+ * refused), and the lib wrapper applies switches one at a time in call order,
+ * so the last answer to arrive is the mode in effect.
+ */
+export function adoptModeInEffect(mode: string): void {
+  if (mode === "automatic" || mode === "manual") {
+    currentMode = mode;
+  }
+}
+
+/** The mode the menu's checkmark shows (for tests). */
+export function getMenuCalculationMode(): "automatic" | "manual" {
+  return currentMode;
+}
+
+/**
  * Apply recalculated cells to the grid so the canvas refreshes.
  */
 function applyCellUpdates(
@@ -118,10 +135,12 @@ export function registerCalculationMenuItems(): () => void {
     get checked() { return currentMode === "automatic"; },
     action: () => {
       currentMode = "automatic";
+      // Leaving manual recalculates the workbook IN THE BACKEND (Excel's
+      // rule, so every route to automatic agrees), and the lib wrapper paints
+      // the recalculated cells; chaining Calculate Now here would run it twice.
       setCalculationMode("automatic")
-        .then(() => calculateNow())
-        .then((cells) => {
-          applyCellUpdates(cells);
+        .then((inEffect) => {
+          adoptModeInEffect(inEffect);
           emitAppEvent(AppEvents.GRID_REFRESH);
         })
         .catch((err) => {
@@ -137,10 +156,12 @@ export function registerCalculationMenuItems(): () => void {
     get checked() { return currentMode === "manual"; },
     action: () => {
       currentMode = "manual";
-      setCalculationMode("manual").catch((err) => {
-        console.error("[CalculationOptions] Failed to set manual mode:", err);
-        currentMode = "automatic"; // Revert on error
-      });
+      setCalculationMode("manual")
+        .then(adoptModeInEffect)
+        .catch((err) => {
+          console.error("[CalculationOptions] Failed to set manual mode:", err);
+          currentMode = "automatic"; // Revert on error
+        });
     },
   };
 

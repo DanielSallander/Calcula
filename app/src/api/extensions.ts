@@ -135,6 +135,17 @@ export interface GridContextMenuItem {
   disabledReason?: string | ((context: GridMenuContext) => string | null);
   /** Whether the item is visible */
   visible?: boolean | ((context: GridMenuContext) => boolean);
+  /**
+   * The ids of other top-level items this one STANDS IN FOR: while this item
+   * is visible, those are left out of the menu (Insert Copied Cells takes the
+   * place of Core's header Insert Row / Insert Column while a copy is pending,
+   * as Excel's header menu does). The replaced item needs no knowledge of its
+   * replacement, so it is still offered whenever the replacement is absent.
+   * Only a SHOWING item replaces (an item itself left out leaves out nothing),
+   * and items that replace each other in a cycle are decided by registration
+   * order: the earliest registered shows.
+   */
+  replaces?: readonly string[];
   /** Whether to show a separator after this item */
   separatorAfter?: boolean;
   /** Click handler */

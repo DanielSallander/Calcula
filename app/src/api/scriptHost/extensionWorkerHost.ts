@@ -126,6 +126,7 @@ import { registerFunction, hasCustomFunction } from "../formulaFunctions";
 import { registerFileFormat, getFileFormats, type ImportResult } from "../fileFormats";
 import type { IStyleOverride } from "../styleInterceptors";
 import type { RenderCellRequest } from "./protocol";
+import { METHOD_CALL_TIMEOUT_MS } from "./protocol";
 import { toBiConnectionSummary } from "./biQuerySupport";
 
 const SCRIPT_STORAGE_QUOTA_BYTES = 262_144; // 256 KB, matches the object-script store
@@ -198,6 +199,15 @@ interface MountedExtension {
   /** Pending host->worker handler invocations (command click, etc.). */
   pendingInvokes: Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void; timer: number }>;
   nextReqId: number;
+  /**
+   * The methods this extension published for ITS OWN scheduled jobs
+   * (`ext.scheduleExpose`, BUG-0616 #3): the name a job stores -> the worker
+   * slot a firing relays into. Kept HERE, on the mount, and nowhere else: it is
+   * not the cross-script exposed-method registry, so nothing but
+   * `callExtensionJobHandler` -- the scheduler firing a job this extension
+   * owns -- can reach it, and it dies with the mount.
+   */
+  jobHandlers: Map<string, number>;
 }
 
 const mounted = new Map<string, MountedExtension>();
@@ -394,6 +404,7 @@ export async function mountWorkerExtension(
     ribbonButtons: new Map(),
     pendingInvokes: new Map(),
     nextReqId: 1,
+    jobHandlers: new Map(),
   };
   mounted.set(extId, mw);
   declaredByExtension.set(extId, contributes);
@@ -1674,15 +1685,54 @@ function isGridIndex(v: unknown): boolean {
 }
 
 /** RPC a worker-held handler and await its result (with a deadline). */
-function invokeWorkerHandler(mw: MountedExtension, handlerId: number, args: unknown[]): Promise<unknown> {
+function invokeWorkerHandler(
+  mw: MountedExtension,
+  handlerId: number,
+  args: unknown[],
+  timeoutMs: number = EXTENSION_HANDLER_TIMEOUT_MS,
+): Promise<unknown> {
   const reqId = mw.nextReqId++;
   return new Promise<unknown>((resolve, reject) => {
     const timer = setTimeout(() => {
       if (mw.pendingInvokes.delete(reqId)) reject(new Error("extension handler timed out"));
-    }, EXTENSION_HANDLER_TIMEOUT_MS) as unknown as number;
+    }, timeoutMs) as unknown as number;
     mw.pendingInvokes.set(reqId, { resolve, reject, timer });
     mw.worker.postMessage({ t: "invokeHandler", reqId, handlerId, args } as HX2W);
   });
+}
+
+/**
+ * Run the method a sandboxed extension published for its OWN scheduled jobs
+ * (`ext.scheduleExpose`, BUG-0616 #3) -- the scheduler's firing of a job whose
+ * owner is this extension (`surface: "extension-worker"`, scheduler.ts), and
+ * nothing else: no script, form or other extension has a door to it.
+ *
+ * `scriptId` and `objectType` are what Rust handed back for the job, and both
+ * must name the SAME mounted extension (the job's owner is host-supplied at
+ * registration, `cap.scheduleEvery`). A job whose method is not published --
+ * the extension is not mounted, or never exposed that name -- THROWS, so the
+ * firing is reported as a FAILED run with the reason, never as a run that did
+ * nothing (the same rule as `hostCallOwnExposed`).
+ */
+export function callExtensionJobHandler(
+  scriptId: string,
+  objectType: string,
+  handlerName: string,
+): Promise<unknown> {
+  const mw = mounted.get(objectType);
+  const handlerId = mw && mw.handle.scriptId === scriptId ? mw.jobHandlers.get(handlerName) : undefined;
+  if (!mw || handlerId === undefined) {
+    return Promise.reject(
+      new BrokerError(
+        "UnknownMethod",
+        `The extension ${objectType} does not publish ${handlerName}() for its scheduled jobs ` +
+          "(capabilities.schedule.expose), so the scheduled job had nothing to run.",
+      ),
+    );
+  }
+  // Background work, bounded like an object script's job (METHOD_CALL_TIMEOUT_MS,
+  // protocol.ts) rather than by the 5-second deadline of a click's handler.
+  return invokeWorkerHandler(mw, handlerId, [], METHOD_CALL_TIMEOUT_MS);
 }
 
 // ============================================================================
@@ -2013,8 +2063,10 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
     // the mount handle — an extension cannot schedule under another's name.
     //
     // objectType/instanceId are the extension's own id and null: a worker
-    // extension exposes methods against its extension identity, not against a
-    // grid object, and that is the address the scheduler calls back on.
+    // extension publishes its job methods against its extension identity
+    // (`ext.scheduleExpose`, on its mount -- BUG-0616 #3), not against a grid
+    // object, and that is the address the scheduler calls back on
+    // (`callExtensionJobHandler`).
     case "cap.scheduleEvery": {
       const [intervalSecs, handler, options] = args as [
         number,
@@ -2046,6 +2098,34 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
     case "cap.scheduleList": {
       const { listScheduledJobsForScript } = await import("./scheduler");
       return listScheduledJobsForScript(scriptId);
+    }
+    case "ext.scheduleExpose": {
+      // The method a job of THIS extension calls (BUG-0616 #3). Recorded on
+      // the mount only -- see MountedExtension.jobHandlers -- and the slot is
+      // a number this extension's own worker minted, so it can name nothing
+      // but one of its own functions.
+      //
+      // No consent prompt (the row carries no capability -- see allowlist.ts):
+      // the `schedule` consent is asked when a JOB is created, never for a
+      // name. The DECLARED ceiling still holds: an add-in whose manifest does
+      // not declare `schedule` can never have a job, so it may not publish one.
+      if (!mw.handle.declaredCapabilities.has("schedule")) {
+        throw new BrokerError(
+          "PermissionDenied",
+          `${mw.extName} does not declare the 'schedule' capability, so it cannot publish a method for scheduled jobs`,
+          "schedule",
+        );
+      }
+      // WITHDRAW BY REGISTRATION IDENTITY: [name, null, slot] removes the name
+      // only while it still points at THAT slot. A name exposed twice belongs to
+      // the newer registration, and withdrawing the older one must not orphan it.
+      const [handlerName, handlerId, withdrawnId] = args as [string, number | null, number | undefined];
+      if (handlerId === null) {
+        if (mw.jobHandlers.get(handlerName) === withdrawnId) mw.jobHandlers.delete(handlerName);
+      } else {
+        mw.jobHandlers.set(handlerName, handlerId);
+      }
+      return undefined;
     }
     case "cap.scheduleCancel": {
       const [jobId] = args as [string];

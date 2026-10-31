@@ -182,9 +182,15 @@ impl ChartPlacement {
 /// check, JSON merge, undo snapshot) is unit-testable with `create_app_state()`.
 ///
 /// Returns a human-readable summary of what changed.
+///
+/// Takes the `FileState`, not a ready-made effect: the `DocumentEffect` is
+/// minted only after the LAST gate that can refuse (the Lock Objects decision
+/// inside the store's `lock_pending`), so a refused edit leaves the document
+/// exactly as clean as it was -- the same order as
+/// `chart_commands::update_chart_core`.
 pub(crate) fn update_chart_core(
     state: &AppState,
-    effect: &crate::document_effect::DocumentEffect,
+    file_state: &crate::persistence::FileState,
     chart_id: &str,
     spec: Option<&serde_json::Value>,
     name: Option<&str>,
@@ -275,19 +281,23 @@ pub(crate) fn update_chart_core(
         sheet_index: target_sheet,
         spec_json,
     };
-    // LOCK OBJECTS: an AI tool is one more door, refused exactly like the
-    // chart store's own (`chart_commands::update_chart_core`) when the edit
-    // moves or resizes the chart on a locked page.
-    if crate::chart_commands::chart_moves(&previous, &updated) {
-        crate::sheets::ensure_canvas_objects_unlocked(state, previous.sheet_index, "move or resize a chart")?;
-    }
     {
-        let mut charts = state.charts.write(effect).map_err(|e| e.to_string())?;
-        let slot = charts
-            .iter_mut()
-            .find(|c| c.id == id)
+        let pending = state.charts.lock_pending().map_err(|e| e.to_string())?;
+        let slot = pending
+            .iter()
+            .position(|c| c.id == id)
             .ok_or_else(|| format!("Chart '{}' disappeared during the edit.", chart_id))?;
-        *slot = updated;
+        // LOCK OBJECTS: an AI tool is one more door, refused exactly like the
+        // chart store's own (`chart_commands::update_chart_core`) when the
+        // edit moves or resizes the chart on a locked page -- decided HERE,
+        // holding the store the write lands in (BUG-0443), and BEFORE the
+        // effect exists, so a refusal does not dirty the document.
+        if crate::chart_commands::chart_moves(&pending[slot], &updated) {
+            crate::sheets::ensure_canvas_objects_unlocked(state, pending[slot].sheet_index, "move or resize a chart")?;
+        }
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut charts = pending.authorize(&effect);
+        charts[slot] = updated;
     }
 
     // Same undo shape as chart_commands::update_chart: the PREVIOUS entry.
@@ -308,10 +318,13 @@ pub fn update_chart(
 ) -> Result<String, String> {
     require_tier(handle, "update_chart")?;
     let state = handle.state::<AppState>();
-    // Built after `require_tier`; update_chart_core still resolves "no such chart"
-    // and the protection gate under a read guard before it writes.
-    let effect = mcp_effect(handle);
-    let summary = update_chart_core(&state, &effect, chart_id, spec, name, sheet_index, placement)?;
+    // update_chart_core mints the effect itself, after every gate that can
+    // refuse ("no such chart", protection, Lock Objects), so a refused edit
+    // leaves the document clean.
+    let summary = {
+        let file_state = handle.state::<crate::persistence::FileState>();
+        update_chart_core(&state, &file_state, chart_id, spec, name, sheet_index, placement)?
+    };
     drop(state);
 
     // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
@@ -545,7 +558,7 @@ pub(crate) fn update_named_range_core(
 
     let existing = {
         let ranges = state.named_ranges.read().map_err(|e| e.to_string())?;
-        ranges.get(&name.to_uppercase()).cloned().ok_or_else(|| {
+        ranges.get(&crate::name_resolution::name_key(&name)).cloned().ok_or_else(|| {
             format!("Named range '{}' does not exist. Use list_named_ranges to see the names.", name)
         })?
     };
@@ -1158,14 +1171,14 @@ pub fn delete_pivot(handle: &AppHandle, pivot_id: &str) -> Result<String, String
     let id = parse_entity_id(pivot_id, "pivot", "list_pivots")?;
 
     crate::pivot::commands::delete_pivot_table(
-        handle.state::<AppState>(),
-        handle.state::<crate::persistence::FileState>(),
-        handle.state::<crate::pivot::PivotState>(),
-        handle.state::<crate::persistence::UserFilesState>(),
-        handle.state::<crate::pane_control::PaneControlState>(),
-        handle.state::<crate::ribbon_filter::RibbonFilterState>(),
-        handle.state::<crate::slicer::SlicerState>(),
-        handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
+        &handle.state::<AppState>(),
+        &handle.state::<crate::persistence::FileState>(),
+        &handle.state::<crate::pivot::PivotState>(),
+        &handle.state::<crate::persistence::UserFilesState>(),
+        &handle.state::<crate::pane_control::PaneControlState>(),
+        &handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+        &handle.state::<crate::slicer::SlicerState>(),
+        &handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
         id,
     )?;
 
@@ -1452,6 +1465,9 @@ pub fn move_sheet(handle: &AppHandle, from_index: usize, to_index: usize) -> Res
         handle.state::<crate::slicer::SlicerState>(),
         handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
         handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+        handle.state::<crate::persistence::UserFilesState>(),
+        handle.state::<crate::pivot::types::PivotState>(),
+        handle.state::<crate::pane_control::PaneControlState>(),
         from_index,
         to_index,
     )?;
@@ -1621,7 +1637,7 @@ mod tests {
 
         let summary = update_chart_core(
             &state,
-            &effect,
+            &fs,
             &id,
             Some(&valid_spec()),
             Some("Revenue by Region"),
@@ -1659,13 +1675,13 @@ mod tests {
 
         // Unknown id.
         let missing = identity::EntityId::from_bytes([9u8; 16]).to_string();
-        assert!(update_chart_core(&state, &effect, &missing, None, Some("x"), None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &fs, &missing, None, Some("x"), None, &ChartPlacement::default()).is_err());
         // Not an EntityId at all.
-        assert!(update_chart_core(&state, &effect, "not-a-uuid", None, Some("x"), None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &fs, "not-a-uuid", None, Some("x"), None, &ChartPlacement::default()).is_err());
         // A spec that fails the structural backstop.
-        assert!(update_chart_core(&state, &effect, &id, Some(&json!({ "mark": "bar" })), None, None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &fs, &id, Some(&json!({ "mark": "bar" })), None, None, &ChartPlacement::default()).is_err());
         // Nothing to change.
-        assert!(update_chart_core(&state, &effect, &id, None, None, None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &fs, &id, None, None, None, &ChartPlacement::default()).is_err());
         // None of the failures recorded an undo entry or touched the chart.
         assert!(!state.undo_stack.lock().unwrap().can_undo());
         let charts = state.charts.read().unwrap();
@@ -1737,7 +1753,7 @@ mod tests {
         let fs = crate::persistence::FileState::default();
         let pane_state = crate::pane_control::PaneControlState::new();
         let effect = crate::document_effect::DocumentEffect::mutates(&fs);
-        assert!(update_chart_core(&state, &effect, &id, None, Some("nope"), None, &ChartPlacement::default()).is_err());
+        assert!(update_chart_core(&state, &fs, &id, None, Some("nope"), None, &ChartPlacement::default()).is_err());
         assert!(delete_chart_core(&state, &pane_state, &effect, &id).is_err());
         // Nothing changed, nothing recorded.
         assert_eq!(state.charts.read().unwrap().len(), 1);

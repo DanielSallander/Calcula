@@ -6,13 +6,27 @@
 // Clipboard API - Internal clipboard access for extensions
 // ============================================================================
 
-export { getInternalClipboard } from "../core/hooks/useClipboard";
+export { getInternalClipboard, settledInternalClipboard } from "../core/hooks/useClipboard";
 export type { ClipboardData } from "../core/hooks/useClipboard";
+// Excel's Insert Copied Cells (round 12): with a COPY pending, Insert makes
+// room for the copied block and pastes it there as ONE undo step. The
+// primitive; which shape, dialog and refusal is the Insert command's own.
+// `insertCopiedCellsLabel` is the word Excel's menus then show for Insert.
+export {
+  insertCopiedCells,
+  insertCopiedCellsLabel,
+  pendingCopyOfSheetCells,
+} from "../core/hooks/useClipboard";
+export type { InsertCopiedCellsRequest, InsertCopiedCellsResult } from "../core/hooks/useClipboard";
 // A COPY over a filtered range collapses the filter-hidden rows away, so a
 // clipboard matrix row is NOT necessarily `sourceSelection.startRow + r`.
 // Anything that shifts relative references or re-reads the source by
 // coordinate must map through these instead of assuming contiguity.
 export { clipboardSourceRow, pasteRowDeltas } from "../core/lib/clipboardVisibility";
+// Excel TILES a copy into a selection that is an exact multiple of it (round
+// 13 [LIVE]): ONE rule for Paste, Paste Special and Insert Copied Cells.
+export { PASTE_ONCE, pasteMayTile, pasteTiles } from "../core/lib/pasteTiling";
+export type { PasteTiles, PasteTilingSelection } from "../core/lib/pasteTiling";
 // A copy carries its cells' STORED values (`ClipboardData.values`); a paste of
 // a constant writes it through this one rule -- exactly, invariant -- never by
 // re-typing the display text (1.23456 shown under 0.00 pasted as 1.23).
@@ -91,6 +105,8 @@ export {
   getStyle,
   getAllStyles,
   setCellStyle,
+  // A style-only batch: many cells, one call, one undo step
+  setCellStyles,
   setCellRichText,
   applyFormatting,
   applyBorderPreset,
@@ -306,6 +322,8 @@ export type {
   MergedRegion as TauriMergedRegion,
   MergeResult,
   CellUpdateInput,
+  MovedFrom,
+  CellStyleWrite,
   FormulaShiftInput,
   // Grouping types
   GroupResult,
@@ -555,6 +573,7 @@ export type {
 
 export {
   goalSeek,
+  cancelGoalSeek,
 } from "./backend";
 
 export type {
@@ -705,6 +724,7 @@ export {
   getProtectionStatus,
   isSheetProtected,
   canEditCell,
+  canEditCells,
   canPerformAction,
   setCellProtection,
   getCellProtection,

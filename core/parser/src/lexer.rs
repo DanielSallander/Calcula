@@ -459,17 +459,50 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        match ident.to_uppercase().as_str() {
+        // Normalise to UPPERCASE, ONE CHARACTER FOR ONE CHARACTER, by Excel's
+        // sheet-name case rule. Never `to_uppercase()`: Rust's full mapping
+        // EXPANDS `ß` to `SS`, so a bare `=Straße!A1` would be stored as
+        // `STRASSE!A1` -- a different sheet to Excel [LIVE], which holds
+        // `Straße` and `STRASSE` side by side. For ASCII (every function name,
+        // every cell reference) the fold is exactly `to_ascii_uppercase`.
+        //
+        // BUT NEVER INTO ASCII. The sheet-name table maps a few non-ASCII
+        // characters onto ASCII ones (the KELVIN SIGN onto `K`), and an
+        // identifier folded that way turned into a cell reference or a function
+        // name: `=SUM(\u{212A}1)` read K1. Excel refuses `=\u{212A}1` and gives
+        // #NAME? for `=SUM(\u{212A}1)` [LIVE, rev13C kelvin.ps1]. Such a
+        // character is kept as written: a sheet qualifier still finds its sheet
+        // (every sheet lookup folds again with `sheet_names_equal`) and a defined
+        // name its name (`defined_name_key` folds it too).
+        let folded: String = ident.chars().map(fold_identifier_char).collect();
+        match folded.as_str() {
             "TRUE" => Token::Boolean(true),
             "FALSE" => Token::Boolean(false),
-            _ => Token::Identifier(ident.to_uppercase()), // Normalize to UPPERCASE
+            _ => Token::Identifier(folded),
         }
     }
 }
 
-/// Returns true if `ch` can start an identifier.
-/// Supports: ASCII letters, underscore (for names like _private),
-/// and backslash (for Excel-style names like \TaxRate).
+/// One identifier character under the sheet-name case rule, except that a
+/// non-ASCII character is never folded INTO ASCII (see `read_identifier`).
+fn fold_identifier_char(ch: char) -> char {
+    let folded = identity::fold_sheet_name_char(ch);
+    if !ch.is_ascii() && folded.is_ascii() {
+        ch
+    } else {
+        folded
+    }
+}
+
+/// Returns true if `ch` can start (or continue) an identifier: ASCII letters,
+/// underscore (for names like _private), backslash (for Excel-style names like
+/// \TaxRate), and any non-ASCII LETTER.
+///
+/// The non-ASCII half is Excel's: it reads `=Översikt!A1` and `=Straße!A1`
+/// bare, and writes them back bare [LIVE, Excel 16, 2026-10-30]. Before, the
+/// first `Ö` was an illegal character, so a formula Excel accepts (typed, or
+/// read from an .xlsx, where Excel stores such qualifiers unquoted) did not
+/// parse at all.
 fn is_letter(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_' || ch == '\\'
+    ch.is_ascii_alphabetic() || ch == '_' || ch == '\\' || (!ch.is_ascii() && ch.is_alphabetic())
 }

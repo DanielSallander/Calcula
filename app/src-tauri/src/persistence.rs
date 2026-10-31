@@ -7,7 +7,7 @@ use crate::tables::{
 };
 use crate::{format_cell_value, AppState};
 use persistence::{
-    load_xlsx, save_xlsx, DimensionData, SavedTable, SavedTableColumn, SavedTableStyleOptions,
+    load_xlsx, DimensionData, SavedTable, SavedTableColumn, SavedTableStyleOptions,
     SavedMergedRegion, SavedNamedRange, SavedNote, SavedHyperlink, SavedPageSetup,
     Workbook,
 };
@@ -49,9 +49,103 @@ pub struct FileState {
     /// Whether the currently-open document is encrypted. Drives the File-menu
     /// label ("Encrypt with Password…" vs "Remove Password").
     pub is_encrypted: Mutex<bool>,
+    /// THE DOCUMENT EPOCH: which document the live stores hold. Moved by
+    /// [`FileState::note_document_replaced`], which `open_file` and `new_file`
+    /// call immediately BEFORE `reset_document_scoped_stores` -- after every
+    /// gate that can still keep the current document -- so any read that sees
+    /// the epoch unchanged after its last store read read only the document it
+    /// started on. Never set back.
+    ///
+    /// WHO READS IT: an `(async)` command that spans a File > Open / New on the
+    /// main thread -- `calp_publish` captures it at entry and refuses to ship a
+    /// carrier, or to record the push in the working-copy link, once it moved
+    /// (rev13A: the push could assemble one workbook and record its link in the
+    /// next). `sheet_structure_generation` is not this: it also moves on every
+    /// tab drag, which a publish by stable sheet id survives.
+    ///
+    /// Reading the epoch is lock-free: an atomic adds no edge to the lock order.
+    document_epoch: std::sync::atomic::AtomicU64,
+    /// THE DOCUMENT PIN (calpref2): what lets a work that MUTATES the live
+    /// document on behalf of a starting epoch -- the push's recalculation
+    /// before publishing -- keep File > Open / New from replacing the document
+    /// under it. [`FileState::with_document_pinned`] holds it SHARED for the
+    /// whole work, after asking the epoch under it;
+    /// [`FileState::begin_document_replacement`] takes it EXCLUSIVE to move
+    /// the epoch and HOLDS it across the whole replacement (reset and restore),
+    /// so an open waits for a pinned work to finish before it resets a single
+    /// store, a work that pins after the move waits for the open to finish and
+    /// then refuses to start, and [`FileState::settled_document_epoch`] never
+    /// answers mid-replacement (round 18).
+    ///
+    /// LOCK ORDER: OUTERMOST. Both sides take it holding no other guard (the
+    /// open and new doors before their reset; the push before its pass), and
+    /// nothing taken under it ever takes it again.
+    document_pin: std::sync::RwLock<()>,
+}
+
+/// A document replacement in progress ([`FileState::begin_document_replacement`]):
+/// while it lives, the document pin is held EXCLUSIVE, so no work pinned to
+/// either epoch runs and no settled epoch is read.
+pub(crate) struct DocumentReplacement<'a> {
+    _exclusive: std::sync::RwLockWriteGuard<'a, ()>,
 }
 
 impl FileState {
+    /// Which document the live stores hold (see the field's doc).
+    pub(crate) fn document_epoch(&self) -> u64 {
+        self.document_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The live document is about to be REPLACED (File > Open / New): move the
+    /// epoch. Called before the first store is reset, never after, and holding
+    /// no other guard. Waits for any work pinned to the outgoing document
+    /// ([`FileState::with_document_pinned`]) to finish first.
+    pub(crate) fn note_document_replaced(&self) {
+        drop(self.begin_document_replacement());
+    }
+
+    /// The live document is being REPLACED (File > Open / New): move the epoch
+    /// and keep the pin EXCLUSIVE until the returned guard drops -- held by
+    /// `open_file` / `new_file` across the WHOLE replacement (the move, the
+    /// reset and the restore), not only the move (round 18, rev16B): a push
+    /// that read the epoch while the open was still restoring stores used to
+    /// get the NEW epoch at once, and its pinned pass then judged, recalculated
+    /// and shipped a half-restored workbook. Now a pinned work waits for the
+    /// replacement to finish, and [`FileState::settled_document_epoch`] never
+    /// answers mid-replacement. Taken holding no other guard (OUTERMOST).
+    pub(crate) fn begin_document_replacement(&self) -> DocumentReplacement<'_> {
+        let exclusive = self.document_pin.write().unwrap_or_else(|p| p.into_inner());
+        self.document_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        DocumentReplacement { _exclusive: exclusive }
+    }
+
+    /// The epoch of a document NO replacement is in the middle of: read under
+    /// the shared pin, so it waits for a File > Open / New that is still
+    /// restoring and answers the epoch of a whole document -- the outgoing one
+    /// or the fully opened one, never one half reset. What a work that will
+    /// later pin to the epoch (the push) reads at entry. Holding no other guard.
+    pub(crate) fn settled_document_epoch(&self) -> u64 {
+        let _shared = self.document_pin.read().unwrap_or_else(|p| p.into_inner());
+        self.document_epoch()
+    }
+
+    /// Run `work` on the live document only while it is still the one of
+    /// `epoch`, and keep File > Open / New from replacing it until `work`
+    /// returns. `None` -- `work` never ran -- when the document was replaced
+    /// since `epoch` was read. Call holding no other guard.
+    pub(crate) fn with_document_pinned<T>(&self, epoch: u64, work: impl FnOnce() -> T) -> Option<T> {
+        let _shared = self.document_pin.read().unwrap_or_else(|p| p.into_inner());
+        if self.document_replaced_since(epoch) {
+            return None;
+        }
+        Some(work())
+    }
+
+    /// Has the live document been replaced since `epoch` was read?
+    pub(crate) fn document_replaced_since(&self, epoch: u64) -> bool {
+        self.document_epoch() != epoch
+    }
+
     /// Does the in-memory document differ from what is on disk?
     ///
     /// Free, and announces nothing -- which matters because the frontend calls
@@ -321,7 +415,7 @@ fn restore_tables(
 
     for saved in saved_tables {
         let Some(table) = saved_to_table(saved, workbook) else { continue };
-        table_names.insert(table.name.to_uppercase(), (table.sheet_index, table.id));
+        table_names.insert(crate::tables::table_name_key(&table.name), (table.sheet_index, table.id));
         tables
             .entry(table.sheet_index)
             .or_insert_with(HashMap::new)
@@ -936,8 +1030,8 @@ pub fn build_workbook_for_save(
     // honest.
     workbook.media = state.media.read().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.read().unwrap().clone();
-    workbook.default_row_height = *state.default_row_height.read().unwrap();
-    workbook.default_column_width = *state.default_column_width.read().unwrap();
+    // The standard row height / column width ride each sheet's grid
+    // (`Sheet::from_grid`), per sheet as in Excel.
 
     // Include workbook properties
     {
@@ -956,6 +1050,12 @@ pub fn build_workbook_for_save(
 
     // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
     enrich_workbook_metadata(&mut workbook, state, &sheet_ids);
+    // Excel's `calcCompleted="0"` (BUG-0615#2): values some sheet's cache says
+    // may be stale -- a manual workbook edited and saved without recalculating,
+    // calculation that left manual with nothing recalculated since -- are saved
+    // as they are, and the file says so, so the reopened workbook does not
+    // vouch for them. Read off the grids this body already holds.
+    workbook.calculation_incomplete = crate::calculation::values_may_be_stale_in(&active_grid, &grids);
 
     // THE HOLD ENDS HERE, after the body's last store read and before anything
     // a caller does next (file IO included): visibility, kind, page setup, CF,
@@ -986,7 +1086,7 @@ pub fn build_workbook_for_save_with_slicers(
     timeline_state: &crate::timeline_slicer::TimelineSlicerState,
 ) -> Result<(Workbook, SnapshotBasis), String> {
     // The carrier: a design-query chart's key is the id its data source is
-    // filed under in this package (review RB-1).
+    // filed under in this package (review RB-1; the stable key, BUG-0589).
     let (mut workbook, basis) = build_workbook_for_save(state, user_files_state, bi_state, ChartKeysFor::Package)?;
     // THE SNAPSHOT'S OWN SHEET IDS, in its own order -- never a second read of
     // `sheet_ids`. A fresh read paired this tail's indices with whatever sheet
@@ -1480,6 +1580,18 @@ pub fn restore_pending_recalc_on_load(state: &AppState, workbook: &persistence::
                 p.cells.len()
             );
         }
+    }
+    // A workbook saved with calculation incomplete (Excel's
+    // `calcCompleted="0"`, BUG-0615#2): its values open as they were saved,
+    // marked possibly stale on every sheet until a completed Calculate Now --
+    // and BEFORE the results cache is seeded, which then files none of them as
+    // an answer (`bi::cube::remember_loaded_call_results`).
+    if workbook.calculation_incomplete {
+        crate::calculation::note_stored_values_may_be_stale(state);
+        crate::log_warn!(
+            "CALC",
+            "opened a workbook saved without recalculating; its values may be stale — press F9"
+        );
     }
 }
 
@@ -2329,8 +2441,13 @@ pub(crate) type ChartConnectionKeys =
     std::collections::HashMap<crate::bi::types::ConnectionId, Option<String>>;
 
 /// Which key a saved design-query chart carries ([`collect_charts_for_save`]).
-/// The two answers differ for a connection a pull or an open minted, and BOTH
-/// are right for their file -- which is why the caller says which file it is.
+/// For a connection a pull or an open minted both answers are its application
+/// data-source id (BUG-0589: a package files that data source under the same
+/// stable key). They differ for a connection authored in THIS workbook: the
+/// `.cala` carries no key (the chart stays on the local connection's own id),
+/// while a package names the id it files that model under, the connection's
+/// own id -- BOTH right for their file, which is why the caller says which
+/// file it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartKeysFor {
     /// The `.cala` save and AutoRecover: the application data-source id the
@@ -2360,9 +2477,10 @@ pub(crate) fn chart_connection_keys(
 
 /// The `.calp` CARRIER's keys ([`ChartKeysFor::Package`]): every live
 /// connection -> the id its data source is filed under in the package being
-/// written, `calp_commands::published_data_source_id` -- the one function the
-/// capture of the data sources uses too, so the chart's key and the embedded
-/// data source cannot name two different things. A connection the capture
+/// written, `calp_commands::published_data_source_id` (the stable key: the
+/// application data-source id, else the connection's own id) -- the one
+/// function the capture of the data sources uses too, so the chart's key and
+/// the embedded data source cannot name two different things. A connection the capture
 /// skips (no model loaded) gets a key that names nothing in the package, which
 /// re-binds exactly as no key does. Same lock discipline as
 /// [`chart_connection_keys`].
@@ -2371,8 +2489,8 @@ pub(crate) fn published_chart_connection_keys(
 ) -> Result<ChartConnectionKeys, String> {
     let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
     Ok(connections
-        .keys()
-        .map(|id| (*id, Some(crate::calp_commands::published_data_source_id(id))))
+        .iter()
+        .map(|(id, connection)| (*id, Some(crate::calp_commands::published_data_source_id(connection))))
         .collect())
 }
 
@@ -2744,7 +2862,7 @@ pub(crate) fn collect_pivot_definitions(
                 .as_ref()
                 .or(def.destination_sheet.as_ref())
                 .and_then(|name| {
-                    sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
+                    sheet_names.iter().position(|n| identity::sheet_names_equal(&n, &name))
                 })
         } else {
             None
@@ -3767,7 +3885,7 @@ pub fn save_file(
     // recovery path previously used its own drifted single-sheet builder and
     // silently dropped every non-active sheet, all pivots, BI models and
     // user_files artifacts).
-    let workbook = assemble_workbook_for_save(
+    let mut workbook = assemble_workbook_for_save(
         &state,
         &user_files_state,
         &slicer_state,
@@ -3778,6 +3896,9 @@ pub fn save_file(
         &bi_state,
         &timeline_slicer_state,
     )?;
+    // The session's calculation mode, which a .cala records (the .xlsx branch
+    // below writes it into calcPr itself, `save_xlsx_for_session`).
+    record_session_calculation_mode(&state, &mut workbook);
 
     let path_buf = PathBuf::from(&path);
 
@@ -3800,13 +3921,17 @@ pub fn save_file(
             .clone(),
     };
 
+    // What an .xlsx export had to leave out, told to the user once the save
+    // is done (below).
+    let mut export_loss: Option<String> = None;
     match ext.as_str() {
         "cala" => {
             let pw_bytes = effective_pw.as_ref().map(|z| z.as_bytes());
             save_calcula_opt(&workbook, &path_buf, pw_bytes).map_err(|e| e.to_string())?;
         }
-        // xlsx (and any other format) is never encrypted; the passphrase is ignored.
-        _ => save_xlsx(&workbook, &path_buf).map_err(|e| e.to_string())?,
+        // xlsx (and any other format) is never encrypted; the passphrase is
+        // ignored. The export records the calculation mode, as Excel's does.
+        _ => export_loss = save_xlsx_for_session(&state, &workbook, &path_buf)?,
     }
 
     // Persist the session encryption state for subsequent saves. A `.cala` save
@@ -3825,6 +3950,16 @@ pub fn save_file(
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
     crate::document_effect::mark_saved(&file_state);
+
+    // The file is written and the save is done: tell the user what the .xlsx
+    // could not hold, through the same non-blocking warning the open uses
+    // (`document:load-warnings`, the shell's load-warnings bridge).
+    if let Some(message) = export_loss {
+        let _ = window.emit(
+            "document:load-warnings",
+            serde_json::json!({ "section": "xlsxExport", "message": message }),
+        );
+    }
 
     Ok(())
 }
@@ -3918,6 +4053,16 @@ pub fn open_file(
     // rows were never cleared at all. A reset that runs for every store, whether
     // or not the restore below happens to be careful, is what makes that class
     // impossible rather than unlikely.
+    //
+    // THE EPOCH MOVES FIRST, before any store is reset: an `(async)` push that
+    // started on the outgoing document then refuses to ship or to record its
+    // link once it sees the move (`FileState::document_epoch`, rev13A), and
+    // the move itself waits for a push's recalculation pinned to the outgoing
+    // document (`FileState::with_document_pinned`). The guard is HELD to the
+    // end of this command: a pinned work, or a push reading its entry epoch
+    // (`settled_document_epoch`), waits for the whole replacement, so none of
+    // them ever sees a half-restored workbook (round 18).
+    let _replacing = file_state.begin_document_replacement();
     reset_document_scoped_stores(
         state.inner(),
         user_files_state.inner(),
@@ -3933,6 +4078,12 @@ pub fn open_file(
 
     // Restore tables from the workbook metadata
     let (new_tables, new_table_names) = restore_tables(&workbook.tables, &workbook);
+
+    // What the load had to change or drop (`document:load-warnings`). HELD
+    // until the open has succeeded and emitted at the very end: a step below
+    // can still return Err, and a notice that "the workbook was opened with a
+    // sheet renamed" for a workbook that then did not open is untrue (rev13C).
+    let mut load_warnings: Vec<serde_json::Value> = Vec::new();
 
     {
         // Build a single shared StyleRegistry from all sheets.
@@ -3986,6 +4137,25 @@ pub fn open_file(
                 );
             }
         }
+        // ...EXCEPT a name another sheet of the file already has by Excel's
+        // rule (`Ärende` beside `ärende`, saved while the rule was ASCII-only).
+        // That one cannot be carried: every lookup keys by
+        // `identity::sheet_name_key`, so one of the two would be unreachable
+        // by name. The lower tab index keeps its name; each later one is
+        // renamed like a copy, and the formulas spelled exactly as it was
+        // follow it (`sheet_names::dedupe_loaded_sheet_names`) -- the cells AND
+        // every other store of the file that names a sheet (defined names,
+        // charts, rules, page targets, slicers, bindings, pivots), before any of
+        // them is installed below. The user is told ONCE, without blocking the
+        // open (`document:load-warnings`, the shell's load-warnings bridge).
+        let (loaded_sheet_names, load_renames) =
+            crate::sheet_names::settle_loaded_workbook_sheet_names(&mut workbook, &mut all_grids);
+        if let Some(message) = crate::sheet_names::load_rename_notice(&load_renames) {
+            load_warnings.push(serde_json::json!({
+                "section": "sheetNames",
+                "message": message,
+            }));
+        }
         // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else.
         // These two used to be taken BELOW `sheet_names` / `sheet_ids` /
         // `column_widths` / `row_heights`, and that inversion is one half of
@@ -4006,7 +4176,7 @@ pub fn open_file(
         *grids = all_grids;
 
         let mut names = state.sheet_names.write(&load_effect).map_err(|e| e.to_string())?;
-        *names = workbook.sheets.iter().map(|s| s.name.clone()).collect();
+        *names = loaded_sheet_names;
 
         // Restore sheet IDs from the workbook
         let mut sheet_ids = state.sheet_ids.write(&load_effect).map_err(|e| e.to_string())?;
@@ -4049,9 +4219,8 @@ pub fn open_file(
         *tables = new_tables;
         *table_names = new_table_names;
 
-        // Restore default dimensions
-        *state.default_row_height.write(&load_effect).unwrap() = workbook.default_row_height;
-        *state.default_column_width.write(&load_effect).unwrap() = workbook.default_column_width;
+        // The standard row height / column width arrived on each sheet's grid
+        // (`Sheet::to_grid`), per sheet as in Excel.
 
         // ---- Freeze pane configs for all sheets ----
         let mut freeze_configs = state.freeze_configs.write(&load_effect).map_err(|e| e.to_string())?;
@@ -4294,11 +4463,11 @@ pub fn open_file(
                 },
                 None => None,
             };
-            // The map is keyed by the UPPERCASED name (case-insensitive lookup
+            // The map is keyed by the defined-name KEY (`name_resolution::name_key`) (case-insensitive lookup
             // invariant shared with create/update/rename/delete + the BI insert);
             // the struct keeps the original-case name for display.
             named_ranges.insert(
-                nr.name.to_uppercase(),
+                crate::name_resolution::name_key(&nr.name),
                 crate::named_ranges::NamedRange {
                     name: nr.name.clone(),
                     sheet_index,
@@ -4351,6 +4520,15 @@ pub fn open_file(
 
     // Restore (or CLEAR) the staleness left by a cancelled recalculation.
     restore_pending_recalc_on_load(&state, &workbook);
+
+    // The opened file sets the calculation mode, as the first workbook Excel
+    // opens does: an .xlsx from its calcPr (`adopt_xlsx_calculation_mode`), a
+    // .cala from `calc_mode.json` (`adopt_cala_calculation_mode`).
+    if ext != "cala" {
+        adopt_xlsx_calculation_mode(&state, &path_buf);
+    } else {
+        adopt_cala_calculation_mode(&state, &workbook);
+    }
 
     // Restore protection (sheet-level + per-cell + workbook structure). The
     // stores are cleared FIRST so a file without protection never inherits the
@@ -4729,6 +4907,7 @@ pub fn open_file(
             //      continues and the loss is REPORTED, which is the part that was
             //      missing.
             let mut lost: Vec<String> = Vec::new();
+            let mut whole_section_lost = false;
             match serde_json::from_slice::<
                 std::collections::HashMap<usize, serde_json::Value>,
             >(&json_bytes) {
@@ -4751,6 +4930,7 @@ pub fn open_file(
                     // Not even an object keyed by sheet. Nothing is recoverable,
                     // but it is still SAID rather than swallowed.
                     auto_filters.clear();
+                    whole_section_lost = true;
                     lost.push(format!("the whole section could not be read: {}", e));
                 }
             }
@@ -4766,14 +4946,13 @@ pub fn open_file(
                     lost.join("; ")
                 );
                 // Tell the FRONTEND too: a log line nobody opens is the same
-                // silence in a different place.
-                let _ = window.emit(
-                    "document:load-warnings",
-                    serde_json::json!({
-                        "section": "autofilters.json",
-                        "lost": lost,
-                    }),
-                );
+                // silence in a different place. In the user's words: the
+                // section id names WHAT was lost, the parser detail stays in
+                // the log line above (rev13C).
+                load_warnings.push(serde_json::json!({
+                    "section": "autoFilters",
+                    "message": autofilter_load_warning((!whole_section_lost).then_some(lost.len())),
+                }));
             }
         } else {
             // No section at all — a document with no filters genuinely has none.
@@ -4936,8 +5115,36 @@ pub fn open_file(
     // argument; recorded any later it would vouch for a stale value. Derived
     // state, never saved, so no effect.
     crate::bi::cube::remember_loaded_call_results(state.inner());
+    // WHICH NAMES ARE THE WORKBOOK'S CUSTOM FUNCTIONS, for every route from the
+    // first edit on: THIS workbook's libraries' (read from the store just
+    // loaded) and the add-ins' the page registers -- the page never reports a
+    // library's names, so the previous workbook's are not noted here (rev11C).
+    // Seeding a saved value vouches for no name (rev10 cache2).
+    crate::bi::cube::note_library_custom_functions(state.inner(), script_state.inner());
 
-    collect_active_sheet_cells(&state)
+    let cells = collect_active_sheet_cells(&state)?;
+    // The open has succeeded: only now say what it changed or dropped.
+    for warning in load_warnings {
+        let _ = window.emit("document:load-warnings", warning);
+    }
+    Ok(cells)
+}
+
+/// The sentence the user is shown when AutoFilter settings could not be read
+/// on open: what was lost and what saving does, in plain words. The section's
+/// file name and the parser's error go to the log, not the screen.
+pub(crate) fn autofilter_load_warning(lost_sheets: Option<usize>) -> String {
+    let what = match lost_sheets {
+        Some(1) => "The filter settings on one sheet".to_string(),
+        Some(n) => format!("The filter settings on {} sheets", n),
+        // The section as a whole could not be read: every sheet's filters.
+        None => "The filter settings".to_string(),
+    };
+    format!(
+        "{} of this workbook could not be read, so those filters were not restored. \
+         Saving the workbook will not write them back.",
+        what
+    )
 }
 
 /// The active sheet's cells in the shape the frontend renders.
@@ -4984,27 +5191,6 @@ pub(crate) fn collect_active_sheet_cells(state: &AppState) -> Result<Vec<CellDat
         .collect();
 
     Ok(cells)
-}
-
-/// Put the workbook's DEFAULT grid geometry back to the shipped defaults.
-///
-/// A named function rather than two assignments inside `new_file` for one
-/// reason: `new_file` used to re-type the numbers (24.0 / 100.0) while
-/// `AppState` was initialized with Excel's (20.0 / 64.29), so File > New
-/// silently handed the user a differently-scaled grid than the one the app
-/// launched with. Both sides now read `persistence`'s constants, and the test
-/// that pins them together calls THIS, so it exercises the same code
-/// `new_file` does rather than a copy of it.
-pub(crate) fn reset_default_geometry(
-    state: &AppState,
-    effect: &crate::document_effect::DocumentEffect,
-) {
-    if let Ok(mut h) = state.default_row_height.write(effect) {
-        *h = ::persistence::DEFAULT_ROW_HEIGHT_PX;
-    }
-    if let Ok(mut w) = state.default_column_width.write(effect) {
-        *w = ::persistence::DEFAULT_COLUMN_WIDTH_PX;
-    }
 }
 
 // ============================================================================
@@ -5143,7 +5329,9 @@ pub(crate) fn reset_document_scoped_stores(
         all_rh.clear();
         all_rh.push(std::collections::HashMap::new());
     }
-    reset_default_geometry(state, effect);
+    // The standard row height / column width live on each sheet's grid, so
+    // the blank sheet above already carries the application standard (it
+    // used to be a separate workbook-wide reset of two AppState fields).
 
     // ---- Per-sheet view configuration --------------------------------------
     {
@@ -5570,6 +5758,10 @@ pub fn new_file(
     // ONE call, which both document-replacing paths share. `new_file` used to do
     // this inline and did not even take `PivotState`, `RibbonFilterState` or
     // `BiState` — see `reset_document_scoped_stores` for what that leaked.
+    //
+    // THE EPOCH MOVES FIRST, before any store is reset, and the replacement
+    // guard is held to the end of this command (see `open_file`).
+    let _replacing = file_state.begin_document_replacement();
     reset_document_scoped_stores(
         state.inner(),
         user_files_state.inner(),
@@ -6428,19 +6620,6 @@ pub fn xlsx_save_loss_report(
         *state.theme.read().map_err(|e| e.to_string())? != engine::ThemeDefinition::default(),
         "Document theme (colors and font pair revert to the default)",
     );
-    // The xlsx reader hard-codes Calcula's defaults for both of these, so a
-    // workbook whose author changed them comes back with different geometry.
-    check(
-        (*state.default_row_height.read().map_err(|e| e.to_string())?
-            - ::persistence::DEFAULT_ROW_HEIGHT_PX)
-            .abs()
-            > f64::EPSILON
-            || (*state.default_column_width.read().map_err(|e| e.to_string())?
-                - ::persistence::DEFAULT_COLUMN_WIDTH_PX)
-                .abs()
-                > f64::EPSILON,
-        "Default row height / column width",
-    );
     // Rich text is per-cell, so this one has to look at cells. `any`
     // short-circuits on the first hit and the grid is sparse.
     check(
@@ -6529,8 +6708,6 @@ pub(crate) const XLSX_LOSS_COVERAGE: &[(&str, &str)] = &[
     ("media", "REPORTED: 'Embedded media (image data)'"),
     ("user_files", "REPORTED: 'Attached files (the in-document file store)'"),
     ("theme", "REPORTED when customised: 'Document theme'"),
-    ("default_row_height", "REPORTED when non-default: 'Default row height / column width'"),
-    ("default_column_width", "REPORTED when non-default: 'Default row height / column width'"),
     (
         "active_sheet",
         "SILENT: which tab was selected is a view preference, not document \
@@ -6540,6 +6717,20 @@ pub(crate) const XLSX_LOSS_COVERAGE: &[(&str, &str)] = &[
         "pending_recalc",
         "SILENT: a transient marker meaning 'recalculate on next open'. It is \
          recomputed, never authored, and xlsx has fullCalcOnLoad for the same job.",
+    ),
+    (
+        "calculation_incomplete",
+        "WRITTEN: Excel's own <calcPr calcCompleted=\"0\"/> (xlsx_writer \
+         mark_calculation_incomplete, fullCalcOnLoad kept so Excel recalculates the \
+         export on open), and the reader reads it back (xlsx_reader \
+         read_calculation_incomplete), as Excel itself does for a manual workbook \
+         saved with calculation pending",
+    ),
+    (
+        "calculation_manual",
+        "WRITTEN: Excel's own <calcPr calcMode=\"manual\"/> -- save_file writes the \
+         session's mode through save_xlsx_for_session (the same leaf this field is \
+         read from), and the open adopts it back (adopt_xlsx_calculation_mode)",
     ),
     (
         "format_version",
@@ -6595,7 +6786,7 @@ pub fn auto_recover_save(
     // inline single-sheet Workbook::from_grid build dropped every non-active
     // sheet, all pivots, BI models/caches and the user_files artifacts, so a
     // crash recovery was worse than the last manual save.
-    let workbook = assemble_workbook_for_save(
+    let mut workbook = assemble_workbook_for_save(
         &state,
         &user_files_state,
         &slicer_state,
@@ -6606,6 +6797,14 @@ pub fn auto_recover_save(
         &bi_state,
         &timeline_slicer_state,
     )?;
+    // The snapshot is of an EDITED document (the dirty gate above), so under
+    // manual calculation its values may be stale exactly as a save without
+    // recalculating would leave them (`calculation::note_manual_edits_outlive_a_save`)
+    // -- and the recovered workbook must not vouch for them. Decided on the
+    // snapshot alone: a background probe never marks the live session.
+    mark_snapshot_calculation_incomplete(&state, &mut workbook, is_modified);
+    // ...and the mode it is in, so a recovered manual workbook reopens manual.
+    record_session_calculation_mode(&state, &mut workbook);
 
     // Save as .cala to the recovery path. CRITICAL: if the live document is
     // encrypted, the recovery snapshot MUST be encrypted too — otherwise an
@@ -6621,6 +6820,114 @@ pub fn auto_recover_save(
 
     // Do NOT reset the dirty flag -- this is a background save
     Ok(recovery_path.to_string_lossy().to_string())
+}
+
+/// For `auto_recover_save`: Excel's `calcCompleted="0"` on the SNAPSHOT of an
+/// edited manual-calculation document. The live caches already say so when a
+/// manual write left a formula un-recalculated; an edit through a path that
+/// records nothing (a structural change, a defined-name edit) leaves only the
+/// dirty flag, which is what a save without recalculating marks on
+/// (`calculation::note_manual_edits_outlive_a_save`). The snapshot takes the
+/// same rule without touching the session: a background write never changes
+/// what the user sees. `calculation_mode` is a leaf lock.
+pub(crate) fn mark_snapshot_calculation_incomplete(
+    state: &AppState,
+    workbook: &mut Workbook,
+    document_edited: bool,
+) {
+    let manual = state
+        .calculation_mode
+        .lock()
+        .map(|mode| *mode == "manual")
+        .unwrap_or(true);
+    if manual && document_edited {
+        workbook.calculation_incomplete = true;
+    }
+}
+
+/// `save_file`'s .xlsx write: the export records the session's calculation
+/// mode, as Excel's save records `Application.Calculation` -- [LIVE] Excel 16
+/// writes `<calcPr calcMode="manual"/>` when calculation is manual, and
+/// resaving a manual file while the application is automatic writes no
+/// `calcMode`. `calculation_mode` is a leaf lock, read and released before the
+/// file is written.
+///
+/// Returns the sentence that tells the user what the file could not hold and
+/// left out (a hyperlink the format refuses, a defined name Excel does not
+/// allow), `None` when nothing was left out -- `save_file` shows it once the
+/// save is done (`document:load-warnings`). It used to be a stderr `[WARN]`
+/// only (rev15A, round 16).
+pub(crate) fn save_xlsx_for_session(
+    state: &AppState,
+    workbook: &Workbook,
+    path: &std::path::Path,
+) -> Result<Option<String>, String> {
+    let manual = state
+        .calculation_mode
+        .lock()
+        .map(|mode| *mode == "manual")
+        .map_err(|e| e.to_string())?;
+    let losses = persistence::save_xlsx_reporting_losses(workbook, path, manual).map_err(|e| e.to_string())?;
+    if !losses.is_empty() {
+        crate::log_warn!("SAVE", "xlsx export left out: {:?}", losses);
+    }
+    Ok(losses.message())
+}
+
+/// `open_file`'s .xlsx half of Excel's calculation-mode rule: the workbook
+/// opened when NO other workbook is open sets the application's calculation
+/// mode. [LIVE] Excel 16: with nothing open, opening a `calcMode="manual"`
+/// file makes the application manual and opening one without `calcMode` makes
+/// it automatic; a workbook opened while another is still open leaves the mode
+/// alone, and after the last one closes the next open sets it again. A Calcula
+/// window holds ONE document and File > Open replaces it, so every open is the
+/// "nothing else open" case and adopts the file's mode. (File > New keeps the
+/// mode, as Excel's new workbook takes the application's.)
+///
+/// Written straight to the leaf `calculation_mode` lock, NOT through
+/// `set_calculation_mode_impl`: that marks every sheet stale when calculation
+/// LEAVES manual, which is about the session's own edits -- the sheets here
+/// were just read from the file. A file whose mode cannot be read leaves the
+/// mode as it was. Returns the mode adopted, if any.
+pub(crate) fn adopt_xlsx_calculation_mode(state: &AppState, path: &std::path::Path) -> Option<&'static str> {
+    let mode = match persistence::read_xlsx_manual_calculation(path) {
+        Ok(true) => "manual",
+        Ok(false) => "automatic",
+        Err(e) => {
+            crate::log_warn!("CALC", "could not read the workbook's calculation mode; keeping the current one: {}", e);
+            return None;
+        }
+    };
+    let mut current = state.calculation_mode.lock().ok()?;
+    *current = mode.to_string();
+    Some(mode)
+}
+
+/// The calculation mode a .cala is saved under (`Workbook::calculation_manual`,
+/// `calc_mode.json`), as Excel's save records `Application.Calculation`
+/// (`calcMode="manual"`). Set by `save_file` and `auto_recover_save` on the
+/// assembled workbook -- NOT inside the shared assembly, whose stores the
+/// save-path censuses hold to `Persisted<T>` and to the document reset: the
+/// mode is the APPLICATION's (a session value a file sets, never one File >
+/// New resets, see the census exemption for `AppState.calculation_mode`), so
+/// it is read here, on the leaf lock, like `save_xlsx_for_session` reads it.
+pub(crate) fn record_session_calculation_mode(state: &AppState, workbook: &mut Workbook) {
+    workbook.calculation_manual = state.calculation_mode.lock().map(|mode| *mode == "manual").unwrap_or(false);
+}
+
+/// `open_file`'s .cala half of the same rule: the workbook sets the session's
+/// calculation mode -- manual when it was saved under manual
+/// (`Workbook::calculation_manual`, `calc_mode.json`), automatic otherwise, as
+/// an Excel file without `calcMode` opens automatic. Written to the leaf lock
+/// directly for the reason [`adopt_xlsx_calculation_mode`] gives (the sheets
+/// were just read; whether their values are current is the separate
+/// `calculation_incomplete` mark). Returns the mode adopted.
+pub(crate) fn adopt_cala_calculation_mode(state: &AppState, workbook: &Workbook) -> &'static str {
+    let mode = if workbook.calculation_manual { "manual" } else { "automatic" };
+    if let Ok(mut current) = state.calculation_mode.lock() {
+        *current = mode.to_string();
+    }
+    mode
 }
 
 fn restore_notebooks(
@@ -7695,48 +8002,54 @@ mod default_geometry_and_sheet_view_tests {
 
     /// THE pin: app launch and File > New must produce the same grid, and both
     /// must be the documented Excel defaults. Asserted against the ONE constant
-    /// so neither side can be "fixed" alone.
+    /// so neither side can be "fixed" alone. The standard sizes live on each
+    /// sheet's grid now (BUG-0352), so File > New's blank sheet must carry none
+    /// of the previous document's.
     #[test]
     fn new_file_geometry_equals_launch_geometry() {
         let launched = crate::create_app_state();
+        let expected = crate::api_types::DefaultDimensions {
+            default_row_height: DEFAULT_ROW_HEIGHT_PX,
+            default_column_width: DEFAULT_COLUMN_WIDTH_PX,
+        };
         assert_eq!(
-            *launched.default_row_height.read().unwrap(),
-            DEFAULT_ROW_HEIGHT_PX,
-            "app launch must start at the documented default row height"
-        );
-        assert_eq!(
-            *launched.default_column_width.read().unwrap(),
-            DEFAULT_COLUMN_WIDTH_PX,
-            "app launch must start at the documented default column width"
+            crate::commands::dimensions::sheet_default_dimensions(&launched.grid.read().unwrap()),
+            expected,
+            "app launch must start at the documented default row height and column width"
         );
 
-        // A workbook that has been messed with, then reset the way File > New
-        // resets it (the same function `new_file` calls).
+        // A workbook whose sheet has been messed with, then reset the way File >
+        // New resets it.
         let after_new = crate::create_app_state();
-        *after_new.default_row_height.write(&crate::document_effect::test_seed_effect()).unwrap() = 37.5;
-        *after_new.default_column_width.write(&crate::document_effect::test_seed_effect()).unwrap() = 212.0;
-        reset_default_geometry(&after_new, &crate::document_effect::test_seed_effect());
-
+        {
+            let seed = crate::document_effect::test_seed_effect();
+            let mut grid = after_new.grid.write(&seed).unwrap();
+            grid.default_row_height = Some(37.5);
+            grid.default_column_width = Some(212.0);
+            let mut grids = after_new.grids.write(&seed).unwrap();
+            grids[0].default_row_height = Some(37.5);
+            grids[0].default_column_width = Some(212.0);
+        }
+        reset_document_scoped_stores(
+            &after_new,
+            &crate::persistence::UserFilesState::default(),
+            &crate::slicer::SlicerState::new(),
+            &crate::ribbon_filter::RibbonFilterState::new(),
+            &crate::pane_control::PaneControlState::new(),
+            &crate::scripting::types::ScriptState::new(),
+            &crate::pivot::types::PivotState::new(),
+            &crate::bi::types::BiState::new(),
+            &crate::timeline_slicer::TimelineSlicerState::new(),
+            &crate::document_effect::test_seed_effect(),
+        )
+        .expect("the reset runs");
         assert_eq!(
-            *after_new.default_row_height.read().unwrap(),
-            *launched.default_row_height.read().unwrap(),
-            "File > New must hand out the SAME row height the app launched with"
+            crate::commands::dimensions::sheet_default_dimensions(&after_new.grid.read().unwrap()),
+            expected,
+            "File > New must hand out the SAME standard sizes the app launched with"
         );
-        assert_eq!(
-            *after_new.default_column_width.read().unwrap(),
-            *launched.default_column_width.read().unwrap(),
-            "File > New must hand out the SAME column width the app launched with"
-        );
-    }
-
-    /// The .cala manifest's serde defaults are the same numbers, so a manifest
-    /// that omits them reconstructs the grid the app launches with rather than
-    /// a third set of values.
-    #[test]
-    fn the_cala_manifest_defaults_are_the_same_constant() {
-        let manifest = calcula_format::Manifest::from_sheet_names(&["Sheet1".to_string()], 0);
-        assert_eq!(manifest.default_row_height, DEFAULT_ROW_HEIGHT_PX);
-        assert_eq!(manifest.default_column_width, DEFAULT_COLUMN_WIDTH_PX);
+        assert_eq!(after_new.grids.read().unwrap()[0].default_row_height, None);
+        assert_eq!(after_new.grids.read().unwrap()[0].default_column_width, None);
     }
 
     /// A fresh workbook is at 100% with no split -- the values every "is this
@@ -7861,6 +8174,10 @@ mod default_geometry_and_sheet_view_tests {
 #[cfg(test)]
 #[path = "orphaned_sheet_state_tests.rs"]
 mod orphaned_sheet_state_tests;
+
+#[cfg(test)]
+#[path = "xlsx_calc_mode_tests.rs"]
+mod xlsx_calc_mode_tests;
 
 #[cfg(test)]
 mod canvas_kind_persistence_tests {

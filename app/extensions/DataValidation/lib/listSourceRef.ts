@@ -14,6 +14,7 @@
 import { columnToLetter, letterToColumn, DEFAULT_GRID_CONFIG } from "@api/types";
 import type { ListSource } from "@api";
 import { quoteSheetNameForFormula } from "@api/externalEdit";
+import { indexOfSheetName } from "@api/sheetNames";
 
 /**
  * The rectangle half of `ListSource`, taken FROM the @api union rather than
@@ -91,7 +92,19 @@ function splitSheetPrefix(
   if (bang < 0) {
     return { sheet: null, rest: ref };
   }
-  return { sheet: ref.slice(0, bang), rest: ref.slice(bang + 1) };
+  const name = ref.slice(0, bang);
+  // AN UNQUOTED SHEET NAME HOLDS NO SPACE (misc19, round 19). In a formula a
+  // space is an operator, so a name with one must be quoted. [LIVE] Excel 16
+  // (misc19/probe1.ps1, probe4.ps1) refuses the list source `=Data !A1:A3`
+  // whether or not a sheet named `Data ` exists, and takes `='Data '!A1:A3`
+  // (and `=Data! A1:A3`, `= Data!A1:A3`, `=data!A1:A3` for `Data`). Looked up as
+  // written, the unquoted `Data ` bound the rule to a sheet named `Data `.
+  if (/\s/.test(name)) {
+    return {
+      error: `A sheet name with a space must be in single quotes, like ='${name.replace(/'/g, "''")}'!$A$1:$A$10.`,
+    };
+  }
+  return { sheet: name, rest: ref.slice(bang + 1) };
 }
 
 /** One `A1`-style cell reference as 0-based row/col, or null. */
@@ -159,10 +172,13 @@ export function parseListSourceText(
 
   let sheetIndex = currentSheetIndex;
   if (split.sheet !== null) {
-    const wanted = split.sheet.trim().toLowerCase();
-    const found = sheetNames.findIndex((n) => n.toLowerCase() === wanted);
+    // The name EXACTLY as written: a sheet name keeps its spaces (` Data ` is
+    // a sheet of its own beside `Data`), and Excel keeps the list formula as
+    // =' Data '!$A$1:$A$1 [LIVE, rev15C/probe2.ps1]. Trimming it here bound
+    // the rule to `Data`, or refused it when only ` Data ` existed.
+    const found = indexOfSheetName(sheetNames, split.sheet);
     if (found < 0) {
-      return fail(`There is no sheet named "${split.sheet.trim()}".`);
+      return fail(`There is no sheet named "${split.sheet}".`);
     }
     sheetIndex = found;
   }

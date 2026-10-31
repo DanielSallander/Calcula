@@ -124,6 +124,42 @@ describe("Hide Sheet greys on the VISIBLE sheet count", () => {
 });
 
 // ============================================================================
+// Delete (BUG-0368)
+// ============================================================================
+
+describe("Delete greys on the VISIBLE sheet count, like Hide Sheet", () => {
+  it("greyed when the right-clicked sheet is the only VISIBLE one, though the workbook has two", () => {
+    seat([sheet(0, "Sheet1", "visible"), sheet(1, "Sheet2", "hidden")]);
+    expect(item("core:delete", contextFor(0)).disabled).toBe(true);
+  });
+
+  it("its click does nothing then (no request reaches the strip)", async () => {
+    seat([sheet(0, "Sheet1", "visible"), sheet(1, "Sheet2", "hidden")]);
+    const heard = vi.fn();
+    window.addEventListener("sheet:requestDelete", heard);
+    try {
+      await item("core:delete", contextFor(0)).onClick(contextFor(0));
+      expect(heard).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("sheet:requestDelete", heard);
+    }
+  });
+
+  it("enabled with another visible sheet (positive control), and its click asks the strip", async () => {
+    seat([sheet(0, "Sheet1", "visible"), sheet(1, "Sheet2", "hidden"), sheet(2, "Sheet3", "visible")]);
+    expect(item("core:delete", contextFor(0)).disabled).toBe(false);
+    const heard = vi.fn();
+    window.addEventListener("sheet:requestDelete", heard);
+    try {
+      await item("core:delete", contextFor(2)).onClick(contextFor(2));
+      expect(heard).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("sheet:requestDelete", heard);
+    }
+  });
+});
+
+// ============================================================================
 // Tab Color
 // ============================================================================
 

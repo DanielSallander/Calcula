@@ -18,7 +18,7 @@ import {
   vScrollTo,
   vClearRange,
   MAX_SELECT_AREAS,
-  MAX_RANGE_CELLS,
+  MAX_FORMAT_RECT_CELLS,
   SCRIPT_CLEAR_APPLY_TO,
 } from "../validators";
 import { ALLOWLIST } from "../allowlist";
@@ -192,7 +192,8 @@ describe("vClearRange applyTo matrix", () => {
 
   it("shares the bulk-range gates: inverted corners and oversized ranges refuse", () => {
     expect(vClearRange([5, 0, 0, 0])).not.toBe(true);
-    expect(vClearRange([0, 0, MAX_RANGE_CELLS, 3])).toContain("range too large");
+    // Not whole lines and over the backend's 4,000,000-cell walk (BUG-0616 #1).
+    expect(vClearRange([0, 0, 2000, 1999])).toContain("range too large");
   });
 
   it("accepts an optional trailing sheet ref (index or name)", () => {
@@ -219,7 +220,8 @@ describe("Wave 2 allowlist rows", () => {
 
   it("declared limits match the enforced constants", () => {
     expect(ALLOWLIST["api.select"].limits).toEqual({ maxAreas: MAX_SELECT_AREAS });
-    expect(ALLOWLIST["api.clearRange"].limits).toEqual({ maxCells: MAX_RANGE_CELLS });
+    // A clear names its rectangle, never its cells (BUG-0616 #1).
+    expect(ALLOWLIST["api.clearRange"].limits).toEqual({ maxCells: MAX_FORMAT_RECT_CELLS });
   });
 
   it("the validators on the rows are the ones tested above", () => {

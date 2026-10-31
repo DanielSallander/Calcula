@@ -405,6 +405,7 @@ fn lock_objects_refuses_a_hide_and_a_canvas_host_is_never_asked_about_rows() {
     crate::sheets::set_canvas_layout_inner(
         &wb.state,
         &wb.file,
+        crate::sheets::ObjectFamilyStores::none_for_test(),
         Some(canvas),
         &crate::api_types::CanvasLayoutPatch { objects_locked: Some(true), ..Default::default() },
     )

@@ -108,6 +108,18 @@ pub struct HostState {
     /// fields; defaults to false.
     #[serde(default)]
     pub display_formulas: bool,
+    /// Whether calculation is complete, as the host's `get_calculation_state`
+    /// answers it: "done", or "pending" when some formula may hold a value
+    /// it has not been recalculated for (a cancelled recalculation, a manual-
+    /// calculation edit of a precedent, a workbook saved or reopened that
+    /// way) -- Excel's Application.CalculationState xlDone / xlPending.
+    /// Taken when the run starts: a run's own writes do not move it.
+    #[serde(default = "default_calculation_state")]
+    pub calculation_state: String,
+}
+
+fn default_calculation_state() -> String {
+    "done".to_string()
 }
 
 impl Default for HostState {
@@ -129,6 +141,7 @@ impl Default for HostState {
             display_gridlines: true,
             display_headings: true,
             display_formulas: false,
+            calculation_state: default_calculation_state(),
         }
     }
 }

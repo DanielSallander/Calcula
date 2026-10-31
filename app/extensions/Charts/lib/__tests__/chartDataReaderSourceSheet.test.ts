@@ -42,6 +42,7 @@ import {
   readChartDataResolved,
   readRangeDisplayGrid,
   autoDetectSeries,
+  readRangeHeaderLabels,
   TYPED_RANGE_READ_CAP,
 } from "../chartDataReader";
 import { SOURCE_SHEET_MISSING_MESSAGE } from "../dataSourceResolver";
@@ -265,6 +266,21 @@ describe("the other reads go to the source sheet too", () => {
     );
     expect(h.getRangeCellsTyped).toHaveBeenCalledWith(0, 0, 2, 1, 0);
     expect(detected.series.map((s) => s.name)).toEqual(["Sales"]);
+  });
+
+  it("readRangeHeaderLabels reads ONLY the header row, from the id-resolved sheet (BUG-0448)", async () => {
+    const labels = await readRangeHeaderLabels(
+      { sheetIndex: 5, sheetId: "id-0", startRow: 0, startCol: 0, endRow: 2, endCol: 1 },
+      "columns",
+    );
+    expect(h.getRangeCellsTyped).toHaveBeenCalledWith(0, 0, 0, 1, 0);
+    expect(labels).toEqual(["Month", "Sales"]);
+    const rows = await readRangeHeaderLabels(
+      { sheetIndex: 5, sheetId: "id-0", startRow: 0, startCol: 0, endRow: 2, endCol: 1 },
+      "rows",
+    );
+    expect(h.getRangeCellsTyped).toHaveBeenLastCalledWith(0, 0, 2, 0, 0);
+    expect(rows).toEqual(["Month", "Jan", "Feb"]);
   });
 
   it("a lookup table is read from ITS sheet, once", async () => {

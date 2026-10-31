@@ -41,7 +41,7 @@ fn add_canvas(wb: &Workbook) -> usize {
 
 fn lock(wb: &Workbook, index: usize, on: bool) {
     let patch = CanvasLayoutPatch { objects_locked: Some(on), ..Default::default() };
-    crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(index), &patch).expect("toggle Lock Objects");
+    crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, crate::sheets::ObjectFamilyStores::none_for_test(), Some(index), &patch).expect("toggle Lock Objects");
 }
 
 fn undo_depth(wb: &Workbook) -> usize {

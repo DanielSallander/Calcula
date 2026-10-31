@@ -50,6 +50,7 @@ import {
   sourceTextNamesTable,
   type CanvasPivotPlacement,
 } from '../lib/canvasPivotCreate';
+import { sheetNameKey, sheetNamesEqual } from '@api/sheetNames';
 
 /** Excel-compatible grid limits (0-indexed max values). */
 const MAX_ROW_INDEX = 1048576 - 1; // 1,048,575
@@ -193,7 +194,7 @@ function parseCellReference(cellRef: string): { row: number; col: number } | nul
  */
 function generatePivotSheetName(existingSheets: { name: string }[]): string {
   const pivotSheetCount = existingSheets.filter(s => 
-    s.name.toLowerCase().startsWith('pivottable')
+    sheetNameKey(s.name).startsWith('PIVOTTABLE')
   ).length;
   return `PivotTable${pivotSheetCount + 1}`;
 }
@@ -589,14 +590,16 @@ export function CreatePivotDialog({
       let destinationCoords: { row: number; col: number } = { row: 0, col: 0 };
 
       if (destinationType === 'new') {
-        // Validate sheet name
-        const sheetName = newSheetName.trim();
-        if (!sheetName) {
+        // Validate sheet name. Taken EXACTLY as typed: a sheet name keeps its
+        // leading and trailing spaces, as Excel's and every other create door
+        // does (`validate_sheet_name`); only the empty name is refused here.
+        const sheetName = newSheetName;
+        if (sheetName.length === 0) {
           throw new Error('Please enter a name for the new worksheet.');
         }
         
         // Check for duplicate sheet names
-        if (sheets.some(s => s.name.toLowerCase() === sheetName.toLowerCase())) {
+        if (sheets.some(s => sheetNamesEqual(s.name, sheetName))) {
           throw new Error(`A worksheet named "${sheetName}" already exists.`);
         }
         
@@ -950,6 +953,7 @@ export function CreatePivotDialog({
                       <input
                         type="text"
                         style={styles.inputSmall}
+                        data-testid="pivot-new-sheet-name"
                         value={newSheetName}
                         onChange={e => setNewSheetName(e.target.value)}
                         placeholder="Sheet name"

@@ -156,6 +156,16 @@ describe("the pane names every application-connection skip reason", () => {
     // Set by the restore walk itself, not by the classifier: an HTTP workspace
     // exposes no local model artifact, so no connection can be built from it.
     expect(rows).toContain("unsupportedTransport");
+    // Also set by the restore itself (rev10B): every reason-string literal the
+    // minting half records has a row, so a new one cannot fall through to the
+    // generic warning.
+    const mint = CALP_RS.match(/fn materialize_verified_application_connections\([\s\S]*?\n\}/);
+    expect(mint, "materialize_verified_application_connections moved or was renamed").toBeTruthy();
+    const minted = [...mint![0].matchAll(/reason: "([a-zA-Z]+)"\.to_string\(\)/g)].map((m) => m[1]);
+    expect(minted, "no reason literal parsed out of the minting half").toContain("sharedDataSource");
+    for (const reason of minted) {
+      expect(rows, `no CONNECTION_SKIP_NOTICE row for reason '${reason}'`).toContain(reason);
+    }
   });
 
   it("an unrecognised reason still warns instead of rendering nothing", () => {

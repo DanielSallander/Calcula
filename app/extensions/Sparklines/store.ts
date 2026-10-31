@@ -14,7 +14,7 @@ import type {
   AxisScaleType,
   PlotOrder,
 } from "./types";
-import { validateSparklineRanges } from "./types";
+import { validateSparklineRanges, groupAreas, groupLocationOverlaps } from "./types";
 import { sparklinesBackend } from "./lib/sparklinesBackend";
 import { AppEvents, emitAppEvent } from "@api/events";
 
@@ -39,14 +39,18 @@ function notifyMutation(): void {
   if (onMutationCallback) onMutationCallback();
 }
 
-/** Fast lookup: "row,col" -> { group, index within location range } */
+/** Fast lookup: "row,col" -> { group, index within the group } */
 interface CellEntry {
   group: SparklineGroup;
-  /** Index of this cell within the location range (0-based) */
+  /**
+   * Index of this cell's sparkline within the GROUP (0-based): its place in
+   * its area's location, after every sparkline of the group's earlier areas
+   * (`moreAreas`, types.ts) -- the order fetchGroupData lists the data in.
+   */
   index: number;
-  /** Total number of sparklines in the group */
+  /** Total number of sparklines in the group (every area) */
   count: number;
-  /** Data orientation for this group */
+  /** Data orientation for the group's FIRST area (each later area's comes from its own ranges) */
   orientation: DataOrientation;
 }
 const cellIndex = new Map<string, CellEntry>();
@@ -69,20 +73,33 @@ function cellKey(row: number, col: number): string {
 function rebuildCellIndex(): void {
   cellIndex.clear();
   for (const group of groups) {
-    const validation = validateSparklineRanges(group.location, group.dataRange);
-    if (!validation.valid) continue;
+    const first = validateSparklineRanges(group.location, group.dataRange);
+    if (!first.valid) continue;
+    const orientation = first.orientation!;
 
-    const locRows = group.location.endRow - group.location.startRow + 1;
-    const locCols = group.location.endCol - group.location.startCol + 1;
-    const count = Math.max(locRows, locCols);
-    const orientation = validation.orientation!;
-
-    // Iterate over each cell in the location range
-    for (let i = 0; i < count; i++) {
-      const row = group.location.startRow + (locCols === 1 ? i : 0);
-      const col = group.location.startCol + (locRows === 1 ? i : 0);
-      cellIndex.set(cellKey(row, col), { group, index: i, count, orientation });
+    // Every area in turn (a group of several areas: `moreAreas`, types.ts),
+    // numbering the sparklines across them. An area whose ranges do not map
+    // still takes its place in the numbering, so the later areas' indices
+    // stay aligned with fetchGroupData's slices; its cells draw nothing.
+    const areas = groupAreas(group);
+    const cells: Array<[number, number]> = [];
+    for (const area of areas) {
+      const locRows = area.location.endRow - area.location.startRow + 1;
+      const locCols = area.location.endCol - area.location.startCol + 1;
+      const n = Math.max(locRows, locCols);
+      const valid = validateSparklineRanges(area.location, area.dataRange).valid;
+      for (let i = 0; i < n; i++) {
+        cells.push(
+          valid
+            ? [area.location.startRow + (locCols === 1 ? i : 0), area.location.startCol + (locRows === 1 ? i : 0)]
+            : [-1, -1],
+        );
+      }
     }
+    const count = cells.length;
+    cells.forEach(([row, col], index) => {
+      if (row >= 0) cellIndex.set(cellKey(row, col), { group, index, count, orientation });
+    });
   }
 }
 
@@ -148,13 +165,8 @@ export function createSparklineGroup(
 /** Remove all sparkline groups whose location overlaps the given range. */
 function removeSparklineGroupsOverlapping(range: CellRange): void {
   for (let i = groups.length - 1; i >= 0; i--) {
-    const loc = groups[i].location;
-    const overlaps =
-      loc.startRow <= range.endRow &&
-      loc.endRow >= range.startRow &&
-      loc.startCol <= range.endCol &&
-      loc.endCol >= range.startCol;
-    if (overlaps) {
+    // Any AREA of the group (types.ts `moreAreas`).
+    if (groupLocationOverlaps(groups[i], range)) {
       dataCache.delete(groups[i].id);
       groups.splice(i, 1);
     }
@@ -208,13 +220,8 @@ export function getGroupsForRange(
 ): SparklineGroup[] {
   const result: SparklineGroup[] = [];
   for (const group of groups) {
-    const loc = group.location;
-    const overlaps =
-      loc.startRow <= endRow &&
-      loc.endRow >= startRow &&
-      loc.startCol <= endCol &&
-      loc.endCol >= startCol;
-    if (overlaps) {
+    // Any AREA of the group (types.ts `moreAreas`).
+    if (groupLocationOverlaps(group, { startRow, startCol, endRow, endCol })) {
       result.push(group);
     }
   }
@@ -234,8 +241,12 @@ export function updateSparklineGroup(
 
   Object.assign(group, updates);
 
-  // Rebuild cell index if structural fields changed
+  // Rebuild cell index if structural fields changed. A new location or data
+  // range (the Edit Data dialog) REPLACES the group's areas with the one
+  // entered, as Excel's "Edit Group Location & Data" does -- unless the
+  // update names its own `moreAreas`.
   if (updates.location || updates.dataRange) {
+    if (!("moreAreas" in updates)) delete group.moreAreas;
     rebuildCellIndex();
   }
 
@@ -300,15 +311,18 @@ export function groupSparklines(
   let locMinRow = Infinity, locMinCol = Infinity, locMaxRow = -Infinity, locMaxCol = -Infinity;
   let dataMinRow = Infinity, dataMinCol = Infinity, dataMaxRow = -Infinity, dataMaxCol = -Infinity;
 
+  // Every AREA of every group (types.ts `moreAreas`).
   for (const g of overlapping) {
-    locMinRow = Math.min(locMinRow, g.location.startRow);
-    locMinCol = Math.min(locMinCol, g.location.startCol);
-    locMaxRow = Math.max(locMaxRow, g.location.endRow);
-    locMaxCol = Math.max(locMaxCol, g.location.endCol);
-    dataMinRow = Math.min(dataMinRow, g.dataRange.startRow);
-    dataMinCol = Math.min(dataMinCol, g.dataRange.startCol);
-    dataMaxRow = Math.max(dataMaxRow, g.dataRange.endRow);
-    dataMaxCol = Math.max(dataMaxCol, g.dataRange.endCol);
+    for (const area of groupAreas(g)) {
+      locMinRow = Math.min(locMinRow, area.location.startRow);
+      locMinCol = Math.min(locMinCol, area.location.startCol);
+      locMaxRow = Math.max(locMaxRow, area.location.endRow);
+      locMaxCol = Math.max(locMaxCol, area.location.endCol);
+      dataMinRow = Math.min(dataMinRow, area.dataRange.startRow);
+      dataMinCol = Math.min(dataMinCol, area.dataRange.startCol);
+      dataMaxRow = Math.max(dataMaxRow, area.dataRange.endRow);
+      dataMaxCol = Math.max(dataMaxCol, area.dataRange.endCol);
+    }
   }
 
   // Remove all overlapping groups
@@ -327,6 +341,8 @@ export function groupSparklines(
     location: { startRow: locMinRow, startCol: locMinCol, endRow: locMaxRow, endCol: locMaxCol },
     dataRange: { startRow: dataMinRow, startCol: dataMinCol, endRow: dataMaxRow, endCol: dataMaxCol },
   };
+  // One bounding area: the template's own further areas are inside it.
+  delete merged.moreAreas;
 
   groups.push(merged);
   rebuildCellIndex();
@@ -345,14 +361,43 @@ export function ungroupSparkline(groupId: number): number {
   const group = groups.find((g) => g.id === groupId);
   if (!group) return 0;
 
-  const validation = validateSparklineRanges(group.location, group.dataRange);
-  if (!validation.valid || !validation.count || validation.count <= 1) return 0;
-
-  const locRows = group.location.endRow - group.location.startRow + 1;
-  const locCols = group.location.endCol - group.location.startCol + 1;
-  const count = validation.count;
-  const orientation = validation.orientation!;
-  const isLocColumn = locCols === 1;
+  // Every AREA (types.ts `moreAreas`), each cut into its single-cell
+  // sparklines with its own data line.
+  const singles: Array<{ location: CellRange; dataRange: CellRange }> = [];
+  for (const area of groupAreas(group)) {
+    const validation = validateSparklineRanges(area.location, area.dataRange);
+    if (!validation.valid || !validation.count) continue;
+    const locCols = area.location.endCol - area.location.startCol + 1;
+    const isLocColumn = locCols === 1;
+    if (validation.count === 1) {
+      singles.push({ location: area.location, dataRange: area.dataRange });
+      continue;
+    }
+    for (let i = 0; i < validation.count; i++) {
+      const locRow = area.location.startRow + (isLocColumn ? i : 0);
+      const locCol = area.location.startCol + (!isLocColumn ? i : 0);
+      // Compute per-cell data range slice
+      const cellDataRange: CellRange =
+        validation.orientation === "byRow"
+          ? {
+              startRow: area.dataRange.startRow + i,
+              startCol: area.dataRange.startCol,
+              endRow: area.dataRange.startRow + i,
+              endCol: area.dataRange.endCol,
+            }
+          : {
+              startRow: area.dataRange.startRow,
+              startCol: area.dataRange.startCol + i,
+              endRow: area.dataRange.endRow,
+              endCol: area.dataRange.startCol + i,
+            };
+      singles.push({
+        location: { startRow: locRow, startCol: locCol, endRow: locRow, endCol: locCol },
+        dataRange: cellDataRange,
+      });
+    }
+  }
+  if (singles.length <= 1) return 0;
 
   // Remove the original group
   const idx = groups.indexOf(group);
@@ -361,38 +406,15 @@ export function ungroupSparkline(groupId: number): number {
     groups.splice(idx, 1);
   }
 
-  const dataRows = group.dataRange.endRow - group.dataRange.startRow + 1;
-  const dataCols = group.dataRange.endCol - group.dataRange.startCol + 1;
-
   let created = 0;
-  for (let i = 0; i < count; i++) {
-    const locRow = group.location.startRow + (isLocColumn ? i : 0);
-    const locCol = group.location.startCol + (!isLocColumn ? i : 0);
-
-    // Compute per-cell data range slice
-    let cellDataRange: CellRange;
-    if (orientation === "byRow") {
-      cellDataRange = {
-        startRow: group.dataRange.startRow + i,
-        startCol: group.dataRange.startCol,
-        endRow: group.dataRange.startRow + i,
-        endCol: group.dataRange.endCol,
-      };
-    } else {
-      cellDataRange = {
-        startRow: group.dataRange.startRow,
-        startCol: group.dataRange.startCol + i,
-        endRow: group.dataRange.endRow,
-        endCol: group.dataRange.startCol + i,
-      };
-    }
-
+  for (const single of singles) {
     const newGroup: SparklineGroup = {
       ...group,
       id: nextGroupId++,
-      location: { startRow: locRow, startCol: locCol, endRow: locRow, endCol: locCol },
-      dataRange: cellDataRange,
+      location: single.location,
+      dataRange: single.dataRange,
     };
+    delete newGroup.moreAreas;
     groups.push(newGroup);
     created++;
   }
@@ -552,8 +574,9 @@ function sameValue(a: unknown, b: unknown): boolean {
 /**
  * THREE-WAY MERGE, by group ID, of a pending change (`current`: the store as
  * it stands) with groups the backend rewrote on its own (`stored`: a
- * structural edit moved, split or removed them -- chart_range_shift.rs -- or
- * an undo put them back), against what it last confirmed (`base`).
+ * structural edit moved them, gave them more areas (`moreAreas`) or removed
+ * them -- chart_range_shift.rs -- or an undo put them back), against what it
+ * last confirmed (`base`).
  *
  * - A group both still have: each field the change touched keeps the
  *   change, each one it did not takes the backend's value (a recolour keeps
@@ -561,8 +584,7 @@ function sameValue(a: unknown, b: unknown): boolean {
  *   data range is one value: the change's, if it made one.
  * - A group the change REMOVED stays removed; one the backend removed (its
  *   cells or data deleted) stays removed.
- * - A group only the backend has (a part a split gave a fresh id, a group an
- *   undo put back) is taken; a group only the change has (created in the
+ * - A group only the backend has (a group an undo put back) is taken; a group only the change has (created in the
  *   change) is kept, under a fresh id if the backend's took its id.
  *
  * Pure. Returns new objects; the inputs are left as they are.
@@ -579,7 +601,7 @@ export function mergeSparklineGroups(
     const b = baseById.get(s.id);
     const c = currentById.get(s.id);
     if (b === undefined) {
-      // The backend's own: a split part or a group put back.
+      // The backend's own: a group put back.
       out.push({ ...s });
       continue;
     }

@@ -536,7 +536,7 @@ pub(crate) fn resolve_dest_sheet_index(state: &AppState, definition: &PivotDefin
         if let Some(idx) = sheet_names.iter().position(|n| n == sheet_name) {
             return idx;
         }
-        if let Some(idx) = sheet_names.iter().position(|n| n.eq_ignore_ascii_case(sheet_name)) {
+        if let Some(idx) = sheet_names.iter().position(|n| identity::sheet_names_equal(&n, &sheet_name)) {
             return idx;
         }
     }
@@ -611,7 +611,7 @@ pub(crate) fn rename_pivot_sheet_references(
     let rewrite = |def: &mut PivotDefinition| -> bool {
         let mut changed = false;
         for slot in [&mut def.destination_sheet, &mut def.source_sheet] {
-            if slot.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(old_name)) {
+            if slot.as_deref().is_some_and(|n| identity::sheet_names_equal(n, old_name)) {
                 *slot = Some(new_name.to_string());
                 changed = true;
             }
@@ -1171,7 +1171,7 @@ pub(crate) fn linked_table_source(
     state: &AppState,
     table_name: &str,
 ) -> Option<((u32, u32), (u32, u32), usize)> {
-    let located = state.table_names.read().ok()?.get(&table_name.to_uppercase()).cloned();
+    let located = state.table_names.read().ok()?.get(&crate::tables::table_name_key(table_name)).cloned();
     let (sheet_index, table_id) = located?;
     let tables = state.tables.read().ok()?;
     let table = tables.get(&sheet_index)?.get(&table_id)?;
@@ -1191,7 +1191,7 @@ pub(crate) fn index_of_sheet(sheet_names: &[String], name: &str) -> Option<usize
     // a case-only rename is legal and updates no pivot definition — and callers
     // fall back to sheet 0 on a miss, so the pivot silently rebuilt its cache
     // from an unrelated sheet.
-    sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
+    sheet_names.iter().position(|n| identity::sheet_names_equal(&n, &name))
 }
 
 /// Reject a pivot whose output would land on its own source data.
@@ -1967,12 +1967,13 @@ pub fn lookup_pivot_data(
     pivot_col: u32,
     field_item_pairs: &[(&str, &str)],
 ) -> Option<f64> {
-    let wanted_sheet = pivot_sheet.map(str::to_lowercase);
+    // Excel's sheet-name case rule, the one every sheet lookup uses.
+    let wanted_sheet = pivot_sheet;
     // Find which pivot table contains the referenced cell
     let (pivot_id, view) = pivot_views.iter().find(|(_id, v)| {
         if let Some((def, _cache)) = pivot_tables.get(_id) {
             let on_sheet = match (&wanted_sheet, def.destination_sheet.as_deref()) {
-                (Some(wanted), Some(dest)) => *wanted == dest.to_lowercase(),
+                (Some(wanted), Some(dest)) => identity::sheet_names_equal(wanted, dest),
                 _ => true,
             };
             if !on_sheet {
@@ -2818,6 +2819,31 @@ mod dest_sheet_tests {
             "test out of date: the copy-then-resolve pattern is gone"
         );
         assert!(offenders.is_empty(), "resolved under the pivot guard:\n{}", offenders.join("\n"));
+    }
+
+    /// rev10C: a sheet rename re-aimed a pivot's stored anchors ASCII-only, so
+    /// an anchor recorded as `ärende` for the tab `Ärende` (one name to Excel
+    /// [LIVE]) did not follow the rename and the pivot lost its sheet.
+    #[test]
+    fn a_pivot_follows_a_sheet_rename_by_excels_case_rule() {
+        let pivots = PivotState::new();
+        let seed = test_seed_effect();
+        let mut def = full_definition(Some("\u{e4}rende"));
+        def.source_sheet = Some("\u{c4}RENDE".to_string());
+        let other = full_definition(Some("Arende"));
+        let (id, other_id) = (def.id, other.id);
+        {
+            let mut tables = pivots.pivot_tables.write(&seed).unwrap();
+            tables.insert(id, (def, pivot_engine::PivotCache::new(id, 3)));
+            tables.insert(other_id, (other, pivot_engine::PivotCache::new(other_id, 3)));
+        }
+        let changed = rename_pivot_sheet_references(&pivots, &seed, "\u{c4}rende", "Cases");
+        assert_eq!(changed, 1, "only the pivot on \u{c4}rende is re-aimed");
+        let tables = pivots.pivot_tables.read().unwrap();
+        let (moved, _) = &tables[&id];
+        assert_eq!(moved.destination_sheet.as_deref(), Some("Cases"), "\u{e4}rende is \u{c4}rende");
+        assert_eq!(moved.source_sheet.as_deref(), Some("Cases"), "\u{c4}RENDE is \u{c4}rende");
+        assert_eq!(tables[&other_id].0.destination_sheet.as_deref(), Some("Arende"), "another name stays");
     }
 }
 

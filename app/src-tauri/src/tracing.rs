@@ -174,6 +174,11 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
     let mut cross_sheet_refs = Vec::new();
     if let Some(cs_deps) = cross_sheet_deps.get(&(active_sheet, row, col)) {
         for &(ref sheet_name, cs_row, cs_col) in cs_deps.iter() {
+            // A whole column or row on another sheet (`=SUM(Sheet2!G:G)`) is
+            // keyed `WHOLE_LINE` (see `crate::cross_sheet_readers`): its
+            // arrow points at the line's first cell, never at row 4294967296.
+            let cs_row = if cs_row == crate::WHOLE_LINE { 0 } else { cs_row };
+            let cs_col = if cs_col == crate::WHOLE_LINE { 0 } else { cs_col };
             // Find the sheet index for this sheet name
             let sheet_idx = sheet_names
                 .iter()
@@ -321,7 +326,7 @@ fn trace_dependent_cells(state: &AppState, row: u32, col: u32) -> (TraceResult, 
         );
     };
 
-    if let Some(cs_deps) = cross_sheet_deps.get(&(current_sheet_name.clone(), row, col)) {
+    if let Some(cs_deps) = crate::cross_sheet_readers(&cross_sheet_deps, current_sheet_name, row, col) {
         for &(sheet_idx, cs_row, cs_col) in cs_deps.iter() {
             let sheet_name = if sheet_idx < sheet_names.len() {
                 sheet_names[sheet_idx].clone()

@@ -54,6 +54,7 @@ import {
 } from "@api/reportPages";
 import { pageButtonPointer, type ObjectBindingRef } from "@api/objectBindings";
 import { BindableField } from "../../_shared/components/bindings";
+import { useNativeColorPick } from "../../_shared/components/colorPick";
 import type { ControlPropertyValue } from "../lib/types";
 import { navigatorItemKey, readPageNavigatorProps } from "../PageNavigator/navigatorModel";
 import {
@@ -383,6 +384,15 @@ function ColourField(props: {
   binding: PageButtonBinding | null;
 }): React.ReactElement {
   const { label, testId, value, inherited, disabled, onChange, binding } = props;
+  // ONE write per pick (BUG-0536): WebView2's picker fires an `input` per drag
+  // step before its one `change`; committing on each was one override write and
+  // one undo step per step. The stored value is the override's own colour ("" =
+  // none, so any pick -- even the navigator's colour -- writes an override).
+  const picker = useNativeColorPick({
+    value: sixDigitColour(value) ?? "",
+    fallback: swatchValue(undefined, inherited),
+    onCommit: (hex) => onChange(hex),
+  });
   return (
     <div style={fieldStyle}>
       <span style={labelStyle}>{label}</span>
@@ -391,13 +401,11 @@ function ColourField(props: {
         label,
         <div style={colourRowStyle}>
           <input
-            type="color"
+            {...picker}
             data-testid={testId}
             aria-label={label}
             style={swatchStyle}
-            value={swatchValue(value, inherited)}
             disabled={disabled}
-            onChange={(e) => onChange(e.target.value)}
           />
           <span style={colourTextStyle}>{value ?? `Navigator's (${inherited})`}</span>
           <button

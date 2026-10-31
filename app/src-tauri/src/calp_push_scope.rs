@@ -230,11 +230,14 @@ pub struct IncludedItem {
 
 impl IncludedItem {
     /// Does this request name `item` -- the same kind and id? A workbook name
-    /// is matched ignoring case, as every name comparison is.
+    /// is matched by Excel's defined-name rule (`name_resolution::name_key`),
+    /// as every name comparison is.
     fn names(&self, item: &WithheldContent) -> bool {
         self.kind == item.kind
             && match item.kind {
-                WithheldKind::NamedRange => self.id.to_uppercase() == item.id.to_uppercase(),
+                WithheldKind::NamedRange => {
+                    crate::name_resolution::name_key(&self.id) == crate::name_resolution::name_key(&item.id)
+                }
                 _ => self.id == item.id,
             }
     }
@@ -472,11 +475,23 @@ pub(crate) fn withhold_content_not_in_application(
     // ships at all.
     if let Some(link) = link {
         {
-            let keep_names: std::collections::HashSet<String> = link
-                .base_named_range_keys
-                .iter()
-                .map(|k| k.to_uppercase())
-                .collect();
+            // Every name below is keyed by Excel's defined-name rule
+            // (`name_resolution::name_key`) -- the key the pull ledgers a name
+            // under and the live name map uses. `to_uppercase` kept a ligature
+            // apart from its letters (`Pæresalg` -> `PÆRESALG`, the ledger's
+            // `PAERESALG`), so another application's name read as yours.
+            //
+            // The link's keys are compared AS STORED, never re-keyed (round
+            // 18): every writer records them with `name_key`, and a re-key is
+            // exact only if it is the identity on them. A re-key through
+            // `name_key` happens to be (measured over the whole BMP), but it
+            // was there to "convert" pre-round-16 `to_uppercase` keys, which no
+            // re-key can make exact: `to_uppercase` merged `qµ` and `qμ` (both
+            // `QΜ`), and `qı` with `qi`, so such a key cannot say which of two
+            // Excel names it meant. No backward compatibility is kept for those
+            // links (CLAUDE.md); they compare verbatim like any other key.
+            let keep_names: std::collections::HashSet<&str> =
+                link.base_named_range_keys.iter().map(String::as_str).collect();
             // The sheets this push leaves behind, for a name's caveat.
             let published: std::collections::HashSet<usize> = scope.published_sheets.iter().copied().collect();
             let unpublished_sheets: Vec<String> = workbook
@@ -491,17 +506,18 @@ pub(crate) fn withhold_content_not_in_application(
                     return true;
                 }
                 // ANOTHER APPLICATION'S NAME -- one a subscription's pull
-                // ledgered (by the uppercased key) -- is that application's,
+                // ledgered (by its `name_key`) -- is that application's,
                 // LAMBDAs included: withheld as such, and never includable.
                 // Asked FIRST, as for a pane control: a name carries no stamp
                 // of its own, so the ledger is the only thing that can tell an
                 // imported name from one the author wrote, and "Include in
                 // application" would otherwise re-sign it under the author's key.
-                if let Some(owner) = scope.foreign_claimant("namedRange", &nr.name.to_uppercase()) {
+                let key = crate::name_resolution::name_key(&nr.name);
+                if let Some(owner) = scope.foreign_claimant("namedRange", &key) {
                     withheld.push(WithheldContent::new(WithheldKind::NamedRange, &nr.name, &nr.name, Some(owner)));
                     return false;
                 }
-                let keep = keep_names.contains(&nr.name.to_uppercase());
+                let keep = keep_names.contains(key.as_str());
                 if keep {
                     return true;
                 }
@@ -779,7 +795,7 @@ pub(crate) fn shipped_content(workbook: &persistence::Workbook) -> calp::Working
     calp::WorkingCopyContent {
         script_ids: workbook.scripts.iter().map(|s| s.id.clone()).collect(),
         notebook_ids: workbook.notebooks.iter().map(|n| n.id.clone()).collect(),
-        named_range_keys: workbook.named_ranges.iter().map(|nr| nr.name.to_uppercase()).collect(),
+        named_range_keys: workbook.named_ranges.iter().map(|nr| crate::name_resolution::name_key(&nr.name)).collect(),
         pane_control_ids: workbook.pane_controls.iter().map(|pc| pc.id.to_string()).collect(),
         custom_function_names: workbook
             .scripts
@@ -975,7 +991,7 @@ mod tests {
         l.record_content(calp::WorkingCopyContent {
             script_ids: scripts.iter().map(|s| s.to_string()).collect(),
             notebook_ids: notebooks.iter().map(|s| s.to_string()).collect(),
-            named_range_keys: names.iter().map(|s| s.to_uppercase()).collect(),
+            named_range_keys: names.iter().map(|s| crate::name_resolution::name_key(s)).collect(),
             pane_control_ids: panes.unwrap_or(&[]).iter().map(|s| s.to_string()).collect(),
             custom_function_names: Vec::new(),
         });
@@ -1960,6 +1976,80 @@ mod tests {
         wb.named_ranges = vec![workbook_name("MyRate")];
         let (withheld, _) = run(&mut wb, &scope(Some(&l), &subs));
         assert!(withheld[0].includable && withheld[0].reason == WithheldReason::NotInApplication, "{withheld:?}");
+    }
+
+    /// A LIGATURE-SPELLED name another application brought in is still that
+    /// application's. The pull ledgers a name under `name_resolution::name_key`
+    /// (Excel's defined-name rule: `Pæresalg` is `PAERESALG`, `Þing` is
+    /// `THING`), so the push must look it up under the same key -- under
+    /// `to_uppercase` (`PÆRESALG`) the ledger never matched, the name read as
+    /// the author's own, and "Include in application" re-signed it under the
+    /// author's key. The base record is keyed the same way: an application name
+    /// spelled `Œuvre` in the base keeps `OEUVRE` in the push.
+    ///
+    /// Round 18 (rev16A nit): the link's name keys are compared EXACTLY as
+    /// stored. `qµ` (micro sign) and `qμ` (Greek mu), and `qı` and `qi`, are
+    /// four different Excel names; a link that recorded the application's `qµ`
+    /// and `qı` keeps exactly those and withholds the author's `qμ` and `qi`.
+    /// A re-key that is not the identity on `name_key` output -- the
+    /// `to_uppercase` of the pre-round-16 links, which merges each pair --
+    /// keeps the author's names instead. And `name_key` IS the identity on its
+    /// own output, for every BMP character, which is what makes the verbatim
+    /// compare exact for every key this build writes.
+    ///
+    /// SABOTAGE: re-key the link's keys with `k.to_uppercase()`.
+    #[test]
+    fn the_links_name_keys_are_compared_exactly_as_stored() {
+        let l = link(&[], &[], &["qµ", "qı"], Some(&[]));
+        let mut wb = Workbook::default();
+        wb.named_ranges = vec![workbook_name("qµ"), workbook_name("qμ"), workbook_name("qı"), workbook_name("qi")];
+        let (withheld, _) = run(&mut wb, &scope(Some(&l), &[]));
+        assert_eq!(
+            wb.named_ranges.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            vec!["qµ", "qı"],
+            "the push kept the wrong one of two different Excel names (a re-key merged them)"
+        );
+        let mut withheld_ids: Vec<&str> = withheld.iter().map(|w| w.id.as_str()).collect();
+        withheld_ids.sort_unstable();
+        assert_eq!(withheld_ids, vec!["qi", "qμ"]);
+
+        for c in (0x80u32..0x1_0000).filter_map(char::from_u32) {
+            let key = crate::name_resolution::name_key(&c.to_string());
+            assert_eq!(crate::name_resolution::name_key(&key), key, "name_key is not idempotent on U+{:04X}", c as u32);
+        }
+    }
+
+    /// SABOTAGE: key the name filter with `nr.name.to_uppercase()` again.
+    #[test]
+    fn another_applications_ligature_name_is_never_includable() {
+        let l = link(&[], &[], &["Œuvre"], Some(&[]));
+        let ledger: Vec<(&str, String)> = ["Pæresalg", "Þing", "qﬁ"]
+            .iter()
+            .map(|n| ("namedRange", crate::name_resolution::name_key(n)))
+            .collect();
+        let ledger_refs: Vec<(&str, &str)> = ledger.iter().map(|(k, id)| (*k, id.as_str())).collect();
+        let subs = [subscription("finance", &ledger_refs)];
+        let included = [include(WithheldKind::NamedRange, "Pæresalg", "=Sheet1!$A$1")];
+        let mut wb = Workbook::default();
+        wb.named_ranges = vec![
+            workbook_name("Pæresalg"),
+            workbook_name("Þing"),
+            workbook_name("qﬁ"),
+            workbook_name("Œuvre"),
+        ];
+        let content = withhold_content_not_in_application(&mut wb, &mut None, &scope_including(Some(&l), &subs, &included));
+        assert_eq!(
+            wb.named_ranges.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            vec!["Œuvre"],
+            "another application's ligature-spelled name shipped under your key"
+        );
+        assert!(content.added.is_empty(), "{:?}", content.added);
+        assert_eq!(content.withheld.len(), 3, "{:?}", content.withheld);
+        for w in &content.withheld {
+            assert_eq!(w.reason, WithheldReason::OtherApplication, "{w:?}");
+            assert_eq!(w.owner, "finance", "{w:?}");
+            assert!(!w.includable, "{w:?}");
+        }
     }
 
     /// The Custom Functions record and reserved (`__calcula_`) records are

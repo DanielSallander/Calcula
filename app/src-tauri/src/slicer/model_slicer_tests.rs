@@ -3563,8 +3563,10 @@ async fn a_cancel_refuses_a_step_that_absorbed_a_script_batch() {
 /// A4. A canvas-wide Delete that removes a pivot box with a chart and a slicer
 /// is ONE step: `delete_pivot_table` joins an open transaction and never
 /// commits one it did not open (its unconditional begin/commit pair committed
-/// the caller's transaction half-way). A Tauri command with nine `State`
-/// handles cannot run in process, so the rule is read from its body.
+/// the caller's transaction half-way). The rule is read from its body (which
+/// since round 10 takes plain references and can also run in process, as
+/// `deleting_a_pivot_never_holds_pivot_tables_while_it_waits_for_the_undo_stack`
+/// does).
 #[test]
 fn deleting_a_pivot_never_commits_a_transaction_it_did_not_open() {
     let src = include_str!("../pivot/commands.rs").replace("\r\n", "\n");
@@ -4444,8 +4446,7 @@ async fn deleting_a_pivot_on_a_sheet_protected_against_it_is_refused() {
 }
 
 /// The delete COMMAND asks the gate before it mints its effect (a refused
-/// delete leaves the document clean). It needs nine `State` handles, so the
-/// order is read from its body.
+/// delete leaves the document clean). The order is read from its body.
 #[test]
 fn the_pivot_delete_command_asks_the_protection_gate_before_anything_is_written() {
     let src = include_str!("../pivot/commands.rs").replace("\r\n", "\n");

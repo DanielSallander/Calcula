@@ -189,7 +189,7 @@ impl CubePrefetch {
             return self;
         }
         match sheet {
-            Some(sheet) => self.other_sheets.get(&sheet.to_uppercase()).unwrap_or(self),
+            Some(sheet) => self.other_sheets.get(&identity::sheet_name_key(sheet)).unwrap_or(self),
             None => self,
         }
     }
@@ -203,7 +203,7 @@ impl CubePrefetch {
             return true;
         };
         if let Some(sheet) = sheet {
-            if sheet.to_uppercase() != scope.sheet.to_uppercase() {
+            if !identity::sheet_names_equal(sheet, &scope.sheet) {
                 return false;
             }
         }
@@ -488,9 +488,15 @@ pub enum CallKind {
 /// process, so nobody can construct a workbook whose calls collide -- an
 /// accidental collision is ~2^-128 per pair -- and a collision is what would
 /// serve one call's answer for another's arguments.
+///
+/// A custom function's key also carries a tag of the function's NAME
+/// ([`custom_function_tag`]), so every answer one function gave can be
+/// forgotten when its definition changes ([`CallMemo::forget_custom_function_answers`]);
+/// a cube key's tag is 0. Two names sharing a tag (2^-64) only forget more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CallKey {
     kind: CallKind,
+    name: u64,
     len: u64,
     digest: [u64; 2],
 }
@@ -502,6 +508,11 @@ impl CallKey {
         let mut writer = KeyWriter::new();
         writer.bytes(spelling.as_bytes());
         writer.finish(CallKind::Cube)
+    }
+
+    /// Whether this is a call of the custom function whose name has `tag`.
+    fn calls_custom_function(&self, tag: u64) -> bool {
+        self.kind == CallKind::Custom && self.name == tag
     }
 
     /// Which kind of call this key names.
@@ -543,8 +554,17 @@ impl KeyWriter {
 
     fn finish(self, kind: CallKind) -> CallKey {
         use std::hash::Hasher;
-        CallKey { kind, len: self.len, digest: [self.first.finish(), self.second.finish()] }
+        CallKey { kind, name: 0, len: self.len, digest: [self.first.finish(), self.second.finish()] }
     }
+}
+
+/// The tag every key of a call of the custom function `name_upper` carries
+/// (see [`CallKey`]): a domain-separated digest of the uppercased name.
+fn custom_function_tag(name_upper: &str) -> u64 {
+    let mut writer = KeyWriter::new();
+    writer.bytes(b"\x1dNAME\x1f");
+    writer.bytes(name_upper.as_bytes());
+    writer.finish(CallKind::Custom).digest[0]
 }
 
 impl std::fmt::Write for KeyWriter {
@@ -558,15 +578,56 @@ impl std::fmt::Write for KeyWriter {
 /// [`CALL_MEMO_WORKBOOK_BYTES`]). Each memo adds what it files and gives back
 /// what it drops -- on a roll-over, a clear, a forget, and when its last clone
 /// is dropped -- so the count is exact, never a running total that only grows.
+///
+/// FAIR WHEN FULL (rev8A minor). The ledger knows its memos, so when one more
+/// answer would overflow the budget, the sheet holding the MOST gives back
+/// (its oldest generation), not the sheet that happens to be filing. It used
+/// to be the filer: once two big sheets had filled the budget, every answer a
+/// third sheet filed rolled that sheet's own generation over, so it kept two
+/// answers and refused the rest while the big sheets never gave anything back.
 pub struct CallMemoLedger {
     held: std::sync::atomic::AtomicUsize,
     cap: usize,
+    /// Every memo counted here, by a weak handle (a dropped memo is skipped
+    /// and pruned), with the bytes it holds now -- read without its lock.
+    memos: std::sync::Mutex<Vec<(std::sync::Weak<std::sync::Mutex<CallMemoTable>>, std::sync::Arc<std::sync::atomic::AtomicUsize>)>>,
 }
 
 impl CallMemoLedger {
     /// A ledger that lets its memos hold `cap` bytes together.
     pub const fn new(cap: usize) -> Self {
-        CallMemoLedger { held: std::sync::atomic::AtomicUsize::new(0), cap }
+        CallMemoLedger { held: std::sync::atomic::AtomicUsize::new(0), cap, memos: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    fn register(
+        &self,
+        table: &std::sync::Arc<std::sync::Mutex<CallMemoTable>>,
+        held: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let mut memos = self.memos.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        memos.retain(|(memo, _)| memo.strong_count() > 0);
+        memos.push((std::sync::Arc::downgrade(table), held));
+    }
+
+    /// The memo, other than the one whose byte count is `me`, that holds the
+    /// most bytes, and how many it holds. The ledger's own lock is released
+    /// before this returns: the caller locks the memo, never both at once.
+    fn largest_other(
+        &self,
+        me: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Option<(std::sync::Arc<std::sync::Mutex<CallMemoTable>>, usize)> {
+        let memos = self.memos.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut largest: Option<(&std::sync::Weak<std::sync::Mutex<CallMemoTable>>, usize)> = None;
+        for (memo, held) in memos.iter() {
+            if std::sync::Arc::ptr_eq(held, me) {
+                continue;
+            }
+            let held = held.load(std::sync::atomic::Ordering::Relaxed);
+            if held > 0 && largest.is_none_or(|(_, most)| held > most) {
+                largest = Some((memo, held));
+            }
+        }
+        largest.and_then(|(memo, held)| memo.upgrade().map(|memo| (memo, held)))
     }
 
     /// The bytes its memos hold now.
@@ -610,10 +671,16 @@ struct CallMemoTable {
     previous_bytes: usize,
     /// The workbook-wide budget these bytes are counted against.
     ledger: &'static CallMemoLedger,
+    /// `current_bytes + previous_bytes`, mirrored for the ledger, which reads
+    /// it without this table's lock to find the largest holder.
+    held: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// See [`CallMemo::values_may_be_stale`].
     values_may_be_stale: bool,
     /// See [`CallMemo::knows_custom_function`].
     custom_functions: HashSet<String>,
+    /// See [`CallMemo::holds_custom_function`]: uppercased name -> the library
+    /// generation that must be installed before its served answers count.
+    held_custom_functions: HashMap<String, u64>,
 }
 
 /// How many custom-function NAMES one memo remembers
@@ -628,9 +695,17 @@ impl CallMemoTable {
             current_bytes: 0,
             previous_bytes: 0,
             ledger,
+            held: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             values_may_be_stale: false,
             custom_functions: HashSet::new(),
+            held_custom_functions: HashMap::new(),
         }
+    }
+
+    /// Publishes what this table holds now to the ledger's mirror.
+    fn mirror(&self) {
+        self.held
+            .store(self.current_bytes.saturating_add(self.previous_bytes), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Removes and returns the answer for `key` from either generation.
@@ -639,32 +714,94 @@ impl CallMemoTable {
             let bytes = entry_bytes(&answer);
             self.current_bytes = self.current_bytes.saturating_sub(bytes);
             self.ledger.give_back(bytes);
+            self.mirror();
             return Some(answer);
         }
         let answer = self.previous.remove(key)?;
         let bytes = entry_bytes(&answer);
         self.previous_bytes = self.previous_bytes.saturating_sub(bytes);
         self.ledger.give_back(bytes);
+        self.mirror();
         Some(answer)
     }
 
+    /// Rolls the generations over: the previous one is dropped and the current
+    /// one becomes the previous one.
+    fn roll(&mut self) {
+        self.ledger.give_back(self.previous_bytes);
+        self.previous = std::mem::take(&mut self.current);
+        self.previous_bytes = std::mem::take(&mut self.current_bytes);
+        self.mirror();
+    }
+
+    /// Gives back this table's OLDEST generation -- the previous one, or the
+    /// current one when it has only that -- for another sheet's answer when
+    /// the workbook's budget is full and this table holds the most.
+    fn shed_oldest(&mut self) {
+        if self.previous.is_empty() {
+            self.ledger.give_back(self.current_bytes);
+            self.current.clear();
+            self.current_bytes = 0;
+        } else {
+            self.ledger.give_back(self.previous_bytes);
+            self.previous.clear();
+            self.previous_bytes = 0;
+        }
+        self.mirror();
+    }
+
+    /// Makes room in the WORKBOOK's budget for `bytes` more: while it would
+    /// overflow and another sheet holds more than this one, that sheet gives
+    /// back its oldest generation; when this sheet holds the most, it rolls
+    /// its own generations over (as it always did). A sheet another thread is
+    /// using right now is not waited for (`try_lock`: this table's own lock is
+    /// held, and two fillers waiting on each other would deadlock) -- this one
+    /// rolls instead.
+    fn make_room(&mut self, bytes: usize) {
+        for _ in 0..16 {
+            if !self.ledger.would_overflow(bytes) {
+                return;
+            }
+            let mine = self.current_bytes.saturating_add(self.previous_bytes);
+            if let Some((other, theirs)) = self.ledger.largest_other(&self.held) {
+                if theirs > mine {
+                    match other.try_lock() {
+                        Ok(mut table) => {
+                            table.shed_oldest();
+                            continue;
+                        }
+                        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                            poisoned.into_inner().shed_oldest();
+                            continue;
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => {}
+                    }
+                }
+            }
+            break;
+        }
+        if self.ledger.would_overflow(bytes) && !self.current.is_empty() {
+            self.roll();
+        }
+    }
+
     /// Files `answer` under `key` in the current generation, rolling the
-    /// generations over first when the current one is full -- by count, by this
-    /// sheet's bytes, or by the WORKBOOK's bytes.
+    /// generations over first when the current one is full -- by count or by
+    /// this sheet's bytes -- and making room first when the WORKBOOK's budget
+    /// would overflow ([`Self::make_room`]).
     fn put(&mut self, key: CallKey, answer: crate::evaluator::EvalResult) {
         let bytes = entry_bytes(&answer);
         if !self.current.is_empty()
             && (self.current.len() >= CALL_MEMO_GENERATION
-                || self.current_bytes.saturating_add(bytes) > CALL_MEMO_GENERATION_BYTES
-                || self.ledger.would_overflow(bytes))
+                || self.current_bytes.saturating_add(bytes) > CALL_MEMO_GENERATION_BYTES)
         {
-            self.ledger.give_back(self.previous_bytes);
-            self.previous = std::mem::take(&mut self.current);
-            self.previous_bytes = std::mem::take(&mut self.current_bytes);
+            self.roll();
         }
+        self.make_room(bytes);
         self.current_bytes = self.current_bytes.saturating_add(bytes);
         self.ledger.add(bytes);
         self.current.insert(key, answer);
+        self.mirror();
     }
 
     /// Drops every answer whose key `keep` refuses, giving its bytes back.
@@ -688,6 +825,7 @@ impl CallMemoTable {
         self.current_bytes = self.current_bytes.saturating_sub(freed_current);
         self.previous_bytes = self.previous_bytes.saturating_sub(freed_previous);
         self.ledger.give_back(freed_current.saturating_add(freed_previous));
+        self.mirror();
     }
 }
 
@@ -762,7 +900,13 @@ fn entry_bytes(answer: &crate::evaluator::EvalResult) -> usize {
 /// re-serves every cube call a cell makes now, so an answer from the model as
 /// it was is never served afterwards for an argument that comes back (rev6A#1:
 /// it used to be, with no error). Custom-function answers survive a refresh:
-/// they are facts about their arguments, not about the model.
+/// they are facts about their arguments, not about the model -- but not a
+/// change of the function's own CODE: when a Custom Functions library changes
+/// (the author's Save, an application's subscribe or update), every function
+/// whose definition changed forgets its answers and a function that is gone is
+/// forgotten altogether ([`CallMemo::forget_custom_function_answers`],
+/// [`CallMemo::forget_custom_function`], run by the app's
+/// `bi::cube::forget_redefined_custom_functions`).
 ///
 /// SHARED BY CLONES. `Grid::clone` shares one memo (an `Arc`): the app keeps
 /// the active sheet twice (`AppState::grid` and `grids[active]`) and copies one
@@ -791,8 +935,9 @@ fn entry_bytes(answer: &crate::evaluator::EvalResult) -> usize {
 /// BOUNDED: two generations, each of at most [`CALL_MEMO_GENERATION`] calls
 /// and about [`CALL_MEMO_GENERATION_BYTES`] bytes, and every sheet's memo
 /// together at most about [`CALL_MEMO_WORKBOOK_BYTES`]. When the current
-/// generation fills -- or the workbook's budget would overflow -- it becomes
-/// the previous one and the old previous one is dropped; a call found in the
+/// generation fills it becomes the previous one and the old previous one is
+/// dropped; when the workbook's budget would overflow, the sheet holding the
+/// MOST gives back its oldest generation ([`CallMemoLedger`]); a call found in the
 /// previous generation moves back to the current one. A call is filed under a
 /// fixed-size [`CallKey`], never its arguments' spelling, so what is held is
 /// the answers. Forgetting is safe -- it only turns an answer into a refusal.
@@ -824,7 +969,11 @@ impl CallMemo {
     /// An empty memo whose bytes count against `ledger` -- the workbook's
     /// ([`CallMemo::default`]), or a test's own.
     pub fn with_ledger(ledger: &'static CallMemoLedger) -> Self {
-        CallMemo { table: std::sync::Arc::new(std::sync::Mutex::new(CallMemoTable::new(ledger))) }
+        let table = CallMemoTable::new(ledger);
+        let held = std::sync::Arc::clone(&table.held);
+        let table = std::sync::Arc::new(std::sync::Mutex::new(table));
+        ledger.register(&table, held);
+        CallMemo { table }
     }
 
     fn table(&self) -> std::sync::MutexGuard<'_, CallMemoTable> {
@@ -868,10 +1017,42 @@ impl CallMemo {
         self.table().retain(|key| key.kind() != CallKind::Cube);
     }
 
+    /// Forgets every answer the custom function `name` gave (rev8A): its
+    /// DEFINITION changed -- the author edited its code, or an application
+    /// update replaced the library. An answer is a fact about the arguments
+    /// only for the code that computed it, and nothing else would ever replace
+    /// the answer for an argument no cell holds when the new code is installed:
+    /// a recalculation without a resolver (the cross-sheet walk, F9, the save)
+    /// would serve the OLD code's number for it as current, with no error.
+    /// Keeps whether `name` is a known function (see
+    /// [`Self::forget_custom_function`] for a function that is gone).
+    pub fn forget_custom_function_answers(&self, name: &str) {
+        let tag = custom_function_tag(&name.to_uppercase());
+        self.table().retain(|key| !key.calls_custom_function(tag));
+    }
+
+    /// Forgets the custom function `name` altogether: the workbook no longer
+    /// defines it (its library dropped it, or the whole library is gone). Its
+    /// answers go, and so does the knowledge that it IS a function here, so a
+    /// call of it is Excel's ordinary `#NAME?` again -- which an IFERROR around
+    /// it handles (`=IFERROR(GONEFN(A1),0)` is 0 in Excel), never the sticky
+    /// refusal of a call nobody computed.
+    pub fn forget_custom_function(&self, name: &str) {
+        let upper = name.to_uppercase();
+        let tag = custom_function_tag(&upper);
+        let mut table = self.table();
+        table.retain(|key| !key.calls_custom_function(tag));
+        table.custom_functions.remove(&upper);
+    }
+
     /// Records that `name` (uppercased) IS a custom function of this workbook:
-    /// a resolver served a call of it, or a saved root call of it was seeded.
-    /// Never forgotten with the answers -- it is a fact about the workbook's
-    /// functions, not about any argument.
+    /// a resolver served a call of it, a Custom Functions library defines it,
+    /// or the host registers it (an add-in's function). Seeding a saved root
+    /// call does NOT note it: a saved value proves only that the function
+    /// existed when the value was computed. Never forgotten with the answers --
+    /// it is a fact about the workbook's functions, not about any argument --
+    /// only when the workbook stops defining it ([`Self::forget_custom_function`],
+    /// [`Self::unnote_custom_function`]).
     pub fn note_custom_function(&self, name: &str) {
         let mut table = self.table();
         if table.custom_functions.len() < CALL_MEMO_CUSTOM_FUNCTION_NAMES || table.custom_functions.contains(name) {
@@ -887,6 +1068,45 @@ impl CallMemo {
     /// with the refusal whole (`Evaluator::evaluate`).
     pub fn knows_custom_function(&self, name: &str) -> bool {
         self.table().custom_functions.contains(name)
+    }
+
+    /// Stops knowing `name` as a custom function WITHOUT forgetting its
+    /// answers: the host no longer registers it (an add-in that registered it
+    /// was unloaded) and no library defines it. A call of it with no data is
+    /// then Excel's ordinary `#NAME?`, which an IFERROR handles; an answer
+    /// already recorded for exactly its arguments is still the value that call
+    /// computed.
+    pub fn unnote_custom_function(&self, name: &str) {
+        self.table().custom_functions.remove(&name.to_uppercase());
+    }
+
+    /// HOLDS the custom function `name` until the host has installed the
+    /// library of `generation` (rev10 cache2 residual): its library was just
+    /// replaced in the backend, but the page that runs custom functions still
+    /// runs the OLD code until it re-installs, so an answer it serves in that
+    /// window belongs to the old code and must not be recorded as a fact about
+    /// the arguments. Served answers are still used for the edit that carried
+    /// them; they are just not filed ([`Self::holds_custom_function`]). A later
+    /// hold of the same name keeps the higher generation.
+    pub fn hold_custom_function(&self, name: &str, generation: u64) {
+        let upper = name.to_uppercase();
+        let mut table = self.table();
+        let held = table.held_custom_functions.entry(upper).or_insert(generation);
+        if *held < generation {
+            *held = generation;
+        }
+    }
+
+    /// Releases every hold whose generation is `generation` or older: the host
+    /// reported it has installed (at least) that library.
+    pub fn release_custom_functions_up_to(&self, generation: u64) {
+        self.table().held_custom_functions.retain(|_, held| *held > generation);
+    }
+
+    /// Whether answers the custom function `name` (uppercased) is SERVED must
+    /// not be recorded yet ([`Self::hold_custom_function`]).
+    pub fn holds_custom_function(&self, name: &str) -> bool {
+        self.table().held_custom_functions.contains_key(name)
     }
 
     /// Whether this sheet's STORED VALUES may be stale for their arguments --
@@ -1065,13 +1285,16 @@ fn contains_call(expr: &Expression, is_call: fn(&Expression) -> bool) -> bool {
 /// answer that belongs to other arguments.
 pub fn udf_call_fingerprint(name: &str, args: &[crate::evaluator::EvalResult]) -> Option<CallKey> {
     use std::fmt::Write;
+    let name_upper = name.to_uppercase();
     let mut key = KeyWriter::new();
-    let _ = write!(key, "\u{1e}UDF{}{}", KEY_SEP, name.to_uppercase());
+    let _ = write!(key, "\u{1e}UDF{}{}", KEY_SEP, name_upper);
     for arg in args {
         let _ = key.write_char(KEY_SEP);
         push_value_fingerprint(arg, &mut key)?;
     }
-    Some(key.finish(CallKind::Custom))
+    let mut key = key.finish(CallKind::Custom);
+    key.name = custom_function_tag(&name_upper);
+    Some(key)
 }
 
 fn push_value_fingerprint(value: &crate::evaluator::EvalResult, out: &mut KeyWriter) -> Option<()> {
@@ -1382,6 +1605,72 @@ mod tests {
         let held_by_first = first.len() * one;
         drop(first);
         assert_eq!(ledger.held(), second.len() * one, "a dropped memo gave back its {} bytes", held_by_first);
+    }
+
+    /// rev8A minor: the WORKBOOK's budget starved a sheet. Once two sheets had
+    /// filled it, every answer a third sheet filed rolled that sheet's own
+    /// generation over -- it kept two answers and refused the rest -- while the
+    /// big sheets never gave anything back. The sheet holding the most gives
+    /// back now.
+    ///
+    /// SABOTAGE: `CallMemoLedger::largest_other` answers `None`.
+    #[test]
+    fn a_full_workbook_budget_never_starves_a_sheet_that_holds_little() {
+        let one = entry_bytes(&EvalResult::Number(0.0));
+        let ledger = own_ledger(100 * one);
+        let first = CallMemo::with_ledger(ledger);
+        let second = CallMemo::with_ledger(ledger);
+        for i in 0..50 {
+            first.remember(key(&format!("a{}", i)), &EvalResult::Number(i as f64));
+            second.remember(key(&format!("b{}", i)), &EvalResult::Number(i as f64));
+        }
+        assert_eq!(ledger.held(), 100 * one, "precondition: two sheets fill the workbook's budget");
+        let third = CallMemo::with_ledger(ledger);
+        for i in 0..30 {
+            third.remember(key(&format!("c{}", i)), &EvalResult::Number(i as f64));
+            // At most the filer's own two newest answers over the budget.
+            assert!(ledger.held() <= 100 * one + 2 * one, "the workbook holds {} bytes", ledger.held());
+        }
+        for i in 0..30 {
+            assert_eq!(
+                third.answer(&key(&format!("c{}", i))),
+                Some(EvalResult::Number(i as f64)),
+                "the third sheet lost answer {} to a budget the other two filled",
+                i
+            );
+        }
+        assert!(first.len() + second.len() < 100, "a big sheet gave back what the third one needed");
+    }
+
+    /// rev8A: a custom function's answers were never forgotten when its CODE
+    /// changed. Forgetting one function's answers leaves every other
+    /// function's -- and every cube call's -- alone, and keeps the name known;
+    /// forgetting the function altogether makes the name unknown again.
+    ///
+    /// SABOTAGE: `CallKey::calls_custom_function` answers false.
+    #[test]
+    fn a_redefined_custom_function_forgets_its_own_answers_only() {
+        let memo = CallMemo::with_ledger(own_ledger(usize::MAX));
+        let mine = |n: f64| udf_call_fingerprint("myFn", &[EvalResult::Number(n)]).unwrap();
+        let other = udf_call_fingerprint("OTHER", &[EvalResult::Number(4.0)]).unwrap();
+        memo.remember(mine(4.0), &EvalResult::Number(40.0));
+        memo.remember(mine(3.0), &EvalResult::Number(30.0));
+        memo.remember(other, &EvalResult::Number(7.0));
+        memo.remember(key("CUBEVALUE\u{1f}Sales"), &EvalResult::Number(175.0));
+        memo.note_custom_function("MYFN");
+        memo.note_custom_function("OTHER");
+
+        memo.forget_custom_function_answers("MyFn");
+        assert_eq!(memo.answer(&mine(4.0)), None, "MYFN(4) kept the old code's answer");
+        assert_eq!(memo.answer(&mine(3.0)), None, "MYFN(3) kept the old code's answer");
+        assert_eq!(memo.answer(&other), Some(EvalResult::Number(7.0)), "another function's answer was forgotten");
+        assert_eq!(memo.answer(&key("CUBEVALUE\u{1f}Sales")), Some(EvalResult::Number(175.0)), "a cube answer was forgotten");
+        assert!(memo.knows_custom_function("MYFN"), "a redefined function is still the workbook's");
+
+        memo.forget_custom_function("other");
+        assert_eq!(memo.answer(&other), None);
+        assert!(!memo.knows_custom_function("OTHER"), "a function the workbook dropped is still known");
+        assert!(memo.knows_custom_function("MYFN"));
     }
 
     #[test]
