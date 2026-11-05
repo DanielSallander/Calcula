@@ -143,8 +143,9 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
 
   // --- Validate SORT ---
   // Sorting by a calculated field is not supported: the backend sort
-  // (sort_pivot_field) only reorders row/column fields by their labels via
-  // source_index — calculated columns have no source field to sort by.
+  // (sort_pivot_field) reorders row/column fields by their labels, or by the
+  // values of a VALUE field (BUG-0459), via source_index — calculated
+  // columns have no source field to sort by.
   const calcFieldNames = new Set(ast.calculatedFields.map(c => c.name.toLowerCase()));
   for (const node of ast.sort) {
     const lower = node.fieldName.toLowerCase();

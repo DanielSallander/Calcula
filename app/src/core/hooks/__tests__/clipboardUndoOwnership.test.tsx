@@ -170,7 +170,8 @@ const GESTURES: Array<{
   },
   {
     name: "drag-move cells",
-    failOn: "updateCell",
+    // ONE batch since NEW-drag-move-whole-table, as a Cut + Paste writes it.
+    failOn: "updateCellsBatch",
     label: "Move 1 cells",
     run: () => act(async () => hook.moveCells(src, 5, 5)),
   },

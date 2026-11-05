@@ -123,6 +123,13 @@ struct RenderCtx<'a> {
     collapse: bool,
     path: Vec<usize>,
     spans: Option<&'a mut SpanMap>,
+    /// Show a name spelled like a cell that no binder in scope binds QUOTED
+    /// (the formula bar's spelling, [`render_cell_shaped_name`]).
+    quote_names: bool,
+    /// The LET names and LAMBDA parameters in scope at this point of the
+    /// walk, so a name spelled like a cell that NONE of them binds is shown
+    /// quoted ([`render_cell_shaped_name`]).
+    bound: Vec<String>,
 }
 
 impl RenderCtx<'_> {
@@ -167,7 +174,7 @@ pub const NAMED_INVOKE_MARKER: &str = "__INVOKE__";
 /// authored call rather than the expanded LAMBDA. Use [`render_formula_raw`]
 /// wherever the expanded form must be preserved (persistence / round-tripping).
 pub fn render_formula(expr: &Expression) -> String {
-    render_expr(expr, true)
+    render_expr_quoting(expr, true, true)
 }
 
 /// Like [`render_formula`] but preserves the literal `__INVOKE__(...)` marker
@@ -175,7 +182,7 @@ pub fn render_formula(expr: &Expression) -> String {
 /// so the saved (and re-parsed-on-load) formula keeps the resolved form that
 /// dependency extraction and evaluation rely on.
 pub fn render_formula_raw(expr: &Expression) -> String {
-    render_expr(expr, false)
+    render_expr_quoting(expr, false, false)
 }
 
 /// Collapse a PERSISTED formula string to the form the user sees.
@@ -205,8 +212,11 @@ pub fn collapse_formula_text(raw: &str) -> String {
     if !raw.contains(NAMED_INVOKE_MARKER) {
         return raw.to_string();
     }
+    // Collapsed, but a name spelled like a cell stays BARE
+    // (`render_cell_shaped_name`): the .xlsx writer reads this text and
+    // writes such a name `_xlnm.D1`, which a quote would hide from it.
     match parser::parse(raw) {
-        Ok(ast) => render_formula(&ast),
+        Ok(ast) => render_expr_quoting(&ast, true, false),
         Err(_) => raw.to_string(),
     }
 }
@@ -224,18 +234,25 @@ pub fn render_with_spans(expr: &Expression, collapse: bool) -> (String, SpanMap)
             collapse,
             path: Vec::new(),
             spans: Some(&mut spans),
+            quote_names: collapse,
+            bound: Vec::new(),
         };
         render_into(expr, &mut ctx, &mut out);
     }
     (out, spans)
 }
 
-fn render_expr(expr: &Expression, collapse: bool) -> String {
+/// The renderer with its two display choices: collapse the named-invoke
+/// marker, and quote a name spelled like a cell that nothing binds
+/// ([`render_cell_shaped_name`]; the formula bar only).
+fn render_expr_quoting(expr: &Expression, collapse: bool, quote_names: bool) -> String {
     let mut out = String::new();
     let mut ctx = RenderCtx {
         collapse,
         path: Vec::new(),
         spans: None,
+        quote_names,
+        bound: Vec::new(),
     };
     render_into(expr, &mut ctx, &mut out);
     out
@@ -256,15 +273,71 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
             out.push_str(&row.to_string());
         }
 
+        // `Sheet2!A1` in a formula read in R1C1 is that sheet's NAME, held as
+        // the range of the name with itself (`parser::apply_r1c1_fallback`):
+        // written back the way it was typed, one name behind its sheet.
+        Expression::Range { sheet: sheet @ Some(_), start: s, end: e, .. }
+            if matches!(
+                (s.as_ref(), e.as_ref()),
+                (Expression::NamedRef { name: a, .. }, Expression::NamedRef { name: b, .. })
+                    if a.eq_ignore_ascii_case(b) && is_cell_spelling(a)
+            ) =>
+        {
+            out.push_str(&render_sheet_prefix(sheet));
+            // Bare, not Excel's `Sheet2!'A1'`: a quote after `!` does not
+            // parse back (`render_cell_shaped_name`).
+            if let Expression::NamedRef { name, .. } = s.as_ref() {
+                ctx.bound.push(name.clone());
+            }
+            ctx.enter(0);
+            render_into(s, ctx, out);
+            ctx.leave();
+            if matches!(s.as_ref(), Expression::NamedRef { .. }) {
+                ctx.bound.pop();
+            }
+        }
+
         Expression::Range { sheet, start: s, end: e, .. } => {
             out.push_str(&render_sheet_prefix(sheet));
+            // A name half is quoted only where the parser reads a quote back
+            // as a range half: never behind a sheet (`Sheet2!D1:D2`, a range
+            // of names in R1C1 -- a quote after `!` names no sheet), and the
+            // END only after a quoted START (`'D1':'D2'`, `'D1':X1`; `X1:D2`
+            // and `$D$1:D2` stay bare, and the R1C1 fallback reads their
+            // names). A half left bare counts as bound for this range.
+            let depth = ctx.bound.len();
+            let start_quoted = sheet.is_none()
+                && matches!(s.as_ref(), Expression::NamedRef { name, .. }
+                    if ctx.quote_names
+                        && parser::parser::is_cell_spelling(name)
+                        && !ctx.bound.iter().any(|b| b.eq_ignore_ascii_case(name)));
+            let bare_halves: Vec<&Expression> = if sheet.is_some() {
+                vec![s.as_ref(), e.as_ref()]
+            } else if !start_quoted {
+                vec![e.as_ref()]
+            } else {
+                Vec::new()
+            };
+            for half in bare_halves {
+                if let Expression::NamedRef { name, .. } = half {
+                    ctx.bound.push(name.clone());
+                }
+            }
             ctx.enter(0);
             render_no_sheet_into(s, ctx, out);
             ctx.leave();
             out.push(':');
             ctx.enter(1);
-            render_no_sheet_into(e, ctx, out);
+            // `Sheet1!A1:Sheet1!A3` keeps its second qualifier, as Excel's
+            // formula bar does (BUG-0646): the parser stores it on the end
+            // corner. A corner without one renders bare, as it always has.
+            if matches!(e.as_ref(), Expression::CellRef { sheet: Some(_), .. }) && sheet.is_some() {
+                render_into(e, ctx, out);
+            } else {
+                render_no_sheet_into(e, ctx, out);
+            }
             ctx.leave();
+            ctx.bound.truncate(depth);
         }
 
         Expression::ColumnRef { sheet, start_col, end_col, start_absolute, end_absolute, .. } => {
@@ -325,21 +398,54 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
             // for display. The raw path (collapse == false) falls through and
             // renders the literal `__INVOKE__("Name", lambda, args)` form.
             let collapsed = (ctx.collapse && render_named_invoke_into(func, args, ctx, out))
+                || render_inline_invoke_into(func, args, ctx, out)
                 || render_trim_dots_into(func, args, ctx, out);
             if !collapsed {
                 out.push_str(func.to_canonical_name());
                 out.push('(');
+                // The binders in scope, by the parser's rule
+                // (`parser::parser::apply_r1c1_fallback`): a LAMBDA parameter
+                // in the body, a LET name in every LATER argument -- never in
+                // its own value. A binder slot itself is its name, never shown
+                // quoted.
+                let depth = ctx.bound.len();
+                let last = args.len().saturating_sub(1);
+                let is_let = *func == BuiltinFunction::Let && args.len() >= 3;
+                if *func == BuiltinFunction::Lambda {
+                    for a in &args[..last] {
+                        if let Expression::NamedRef { name, .. } = a {
+                            ctx.bound.push(name.clone());
+                        }
+                    }
+                }
+                let mut pending: Option<String> = None;
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 { out.push(','); }
+                    let let_binder = match a {
+                        Expression::NamedRef { name, .. } if is_let && i < last && i % 2 == 0 => Some(name.clone()),
+                        _ => None,
+                    };
+                    if let Some(name) = &let_binder {
+                        ctx.bound.push(name.clone());
+                    }
                     ctx.enter(i);
                     render_into(a, ctx, out);
                     ctx.leave();
+                    if let Some(name) = let_binder {
+                        ctx.bound.pop();
+                        pending = Some(name);
+                    } else if is_let && i < last && i % 2 == 1 {
+                        if let Some(name) = pending.take() {
+                            ctx.bound.push(name);
+                        }
+                    }
                 }
+                ctx.bound.truncate(depth);
                 out.push(')');
             }
         }
 
-        Expression::NamedRef { name, .. } => out.push_str(name),
+        Expression::NamedRef { name, .. } => render_cell_shaped_name(name, ctx, out),
 
         Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             if !sheet_range_renders_bare(start_sheet, end_sheet) {
@@ -354,11 +460,34 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
             } else {
                 let _ = write!(out, "{}:{}!", start_sheet, end_sheet);
             }
+            // A name behind the span (`Sheet1:Sheet2!A1`, read in R1C1) stays
+            // bare: a quote after `!` would not parse back.
+            let depth = ctx.bound.len();
+            let halves: Vec<&Expression> = match reference.as_ref() {
+                Expression::Range { start, end, .. } => vec![start.as_ref(), end.as_ref()],
+                other => vec![other],
+            };
+            for half in halves {
+                if let Expression::NamedRef { name, .. } = half {
+                    ctx.bound.push(name.clone());
+                }
+            }
             ctx.enter(0);
             render_into(reference, ctx, out);
             ctx.leave();
+            ctx.bound.truncate(depth);
         }
 
+        // The WHOLE table shows as its bare name in the formula bar (DISPLAY
+        // ONLY, `quote_names`) and is stored `Tbl[]`, Excel's own file text
+        // [LIVE, lane namese: `=ROWS(Tbl[])` shows `=ROWS(Tbl)`, is filed
+        // `ROWS(Tbl[])`]. The bare name reads back through the host's
+        // bare-table rule; the stored text needs no table registry to read.
+        Expression::TableRef { table_name, specifier: TableSpecifier::Whole, .. }
+            if ctx.quote_names && !table_name.is_empty() =>
+        {
+            out.push_str(table_name);
+        }
         Expression::TableRef { table_name, specifier, .. } => {
             out.push_str(table_name);
             out.push_str(&render_table_specifier(specifier));
@@ -544,7 +673,84 @@ fn render_named_invoke_into(
     true
 }
 
+/// If `func`/`args` are the INLINE invocation `__INVOKE__(callee, args...)` --
+/// the parser's spelling of `LAMBDA(x,x*2)(5)`, whose callee is a function
+/// call -- append Excel's spelling `callee(args...)` and return true.
+///
+/// Lane formc (2026-11-05): this rendered the marker itself, so the formula
+/// bar (`commands/utils.rs` builds the cell's formula from `formula_string`),
+/// the AI's formula context and Find & Replace showed `=__INVOKE__(LAMBDA(x,
+/// x*2),5)` for what [LIVE] Excel 16 shows as `=LAMBDA(x,x*2)(5)`. The
+/// spelling parses back to the identical tree (`expr(args)` after a call IS
+/// the invocation), so the raw form for persistence renders it too. The NAMED
+/// shape (`__INVOKE__("Name", lambda, args)`) is not this: its first argument
+/// is a text, never a call.
+fn render_inline_invoke_into(
+    func: &BuiltinFunction,
+    args: &[Expression],
+    ctx: &mut RenderCtx<'_>,
+    out: &mut String,
+) -> bool {
+    let BuiltinFunction::Custom(name) = func else { return false; };
+    if name != NAMED_INVOKE_MARKER || args.is_empty() {
+        return false;
+    }
+    if !matches!(args[0], Expression::FunctionCall { .. }) {
+        return false;
+    }
+    ctx.enter(0);
+    render_into(&args[0], ctx, out);
+    ctx.leave();
+    out.push('(');
+    for (j, a) in args[1..].iter().enumerate() {
+        if j > 0 { out.push(','); }
+        ctx.enter(j + 1);
+        render_into(a, ctx, out);
+        ctx.leave();
+    }
+    out.push(')');
+    true
+}
+
+/// Letters then digits (`A1`, `zz9`): a name spelled like a cell, which exists
+/// only in a formula read in R1C1.
+fn is_cell_spelling(name: &str) -> bool {
+    let letters = name.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+    letters > 0 && letters < name.len() && name[letters..].chars().all(|c| c.is_ascii_digit())
+}
+
 /// Append a CellRef without its sheet prefix (for Range start/end endpoints).
+/// A NAME SPELLED LIKE A CELL THAT NO LET / LAMBDA IN SCOPE BINDS IS SHOWN
+/// QUOTED, as Excel's formula bar shows it, so it cannot be mistaken for the
+/// reference it looks like.
+///
+/// [LIVE, Excel 16, 2026-11-05, rev-parse probe B, `Range.Formula2` read back]
+/// `=D1+LET(A1,5,A1)` shows `='D1'+LET(A1,5,A1)`, `=SUM(D1:D2,LAMBDA(a1,a1)(1))`
+/// `=SUM('D1':'D2',LAMBDA(a1,a1)(1))`, `=LET(A1,5,A1+INDEX(T1,1,1))`
+/// `=LET(A1,5,A1+INDEX('T1',1,1))` and `=LET(n,5,LAMBDA(n1,n1+n)(1))+D1`
+/// `...+'D1'`, while a binder and every use of it in its scope stay bare
+/// (`LET(A1,5,A1)`). Such a name exists only in a formula Excel reads in R1C1
+/// (`parser::parser::apply_r1c1_fallback`), where it is #NAME?.
+///
+/// DISPLAY ONLY (`quote_names`: [`render_formula`], and the collapsed
+/// [`render_with_spans`]): the raw text persistence writes keeps the bare
+/// spelling, which reads back as the same name (the formula still declares
+/// the binder), and so does [`collapse_formula_text`], whose text the .xlsx
+/// writer turns into Excel's file text (`_xlnm.D1`). The parser reads the
+/// quoted spelling back as the same name.
+fn render_cell_shaped_name(name: &str, ctx: &mut RenderCtx<'_>, out: &mut String) {
+    let quoted = ctx.quote_names
+        && parser::parser::is_cell_spelling(name)
+        && !ctx.bound.iter().any(|b| b.eq_ignore_ascii_case(name));
+    if quoted {
+        out.push('\'');
+        out.push_str(name);
+        out.push('\'');
+    } else {
+        out.push_str(name);
+    }
+}
+
 fn render_no_sheet_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
     match expr {
         Expression::CellRef { col, row, col_absolute, row_absolute, .. } => {
@@ -616,6 +822,10 @@ fn render_value(val: &Value) -> String {
 
 fn render_sheet_prefix(sheet: &Option<String>) -> String {
     match sheet {
+        // A DELETED sheet (`parser::ast::REF_ERROR_SHEET`): Excel writes `#REF!`
+        // where the sheet was, unquoted -- `=#REF!A1`, `=SUM(#REF!A1:A3)`. The
+        // parser reads that spelling back to the same marker.
+        Some(name) if name == parser::ast::REF_ERROR_SHEET => "#REF!".to_string(),
         Some(name) => format!("{}!", quote_sheet_name(name)),
         None => String::new(),
     }
@@ -836,24 +1046,54 @@ pub fn render_table_specifier(spec: &TableSpecifier) -> String {
         ),
         TableSpecifier::AllRows => "[#All]".to_string(),
         TableSpecifier::DataRows => "[#Data]".to_string(),
+        // `Tbl[]`: the stored spelling of the whole table (the formula bar
+        // shows the bare name -- see `render_into`).
+        TableSpecifier::Whole => "[]".to_string(),
         TableSpecifier::Headers => "[#Headers]".to_string(),
         TableSpecifier::Totals => "[#Totals]".to_string(),
+        // The two special-item PAIRS Excel accepts, in the order it stores them
+        // (BUG-0643: the second item was rendered as an escaped column `'#Data`).
+        TableSpecifier::HeadersAndData | TableSpecifier::DataAndTotals => {
+            format!("[{}]", special_items(spec))
+        }
         TableSpecifier::SpecialColumn(special, col) => {
-            // `render_table_specifier(special)` already carries its own outer
-            // brackets (`[#Data]`), which is exactly the inner half Excel wants;
-            // the column gets its own, and one more pair wraps the comma.
+            // The special item(s) already carry their own brackets (`[#Data]`,
+            // `[#Headers],[#Data]`), which is exactly the inner half Excel
+            // wants; the column gets its own, and one more pair wraps the comma.
             format!(
                 "[{},[{}]]",
-                render_table_specifier(special),
+                special_items(special),
                 escape_column_name(col)
             )
         }
+        TableSpecifier::SpecialColumnRange(special, start, end) => format!(
+            "[{},[{}]:[{}]]",
+            special_items(special),
+            escape_column_name(start),
+            escape_column_name(end)
+        ),
+    }
+}
+
+/// The bracketed special item(s) of a region, WITHOUT the outer pair a whole
+/// specifier adds: `[#Data]`, `[#Headers],[#Data]`.
+fn special_items(spec: &TableSpecifier) -> String {
+    match spec {
+        TableSpecifier::HeadersAndData => "[#Headers],[#Data]".to_string(),
+        TableSpecifier::DataAndTotals => "[#Data],[#Totals]".to_string(),
+        other => render_table_specifier(other),
     }
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// The formula bar quotes a name spelled like a cell that nothing binds
+// (`render_cell_shaped_name`), and the quoted text reads back as that name.
+#[cfg(test)]
+#[path = "cell_shaped_name_render_tests.rs"]
+mod cell_shaped_name_render_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1022,7 +1262,9 @@ mod tests {
     }
 
     /// The inline-lambda shape `__INVOKE__(lambdaExpr, args)` (no leading name
-    /// literal, produced by the parser for `LAMBDA(...)(x)`) must NOT collapse.
+    /// literal, produced by the parser for `LAMBDA(...)(x)`) is not the named
+    /// collapse: it renders as Excel spells an invocation, `callee(args)`
+    /// (lane formc; it rendered the `__INVOKE__` marker before).
     #[test]
     fn render_does_not_collapse_inline_invoke() {
         let inline = Expression::FunctionCall {
@@ -1038,7 +1280,8 @@ mod tests {
             ],
             ref_site_id: Default::default(),
         };
-        assert_eq!(render_formula(&inline), "__INVOKE__(SUM(1),5)");
+        assert_eq!(render_formula(&inline), "SUM(1)(5)");
+        assert_eq!(render_formula_raw(&inline), "SUM(1)(5)");
     }
 
     /// The string→string bridge: PERSISTED text in, DISPLAYED text out.
@@ -1457,9 +1700,22 @@ mod tests {
             TableSpecifier::ThisRowRange("A".to_string(), "B".to_string()),
             TableSpecifier::AllRows,
             TableSpecifier::DataRows,
+            TableSpecifier::Whole,
             TableSpecifier::Headers,
             TableSpecifier::Totals,
             TableSpecifier::SpecialColumn(Box::new(TableSpecifier::DataRows), "REV".to_string()),
+            // BUG-0643: the two special-item pairs, alone, with a column, and
+            // with a column span -- and a span after a single special item.
+            TableSpecifier::HeadersAndData,
+            TableSpecifier::DataAndTotals,
+            TableSpecifier::SpecialColumn(Box::new(TableSpecifier::HeadersAndData), "REV".to_string()),
+            TableSpecifier::SpecialColumn(Box::new(TableSpecifier::DataAndTotals), "#n".to_string()),
+            TableSpecifier::SpecialColumnRange(Box::new(TableSpecifier::Headers), "A".to_string(), "B".to_string()),
+            TableSpecifier::SpecialColumnRange(
+                Box::new(TableSpecifier::HeadersAndData),
+                "A".to_string(),
+                "B".to_string(),
+            ),
         ];
 
         for spec in variants {
@@ -1569,11 +1825,42 @@ mod tests {
             "SUM(SALES[#Headers])",
             "SUM(SALES[#Totals])",
             "SUM(SALES[#This Row])",
+            // BUG-0643 [LIVE, Excel 16, parser lane probe]: a SECOND special item
+            // is a special item, never a column -- Excel's formula bar shows each
+            // of these exactly so.
+            "ROWS(TABLE3[[#Headers],[#Data]])",
+            "ROWS(TABLE3[[#Data],[#Totals]])",
+            "ROWS(TABLE3[[#Headers],[#Data],['#n]])",
+            "SUM(TABLE4[[#Data],[#Totals],[p]])",
+            "COLUMNS(TABLE4[[#Headers],[#Data],[p]:[q]])",
+            "ROWS(TABLE4[[#Headers],[p]:[q]])",
         ] {
             let ast = parser::parse(source)
                 .unwrap_or_else(|e| panic!("Excel spelling {} does not parse: {}", source, e));
             let rendered = render_formula_raw(&ast);
             assert_eq!(rendered, source, "{} did not round-trip", source);
+        }
+    }
+
+    /// BUG-0643. Excel stores a reversed special pair in its own order and
+    /// refuses the pairs it has no region for [LIVE, Excel 16: typed
+    /// `Table1[[#Data],[#Headers]]` shows `Table1[[#Headers],[#Data]]`;
+    /// `[[#Headers],[#Totals]]` and `[[#All],[#Data]]` are refused at entry].
+    #[test]
+    fn a_reversed_special_pair_is_stored_in_excels_order_and_an_impossible_one_is_refused() {
+        let reversed = parser::parse("=ROWS(T[[#Data],[#Headers]])").expect("reversed pair parses");
+        assert_eq!(render_formula_raw(&reversed), "ROWS(T[[#Headers],[#Data]])");
+        let reversed = parser::parse("=ROWS(T[[#Totals],[#Data]])").expect("reversed pair parses");
+        assert_eq!(render_formula_raw(&reversed), "ROWS(T[[#Data],[#Totals]])");
+        assert!(parser::parse("=ROWS(T[[#Headers],[#Totals]])").is_err());
+        assert!(parser::parse("=ROWS(T[[#All],[#Data]])").is_err());
+        // An ESCAPED `#` is a column name, not a special item.
+        match parser::parse("=T[[#Data],['#Totals]]").expect("parses") {
+            Expression::TableRef { specifier, .. } => assert_eq!(
+                specifier,
+                TableSpecifier::SpecialColumn(Box::new(TableSpecifier::DataRows), "#Totals".to_string())
+            ),
+            other => panic!("not a table ref: {:?}", other),
         }
     }
 
@@ -1669,6 +1956,32 @@ mod tests {
                 ),
                 other => panic!("{:e} rendered as {:?}, which re-parsed as {:?}", n, rendered, other),
             }
+        }
+    }
+
+    /// NEW-bare-table-name. [LIVE, Excel 16, lane namese, SCRATCH/namese/
+    /// p1.txt] `=ROWS(Tbl[])` shows `=ROWS(Tbl)` and is filed `ROWS(Tbl[])`;
+    /// `=ROWS(Tbl[#Data])` shows and is filed as typed.
+    #[test]
+    fn the_whole_table_shows_bare_and_is_stored_with_empty_brackets() {
+        for (typed, shown, stored) in [
+            ("=ROWS(Tbl[])", "ROWS(Tbl)", "ROWS(Tbl[])"),
+            ("=ROWS(Tbl[ ])", "ROWS(Tbl)", "ROWS(Tbl[])"),
+            ("=Tbl[]+0", "Tbl+0", "Tbl[]+0"),
+            ("=ROWS(Tbl[#Data])", "ROWS(Tbl[#Data])", "ROWS(Tbl[#Data])"),
+            ("=ROWS(Tbl[[#Data]])", "ROWS(Tbl[#Data])", "ROWS(Tbl[#Data])"),
+        ] {
+            let ast = parser::parse(typed).expect("parses");
+            // The lexer folds a table name; the host restamps the table's own
+            // casing (`table_deps::restamp_table_casing`), so compare folded.
+            assert_eq!(render_formula(&ast).to_ascii_uppercase(), shown.to_ascii_uppercase(), "{} in the formula bar", typed);
+            assert_eq!(render_formula_raw(&ast).to_ascii_uppercase(), stored.to_ascii_uppercase(), "{} as stored", typed);
+            assert_eq!(
+                parser::parse(&format!("={}", stored)).expect("the stored text parses back"),
+                ast,
+                "{}: the stored text reads back as the same reference",
+                typed
+            );
         }
     }
 }

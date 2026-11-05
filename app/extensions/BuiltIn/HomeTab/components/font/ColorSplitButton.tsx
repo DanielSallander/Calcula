@@ -23,10 +23,12 @@
 //          Same control in the band and in a panel (Excel's are small splits
 //          in the band too), so `band` changes nothing here.
 
-import React from "react";
+import React, { useEffect } from "react";
 import { RibbonIcon } from "@api";
 import { CoreCommands } from "@api/commands";
+import { AppEvents, onAppEvent } from "@api/events";
 import { ColorSwatch, ICON_SIZE_SM } from "@api/layout";
+import { getThemeColorPalette } from "@api/theme";
 import type { HomeItemProps } from "../homeItemProps";
 import { itemTooltip } from "../itemTooltip";
 import {
@@ -37,16 +39,51 @@ import {
   chooseColor,
   colorChoiceStore,
   isColorItemId,
+  refreshThemeChoices,
   type ColorItemId,
 } from "./colorChoice";
 import { runCommand } from "../runCommand";
 import { useSessionValue } from "./sessionStore";
 
 /**
+ * Keep a remembered THEME colour's bar on the document's current theme
+ * (BUG-0370): re-resolve it on mount, when the document theme changes, and when
+ * another document opens or a new one starts (each may bring its own theme).
+ * @api/theme drops its per-document palette cache on those same events, before
+ * any consumer hears them, so the re-read here is always the new document's.
+ * Every copy of the button runs this; the refresh is idempotent.
+ */
+function useThemeChoiceRefresh(): void {
+  useEffect(() => {
+    let live = true;
+    const refresh = (): void => {
+      getThemeColorPalette()
+        .then((palette) => {
+          if (live && Array.isArray(palette)) refreshThemeChoices(palette);
+        })
+        .catch(() => {
+          // No palette (no backend): the remembered hex stays, as before.
+        });
+    };
+    refresh();
+    const offs = [
+      onAppEvent(AppEvents.THEME_CHANGED, refresh),
+      onAppEvent(AppEvents.AFTER_OPEN, refresh),
+      onAppEvent(AppEvents.AFTER_NEW, refresh),
+    ];
+    return () => {
+      live = false;
+      for (const off of offs) off();
+    };
+  }, []);
+}
+
+/**
  * Excel's Fill Color / Font Color split button. No pressed state: the bar is
  * colour DATA, not a toggle.
  */
 export function ColorSplitButton({ item, state }: HomeItemProps): React.ReactElement {
+  useThemeChoiceRefresh();
   // Any other id is a dispatcher mistake; render it as Font Color rather than
   // throw inside the ribbon.
   const itemId: ColorItemId = isColorItemId(item.id) ? item.id : "textColor";

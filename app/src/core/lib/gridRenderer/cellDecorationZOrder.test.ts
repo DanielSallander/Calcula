@@ -538,11 +538,12 @@ describe("the indicator extensions declare the anchor", () => {
 /**
  * Render the same fixture with frozen or split panes.
  *
- * WHY THIS EXISTS. Freeze/split does not merely shift geometry: it sends the
- * cells through a COMPLETELY DIFFERENT painter (`renderZone` ->
- * `drawCellTextZone`) from the one every test above exercises. An indicator
- * that the ordinary path draws correctly can be absent from the frozen path
- * and nothing above would notice — which is exactly what was measured.
+ * WHY THIS EXISTS. Freeze/split used to send the cells through a COMPLETELY
+ * DIFFERENT painter (`renderZone` -> `drawCellTextZone`) from the one every test
+ * above exercises. An indicator that the ordinary path drew correctly was absent
+ * from the frozen path and nothing above noticed — which is exactly what was
+ * measured. Since BUG-0362 a pane is painted by `drawCellText` itself with the
+ * pane's range and clip; these cases keep the per-pane clip and replay honest.
  */
 function renderPaneFrame(
   selection: Selection | null,

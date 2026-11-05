@@ -133,10 +133,12 @@ describe("Clear on a floating grid's cells", () => {
     expect(api.clearRangeWithOptions).not.toHaveBeenCalled();
   });
 
-  it("positive control: the SHEET's Clear Contents is the plain clearRange, as before", async () => {
+  // Delete is Clear CONTENTS on the sheet too (it keeps the cells' formats, as
+  // Excel's does): the contents clear WITHOUT a target.
+  it("positive control: the SHEET's Clear Contents is the contents clear with no target", async () => {
     await runClearGesture("clearContents", { selection: sel(0, 0, 1, 1), refresh: vi.fn() });
-    expect(api.clearRange).toHaveBeenCalledWith(0, 0, 1, 1);
-    expect(api.clearRangeWithOptions).not.toHaveBeenCalled();
+    expect(api.clearRangeWithOptions).toHaveBeenCalledWith(0, 0, 1, 1, "contents");
+    expect(api.clearRange).not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledTimes(1);
   });
 });

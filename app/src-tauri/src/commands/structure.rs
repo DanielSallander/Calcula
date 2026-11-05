@@ -714,11 +714,14 @@ fn shift_flat_cell_stores(
 /// dropped entirely.
 ///
 /// The caller must already hold the undo-stack lock inside `begin_transaction`.
+/// `sheet_names` is the caller's snapshot: the rules' FORMULAS move too, on
+/// this sheet and on every sheet that names it (NEW-cfdv-structural-shift).
 fn shift_per_sheet_range_stores(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
+    sheet_names: &[String],
     edit: calp::writeback::StructuralEdit,
 ) {
     // --- Conditional formats and data validations (one rule, both paths). ---
@@ -727,6 +730,7 @@ fn shift_per_sheet_range_stores(
         effect,
         undo_stack,
         sheet_index,
+        sheet_names,
         &structure_cells::BandEdit::whole_lines(edit),
     );
 
@@ -1458,6 +1462,10 @@ fn recalc_structural_side_effects(
     if cross_sheet_rewritten.is_empty() && names_rewritten.is_empty() {
         return;
     }
+    // THE LIVE DATA TABLES are refreshed by every structural edit at its tail
+    // (`data_tables::refresh_after_edit`), after its active-sheet cascade: the
+    // two helpers below do not refresh on their own (NEW-dt-refresh-root).
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
     if state
         .calculation_mode
         .lock()
@@ -1647,6 +1655,9 @@ pub(crate) fn insert_rows_impl(
     count: u32,
     sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    // ONE REFRESH (NEW-double-refresh): the shared recalculations below leave
+    // the live data tables to this command's own tail, which refreshes once.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
     // Wave 3: an explicit non-active target takes the off-sheet path (state
     // updates only; the active canvas shows nothing from that sheet, so the
     // empty payload is the correct "no repaint" answer).
@@ -1690,6 +1701,14 @@ pub(crate) fn insert_rows_impl(
     structure_cells::ensure_insert_fits(
         &grid,
         &structure_cells::BandEdit::whole_lines(calp::writeback::StructuralEdit::RowInsert { at: row, count }),
+    )?;
+    // A LIVE DATA TABLE (BUG-0652): a row inserted inside its range is refused
+    // [LIVE: "Can't change part of a data table."], under the held grid.
+    crate::data_tables::check_structural_edit(
+        &grid,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+        0,
+        u32::MAX,
     )?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
@@ -1860,6 +1879,7 @@ pub(crate) fn insert_rows_impl(
         &effect,
         &mut undo_stack,
         active_sheet,
+        &sheet_names_snapshot,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
@@ -2081,6 +2101,19 @@ pub(crate) fn insert_rows_impl(
         &seeds,
         &mut recalculated,
     );
+    // A LIVE DATA TABLE whose model reads a shifted range follows the edit
+    // (Insert Rows) under automatic calculation, as after any edit (BUG-0652, rev-dt2-1)
+    // [LIVE: B1 = A1*SUM(C10:C12) read by a table, row 11 deleted: the body
+    // went 30 / 42 -> 20 / 28]. Every guard above is dropped. The reply below
+    // is the whole grid, read after this, so it carries the refreshed body.
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &mut recalculated,
+    );
 
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
@@ -2186,6 +2219,8 @@ pub(crate) fn insert_columns_impl(
     count: u32,
     sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    // ONE REFRESH (NEW-double-refresh): see `insert_rows_impl`.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
     // Wave 3: an explicit non-active target takes the off-sheet path (see
     // insert_rows).
     {
@@ -2221,6 +2256,13 @@ pub(crate) fn insert_columns_impl(
     structure_cells::ensure_insert_fits(
         &grid,
         &structure_cells::BandEdit::whole_lines(calp::writeback::StructuralEdit::ColInsert { at: col, count }),
+    )?;
+    // A LIVE DATA TABLE (BUG-0652): a column inserted inside its range.
+    crate::data_tables::check_structural_edit(
+        &grid,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+        0,
+        u32::MAX,
     )?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
@@ -2386,6 +2428,7 @@ pub(crate) fn insert_columns_impl(
         &effect,
         &mut undo_stack,
         active_sheet,
+        &sheet_names_snapshot,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
@@ -2589,6 +2632,19 @@ pub(crate) fn insert_columns_impl(
         pane_control_state,
         ribbon_filter_state,
         &seeds,
+        &mut recalculated,
+    );
+    // A LIVE DATA TABLE whose model reads a shifted range follows the edit
+    // (Insert Columns) under automatic calculation, as after any edit (BUG-0652, rev-dt2-1)
+    // [LIVE: B1 = A1*SUM(C10:C12) read by a table, row 11 deleted: the body
+    // went 30 / 42 -> 20 / 28]. Every guard above is dropped. The reply below
+    // is the whole grid, read after this, so it carries the refreshed body.
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
         &mut recalculated,
     );
 
@@ -2934,10 +2990,10 @@ pub(crate) fn shift_formula_internal_with_tables(
     // round 20, parsefix/probe1.ps1: FillRight, FillDown and Range.Copy all
     // leave `SUM(b:b)` and `b:D`, while `=LET(b,2,SUM(A:B))` goes to `B:C`
     // and `=LET(x,2,SUM(B:B)*x)` to `C:C`]. The regex passes below cannot see
-    // a binder's scope, so such a range is held out of the text, exactly as
-    // the structural shift does (`shift_formula_cols_sheet_aware`).
-    let (held_formula, held) = hold_parameter_column_ranges(formula);
-    let formula = held_formula.as_str();
+    // a binder's scope, so `rewrite_outside_strings`, which every one of them
+    // runs through, holds such a range out of the text (`hold_formula_names`),
+    // and in a formula that declares a name spelled like a cell (`x1`) every
+    // name it reads: Excel keeps `=LET(x1,5,x1*2)` on every fill and copy.
     // Structured references first, off the PRISTINE text: the A1 passes below
     // skip bracket spans entirely, so they neither see nor disturb this.
     let mut result = match tables {
@@ -2957,7 +3013,7 @@ pub(crate) fn shift_formula_internal_with_tables(
 
     // Normalize any ranges that became inverted after shifting.
     // Example: I10:$I$11 shifted by +3 rows --> I13:$I$11 --> $I$11:I13
-    release_parameter_column_ranges(normalize_inverted_ranges(&result), &held)
+    normalize_inverted_ranges(&result)
 }
 
 // ============================================================================
@@ -3666,6 +3722,8 @@ pub(crate) fn delete_rows_impl(
     count: u32,
     sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    // ONE REFRESH (NEW-double-refresh): see `insert_rows_impl`.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
     // Wave 3: an explicit non-active target takes the off-sheet path (see
     // insert_rows).
     {
@@ -3724,6 +3782,18 @@ pub(crate) fn delete_rows_impl(
         }
     }
 
+    // A LIVE DATA TABLE (BUG-0652): deleting part of its range -- a body row,
+    // its formula row -- without deleting the whole body is refused [LIVE:
+    // "Can't change part of a data table."]. BEFORE the pivot cascade below,
+    // whose effect would otherwise dirty a document the refusal leaves alone;
+    // asked again under the held grid.
+    crate::data_tables::check_structural_edit(
+        &*state.grid.read().map_err(|e| e.to_string())?,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+        0,
+        u32::MAX,
+    )?;
+
     // BUG-0054: pivots FULLY COVERED by this delete die with their world, not
     // raw. Capture their `pivot_delete` restore payloads and run the
     // slicer/timeline/ribbon-filter cascade NOW — every refusal gate above has
@@ -3758,6 +3828,8 @@ pub(crate) fn delete_rows_impl(
     let snapshot = capture_grid_snapshot(&state);
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    // ...and again under the held grid (no window between the gate and the edit).
+    crate::data_tables::check_structural_edit(&grid, calp::writeback::StructuralEdit::RowDelete { at: row, count }, 0, u32::MAX)?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
     // in that order and runs on a BACKGROUND thread, so the reverse closes a
@@ -3938,6 +4010,7 @@ pub(crate) fn delete_rows_impl(
         &effect,
         &mut undo_stack,
         active_sheet,
+        &sheet_names_snapshot,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
@@ -4156,6 +4229,19 @@ pub(crate) fn delete_rows_impl(
         &seeds,
         &mut recalculated,
     );
+    // A LIVE DATA TABLE whose model reads a shifted range follows the edit
+    // (Delete Rows) under automatic calculation, as after any edit (BUG-0652, rev-dt2-1)
+    // [LIVE: B1 = A1*SUM(C10:C12) read by a table, row 11 deleted: the body
+    // went 30 / 42 -> 20 / 28]. Every guard above is dropped. The reply below
+    // is the whole grid, read after this, so it carries the refreshed body.
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &mut recalculated,
+    );
 
     // Re-acquire locks for result building
     let grid = state.grid.read().map_err(|e| e.to_string())?;
@@ -4261,6 +4347,8 @@ pub(crate) fn delete_columns_impl(
     count: u32,
     sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    // ONE REFRESH (NEW-double-refresh): see `insert_rows_impl`.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
     // Wave 3: an explicit non-active target takes the off-sheet path (see
     // insert_rows).
     {
@@ -4313,6 +4401,14 @@ pub(crate) fn delete_columns_impl(
         }
     }
 
+    // A LIVE DATA TABLE (BUG-0652): see delete_rows_impl.
+    crate::data_tables::check_structural_edit(
+        &*state.grid.read().map_err(|e| e.to_string())?,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+        0,
+        u32::MAX,
+    )?;
+
     // BUG-0054 (column twin): see delete_rows_impl — pivots fully covered by
     // this delete die with their cascade and their undo restore, not raw.
     let doomed_pivots = {
@@ -4342,6 +4438,8 @@ pub(crate) fn delete_columns_impl(
     let snapshot = capture_grid_snapshot(&state);
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    // ...and again under the held grid (no window between the gate and the edit).
+    crate::data_tables::check_structural_edit(&grid, calp::writeback::StructuralEdit::ColDelete { at: col, count }, 0, u32::MAX)?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
     // in that order and runs on a BACKGROUND thread, so the reverse closes a
@@ -4519,6 +4617,7 @@ pub(crate) fn delete_columns_impl(
         &effect,
         &mut undo_stack,
         active_sheet,
+        &sheet_names_snapshot,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
@@ -4734,6 +4833,19 @@ pub(crate) fn delete_columns_impl(
         pane_control_state,
         ribbon_filter_state,
         &seeds,
+        &mut recalculated,
+    );
+    // A LIVE DATA TABLE whose model reads a shifted range follows the edit
+    // (Delete Columns) under automatic calculation, as after any edit (BUG-0652, rev-dt2-1)
+    // [LIVE: B1 = A1*SUM(C10:C12) read by a table, row 11 deleted: the body
+    // went 30 / 42 -> 20 / 28]. Every guard above is dropped. The reply below
+    // is the whole grid, read after this, so it carries the refreshed body.
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
         &mut recalculated,
     );
 
@@ -5619,6 +5731,8 @@ pub(crate) fn relocate_cell_references_recording(
     src_sheet_index: Option<usize>,
     record_move: bool,
 ) -> Result<Vec<CellData>, String> {
+    // ONE REFRESH (NEW-double-refresh): see `insert_rows_impl`.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
     // Cut/paste relocation re-evaluates the formulas it rewrites and WRITES the
     // results, so it is an Interactive surface: same ceiling as typing them.
     let _pass = crate::eval_budget::begin_pass(
@@ -5783,14 +5897,22 @@ pub(crate) fn relocate_cell_references_recording(
         // Preserve existing style
         let existing_style_index = prev.as_ref().map_or(0, |c| c.style_index);
 
-        // Evaluate the new formula
-        let cell_value = crate::evaluate_formula_multi_sheet_with_files(
-            &grids,
-            &sheet_names,
-            active_sheet,
-            new_formula,
-            &user_files,
-        );
+        // Evaluate the new formula -- except a LIVE DATA TABLE's body cell
+        // (BUG-0652, rev-dt-3), whose `TABLE(..)` marker has no value of its
+        // own to evaluate (a positionless evaluation answered #VALUE! in every
+        // body cell): it keeps the value its table computed. Excel [LIVE,
+        // dtfollow/probe4.ps1]: cutting the input cell A1 to C1 turns the body
+        // into `=TABLE(,C1)` showing 10 / 14 as before, and it stays live.
+        let cell_value = match prev.as_ref() {
+            Some(cell) if engine::data_table::is_data_table_cell(cell) => cell.value.clone(),
+            _ => crate::evaluate_formula_multi_sheet_with_files(
+                &grids,
+                &sheet_names,
+                active_sheet,
+                new_formula,
+                &user_files,
+            ),
+        };
 
         // Build new cell. The relocated text is parsed through the shared
         // helper: if it cannot be read back the cell KEEPS the formula it has
@@ -5918,6 +6040,16 @@ pub(crate) fn relocate_cell_references_recording(
         pane_control_state,
         ribbon_filter_state,
         &changed_names,
+    );
+    // A LIVE DATA TABLE whose input cell or model moved follows the move under
+    // automatic calculation, as after any edit (BUG-0652, rev-dt-3).
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &mut result,
     );
 
     Ok(result)
@@ -7252,7 +7384,22 @@ fn replace_all_guarded(
 /// column list to find the next ordinal, which a text shifter cannot reach. The
 /// result here is that a plain specifier never shifts — a divergence, but one
 /// that always names a real column.
-fn rewrite_outside_strings(formula: &str, mut rewrite: impl FnMut(&str) -> String) -> String {
+///
+/// A LET / LAMBDA NAME IS NO REFERENCE, AND THIS IS WHERE EVERY SHIFTER LEARNS
+/// IT. Every text shifter in this file and in `structure_cells` -- Fill and
+/// Copy+Paste, the structural row / column shifts on and off the sheet, the
+/// Cut+Paste relocation, Insert/Delete Cells, defined names and bindings --
+/// bottoms out here, so the names are held out of the text ONCE, before any
+/// pass runs, and put back after ([`hold_formula_names`]): a bound column range
+/// (`b:b`), and in a formula that declares a name spelled like a cell every
+/// name that formula reads ([`cell_shaped_name_spans`]).
+fn rewrite_outside_strings(formula: &str, rewrite: impl FnMut(&str) -> String) -> String {
+    let (held_formula, held) = hold_formula_names(formula);
+    release_formula_names(rewrite_outside_strings_unheld(&held_formula, rewrite), &held)
+}
+
+/// [`rewrite_outside_strings`] over text whose names are already held.
+fn rewrite_outside_strings_unheld(formula: &str, mut rewrite: impl FnMut(&str) -> String) -> String {
     // The trim-reference dots are lifted off before the shifter sees the text
     // and put back after. See `shift_with_trim_dots_lifted` for why.
     let mut rewrite = |segment: &str| shift_with_trim_dots_lifted(segment, &mut rewrite);
@@ -7812,10 +7959,9 @@ pub(crate) fn shift_formula_cols_sheet_aware(
     // Insert Column before B -- `SUM(b:b)` stays, and so does `b:D`, while
     // `$B:$B`, `B5` and an unbound `=LET(x,2,SUM(B:B)*x)` follow the column.
     // The regexes below cannot see a binder's scope, so such a range is held
-    // out of the text here and put back after.
-    let (held_formula, held) = hold_parameter_column_ranges(formula);
-    let formula = held_formula.as_str();
-    let shifted = rewrite_outside_strings(formula, |segment| {
+    // out of the text and put back after, by `rewrite_outside_strings`
+    // (`hold_formula_names`).
+    rewrite_outside_strings(formula, |segment| {
         // Pass 1: cell refs and cell ranges.
         let pass1 = replace_all_guarded(&QUALIFIED_REF_RE, segment, |caps| {
             let lead = &caps[1];
@@ -7900,30 +8046,48 @@ pub(crate) fn shift_formula_cols_sheet_aware(
                 _ => format!("{}{}", lead, REF_ERROR),
             }
         })
-    });
-    release_parameter_column_ranges(shifted, &held)
+    })
 }
 
-/// The first of the placeholder characters [`hold_parameter_column_ranges`]
-/// puts in place of a held range: Supplementary Private Use Area-A, which no
-/// formula, sheet name or shifter pattern uses (the lifts above use U+0001 and
-/// U+0002), so no pattern can match, split or move one.
+/// The first of the placeholder characters [`hold_formula_names`] puts in
+/// place of a held name: Supplementary Private Use Area-A, which no formula,
+/// sheet name or shifter pattern uses (the lifts above use U+0001 and U+0002),
+/// so no pattern can match, split or move one.
 const HELD_RANGE_BASE: u32 = 0xF0000;
 
-/// Replace every bare whole-column range that a LET / LAMBDA name in scope
-/// spells -- by the parser's rule, `parser::bind_parameter_column_ranges`:
-/// unqualified, neither side `$`, and the START letters a bound name (then the
-/// end is a name too, `b:D`, or R1C1's own column / row) -- with one
-/// placeholder character each. Returns the held text and the
-/// ranges, in order, for [`release_parameter_column_ranges`].
+/// Replace every NAME a shifter's regexes would read as a reference with one
+/// placeholder character each. Returns the held text and the names, in order,
+/// for [`release_formula_names`]. Which spellings those are is the parser's
+/// rule, in one of two shapes:
+///
+/// * A formula that declares a LET name or LAMBDA parameter SPELLED LIKE A
+///   CELL (`x1`, `A1`, `XFD1`) is read in R1C1 notation, where every plain cell
+///   spelling is a name ([`cell_shaped_name_spans`]).
+/// * Any other formula: every bare whole-column range that a LET / LAMBDA name
+///   in scope spells -- by the parser's rule,
+///   `parser::bind_parameter_column_ranges`: unqualified, neither side `$`, and
+///   the START letters a bound name (then the end is a name too, `b:D`, or
+///   R1C1's own column / row) ([`parameter_column_range_spans`]).
 ///
 /// THE SCOPE RULE, as the parser applies it: a LET name is bound in every LATER
 /// value and in the calculation, never in its own value
 /// (`=LET(b,SUM(B:B),b)` sums column B); a LAMBDA parameter is bound in the
 /// body. Strings, quoted sheet names and `[...]` brackets are skipped whole, and
 /// `{...}` is its own frame so an array constant's commas count no arguments.
-fn hold_parameter_column_ranges(formula: &str) -> (String, Vec<String>) {
-    let spans = parameter_column_range_spans(formula);
+fn hold_formula_names(formula: &str) -> (String, Vec<String>) {
+    // A name spelled like a cell PAST the sheet's edge, in any formula.
+    let mut spans = beyond_grid_name_spans(formula);
+    // Neither LET / LAMBDA shape exists without a LET or a LAMBDA
+    // (`_xlfn.LET` included), and every formula of a structural edit passes
+    // through here.
+    let upper = formula.to_ascii_uppercase();
+    if upper.contains("LET") || upper.contains("LAMBDA") {
+        spans.extend(match cell_shaped_name_spans(formula) {
+            Some(spans) => spans,
+            None => parameter_column_range_spans(formula),
+        });
+        spans.sort_unstable();
+    }
     if spans.is_empty() {
         return (formula.to_string(), Vec::new());
     }
@@ -7943,8 +8107,8 @@ fn hold_parameter_column_ranges(formula: &str) -> (String, Vec<String>) {
     (out, held)
 }
 
-/// Put back what [`hold_parameter_column_ranges`] held, exactly as written.
-fn release_parameter_column_ranges(text: String, held: &[String]) -> String {
+/// Put back what [`hold_formula_names`] held, exactly as written.
+fn release_formula_names(text: String, held: &[String]) -> String {
     if held.is_empty() {
         return text;
     }
@@ -7959,7 +8123,319 @@ fn release_parameter_column_ranges(text: String, held: &[String]) -> String {
     out
 }
 
-/// The byte spans of the ranges [`hold_parameter_column_ranges`] holds.
+/// In a formula that DECLARES a LET name or LAMBDA parameter spelled like a
+/// cell, the byte spans of every name it reads; `None` when it declares no
+/// such name (or does not parse), for [`parameter_column_range_spans`].
+///
+/// EXCEL'S R1C1 FALLBACK, as the parser applies it
+/// (`parser::parser::apply_r1c1_fallback`): such a formula is read in R1C1
+/// notation, ALL of it, so every plain cell spelling in it is a NAME -- the
+/// binding where one is in scope, an unknown name where none is -- and a name
+/// never moves. [LIVE, Excel 16, 2026-11-05, rev-parse probeA:
+/// `=LET(x1,5,x1*2)`, `=LAMBDA(a1,b1,a1+b1)(3,4)` and `=LET(X1,5,X1*2)` keep
+/// their text, and 10 / 7 / 10, through a delete of row 1, of column X and of
+/// column A, an insert of row 1, a copy up to row 1, FillDown, FillRight at
+/// column XFD, a copy to another cell, and FillRight of `=LET(Q5,2,Q5*3)`; only
+/// a real reference moves -- `RC4`, which the formula holds as `$D7`, became
+/// `$D6`, `$C6`, `$C7`, `$D1` and `$D4`.] The regexes renamed `x1` to `x2` on
+/// every fill and insert, and wrote `=LET(#REF!,5,#REF!*2)` (#VALUE!) on a
+/// delete of row 1; FillRight from Q5 wrote `=LET(R5,2,R5*3)`, a formula
+/// Calcula's own typed entry refuses.
+///
+/// What is a name, token by token -- the parser's own reading, pinned by
+/// `cell_shaped_name_shift_tests::the_held_names_are_the_names_the_parser_reads`:
+/// * a cell spelling (`A1`..`XFD1048576`) that is neither behind a `$` (`$D7`
+///   is the reference an R1C1 `RC4` was entered as) nor in front of `(`, `!`
+///   or `[` (a function, a sheet, a table) -- behind a sheet and a 3-D span
+///   too (`Sheet2!A1` is that sheet's name `A1`, #NAME? in Excel), and either
+///   half of a range;
+/// * a plain whole-column range (`D:D`, `b:D`), behind one sheet too, as long
+///   as neither side is `$` (a 3-D `Sheet1:Sheet3!D:D` stays the columns,
+///   which no shifter touches).
+/// A row range (`1:1`) and everything with a `$` stay references and move.
+fn cell_shaped_name_spans(formula: &str) -> Option<Vec<(usize, usize)>> {
+    let declares = parser::parse(formula)
+        .map(|ast| parser::parser::declares_cell_shaped_name(&ast))
+        .unwrap_or(false);
+    if !declares {
+        return None;
+    }
+    let chars: Vec<(usize, char)> = formula.char_indices().collect();
+    let n = chars.len();
+    let byte_at = |k: usize| if k < n { chars[k].0 } else { formula.len() };
+    let is_ident_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '\\');
+    let is_column_letters = |s: &str| (1..=3).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphabetic());
+    // One identifier at `k`: (its end without trailing trim dots, its end).
+    let ident_at = |k: usize| -> (usize, usize) {
+        let mut j = k;
+        while j < n && is_ident_char(chars[j].1) {
+            j += 1;
+        }
+        let mut e = j;
+        while e > k && chars[e - 1].1 == '.' {
+            e -= 1;
+        }
+        (e, j)
+    };
+    let text = |a: usize, b: usize| -> String { chars[a..b].iter().map(|(_, c)| *c).collect() };
+    let char_at = |k: usize| chars.get(k).map(|(_, c)| *c);
+    let not_a_reference = |c: Option<char>| matches!(c, Some('(') | Some('!') | Some('['));
+
+    let mut spans = Vec::new();
+    // The last significant character; `a` stands for any identifier.
+    let mut prev: Option<char> = None;
+    // The last quoted span held a colon (`'Jan:Mar'`), so a `!` after it
+    // closes a 3-D qualifier.
+    let mut quoted_3d = false;
+    // The last `!` closed a 3-D qualifier.
+    let mut qualifier_3d = false;
+    // The last identifier stood after a `:` (`Sheet3` in `Sheet1:Sheet3`).
+    let mut ident_after_colon = false;
+    let mut k = 0usize;
+    while k < n {
+        let c = chars[k].1;
+        if c.is_whitespace() {
+            prev = Some(' ');
+            k += 1;
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                // A string literal or a quoted sheet name, its doubled quote an
+                // escape: never formula text.
+                let mut j = k + 1;
+                while j < n {
+                    if chars[j].1 == c {
+                        if j + 1 < n && chars[j + 1].1 == c {
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+                if c == '\'' {
+                    quoted_3d = chars[k + 1..j.min(n)].iter().any(|(_, ch)| *ch == ':');
+                }
+                prev = Some(c);
+                k = j + 1;
+                continue;
+            }
+            '[' => {
+                let mut depth = 0usize;
+                let mut j = k;
+                while j < n {
+                    match chars[j].1 {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                prev = Some(']');
+                k = j + 1;
+                continue;
+            }
+            '!' => {
+                qualifier_3d = match prev {
+                    Some('\'') => quoted_3d,
+                    Some('a') => ident_after_colon,
+                    _ => false,
+                };
+                prev = Some('!');
+                k += 1;
+                continue;
+            }
+            // A trim-reference dot after a colon belongs to the operator.
+            '.' if prev == Some(':') => {
+                k += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if c.is_ascii_digit() {
+            // A number, its exponent included (`1E5` holds no cell `E5`).
+            let mut j = k;
+            while j < n && (chars[j].1.is_ascii_digit() || chars[j].1 == '.') {
+                j += 1;
+            }
+            if j < n && matches!(chars[j].1, 'e' | 'E') {
+                let mut e = j + 1;
+                if e < n && matches!(chars[e].1, '+' | '-') {
+                    e += 1;
+                }
+                if e < n && chars[e].1.is_ascii_digit() {
+                    while e < n && chars[e].1.is_ascii_digit() {
+                        e += 1;
+                    }
+                    j = e;
+                }
+            }
+            prev = Some('0');
+            k = j;
+            continue;
+        }
+        if c.is_alphabetic() || c == '_' || c == '\\' {
+            let (end, after) = ident_at(k);
+            let name = text(k, end);
+            let behind_sheet = prev == Some('!');
+            let range_end = prev == Some(':');
+            let absolute = prev == Some('$');
+            let start_3d = behind_sheet && qualifier_3d;
+            // A whole-column range: letters, `:`, letters, and no more name.
+            let column_end = (is_column_letters(&name) && end == after && char_at(after) == Some(':'))
+                .then(|| after + 1)
+                .filter(|&s2| s2 < n && chars[s2].1.is_ascii_alphabetic())
+                .and_then(|s2| {
+                    let (e2, a2) = ident_at(s2);
+                    (e2 == a2 && is_column_letters(&text(s2, e2)) && !not_a_reference(char_at(a2))).then_some(a2)
+                });
+            if let Some(e2) = column_end {
+                if !absolute && !start_3d && !range_end {
+                    spans.push((byte_at(k), byte_at(e2)));
+                }
+                ident_after_colon = false;
+                prev = Some('a');
+                k = e2;
+                continue;
+            }
+            if !absolute && !not_a_reference(char_at(after)) && parser::parser::is_cell_spelling(&name) {
+                spans.push((byte_at(k), byte_at(end)));
+            }
+            ident_after_colon = range_end;
+            prev = Some('a');
+            k = after;
+            continue;
+        }
+        prev = Some(c);
+        k += 1;
+    }
+    Some(spans)
+}
+
+/// The byte spans of every NAME spelled like a cell PAST THE SHEET'S EDGE --
+/// column beyond XFD (`XFE1`, `ZZZ9`) or row beyond 1048576 (`A1048577`) --
+/// which the lexer reads as a name and the shifters' regexes (`[A-Za-z]{1,3}`
+/// then digits) read as a cell. [LIVE, Excel 16, 2026-11-05, rev-parse probe
+/// B: `=LET(XFE1,5,XFE1+D1)` and `=LET(A1048577,5,A1048577+D1)` are 15, their
+/// `D1` the reference `R[-19]C[-6]` -- the binder is no cell, so no R1C1
+/// fallback.] An insert of row 1 turned `XFE1` into `XFE2` (a name renamed),
+/// and so for a defined name `ZZZ1` used in any formula.
+fn beyond_grid_name_spans(formula: &str) -> Vec<(usize, usize)> {
+    if !formula.bytes().any(|b| b.is_ascii_digit()) {
+        return Vec::new();
+    }
+    let beyond = |name: &str| {
+        let letters = name.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+        let digits = &name[letters..];
+        (1..=3).contains(&letters)
+            && !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_digit())
+            && digits.trim_start_matches('0').parse::<u64>().map_or(true, |r| r > 0)
+            && !parser::parser::is_cell_spelling(name)
+    };
+    let chars: Vec<(usize, char)> = formula.char_indices().collect();
+    let n = chars.len();
+    let byte_at = |k: usize| if k < n { chars[k].0 } else { formula.len() };
+    let is_ident_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '\\');
+    let mut spans = Vec::new();
+    let mut prev: Option<char> = None;
+    let mut k = 0usize;
+    while k < n {
+        let c = chars[k].1;
+        match c {
+            // A string literal or a quoted sheet name: never formula text.
+            '"' | '\'' => {
+                let mut j = k + 1;
+                while j < n {
+                    if chars[j].1 == c {
+                        if j + 1 < n && chars[j + 1].1 == c {
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+                prev = Some(c);
+                k = j + 1;
+                continue;
+            }
+            '[' => {
+                let mut depth = 0usize;
+                let mut j = k;
+                while j < n {
+                    match chars[j].1 {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                prev = Some(']');
+                k = j + 1;
+                continue;
+            }
+            _ => {}
+        }
+        if c.is_ascii_digit() {
+            // A number, its exponent included.
+            let mut j = k;
+            while j < n && (chars[j].1.is_ascii_digit() || chars[j].1 == '.') {
+                j += 1;
+            }
+            if j < n && matches!(chars[j].1, 'e' | 'E') {
+                let mut e = j + 1;
+                if e < n && matches!(chars[e].1, '+' | '-') {
+                    e += 1;
+                }
+                if e < n && chars[e].1.is_ascii_digit() {
+                    while e < n && chars[e].1.is_ascii_digit() {
+                        e += 1;
+                    }
+                    j = e;
+                }
+            }
+            prev = Some('0');
+            k = j;
+            continue;
+        }
+        if c.is_alphabetic() || c == '_' || c == '\\' {
+            let mut j = k;
+            while j < n && is_ident_char(chars[j].1) {
+                j += 1;
+            }
+            let mut end = j;
+            while end > k && chars[end - 1].1 == '.' {
+                end -= 1;
+            }
+            let name: String = chars[k..end].iter().map(|(_, ch)| *ch).collect();
+            let follows = chars.get(j).map(|(_, ch)| *ch);
+            if prev != Some('$') && !matches!(follows, Some('(') | Some('!') | Some('[') | Some('$')) && beyond(&name) {
+                spans.push((byte_at(k), byte_at(end)));
+            }
+            prev = Some('a');
+            k = j;
+            continue;
+        }
+        prev = Some(c);
+        k += 1;
+    }
+    spans
+}
+
+/// The byte spans of the ranges [`hold_formula_names`] holds in a formula
+/// that declares no name spelled like a cell.
 fn parameter_column_range_spans(formula: &str) -> Vec<(usize, usize)> {
     #[derive(PartialEq)]
     enum Kind {
@@ -8170,6 +8646,12 @@ fn is_3d_span_end(lead: &str, quoted: &Option<String>, bare: &Option<String>) ->
 fn is_3d_span_line_tail(lead: &str) -> bool {
     lead == "!"
 }
+
+// A LET / LAMBDA name spelled like a cell is a name to every text shifter
+// (`hold_formula_names`, `cell_shaped_name_spans`).
+#[cfg(test)]
+#[path = "cell_shaped_name_shift_tests.rs"]
+mod cell_shaped_name_shift_tests;
 
 #[cfg(test)]
 mod sheet_aware_shift_tests {
@@ -8873,6 +9355,8 @@ pub(crate) fn off_sheet_structural_edit(
     edit: calp::writeback::StructuralEdit,
 ) -> Result<(), String> {
     use calp::writeback::StructuralEdit as SE;
+    // ONE REFRESH (NEW-double-refresh): see `insert_rows_impl`.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
 
     // Bounds first, so every later step can index freely.
     {
@@ -8974,6 +9458,15 @@ pub(crate) fn off_sheet_structural_edit(
             structure_cells::ensure_insert_fits(grid, &structure_cells::BandEdit::whole_lines(edit))?;
         }
     }
+    // A LIVE DATA TABLE on the TARGET sheet (BUG-0652): an insert inside its
+    // range, or a delete of part of it, is refused there as on the active
+    // sheet [LIVE: "Can't change part of a data table."].
+    {
+        let grids = state.grids.read().map_err(|e| e.to_string())?;
+        if let Some(grid) = grids.get(target) {
+            crate::data_tables::check_structural_edit(grid, edit, 0, u32::MAX)?;
+        }
+    }
 
     // Capture the per-sheet snapshot BEFORE any mutation (takes its own locks).
     let snapshot = crate::undo_commands::capture_sheet_structural_snapshot(state, target)?;
@@ -9042,6 +9535,10 @@ pub(crate) fn off_sheet_structural_edit(
         );
         // WHERE the lines moved, on the target sheet (see the on-sheet paths).
         crate::undo_commands::record_structural_delta(&mut undo_stack, &crate::undo_commands::line_edit_delta(target, edit));
+        // ...and the TARGET sheet's spill claims, which the snapshot does not
+        // carry (BUG-0356): without them Undo put the cells back and left the
+        // claims the edit had moved (see `record_spill_claims_for_undo`).
+        record_spill_claims_for_undo(state, &mut undo_stack, target);
         // BUG-0054: restores for the pivots this delete removes outright —
         // cascade first (reverse replay recreates the pivot before its
         // slicers), then one `pivot_delete` per pivot, all in THIS transaction.
@@ -9118,7 +9615,7 @@ pub(crate) fn off_sheet_structural_edit(
             &structure_cells::BandEdit::whole_lines(edit),
         );
         shift_controls(state, &effect, &mut undo_stack, target, edit);
-        shift_per_sheet_range_stores(state, &effect, &mut undo_stack, target, edit);
+        shift_per_sheet_range_stores(state, &effect, &mut undo_stack, target, &sheet_names_snapshot, edit);
         shift_flat_cell_stores(state, &effect, target, edit);
 
         // Every OTHER sheet (including the ACTIVE mirror) may reference the
@@ -9388,6 +9885,19 @@ pub(crate) fn off_sheet_structural_edit(
             &names_rewritten,
         );
     }
+
+    // A LIVE DATA TABLE anywhere follows the edit under automatic calculation
+    // (BUG-0652, rev-dt2-1), with every guard dropped. The off-sheet reply is
+    // empty (the caller repaints nothing), so the repaints are not kept.
+    let mut refreshed: Vec<CellData> = Vec::new();
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &mut refreshed,
+    );
 
     // Dirty flag already set by `effect` (DocumentEffect::mutates) above.
 

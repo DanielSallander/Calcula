@@ -530,9 +530,25 @@ pub struct CellConditionalFormat {
     pub row: u32,
     pub col: u32,
     pub format: ConditionalFormat,
-    /// For data bars: fill percentage (0.0 to 1.0)
+    /// For data bars: the bar's LENGTH as a fraction (0.0 to 1.0) of the cell's
+    /// bar area, measured from the axis when `data_bar_axis` is set and from the
+    /// start edge otherwise (see `data_bar_geometry`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_bar_percent: Option<f64>,
+    /// For data bars: where the AXIS sits, as a fraction (0.0 to 1.0) of the bar
+    /// area from its start edge (the left, or the right under right-to-left).
+    /// Absent when the bar has no axis: no negative values under Automatic, or
+    /// the rule's axis is None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_bar_axis: Option<f64>,
+    /// For data bars: the value is NEGATIVE, so the bar runs from the axis toward
+    /// the start edge and is painted in the rule's negative colours.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_bar_negative: Option<bool>,
+    /// The rule hides the cell's VALUE and shows only its glyph: a data bar's
+    /// "Show Bar Only" (`show_value` false) or an icon set's "Show Icon Only".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hide_value: Option<bool>,
     /// For icon sets: icon index
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_index: Option<u32>,
@@ -601,6 +617,122 @@ pub struct UpdateCFParams {
     /// sheet, never the active sheet.
     #[serde(default)]
     pub target: Option<crate::api_types::CellTargetRef>,
+}
+
+// ============================================================================
+// ENTRY CHECKS
+// ============================================================================
+
+/// What a conditional-format rule naming a structured reference is refused
+/// with (NEW-cfdv-structured-refs). The refusal itself is [LIVE, Excel 16,
+/// 2026-11-05, cfdv/probe1.ps1 C20]: `FormatConditions.Add` refuses
+/// `=T1[@A]>1`, `=SUM(T1[A])>1` and `=T1[[#This Row],[A]]>1` while it accepts
+/// `=SUM($A$2:$A$3)>1` and `=COUNT(T1)>0` (a table's bare NAME is an ordinary
+/// name there). COM reports only E_INVALIDARG, so the sentence is Excel's
+/// dialog text for a reference a rule cannot hold, not a measured string.
+pub(crate) const CF_STRUCTURED_REFERENCE_REFUSAL: &str =
+    "This type of reference cannot be used in a Conditional Formatting formula. \
+     Change the reference to a single cell, or use the reference with a worksheet function, such as =SUM(A1:E5).";
+
+/// Whether a rule formula names a structured reference (`Table1[Col]`,
+/// `[@Col]`, `Table1[#All]`, ...). A text that does not parse is not one: the
+/// rule's own evaluation reports it, as before.
+pub(crate) fn formula_names_structured_reference(formula: &str) -> bool {
+    let text = formula.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let text = if text.starts_with('=') { text.to_string() } else { format!("={}", text) };
+    match parser::parse(&text) {
+        Ok(expr) => expression_names_structured_reference(&expr),
+        Err(_) => false,
+    }
+}
+
+/// Exhaustive on purpose: a new expression kind is a compile error here, not
+/// a silent "no structured reference".
+fn expression_names_structured_reference(expr: &engine::Expression) -> bool {
+    use engine::Expression as X;
+    match expr {
+        X::TableRef { .. } => true,
+        X::Literal(_) | X::CellRef { .. } | X::ColumnRef { .. } | X::RowRef { .. } | X::NamedRef { .. } => false,
+        X::Range { start, end, .. } => {
+            expression_names_structured_reference(start) || expression_names_structured_reference(end)
+        }
+        X::BinaryOp { left, right, .. } => {
+            expression_names_structured_reference(left) || expression_names_structured_reference(right)
+        }
+        X::UnaryOp { operand, .. } | X::ImplicitIntersection { operand } => expression_names_structured_reference(operand),
+        X::FunctionCall { args, .. } => args.iter().any(expression_names_structured_reference),
+        X::Sheet3DRef { reference, .. } => expression_names_structured_reference(reference),
+        X::IndexAccess { target, index } => {
+            expression_names_structured_reference(target) || expression_names_structured_reference(index)
+        }
+        X::ArrayLiteral { rows } => rows.iter().flatten().any(expression_names_structured_reference),
+        X::ListLiteral { elements } => elements.iter().any(expression_names_structured_reference),
+        X::DictLiteral { entries } => entries
+            .iter()
+            .any(|(k, v)| expression_names_structured_reference(k) || expression_names_structured_reference(v)),
+        X::SpillRef { cell, .. } => expression_names_structured_reference(cell),
+    }
+}
+
+/// Every formula a rule carries, for the entry check and the structural
+/// shift alike: the expression, a cell-value comparison's operands when they
+/// are formulas (`=` first; a bare literal is a value), and the formula
+/// thresholds of colour scales, data bars and icon sets.
+pub(crate) fn rule_formulas_mut(rule: &mut ConditionalFormatRule) -> Vec<&mut String> {
+    let mut out: Vec<&mut String> = Vec::new();
+    match rule {
+        ConditionalFormatRule::Expression(e) => out.push(&mut e.formula),
+        ConditionalFormatRule::CellValue(cv) => {
+            if cv.value1.trim_start().starts_with('=') {
+                out.push(&mut cv.value1);
+            }
+            if let Some(v2) = cv.value2.as_mut() {
+                if v2.trim_start().starts_with('=') {
+                    out.push(v2);
+                }
+            }
+        }
+        ConditionalFormatRule::ColorScale(cs) => {
+            out.extend(cs.min_point.formula.as_mut());
+            if let Some(mid) = cs.mid_point.as_mut() {
+                out.extend(mid.formula.as_mut());
+            }
+            out.extend(cs.max_point.formula.as_mut());
+        }
+        ConditionalFormatRule::DataBar(db) => {
+            out.extend(db.min_formula.as_mut());
+            out.extend(db.max_formula.as_mut());
+        }
+        ConditionalFormatRule::IconSet(is) => {
+            for t in is.thresholds.iter_mut() {
+                out.extend(t.formula.as_mut());
+            }
+        }
+        ConditionalFormatRule::ContainsText(_)
+        | ConditionalFormatRule::TopBottom(_)
+        | ConditionalFormatRule::AboveAverage(_)
+        | ConditionalFormatRule::DuplicateValues
+        | ConditionalFormatRule::UniqueValues
+        | ConditionalFormatRule::BlankCells
+        | ConditionalFormatRule::NoBlanks
+        | ConditionalFormatRule::ErrorCells
+        | ConditionalFormatRule::NoErrors
+        | ConditionalFormatRule::TimePeriod(_) => {}
+    }
+    out
+}
+
+/// The entry refusal for a rule: Excel's sentence when any of its formulas
+/// names a structured reference, before any lock or effect.
+pub(crate) fn rule_entry_refusal(rule: &ConditionalFormatRule) -> Option<String> {
+    let mut probe = rule.clone();
+    rule_formulas_mut(&mut probe)
+        .into_iter()
+        .any(|f| formula_names_structured_reference(f))
+        .then(|| CF_STRUCTURED_REFERENCE_REFUSAL.to_string())
 }
 
 // ============================================================================
@@ -674,6 +806,11 @@ pub(crate) fn add_conditional_format_impl(
     file_state: &FileState,
     params: AddCFParams,
 ) -> CFResult {
+    // A structured reference in any of the rule's formulas: Excel's refusal,
+    // before any lock or effect (NEW-cfdv-structured-refs).
+    if let Some(refusal) = rule_entry_refusal(&params.rule) {
+        return CFResult::err(refusal);
+    }
     // An OBJECT's cells (P3): the rule lives on its backing sheet. Every gate
     // runs before the effect below, so a refusal leaves the document clean.
     let active_sheet = match &params.target {
@@ -745,6 +882,10 @@ pub(crate) fn update_conditional_format_impl(
     file_state: &FileState,
     params: UpdateCFParams,
 ) -> CFResult {
+    // The same entry refusal as `add` (NEW-cfdv-structured-refs), first.
+    if let Some(refusal) = params.rule.as_ref().and_then(rule_entry_refusal) {
+        return CFResult::err(refusal);
+    }
     let active_sheet = match &params.target {
         Some(target) => {
             let ranges = params.ranges.clone().unwrap_or_default();
@@ -755,17 +896,21 @@ pub(crate) fn update_conditional_format_impl(
         }
         None => *state.active_sheet.read().unwrap(),
     };
-    let effect = DocumentEffect::mutates(file_state);
-    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
-
-    let rules = match cf_storage.get_mut(&active_sheet) {
-        Some(r) => r,
+    // Gate and mutation in ONE critical section (`lock_pending` then
+    // `authorize`), and the effect only AFTER every refusal below
+    // (NEW-cf-update-dirty): "No conditional formats" and "Rule not found"
+    // change nothing, so they must leave the document clean.
+    let pending = state.conditional_formats.lock_pending().unwrap();
+    match pending.get(&active_sheet) {
         None => return CFResult::err("No conditional formats on this sheet"),
-    };
-
-    if !rules.iter().any(|r| r.id == params.rule_id) {
-        return CFResult::err("Rule not found");
+        Some(rules) if !rules.iter().any(|r| r.id == params.rule_id) => {
+            return CFResult::err("Rule not found");
+        }
+        Some(_) => {}
     }
+    let effect = DocumentEffect::mutates(file_state);
+    let mut cf_storage = pending.authorize(&effect);
+    let rules = cf_storage.get_mut(&active_sheet).expect("presence checked above");
     // Snapshot only once the rule is known to exist: a refusal must leave the
     // undo stack untouched, or Ctrl+Z starts consuming entries that undo
     // nothing.
@@ -775,6 +920,7 @@ pub(crate) fn update_conditional_format_impl(
         .find(|r| r.id == params.rule_id)
         .expect("presence checked above");
 
+    let rule_given = params.rule.is_some();
     if let Some(new_rule) = params.rule {
         rule.rule = new_rule;
     }
@@ -782,6 +928,13 @@ pub(crate) fn update_conditional_format_impl(
         rule.format = new_format;
     }
     if let Some(new_ranges) = params.ranges {
+        // New ranges alone keep the rule's meaning, as Excel's
+        // `ModifyAppliesToRange` does [LIVE, cfeval/probe1.ps1 P14]: the formula
+        // is re-stated for the new anchor. A caller that sends the rule too
+        // states its formula for the new ranges itself.
+        if !rule_given {
+            restate_rule_for_ranges(&mut rule.rule, &rule.ranges, &new_ranges);
+        }
         rule.ranges = new_ranges;
     }
     if let Some(stop) = params.stop_if_true {
@@ -839,21 +992,22 @@ pub(crate) fn delete_conditional_format_on(
         },
         None => *state.active_sheet.read().unwrap(),
     };
-    let effect = DocumentEffect::mutates(file_state);
-    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
-
-    let rules = match cf_storage.get_mut(&active_sheet) {
-        Some(r) => r,
+    // The refusals first, in the same critical section as the delete, and the
+    // effect only after them: a refusal leaves the document clean.
+    let pending = state.conditional_formats.lock_pending().unwrap();
+    match pending.get(&active_sheet) {
         None => return CFResult::err("No conditional formats on this sheet"),
-    };
+        Some(rules) if !rules.iter().any(|r| r.id == rule_id) => {
+            return CFResult::err("Rule not found");
+        }
+        Some(_) => {}
+    }
+    let effect = DocumentEffect::mutates(file_state);
+    let mut cf_storage = pending.authorize(&effect);
+    let rules = cf_storage.get_mut(&active_sheet).expect("presence checked above");
 
     let previous = rules.clone();
-    let initial_len = rules.len();
     rules.retain(|r| r.id != rule_id);
-
-    if rules.len() == initial_len {
-        return CFResult::err("Rule not found");
-    }
 
     drop(cf_storage);
     crate::undo_commands::record_conditional_formats_undo(
@@ -902,13 +1056,15 @@ pub(crate) fn reorder_conditional_formats_on(
         },
         None => *state.active_sheet.read().unwrap(),
     };
+    // The refusal first, in the same critical section as the reorder, and the
+    // effect only after it: a sheet with no rules leaves the document clean.
+    let pending = state.conditional_formats.lock_pending().unwrap();
+    if pending.get(&active_sheet).is_none() {
+        return CFResult::err("No conditional formats on this sheet");
+    }
     let effect = DocumentEffect::mutates(file_state);
-    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
-
-    let rules = match cf_storage.get_mut(&active_sheet) {
-        Some(r) => r,
-        None => return CFResult::err("No conditional formats on this sheet"),
-    };
+    let mut cf_storage = pending.authorize(&effect);
+    let rules = cf_storage.get_mut(&active_sheet).expect("presence checked above");
 
     let previous = rules.clone();
     let order_before: Vec<(u64, u32)> = rules.iter().map(|r| (r.id, r.priority)).collect();
@@ -1052,6 +1208,9 @@ pub(crate) fn resolve_icons(
     surface: crate::eval_budget::EvalSurface,
 ) -> HashMap<(u32, u32), Option<IconRef>> {
     let _governor = crate::eval_budget::install(surface);
+    // Each rule formula parsed once for the pass, evaluated per cell relative
+    // to its rule's anchor (NEW-cf-relative-eval).
+    let formulas = RuleFormulas::new(grids, sheet_names, sheet_index, None);
 
     // Priority order, explicitly. Lower priority value = higher precedence.
     let mut ordered: Vec<&ConditionalFormatDefinition> =
@@ -1079,11 +1238,11 @@ pub(crate) fn resolve_icons(
             if !rule_def.ranges.iter().any(|r| r.contains(row, col)) {
                 continue;
             }
+            let anchor = rule_anchor(&rule_def.ranges).unwrap_or((row, col));
             if let Some(cf) = evaluate_rule(
                 grid,
-                grids,
-                sheet_names,
-                sheet_index,
+                &formulas,
+                anchor,
                 &rule_def.rule,
                 &rule_def.format,
                 row,
@@ -1261,10 +1420,34 @@ pub(crate) fn evaluate_conditional_formats_for(
     start_col: u32,
     end_col: u32,
 ) -> Vec<CellConditionalFormat> {
+    evaluate_conditional_formats_with_names(
+        grid, grids, sheet_names, sheet_index, None, rules, start_row, end_row, start_col, end_col,
+    )
+}
+
+/// [`evaluate_conditional_formats_for`] with the workbook's defined names, so
+/// a rule formula that names one (`=A1>Thr`) resolves it as a cell would.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_conditional_formats_with_names(
+    grid: &Grid,
+    grids: &[Grid],
+    sheet_names: &[String],
+    sheet_index: usize,
+    named_ranges: Option<&HashMap<String, crate::named_ranges::NamedRange>>,
+    rules: &[ConditionalFormatDefinition],
+    start_row: u32,
+    end_row: u32,
+    start_col: u32,
+    end_col: u32,
+) -> Vec<CellConditionalFormat> {
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
     let min_col = start_col.min(end_col);
     let max_col = start_col.max(end_col);
+    // Each rule formula parsed once for the pass, evaluated per cell relative
+    // to its rule's anchor (NEW-cf-relative-eval).
+    let formulas = RuleFormulas::new(grids, sheet_names, sheet_index, named_ranges);
+    let anchors: Vec<Option<(u32, u32)>> = rules.iter().map(|r| rule_anchor(&r.ranges)).collect();
 
     // One RangeStats per rule for the whole pass, never per cell: the stats are a
     // property of the rule's ranges, not of the cell being asked about.
@@ -1291,9 +1474,8 @@ pub(crate) fn evaluate_conditional_formats_for(
                 }
                 if let Some(cf) = evaluate_rule(
                     grid,
-                    grids,
-                    sheet_names,
-                    sheet_index,
+                    &formulas,
+                    anchors[idx].unwrap_or((row, col)),
                     &rule_def.rule,
                     &rule_def.format,
                     row,
@@ -1329,6 +1511,9 @@ pub fn evaluate_conditional_formats(
     end_col: u32,
 ) -> EvaluateCFResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The defined names a rule formula may read, taken and released BEFORE the
+    // grid guards (a snapshot: no names guard is ever held across them).
+    let named_ranges = state.named_ranges.read().map(|n| (*n).clone()).unwrap_or_default();
     // CANONICAL LOCK ORDER: `grids` FIRST, then everything else.
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
@@ -1345,11 +1530,12 @@ pub fn evaluate_conditional_formats(
     };
 
     // ONE implementation, shared with the sort/filter paths and with the tests.
-    let result = evaluate_conditional_formats_for(
+    let result = evaluate_conditional_formats_with_names(
         grid,
         &grids,
         &sheet_names,
         active_sheet,
+        Some(&named_ranges),
         rules,
         start_row,
         end_row,
@@ -1419,9 +1605,10 @@ pub(crate) fn clear_conditional_formats_in_range_on_target(
 /// selection, so with a rule on A1:A10 and A1:A5 selected nothing happened at
 /// all and nothing said so. Now each range loses the selected cells (what is
 /// left is re-described as at most four rectangles: above, below, left and
-/// right of the cut), and a rule left with no cell is removed. Calcula's
-/// expression rules evaluate the same formula for every cell, so re-describing
-/// a rule's ranges cannot change what the rule means.
+/// right of the cut), and a rule left with no cell is removed. A rule's
+/// formula is its anchor's (`rule_anchor`), so when the cut moves the anchor
+/// the formula is re-stated for the new one (`restate_rule_for_ranges`) and
+/// every remaining cell still tests what it tested before, as in Excel.
 ///
 /// Returns the number of rules that changed (cut or removed). The
 /// `DocumentEffect` is constructed only once something is known to change: a
@@ -1460,6 +1647,10 @@ pub(crate) fn clear_conditional_formats_in_range_impl(
             rule.ranges.iter().flat_map(|r| subtract_range(r, &cut)).collect();
         if !ranges.is_empty() {
             let mut kept = rule.clone();
+            // The rule keeps its MEANING when its anchor moves: [LIVE, Excel
+            // 16, cfeval/probe1.ps1 P13] clearing A1:A2 of `=$B1>5` on A1:A5
+            // leaves A3:A5 testing B3..B5 (its formula is now `=$B3>5`).
+            restate_rule_for_ranges(&mut kept.rule, &rule.ranges, &ranges);
             kept.ranges = ranges;
             next.push(kept);
         }
@@ -1481,6 +1672,217 @@ pub(crate) fn clear_conditional_formats_in_range_impl(
     );
 
     Ok(changed)
+}
+
+// ============================================================================
+// STRUCTURAL EDITS: RULE FORMULAS (NEW-cfdv-structural-shift)
+// ============================================================================
+//
+// [LIVE, Excel 16, 2026-11-05, cfdv/probe1.ps1 C1-C19, V1-V11] a rule's
+// formula is the formula of its ANCHOR cell -- the top-left of the rectangle
+// bounding its ranges (`rule_anchor`; [LIVE] cfeval probe3 Q1-Q3 for several
+// ranges) -- and every other cell of the range reads it moved by its offset, as
+// a copied cell formula would be. A structural edit treats each cell's formula
+// as that cell's own and then re-states the rule from its new top-left:
+//   * insert row 1 under `=B2>$D$1` on B2:B10 -> B3:B11 `=B3>$D$2`; insert a
+//     column before D -> `=B2>$E$1`; on another sheet `=B2>Other!$A$1` follows
+//     a row inserted on Other -> `Other!$A$2`;
+//   * delete row 1 -> B1:B9 `=B1>#REF!`; delete the row an absolute reference
+//     names -> `#REF!`; delete the ANCHOR's row 2 -> B2:B9 `=B2>$D$1` (the old
+//     B3's formula, now at B2 -- never `#REF!`);
+//   * Insert Cells D1 down -> `$D$2`; Insert Cells B2 down -> B3:B11
+//     `=B3>$D$1`; Delete Cells B1 up -> B1:B9 `=B1>$D$1`, C1 left -> `$C$1`;
+//   * a cell-value rule's `=$D$1`, a colour scale's formula point and a list
+//     validation's source `=$F$1:$F$5` (-> `$F$2:$F$6`, `$G$1:$G$5`, `#REF!`
+//     when every row of it goes) follow the same rule, and so does a custom
+//     validation `=H2>$D$1` (-> `=H3>$D$2`).
+// The one case not reproduced: when the edit leaves SOME cells' relative
+// references deleted and others not (`=B12>0` on B2:B10, delete row 12),
+// Excel splits the rule in two (B2 `=#REF!>0`, B3:B10 `=B12>0`); the rule
+// here keeps one formula, its anchor's (`=#REF!>0`).
+
+/// Whether `band` is a whole-line edit (Insert/Delete Sheet Rows/Columns).
+fn is_whole_lines(band: &crate::commands::structure::structure_cells::BandEdit) -> bool {
+    let full = if band.moves_rows() { engine::EXCEL_MAX_COL_INDEX } else { engine::EXCEL_MAX_ROW_INDEX };
+    band.band_start == 0 && band.band_end >= full
+}
+
+/// One formula through a structural edit, by the shifter the CELLS use: the
+/// sheet-aware whole-line shifters for Insert/Delete Rows and Columns,
+/// `shift_formula_in_band` for Insert/Delete Cells. `formula_sheet` is the
+/// sheet the rule lives on (what an unqualified reference means).
+pub(crate) fn shift_rule_formula(
+    formula: &str,
+    formula_sheet: &str,
+    edited_sheet: &str,
+    band: &crate::commands::structure::structure_cells::BandEdit,
+) -> String {
+    use calp::writeback::StructuralEdit as SE;
+    use crate::commands::structure::{shift_formula_cols_sheet_aware, shift_formula_rows_sheet_aware};
+    if !is_whole_lines(band) {
+        return crate::commands::structure::structure_cells::shift_formula_in_band(
+            formula, formula_sheet, edited_sheet, band,
+        );
+    }
+    match band.edit {
+        SE::RowInsert { at, count } => shift_formula_rows_sheet_aware(formula, formula_sheet, edited_sheet, at, count as i32),
+        SE::RowDelete { at, count } => shift_formula_rows_sheet_aware(formula, formula_sheet, edited_sheet, at, -(count as i32)),
+        SE::ColInsert { at, count } => shift_formula_cols_sheet_aware(formula, formula_sheet, edited_sheet, at, count as i32),
+        SE::ColDelete { at, count } => shift_formula_cols_sheet_aware(formula, formula_sheet, edited_sheet, at, -(count as i32)),
+    }
+}
+
+/// Where the cell that sits at `(row, col)` AFTER `band` was before it. A cell
+/// an insertion created is its neighbour's continuation (the line before the
+/// insertion, Excel's "Format Same As Above / Left"), `None` only when the
+/// insertion was at the first line.
+pub(crate) fn band_origin(
+    band: &crate::commands::structure::structure_cells::BandEdit,
+    row: u32,
+    col: u32,
+) -> Option<(u32, u32)> {
+    let rows = band.moves_rows();
+    let (along, perp) = if rows { (row, col) } else { (col, row) };
+    if perp < band.band_start || perp > band.band_end {
+        return Some((row, col));
+    }
+    let (at, count) = (band.at() as u64, band.count() as u64);
+    let a = along as u64;
+    let origin = if band.inserting() {
+        if a < at {
+            a
+        } else if a >= at + count {
+            a - count
+        } else if at > 0 {
+            at - 1
+        } else {
+            return None;
+        }
+    } else if a >= at {
+        a + count
+    } else {
+        a
+    };
+    let origin = u32::try_from(origin).ok()?;
+    Some(if rows { (origin, perp) } else { (perp, origin) })
+}
+
+/// A rule formula anchored at `old_anchor` through `band`, re-stated from
+/// `new_anchor` (the rule's top-left AFTER the edit): the formula of the cell
+/// that moved to `new_anchor` -- the anchor's formula moved by that cell's
+/// offset, as a copy would move it -- shifted as that cell's own formula.
+pub(crate) fn rebase_rule_formula(
+    formula: &str,
+    old_anchor: (u32, u32),
+    new_anchor: (u32, u32),
+    formula_sheet: &str,
+    edited_sheet: &str,
+    band: &crate::commands::structure::structure_cells::BandEdit,
+) -> String {
+    let origin = band_origin(band, new_anchor.0, new_anchor.1).unwrap_or(old_anchor);
+    let translated = if origin == old_anchor {
+        formula.to_string()
+    } else {
+        crate::commands::structure::shift_formula_internal(
+            formula,
+            origin.0 as i32 - old_anchor.0 as i32,
+            origin.1 as i32 - old_anchor.1 as i32,
+        )
+    };
+    shift_rule_formula(&translated, formula_sheet, edited_sheet, band)
+}
+
+/// Every formula of a rule ON THE EDITED SHEET, rebased from `old_anchor` to
+/// `new_anchor`. Returns whether any changed.
+pub(crate) fn rebase_rule_formulas(
+    rule: &mut ConditionalFormatRule,
+    old_anchor: (u32, u32),
+    new_anchor: (u32, u32),
+    formula_sheet: &str,
+    edited_sheet: &str,
+    band: &crate::commands::structure::structure_cells::BandEdit,
+) -> bool {
+    let mut changed = false;
+    for formula in rule_formulas_mut(rule) {
+        let next = rebase_rule_formula(formula, old_anchor, new_anchor, formula_sheet, edited_sheet, band);
+        if next != *formula {
+            *formula = next;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The rules and validations on every sheet OTHER than the edited one: their
+/// ranges stay, and only a reference QUALIFIED with the edited sheet's name
+/// can reach it (`=B2>Other!$A$1`, a list source on the edited sheet).
+/// Records one restore per store per sheet that changed, into the caller's
+/// open transaction.
+pub(crate) fn shift_other_sheets_rule_formulas(
+    state: &AppState,
+    effect: &DocumentEffect,
+    undo_stack: &mut engine::UndoStack,
+    edited_sheet: usize,
+    sheet_names: &[String],
+    band: &crate::commands::structure::structure_cells::BandEdit,
+) {
+    let Some(edited_name) = sheet_names.get(edited_sheet) else { return };
+    if let Ok(mut store) = state.conditional_formats.write(effect) {
+        for (&sheet, rules) in store.iter_mut() {
+            if sheet == edited_sheet {
+                continue;
+            }
+            let Some(formula_sheet) = sheet_names.get(sheet) else { continue };
+            let previous = rules.clone();
+            let mut changed = false;
+            for rule in rules.iter_mut() {
+                for formula in rule_formulas_mut(&mut rule.rule) {
+                    let next = shift_rule_formula(formula, formula_sheet, edited_name, band);
+                    if next != *formula {
+                        *formula = next;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                undo_stack.record_custom_restore(
+                    "obj_conditional_formats".to_string(),
+                    crate::undo_commands::conditional_formats_snapshot_bytes(sheet, previous),
+                    "Shift conditional formats",
+                );
+            }
+        }
+    }
+    if let Ok(mut store) = state.data_validations.write(effect) {
+        for (&sheet, ranges) in store.iter_mut() {
+            if sheet == edited_sheet {
+                continue;
+            }
+            let Some(formula_sheet) = sheet_names.get(sheet) else { continue };
+            let previous = ranges.clone();
+            let mut changed = false;
+            for range in ranges.iter_mut() {
+                let anchor = (range.start_row, range.start_col);
+                changed |= crate::data_validation::rebase_validation_formulas(
+                    &mut range.validation,
+                    sheet,
+                    edited_sheet,
+                    anchor,
+                    anchor,
+                    formula_sheet,
+                    edited_name,
+                    band,
+                );
+            }
+            if changed {
+                undo_stack.record_custom_restore(
+                    "obj_validation".to_string(),
+                    crate::undo_commands::validation_snapshot_bytes(sheet, previous),
+                    "Shift data validations",
+                );
+            }
+        }
+    }
 }
 
 /// Do two rectangles share a cell?
@@ -1774,15 +2176,382 @@ fn evaluate_time_period(cell_value: Option<&CellValue>, period: &TimePeriod) -> 
 }
 
 // ============================================================================
+// RELATIVE RULE FORMULAS (NEW-cf-relative-eval, NEW-cf-cellvalue-formula-operand)
+// ============================================================================
+//
+// A rule's formula is the formula of ONE cell, its ANCHOR, and every other
+// cell of the rule reads it moved by its own offset, as a copied cell formula
+// would be. Measured [LIVE, Excel 16, 2026-11-05, cfeval/probe1.ps1 ..
+// probe3.ps1, fresh instance, new unsaved workbook, DisplayFormat read back
+// and the saved sheet XML inspected]:
+//   * `=$C2>100` on A2:E10 (C = 30 x row): A2/A3/D3 not formatted, A4, E7 and
+//     B10 formatted -- row 7 tests $C7 (P1). `=B$1>$A2` on B2:C3 reads C$1 in
+//     column C and $A3 in row 3 (P3).
+//   * THE ANCHOR IS THE TOP-LEFT OF THE RECTANGLE BOUNDING EVERY RANGE, not
+//     the first range's: sqref `C1:C2 A5:A6` saved with `C1=1` means "two
+//     columns right" (C1 reads E1, A5 reads C5) -- written for A1, a cell in
+//     neither range (Q1, Q2); `C3:D3 E1:F1` saved with `C1=1` means the cell
+//     itself, written for C1 (Q3); `B5:B6 B1:B2` with `A1>0` reads the left
+//     neighbour, written for B1 (P2, the file reopened: R-P2).
+//   * A reference moved past an edge of the sheet WRAPS round to the other
+//     side, never `#REF!`: `=B1048576=1` on A1:A3 formats A2 (it reads B1),
+//     `=ISERROR(B1048576)` formats nothing, and `=XFD7=1` on A7:B7 makes B7
+//     read A7 (P4, P4b, P4d).
+//   * A reference to another sheet moves the same (`=Other!A1>0` on B1:B3:
+//     B2 reads Other!A2, P5); a whole column or row moves (`=SUM(C:C)>5` reads
+//     D:D in column B, `=SUM(3:3)>0` reads 4:4 one row down, P8); ROW() and
+//     COLUMN() are the evaluated cell's (`=MOD(ROW(),2)=0` formats rows 2, 4;
+//     probe2 P9, in Swedish `=REST(RAD();2)=0`).
+//   * A defined name resolves as in a cell (`=A1>Thr`, Thr = `$D$1`, P6). A
+//     name whose own definition is RELATIVE (`=RC[-1]`) is relative to the
+//     evaluated cell in Excel (P7, cells and rules alike); Calcula's names are
+//     positionless everywhere, so here it is too (reported, not chased).
+//   * A CELL VALUE rule's operand is a formula too, relative to the cell the
+//     same way (`> =B1` on C1:C3: C2 compares with B2, P10b), compared the way
+//     Excel's operators compare: `> $D$1` (5) formats 7 AND the text "x" (text
+//     sorts above every number) but not a blank; `< 5` formats 3 and a BLANK
+//     (it is 0) but not "x"; `= "abc"` formats "abc" and "ABC" but not 5;
+//     `> "a"` formats "b" and "Z" but not 100; `= TRUE` formats TRUE but not
+//     1; an error cell or an error operand formats nothing; `between =H1 and
+//     =H1*5` reads H in the cell's own row (P10a-P10i).
+//   * A custom VALIDATION formula is relative to its range's top-left the same
+//     way (`=B1>A1` on B1:B3: B2 valid against A2, B3 invalid, P11).
+
+/// The cell a rule's formula is written FOR: the top-left of the rectangle
+/// bounding every range of the rule (see the section note). `None` for a rule
+/// with no range.
+pub(crate) fn rule_anchor(ranges: &[ConditionalFormatRange]) -> Option<(u32, u32)> {
+    let row = ranges.iter().map(|r| r.start_row.min(r.end_row)).min()?;
+    let col = ranges.iter().map(|r| r.start_col.min(r.end_col)).min()?;
+    Some((row, col))
+}
+
+/// A rule whose ranges change from `old` to `new` KEEPS ITS MEANING: when the
+/// anchor moves, every formula is re-stated for the new anchor, the way a copy
+/// to it would move it. [LIVE, Excel 16, cfeval/probe1.ps1] clearing A1:A2 of
+/// `=$B1>5` on A1:A5 (P13) and `ModifyAppliesToRange(A3:A5)` (P14) both leave
+/// A3 testing B3, saved as `$B3>5`. Returns whether any formula changed.
+pub(crate) fn restate_rule_for_ranges(
+    rule: &mut ConditionalFormatRule,
+    old: &[ConditionalFormatRange],
+    new: &[ConditionalFormatRange],
+) -> bool {
+    let (Some(from), Some(to)) = (rule_anchor(old), rule_anchor(new)) else { return false };
+    if from == to {
+        return false;
+    }
+    let (drow, dcol) = (to.0 as i32 - from.0 as i32, to.1 as i32 - from.1 as i32);
+    let mut changed = false;
+    for formula in rule_formulas_mut(rule) {
+        let next = crate::commands::structure::shift_formula_internal(formula, drow, dcol);
+        if next != *formula {
+            *formula = next;
+            changed = true;
+        }
+    }
+    changed
+}
+
+const SHEET_ROWS: i64 = engine::EXCEL_MAX_ROW_INDEX as i64 + 1;
+const SHEET_COLS: i64 = engine::EXCEL_MAX_COL_INDEX as i64 + 1;
+
+/// A 0-based line index moved by `delta`, wrapped round the sheet's edge.
+fn wrap_line(index: i64, delta: i64, size: i64) -> i64 {
+    (index + delta).rem_euclid(size)
+}
+
+/// A column spelling moved by `dcol` unless it is absolute.
+fn shift_col_letters(col: &str, absolute: bool, dcol: i64) -> String {
+    if absolute || dcol == 0 || col.is_empty() || !col.chars().all(|c| c.is_ascii_alphabetic()) {
+        return col.to_string();
+    }
+    let index = engine::col_to_index(col) as i64;
+    engine::index_to_col(wrap_line(index, dcol, SHEET_COLS) as u32)
+}
+
+/// A 1-based row moved by `drow` unless it is absolute.
+fn shift_row_number(row: u32, absolute: bool, drow: i64) -> u32 {
+    if absolute || drow == 0 || row == 0 {
+        return row;
+    }
+    (wrap_line(row as i64 - 1, drow, SHEET_ROWS) + 1) as u32
+}
+
+/// Put a range's two cell corners back in top-left / bottom-right order after
+/// a wrap moved one past the other (`A1048576:A2` is the rectangle A2:A1048576).
+fn order_range_corners(start: &mut engine::Expression, end: &mut engine::Expression) {
+    use engine::Expression as E;
+    if let (
+        E::CellRef { col: c1, row: r1, col_absolute: ca1, row_absolute: ra1, .. },
+        E::CellRef { col: c2, row: r2, col_absolute: ca2, row_absolute: ra2, .. },
+    ) = (start, end)
+    {
+        if *r1 > *r2 {
+            std::mem::swap(r1, r2);
+            std::mem::swap(ra1, ra2);
+        }
+        if engine::col_to_index(c1) > engine::col_to_index(c2) {
+            std::mem::swap(c1, c2);
+            std::mem::swap(ca1, ca2);
+        }
+    }
+}
+
+/// `expr` as the cell `drow` rows below and `dcol` columns right of the cell
+/// it is written for reads it: every RELATIVE row and column part moves, an
+/// absolute (`$`) one stays, and a part moved past an edge wraps round the
+/// sheet (Excel's rule for conditional formats and validations; see the
+/// section note). Names, structured references and literals are untouched.
+pub(crate) fn shift_relative_refs(expr: &engine::Expression, drow: i64, dcol: i64) -> engine::Expression {
+    use engine::Expression as E;
+    let shift = |e: &E| shift_relative_refs(e, drow, dcol);
+    match expr {
+        E::CellRef { sheet, col, row, col_absolute, row_absolute, ref_site_id } => E::CellRef {
+            sheet: sheet.clone(),
+            col: shift_col_letters(col, *col_absolute, dcol),
+            row: shift_row_number(*row, *row_absolute, drow),
+            col_absolute: *col_absolute,
+            row_absolute: *row_absolute,
+            ref_site_id: ref_site_id.clone(),
+        },
+        E::Range { sheet, start, end, ref_site_id } => {
+            let mut start = shift(start);
+            let mut end = shift(end);
+            order_range_corners(&mut start, &mut end);
+            E::Range { sheet: sheet.clone(), start: Box::new(start), end: Box::new(end), ref_site_id: ref_site_id.clone() }
+        }
+        E::ColumnRef { sheet, start_col, end_col, start_absolute, end_absolute, ref_site_id } => {
+            let mut a = (shift_col_letters(start_col, *start_absolute, dcol), *start_absolute);
+            let mut b = (shift_col_letters(end_col, *end_absolute, dcol), *end_absolute);
+            if engine::col_to_index(&a.0) > engine::col_to_index(&b.0) {
+                std::mem::swap(&mut a, &mut b);
+            }
+            E::ColumnRef {
+                sheet: sheet.clone(),
+                start_col: a.0,
+                end_col: b.0,
+                start_absolute: a.1,
+                end_absolute: b.1,
+                ref_site_id: ref_site_id.clone(),
+            }
+        }
+        E::RowRef { sheet, start_row, end_row, start_absolute, end_absolute, ref_site_id } => {
+            let mut a = (shift_row_number(*start_row, *start_absolute, drow), *start_absolute);
+            let mut b = (shift_row_number(*end_row, *end_absolute, drow), *end_absolute);
+            if a.0 > b.0 {
+                std::mem::swap(&mut a, &mut b);
+            }
+            E::RowRef {
+                sheet: sheet.clone(),
+                start_row: a.0,
+                end_row: b.0,
+                start_absolute: a.1,
+                end_absolute: b.1,
+                ref_site_id: ref_site_id.clone(),
+            }
+        }
+        E::BinaryOp { left, op, right } => E::BinaryOp { left: Box::new(shift(left)), op: *op, right: Box::new(shift(right)) },
+        E::UnaryOp { op, operand } => E::UnaryOp { op: *op, operand: Box::new(shift(operand)) },
+        E::FunctionCall { func, args, ref_site_id } => E::FunctionCall {
+            func: func.clone(),
+            args: args.iter().map(shift).collect(),
+            ref_site_id: ref_site_id.clone(),
+        },
+        E::Sheet3DRef { start_sheet, end_sheet, reference, ref_site_id } => E::Sheet3DRef {
+            start_sheet: start_sheet.clone(),
+            end_sheet: end_sheet.clone(),
+            reference: Box::new(shift(reference)),
+            ref_site_id: ref_site_id.clone(),
+        },
+        E::IndexAccess { target, index } => E::IndexAccess { target: Box::new(shift(target)), index: Box::new(shift(index)) },
+        E::ArrayLiteral { rows } => E::ArrayLiteral { rows: rows.iter().map(|r| r.iter().map(shift).collect()).collect() },
+        E::ListLiteral { elements } => E::ListLiteral { elements: elements.iter().map(shift).collect() },
+        E::DictLiteral { entries } => E::DictLiteral { entries: entries.iter().map(|(k, v)| (shift(k), shift(v))).collect() },
+        E::SpillRef { cell, ref_site_id } => E::SpillRef { cell: Box::new(shift(cell)), ref_site_id: ref_site_id.clone() },
+        E::ImplicitIntersection { operand } => E::ImplicitIntersection { operand: Box::new(shift(operand)) },
+        E::Literal(_) | E::NamedRef { .. } | E::TableRef { .. } => expr.clone(),
+    }
+}
+
+/// Everything a rule or validation formula reads, for ONE evaluation pass:
+/// the workbook's grids, the sheet the rule lives on, the defined names (when
+/// the caller has them), and each formula PARSED ONCE per pass -- never once
+/// per cell, which is what a viewport of a million-row rule would otherwise
+/// cost. Build one per pass and drop it; it borrows the caller's guards.
+pub(crate) struct RuleFormulas<'a> {
+    pub grids: &'a [Grid],
+    pub sheet_names: &'a [String],
+    pub sheet_index: usize,
+    pub named_ranges: Option<&'a HashMap<String, crate::named_ranges::NamedRange>>,
+    parsed: std::cell::RefCell<HashMap<String, Option<std::rc::Rc<engine::Expression>>>>,
+}
+
+impl<'a> RuleFormulas<'a> {
+    pub(crate) fn new(
+        grids: &'a [Grid],
+        sheet_names: &'a [String],
+        sheet_index: usize,
+        named_ranges: Option<&'a HashMap<String, crate::named_ranges::NamedRange>>,
+    ) -> Self {
+        RuleFormulas { grids, sheet_names, sheet_index, named_ranges, parsed: Default::default() }
+    }
+
+    /// How many distinct formulas this pass has parsed (tests pin "once per
+    /// pass, not once per cell").
+    #[cfg(test)]
+    pub(crate) fn cached_parses(&self) -> usize {
+        self.parsed.borrow().len()
+    }
+
+    /// `formula` parsed, from this pass's cache. `None` when it does not parse
+    /// (such a rule matches nothing, as before).
+    fn parsed(&self, formula: &str) -> Option<std::rc::Rc<engine::Expression>> {
+        if let Some(hit) = self.parsed.borrow().get(formula) {
+            return hit.clone();
+        }
+        let ast = parser::parse(formula).ok().map(|a| std::rc::Rc::new(crate::convert_expr(&a)));
+        self.parsed.borrow_mut().insert(formula.to_string(), ast.clone());
+        ast
+    }
+
+    /// `ast` with this workbook's defined names spliced in, as a cell's formula
+    /// has them: a RELATIVE name is read from `at`, the cell being evaluated
+    /// (Excel [LIVE, round E namese p1]: `=ROW(rel)=21` on F20:F22 colours F21
+    /// only). A positionless threshold passes (0, 0), the name as written.
+    fn with_names<'e>(&self, ast: std::borrow::Cow<'e, engine::Expression>, at: (u32, u32)) -> std::borrow::Cow<'e, engine::Expression> {
+        match self.named_ranges {
+            Some(names) if crate::name_resolution::needs_name_resolution(&ast, names) => {
+                let mut visited = std::collections::HashSet::new();
+                std::borrow::Cow::Owned(crate::resolve_names_in_ast_at(&ast, names, self.sheet_index, at, &mut visited))
+            }
+            _ => ast,
+        }
+    }
+
+    /// The value of `ast`, written for `anchor`, at the cell (`row`, `col`):
+    /// moved by the cell's offset from the anchor and evaluated AT the cell, so
+    /// ROW(), COLUMN() and `@` are the cell's own.
+    fn eval_ast_at(&self, ast: &engine::Expression, anchor: (u32, u32), row: u32, col: u32) -> CellValue {
+        let drow = row as i64 - anchor.0 as i64;
+        let dcol = col as i64 - anchor.1 as i64;
+        let moved = if drow == 0 && dcol == 0 {
+            std::borrow::Cow::Borrowed(ast)
+        } else {
+            std::borrow::Cow::Owned(shift_relative_refs(ast, drow, dcol))
+        };
+        let resolved = self.with_names(moved, (row, col));
+        let ctx = engine::EvalContext { current_row: Some(row), current_col: Some(col), ..Default::default() };
+        crate::evaluate_formula_with_context(self.grids, self.sheet_names, self.sheet_index, &resolved, ctx, None)
+    }
+
+    /// The value of `formula`, written for `anchor`, at the cell (`row`, `col`).
+    /// `#VALUE!` when it does not parse.
+    pub(crate) fn value_at(&self, formula: &str, anchor: (u32, u32), row: u32, col: u32) -> CellValue {
+        match self.parsed(formula) {
+            Some(ast) => self.eval_ast_at(&ast, anchor, row, col),
+            None => CellValue::Error(engine::CellError::Value),
+        }
+    }
+
+    /// The value of a POSITIONLESS formula (a colour scale's, data bar's or
+    /// icon set's threshold: Excel refuses relative references there).
+    fn value(&self, formula: &str) -> CellValue {
+        let Some(ast) = self.parsed(formula) else {
+            return CellValue::Error(engine::CellError::Value);
+        };
+        let resolved = self.with_names(std::borrow::Cow::Borrowed(&*ast), (0, 0));
+        crate::evaluate_formula_multi_sheet_with_ast(self.grids, self.sheet_names, self.sheet_index, &resolved)
+    }
+
+    /// Whether the cell (`row`, `col`) passes a CELL VALUE rule written for
+    /// `anchor`: the cell compared with each operand by Excel's own comparison
+    /// operators (see the section note). An error on either side, or an operand
+    /// that is missing or does not parse, matches nothing.
+    fn cell_value_rule_matches(&self, rule: &CellValueRule, anchor: (u32, u32), row: u32, col: u32) -> bool {
+        use engine::BinaryOperator as Op;
+        let Some(v1) = self.operand(&rule.value1) else { return false };
+        // The cell itself, absolute, so it never moves.
+        let me = engine::Expression::CellRef {
+            sheet: None,
+            col: engine::index_to_col(col),
+            row: row + 1,
+            col_absolute: true,
+            row_absolute: true,
+            ref_site_id: Default::default(),
+        };
+        let compare = |op: Op, operand: &engine::Expression| -> Option<bool> {
+            let test = engine::Expression::BinaryOp { left: Box::new(me.clone()), op, right: Box::new(operand.clone()) };
+            match self.eval_ast_at(&test, anchor, row, col) {
+                CellValue::Boolean(b) => Some(b),
+                _ => None,
+            }
+        };
+        let between = |v2: &engine::Expression| -> Option<bool> {
+            // Order-free, as before: `between 10 and 2` is `between 2 and 10`.
+            let ge1 = compare(Op::GreaterEqual, &v1)?;
+            let le2 = compare(Op::LessEqual, v2)?;
+            let ge2 = compare(Op::GreaterEqual, v2)?;
+            let le1 = compare(Op::LessEqual, &v1)?;
+            Some((ge1 && le2) || (ge2 && le1))
+        };
+        let answer = match rule.operator {
+            CellValueOperator::Equal => compare(Op::Equal, &v1),
+            CellValueOperator::NotEqual => compare(Op::NotEqual, &v1),
+            CellValueOperator::GreaterThan => compare(Op::GreaterThan, &v1),
+            CellValueOperator::GreaterThanOrEqual => compare(Op::GreaterEqual, &v1),
+            CellValueOperator::LessThan => compare(Op::LessThan, &v1),
+            CellValueOperator::LessThanOrEqual => compare(Op::LessEqual, &v1),
+            CellValueOperator::Between | CellValueOperator::NotBetween => {
+                let Some(v2) = rule.value2.as_deref().and_then(|t| self.operand(t)) else { return false };
+                let inside = between(&v2);
+                if rule.operator == CellValueOperator::NotBetween {
+                    inside.map(|b| !b)
+                } else {
+                    inside
+                }
+            }
+        };
+        answer.unwrap_or(false)
+    }
+
+    /// A cell-value rule's operand as an expression: `=...` is a formula, a
+    /// number is that number, TRUE / FALSE that boolean, anything else the TEXT
+    /// itself (Excel's dialog turns a typed `abc` into `="abc"`). `None` for an
+    /// empty operand or a formula that does not parse.
+    fn operand(&self, text: &str) -> Option<engine::Expression> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.starts_with('=') {
+            return self.parsed(trimmed).map(|ast| (*ast).clone());
+        }
+        if let Ok(n) = trimmed.parse::<f64>() {
+            if n.is_finite() {
+                return Some(engine::Expression::Literal(engine::Value::Number(n)));
+            }
+        }
+        if trimmed.eq_ignore_ascii_case("TRUE") {
+            return Some(engine::Expression::Literal(engine::Value::Boolean(true)));
+        }
+        if trimmed.eq_ignore_ascii_case("FALSE") {
+            return Some(engine::Expression::Literal(engine::Value::Boolean(false)));
+        }
+        Some(engine::Expression::Literal(engine::Value::String(text.to_string())))
+    }
+}
+
+// ============================================================================
 // RULE EVALUATION
 // ============================================================================
 
-/// Evaluate a single rule for a cell
+/// Evaluate a single rule for a cell. `anchor` is the cell the rule's
+/// formulas are written for ([`rule_anchor`] of its ranges).
+#[allow(clippy::too_many_arguments)]
 fn evaluate_rule(
     grid: &Grid,
-    grids: &[Grid],
-    sheet_names: &[String],
-    active_sheet: usize,
+    formulas: &RuleFormulas,
+    anchor: (u32, u32),
     rule: &ConditionalFormatRule,
     format: &ConditionalFormat,
     row: u32,
@@ -1848,7 +2617,7 @@ fn evaluate_rule(
             }
         }
         ConditionalFormatRule::CellValue(value_rule) => {
-            if evaluate_cell_value_rule(cell_value, value_rule) {
+            if formulas.cell_value_rule_matches(value_rule, anchor, row, col) {
                 Some(make_cf(row, col, format))
             } else {
                 None
@@ -1955,12 +2724,9 @@ fn evaluate_rule(
 
         // ---- Expression (custom formula) ----
         ConditionalFormatRule::Expression(expr_rule) => {
-            let result = crate::evaluate_formula_multi_sheet(
-                grids,
-                sheet_names,
-                active_sheet,
-                &expr_rule.formula,
-            );
+            // Relative to the cell (NEW-cf-relative-eval): the formula is the
+            // anchor's, and this cell reads it moved by its own offset.
+            let result = formulas.value_at(&expr_rule.formula, anchor, row, col);
             let truthy = match result {
                 CellValue::Number(n) => n != 0.0,
                 CellValue::Boolean(b) => b,
@@ -1991,9 +2757,9 @@ fn evaluate_rule(
                 return None;
             }
 
-            let ctx = CFFormulaContext { grids, sheet_names, active_sheet };
-            let min_val = resolve_cf_point_value(&cs_rule.min_point, stats, &ctx);
-            let max_val = resolve_cf_point_value(&cs_rule.max_point, stats, &ctx);
+            let ctx = formulas;
+            let min_val = resolve_cf_point_value(&cs_rule.min_point, stats, ctx);
+            let max_val = resolve_cf_point_value(&cs_rule.max_point, stats, ctx);
 
             if (max_val - min_val).abs() < f64::EPSILON {
                 // All values are the same; use min color
@@ -2046,10 +2812,16 @@ fn evaluate_rule(
                 return None;
             }
 
-            let ctx = CFFormulaContext { grids, sheet_names, active_sheet };
+            let ctx = formulas;
 
+            // AUTOMATIC is not LOWEST VALUE (measured [LIVE], see
+            // `data_bar_geometry`): Excel's automatic shortest bar is zero when
+            // every value is positive, so 5 beside 10 is HALF a bar, where
+            // Lowest Value makes it no bar at all. The same for the longest bar
+            // and all-negative values.
             let min_val = match db_rule.min_value_type {
-                CFValueType::AutoMin | CFValueType::Min => stats.min,
+                CFValueType::AutoMin => stats.min.min(0.0),
+                CFValueType::Min => stats.min,
                 CFValueType::Number => db_rule.min_value.unwrap_or(stats.min),
                 CFValueType::Percent => {
                     let pct = db_rule.min_value.unwrap_or(0.0) / 100.0;
@@ -2071,7 +2843,8 @@ fn evaluate_rule(
             };
 
             let max_val = match db_rule.max_value_type {
-                CFValueType::AutoMax | CFValueType::Max => stats.max,
+                CFValueType::AutoMax => stats.max.max(0.0),
+                CFValueType::Max => stats.max,
                 CFValueType::Number => db_rule.max_value.unwrap_or(stats.max),
                 CFValueType::Percent => {
                     let pct = db_rule.max_value.unwrap_or(100.0) / 100.0;
@@ -2092,15 +2865,13 @@ fn evaluate_rule(
                 _ => stats.max,
             };
 
-            let range = max_val - min_val;
-            let percent = if range.abs() > f64::EPSILON {
-                ((num - min_val) / range).clamp(0.0, 1.0)
-            } else {
-                0.5
-            };
+            let geometry = data_bar_geometry(db_rule.axis_position, num, min_val, max_val);
 
             let mut cf = make_cf(row, col, format);
-            cf.data_bar_percent = Some(percent);
+            cf.data_bar_percent = Some(geometry.length);
+            cf.data_bar_axis = geometry.axis;
+            cf.data_bar_negative = geometry.negative.then_some(true);
+            cf.hide_value = (!db_rule.show_value).then_some(true);
             Some(cf)
         }
 
@@ -2112,7 +2883,7 @@ fn evaluate_rule(
                 return None;
             }
 
-            let ctx = CFFormulaContext { grids, sheet_names, active_sheet };
+            let ctx = formulas;
             let icon_count = get_icon_count(&is_rule.icon_set);
             let thresholds = &is_rule.thresholds;
 
@@ -2142,7 +2913,97 @@ fn evaluate_rule(
             cf.icon_index = Some(icon_index);
             // The set travels WITH the index, from the rule that produced it.
             cf.icon_set = Some(is_rule.icon_set);
+            // Show Icon Only hides the value (the painters read `hide_value`).
+            cf.hide_value = is_rule.show_icon_only.then_some(true);
             Some(cf)
+        }
+    }
+}
+
+/// Where one data bar goes inside its cell, as fractions of the bar area.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DataBarGeometry {
+    /// The bar's length, from the axis when there is one, else from the start edge.
+    pub length: f64,
+    /// The axis, from the start edge; `None` when no axis is drawn.
+    pub axis: Option<f64>,
+    /// The value is negative: the bar runs from the axis toward the start edge.
+    pub negative: bool,
+}
+
+/// Excel's data-bar geometry for `num` on a rule whose shortest and longest
+/// bars resolved to `min_val` / `max_val`.
+///
+/// MEASURED [LIVE] 2026-11-04 (Excel 16, fresh hidden instance, new unsaved
+/// workbook, solid bars, the sheet exported to PDF and the bar rectangles read
+/// back; 51pt columns):
+///   - Automatic axis, -5 / 10 / 5 / 0: a dashed axis one third in (|min| /
+///     (|min| + max)); -5 a red bar from the axis LEFTWARDS (15.5pt), 10 a bar
+///     from the axis to the right end (31.8pt), 5 half of that, 0 none.
+///   - Automatic, 5 / 10 / 2.5 (no negatives): no axis, bars from the left edge
+///     at 24.1 / 48.2 / 12.1pt -- proportional to the value, so the automatic
+///     minimum is ZERO, not the lowest value.
+///   - Automatic, -5 / -10 / -2.5 (all negative): bars from the RIGHT edge
+///     leftwards at 24.1 / 48.2 / 12.1pt, no axis line drawn.
+///   - Cell midpoint, -5 / 10 / 5: the axis at the middle; 10 fills the right
+///     half, 5 a quarter of the cell, -5 a quarter leftwards (scale =
+///     max(|min|, |max|)).
+///   - Axis None, -5 / 10 / 5: no axis, bars from the left edge, -5 none and 5
+///     two thirds: the plain (num - min) / (max - min).
+///   - Lowest / Highest Value, 5 / 10 / 7.5: 5 no bar, 7.5 half.
+///   - Right-to-left mirrors all of it (axis two thirds from the left, -5 to the
+///     right of it); the PAINTER mirrors, so it is not an input here.
+pub(crate) fn data_bar_geometry(
+    axis_position: DataBarAxisPosition,
+    num: f64,
+    min_val: f64,
+    max_val: f64,
+) -> DataBarGeometry {
+    let span = max_val - min_val;
+    let plain = |num: f64| -> f64 {
+        if span.abs() > f64::EPSILON {
+            ((num - min_val) / span).clamp(0.0, 1.0)
+        } else {
+            0.5
+        }
+    };
+    match axis_position {
+        DataBarAxisPosition::None => DataBarGeometry {
+            length: plain(num),
+            axis: None,
+            negative: num < 0.0,
+        },
+        DataBarAxisPosition::CellMidpoint => {
+            let scale = min_val.abs().max(max_val.abs());
+            let length = if scale > f64::EPSILON {
+                (0.5 * num.abs() / scale).clamp(0.0, 0.5)
+            } else {
+                0.0
+            };
+            DataBarGeometry { length, axis: Some(0.5), negative: num < 0.0 }
+        }
+        DataBarAxisPosition::Automatic => {
+            if min_val >= 0.0 || span.abs() <= f64::EPSILON {
+                // No negative values in the scale: an axis-less bar from the
+                // start edge, exactly the pre-axis geometry.
+                return DataBarGeometry { length: plain(num), axis: None, negative: false };
+            }
+            if max_val <= 0.0 {
+                // Every value negative: the axis is the far edge and every bar
+                // runs back from it, |num - max| of |min - max| long.
+                let length = ((max_val - num) / span).clamp(0.0, 1.0);
+                return DataBarGeometry { length, axis: Some(1.0), negative: true };
+            }
+            // Both signs: the axis splits the cell in proportion, and each bar
+            // is its distance from zero on the same scale.
+            let axis = -min_val / span;
+            if num < 0.0 {
+                let length = (num.abs() / span).clamp(0.0, axis);
+                DataBarGeometry { length, axis: Some(axis), negative: true }
+            } else {
+                let length = (num / span).clamp(0.0, 1.0 - axis);
+                DataBarGeometry { length, axis: Some(axis), negative: false }
+            }
         }
     }
 }
@@ -2154,6 +3015,9 @@ fn make_cf(row: u32, col: u32, format: &ConditionalFormat) -> CellConditionalFor
         col,
         format: format.clone(),
         data_bar_percent: None,
+        data_bar_axis: None,
+        data_bar_negative: None,
+        hide_value: None,
         icon_index: None,
         icon_set: None,
         rule_id: None,
@@ -2161,12 +3025,9 @@ fn make_cf(row: u32, col: u32, format: &ConditionalFormat) -> CellConditionalFor
     }
 }
 
-/// Context needed for formula evaluation within CF threshold resolution
-struct CFFormulaContext<'a> {
-    grids: &'a [Grid],
-    sheet_names: &'a [String],
-    active_sheet: usize,
-}
+/// Context needed for formula evaluation within CF threshold resolution: the
+/// pass's [`RuleFormulas`] (each threshold formula parsed once per pass).
+type CFFormulaContext<'a> = RuleFormulas<'a>;
 
 /// Evaluate a formula string and return its numeric result, or a fallback value
 fn evaluate_cf_formula(
@@ -2177,12 +3038,7 @@ fn evaluate_cf_formula(
     // Transient for the same reason as `evaluate_rule` — this resolves a rule's
     // threshold expression and feeds a colour decision, not a cell.
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
-    let result = crate::evaluate_formula_multi_sheet(
-        ctx.grids,
-        ctx.sheet_names,
-        ctx.active_sheet,
-        formula,
-    );
+    let result = ctx.value(formula);
     match result {
         CellValue::Number(n) => n,
         CellValue::Boolean(b) => if b { 1.0 } else { 0.0 },
@@ -2297,48 +3153,6 @@ fn evaluate_text_rule(cell_value: Option<&CellValue>, rule: &ContainsTextRule) -
     }
 }
 
-/// Evaluate a cell value comparison rule
-fn evaluate_cell_value_rule(cell_value: Option<&CellValue>, rule: &CellValueRule) -> bool {
-    let num_value = match cell_value {
-        Some(CellValue::Number(n)) => *n,
-        _ => return false,
-    };
-
-    let value1: f64 = match rule.value1.parse() {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    match rule.operator {
-        CellValueOperator::Equal => (num_value - value1).abs() < f64::EPSILON,
-        CellValueOperator::NotEqual => (num_value - value1).abs() >= f64::EPSILON,
-        CellValueOperator::GreaterThan => num_value > value1,
-        CellValueOperator::GreaterThanOrEqual => num_value >= value1,
-        CellValueOperator::LessThan => num_value < value1,
-        CellValueOperator::LessThanOrEqual => num_value <= value1,
-        CellValueOperator::Between => {
-            if let Some(ref v2_str) = rule.value2 {
-                if let Ok(value2) = v2_str.parse::<f64>() {
-                    let min = value1.min(value2);
-                    let max = value1.max(value2);
-                    return num_value >= min && num_value <= max;
-                }
-            }
-            false
-        }
-        CellValueOperator::NotBetween => {
-            if let Some(ref v2_str) = rule.value2 {
-                if let Ok(value2) = v2_str.parse::<f64>() {
-                    let min = value1.min(value2);
-                    let max = value1.max(value2);
-                    return num_value < min || num_value > max;
-                }
-            }
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2370,6 +3184,136 @@ mod tests {
     #[test]
     fn test_cf_value_type_default() {
         assert_eq!(CFValueType::default(), CFValueType::Number);
+    }
+
+    // ------------------------------------------------------------------
+    // Data bars: negatives, the axis, automatic ends, Show Bar Only
+    // (BUG-0511; Excel's geometry measured [LIVE], see data_bar_geometry)
+    // ------------------------------------------------------------------
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn data_bar_automatic_axis_splits_the_cell_by_the_negative_share() {
+        // -5 / 10: the axis one third in; -5 runs left from it, 10 to the end.
+        let neg = data_bar_geometry(DataBarAxisPosition::Automatic, -5.0, -5.0, 10.0);
+        assert!(close(neg.axis.unwrap(), 1.0 / 3.0));
+        assert!(neg.negative);
+        assert!(close(neg.length, 1.0 / 3.0), "-5 fills the whole negative share");
+        let full = data_bar_geometry(DataBarAxisPosition::Automatic, 10.0, -5.0, 10.0);
+        assert!(!full.negative);
+        assert!(close(full.length, 2.0 / 3.0), "10 fills the whole positive share");
+        let half = data_bar_geometry(DataBarAxisPosition::Automatic, 5.0, -5.0, 10.0);
+        assert!(close(half.length, 1.0 / 3.0), "5 is half of 10's bar");
+        let zero = data_bar_geometry(DataBarAxisPosition::Automatic, 0.0, -5.0, 10.0);
+        assert!(close(zero.length, 0.0));
+    }
+
+    #[test]
+    fn data_bar_all_negative_runs_back_from_the_far_edge() {
+        let g = data_bar_geometry(DataBarAxisPosition::Automatic, -5.0, -10.0, 0.0);
+        assert_eq!(g.axis, Some(1.0));
+        assert!(g.negative);
+        assert!(close(g.length, 0.5));
+    }
+
+    #[test]
+    fn data_bar_without_negatives_has_no_axis_and_the_plain_fraction() {
+        let g = data_bar_geometry(DataBarAxisPosition::Automatic, 5.0, 0.0, 10.0);
+        assert_eq!(g, DataBarGeometry { length: 0.5, axis: None, negative: false });
+    }
+
+    #[test]
+    fn data_bar_cell_midpoint_scales_by_the_larger_magnitude() {
+        let pos = data_bar_geometry(DataBarAxisPosition::CellMidpoint, 5.0, -5.0, 10.0);
+        assert_eq!(pos.axis, Some(0.5));
+        assert!(close(pos.length, 0.25));
+        let neg = data_bar_geometry(DataBarAxisPosition::CellMidpoint, -5.0, -5.0, 10.0);
+        assert!(neg.negative);
+        assert!(close(neg.length, 0.25));
+    }
+
+    #[test]
+    fn data_bar_axis_none_is_the_plain_fraction_from_the_left() {
+        let g = data_bar_geometry(DataBarAxisPosition::None, 5.0, -5.0, 10.0);
+        assert_eq!(g.axis, None);
+        assert!(close(g.length, 2.0 / 3.0));
+    }
+
+    fn data_bar_results(values: &[f64], rule: DataBarRule) -> Vec<CellConditionalFormat> {
+        let mut grid = Grid::new();
+        for (i, v) in values.iter().enumerate() {
+            grid.set_cell(i as u32, 0, engine::Cell::new_number(*v));
+        }
+        let ranges = vec![range(0, 0, values.len() as u32 - 1, 0)];
+        let stats = collect_range_stats(&grid, &ranges);
+        let rule = ConditionalFormatRule::DataBar(rule);
+        (0..values.len() as u32)
+            .map(|row| {
+                evaluate_rule(&grid, &RuleFormulas::new(std::slice::from_ref(&grid), &["Sheet1".to_string()], 0, None), (0, 0), &rule, &ConditionalFormat::default(), row, 0, Some(&stats))
+                    .expect("a numeric cell gets a bar")
+            })
+            .collect()
+    }
+
+    /// Excel's AUTOMATIC shortest bar is zero for positive data ([LIVE]: 5 / 10
+    /// / 2.5 gave 24.1 / 48.2 / 12.1pt bars). It was the lowest value, so 2.5
+    /// had no bar and 5 a third of one.
+    #[test]
+    fn automatic_data_bar_ends_include_zero() {
+        let rule = DataBarRule { min_value_type: CFValueType::AutoMin, max_value_type: CFValueType::AutoMax, ..DataBarRule::default() };
+        let out = data_bar_results(&[5.0, 10.0, 2.5], rule);
+        let lengths: Vec<f64> = out.iter().map(|cf| cf.data_bar_percent.unwrap()).collect();
+        assert!(close(lengths[0], 0.5), "5 is half of 10: {:?}", lengths);
+        assert!(close(lengths[1], 1.0));
+        assert!(close(lengths[2], 0.25));
+        // Lowest Value keeps the old meaning: 5 is the shortest bar.
+        let lowest = DataBarRule { min_value_type: CFValueType::Min, max_value_type: CFValueType::Max, ..DataBarRule::default() };
+        let out = data_bar_results(&[5.0, 10.0, 7.5], lowest);
+        assert!(close(out[0].data_bar_percent.unwrap(), 0.0));
+        assert!(close(out[2].data_bar_percent.unwrap(), 0.5));
+    }
+
+    #[test]
+    fn a_negative_value_reports_its_axis_and_sign_and_show_bar_only_hides_the_value() {
+        let rule = DataBarRule {
+            min_value_type: CFValueType::AutoMin,
+            max_value_type: CFValueType::AutoMax,
+            show_value: false,
+            ..DataBarRule::default()
+        };
+        let out = data_bar_results(&[-5.0, 10.0], rule);
+        assert_eq!(out[0].data_bar_negative, Some(true));
+        assert!(close(out[0].data_bar_axis.unwrap(), 1.0 / 3.0));
+        assert_eq!(out[1].data_bar_negative, None, "a positive value carries no sign flag");
+        assert_eq!(out[0].hide_value, Some(true));
+        // Shown values carry no flag at all (the wire stays small).
+        let shown = data_bar_results(&[1.0, 2.0], DataBarRule::default());
+        assert_eq!(shown[0].hide_value, None);
+    }
+
+    /// Show Icon Only hides the value; it had no reader anywhere in the app.
+    #[test]
+    fn show_icon_only_hides_the_value() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, engine::Cell::new_number(1.0));
+        grid.set_cell(1, 0, engine::Cell::new_number(9.0));
+        let ranges = vec![range(0, 0, 1, 0)];
+        let stats = collect_range_stats(&grid, &ranges);
+        let eval = |show_icon_only: bool| {
+            let rule = ConditionalFormatRule::IconSet(IconSetRule {
+                icon_set: IconSetType::ThreeArrows,
+                thresholds: vec![],
+                reverse_icons: false,
+                show_icon_only,
+            });
+            evaluate_rule(&grid, &RuleFormulas::new(std::slice::from_ref(&grid), &["Sheet1".to_string()], 0, None), (0, 0), &rule, &ConditionalFormat::default(), 1, 0, Some(&stats))
+                .expect("an icon")
+        };
+        assert_eq!(eval(true).hide_value, Some(true));
+        assert_eq!(eval(false).hide_value, None);
     }
 
     #[test]
@@ -2491,3 +3435,11 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+#[path = "cfdv_structural_tests.rs"]
+mod cfdv_structural_tests;
+
+#[cfg(test)]
+#[path = "cfeval_tests.rs"]
+mod cfeval_tests;

@@ -201,6 +201,7 @@ dependencies = [
  "ed25519-dalek",
  "engine",
  "identity",
+ "parser",
  "persistence",
  "pivot-engine",
  "rand_core",

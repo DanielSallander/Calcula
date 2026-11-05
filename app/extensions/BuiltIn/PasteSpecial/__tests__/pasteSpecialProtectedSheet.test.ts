@@ -23,6 +23,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const h = vi.hoisted(() => ({
   batch: vi.fn(),
   setCellStyle: vi.fn(),
+  setCellStyles: vi.fn(),
   applyFormatting: vi.fn(),
   canEditCells: vi.fn(),
   canPerformAction: vi.fn(),
@@ -56,6 +57,7 @@ vi.mock("@api/lib", async (importOriginal) => ({
   })),
   updateCell: vi.fn(async () => ({ cells: [] })),
   setCellStyle: (...a: unknown[]) => h.setCellStyle(...a),
+  setCellStyles: (...a: unknown[]) => h.setCellStyles(...a),
   applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
   updateCellsBatch: (...a: unknown[]) => h.batch(...a),
   getRangeCellsTyped: vi.fn(async () => []),
@@ -163,6 +165,11 @@ beforeEach(() => {
     const c = opts?.checkArea;
     h.log.push(c ? `check ${c.startRow},${c.startCol}:${c.endRow},${c.endCol}` : `style ${row},${col}=${index}`);
     return null;
+  });
+  // The style-only BATCH: gated once, all or nothing, as the backend does.
+  h.setCellStyles.mockImplementation(async (writes: Array<{ row: number; col: number; styleIndex: number }>) => {
+    refuseFormat();
+    for (const w of writes) h.log.push(`style ${w.row},${w.col}=${w.styleIndex}`);
   });
   h.applyFormatting.mockImplementation(async (rows: number[], cols: number[]) => {
     refuseFormat();

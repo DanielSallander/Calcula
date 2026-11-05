@@ -53,8 +53,24 @@ const sys = vi.hoisted(() => ({
   everyMerges: null as null | (() => void),
 }));
 
+/**
+ * What the backend WROTE for each batch (BUG-0657): a write naming its source
+ * (`CellUpdateInput.source`) writes what that cell holds when the batch
+ * arrives -- the backend reads it under its own guards, before any write --
+ * and any other write its `value`. Constants only (these tests copy none of
+ * the formulas the backend would shift).
+ */
+const backend = vi.hoisted(() => ({ wrote: [] as string[][] }));
+
 const api = vi.hoisted(() => ({
-  updateCellsBatch: vi.fn(async (_u: unknown[], _o?: unknown) => [] as unknown[]),
+  updateCellsBatch: vi.fn(async (u: unknown[], _o?: unknown) => {
+    backend.wrote.push(
+      (u as Array<{ value: string; source?: { row: number; col: number } }>).map((w) =>
+        w.source ? (model.cells.get(`${w.source.row},${w.source.col}`)?.display ?? "") : w.value,
+      ),
+    );
+    return [] as unknown[];
+  }),
   clearCell: vi.fn(async (_row?: number, _col?: number) => {}),
   relocateCellReferences: vi.fn(async (..._args: unknown[]) => [] as unknown[]),
   /** The backend's commands the REAL wrappers send: the answer per command. */
@@ -248,7 +264,14 @@ async function pasteAt(row: number, col: number): Promise<void> {
   await settle();
 }
 
-type Update = { row: number; col: number; value: string; styleIndex?: number; invariant?: boolean };
+type Update = {
+  row: number;
+  col: number;
+  value: string;
+  styleIndex?: number;
+  invariant?: boolean;
+  source?: { sheetIndex: number; row: number; col: number; unshifted?: boolean };
+};
 
 /** The first write of the paste. */
 function firstUpdate(): Update {
@@ -274,6 +297,7 @@ beforeEach(async () => {
   sys.onMerges = null;
   sys.everyMerges = null;
   api.updateCellsBatch.mockClear();
+  backend.wrote = [];
   api.clearCell.mockClear();
   api.relocateCellReferences.mockClear();
   api.invoke.mockClear();
@@ -503,9 +527,12 @@ describe("a write that lands while a paste waits is read again, never refused", 
 
   // Round 15 (lane clip7, rev13B minor): a write that lands AFTER the settle --
   // during the paste's own later awaits (here: the merged-cells read of a tiled
-  // paste) -- left the paste writing the snapshot it had taken. Nothing is
-  // written yet then, so the paste starts again and takes the fresh snapshot.
-  it("Copy A1 (5); a script writes 9 into A1 while the paste reads the merges of D1:D2: both tiles get 9", async () => {
+  // paste) -- left the paste writing the snapshot it had taken. Round 15 made
+  // the paste start again for it; round C (BUG-0657) names each write's SOURCE
+  // instead, so the backend writes what A1 holds AT THE WRITE and the paste
+  // never restarts for a value. (Was: "the batch's values are 9, 9", which only
+  // a restart could give; the values are the backend's now.)
+  it("Copy A1 (5); a script writes 9 into A1 while the paste reads the merges of D1:D2: both tiles name A1 and get 9", async () => {
     model.cells.set("0,0", { display: "5", formula: null, styleIndex: 0 });
     await copyAt(0, 0);
     await select(0, 3, 1, 3);
@@ -520,16 +547,21 @@ describe("a write that lands while a paste waits is read again, never refused", 
     expect(vi.mocked(dialogs.alertAsync).mock.calls.map((c) => c[0]), "the paste was refused").toEqual([]);
     expect(api.updateCellsBatch, "the paste wrote more than once").toHaveBeenCalledTimes(1);
     const [updates] = api.updateCellsBatch.mock.calls[0] as unknown as [Update[]];
-    expect(updates.map((u) => u.value), "the paste wrote the snapshot the write had replaced").toEqual(["9", "9"]);
+    expect(updates.map((u) => u.source), "a tile did not name its source").toEqual([
+      { sheetIndex: 0, row: 0, col: 0 },
+      { sheetIndex: 0, row: 0, col: 0 },
+    ]);
+    expect(backend.wrote, "the paste wrote the snapshot the write had replaced").toEqual([["9", "9"]]);
     expect(getInternalClipboard(), "the copy ended").not.toBeNull();
   });
 
   // Round 16 (clip7's remaining (a)): the check above ran BEFORE the undo step
   // opened, so a write landing while it opened (beginUndoTransaction, a cut's
-  // move point) still left the paste writing the snapshot it had taken. The
-  // check is made again right before the batch: the empty step is closed and
-  // the paste starts again with the fresh snapshot.
-  it("Copy A1 (5); a script writes 9 into A1 while the paste's undo step opens: the paste writes 9, the empty step is closed", async () => {
+  // move point) still left the paste writing the snapshot it had taken. Round
+  // 16 closed the step and started again; round C (BUG-0657): the write names
+  // A1 and the backend writes what it holds at the write -- one step, no
+  // restart. (Was: "value 9 and the stale attempt's step cancelled once".)
+  it("Copy A1 (5); a script writes 9 into A1 while the paste's undo step opens: the backend writes 9, nothing starts again", async () => {
     model.cells.set("0,0", { display: "5", formula: null, styleIndex: 0 });
     await copyAt(0, 0);
     await select(0, 3);
@@ -545,8 +577,9 @@ describe("a write that lands while a paste waits is read again, never refused", 
     await settle();
     expect(vi.mocked(dialogs.alertAsync).mock.calls.map((c) => c[0]), "the paste was refused").toEqual([]);
     expect(api.updateCellsBatch, "the paste wrote more than once").toHaveBeenCalledTimes(1);
-    expect(firstUpdate().value, "the paste wrote the snapshot the write had replaced (5)").toBe("9");
-    expect(vi.mocked(cancelUndoTransaction), "the step the stale attempt opened was left open").toHaveBeenCalledTimes(1);
+    expect(firstUpdate().source, "the write did not name its source").toEqual({ sheetIndex: 0, row: 0, col: 0 });
+    expect(backend.wrote, "the paste wrote the snapshot the write had replaced (5)").toEqual([["9"]]);
+    expect(vi.mocked(cancelUndoTransaction), "the paste started again for a value").not.toHaveBeenCalled();
     expect(getInternalClipboard(), "the copy ended").not.toBeNull();
   });
 
@@ -654,11 +687,11 @@ describe("a write that lands while a paste waits is read again, never refused", 
 
   // Round 19 (misc19): this paste was refused after its bounded restarts, for as
   // long as the writer ran. Excel [LIVE, misc19/probe3.ps1] pastes what the
-  // source holds at the paste, so past the bound it now writes the snapshot of
-  // its last re-read -- a value A1 held during the paste, never the copy-time
-  // 5 -- once, with no refusal. (Was "nothing written + one 'kept changing'
-  // alert"; changed deliberately for Excel's rule.)
-  it("a source that never holds still is pasted as its last read found it after a bounded number of restarts, once, the copy kept", async () => {
+  // source holds at the paste; round 19 wrote the snapshot of its last re-read,
+  // which the writer had already outrun (BUG-0657). Round C: the writes name
+  // A1 and the backend writes what A1 holds AT THE WRITE -- once, no restart,
+  // no refusal. (Was: "the batch's values are a value read during the paste".)
+  it("a source that never holds still is pasted as it stands AT THE WRITE, once, the copy kept", async () => {
     model.cells.set("0,0", { display: "5", formula: null, styleIndex: 0 });
     await copyAt(0, 0);
     await select(0, 3, 1, 3);
@@ -674,9 +707,84 @@ describe("a write that lands while a paste waits is read again, never refused", 
     await settle();
     expect(vi.mocked(dialogs.alertAsync).mock.calls.map((c) => String(c[0])), "a source that kept changing was refused").toEqual([]);
     expect(api.updateCellsBatch, "the paste wrote other than once").toHaveBeenCalledTimes(1);
-    const [updates] = api.updateCellsBatch.mock.calls[0] as unknown as [Update[]];
-    expect(updates.map((u) => u.value), "the copy-time 5 was pasted instead of a value read during the paste").not.toContain("5");
-    expect(Number(updates[0].value), "a value A1 held during the paste").toBeGreaterThan(10);
+    expect(backend.wrote, "the paste wrote a value A1 no longer held at the write").toEqual([[String(n), String(n)]]);
     expect(getInternalClipboard(), "the paste ended the copy").not.toBeNull();
+  });
+
+  // BUG-0657 (round C). The writer runs on EVERY call the paste makes to the
+  // backend -- the settle's reads, the sheet list, the merges, the undo step --
+  // so every frontend read is stale by the time the batch lands. The batch
+  // names its source cells, and what lands is what they hold at the write.
+  // SABOTAGE: drop `update.source = pasteSourceOf(..)` in the paste's write
+  // builder -- fails at "STALE".
+  it("a source written on every backend call: Copy + Paste and Cut + Paste land what it holds AT THE WRITE", async () => {
+    for (const cut of [false, true]) {
+      model.cells.set("0,0", { display: "5", formula: null, styleIndex: 0 });
+      await copyAt(0, 0, cut);
+      await select(0, 3);
+      api.updateCellsBatch.mockClear();
+      backend.wrote = [];
+      let n = 100;
+      const prior = api.invoke.getMockImplementation()!;
+      const tick = (): void => {
+        n += 1;
+        model.cells.set("0,0", { display: String(n), formula: null, styleIndex: 0 });
+      };
+      api.invoke.mockImplementation(async (cmd: string, a?: unknown) => {
+        tick();
+        return prior(cmd, a);
+      });
+      sys.everyMerges = tick;
+      vi.mocked(beginUndoTransaction).mockImplementationOnce(async () => {
+        tick();
+        return 7;
+      });
+      try {
+        await act(async () => {
+          await clipboard.paste();
+        });
+        await settle();
+      } finally {
+        api.invoke.mockImplementation(prior);
+        sys.everyMerges = null;
+      }
+      expect(vi.mocked(dialogs.alertAsync).mock.calls.map((c) => String(c[0])), "the paste was refused").toEqual([]);
+      expect(api.updateCellsBatch).toHaveBeenCalledTimes(1);
+      expect(backend.wrote, `STALE: the ${cut ? "cut" : "copy"} pasted a value A1 no longer held`).toEqual([[String(n)]]);
+      expect(firstUpdate().value, "precondition: the frontend's own read was stale").not.toBe(String(n));
+      expect(firstUpdate().source, "a cut names its source as a MOVE (unshifted), a copy as a copy").toEqual(
+        cut ? { sheetIndex: 0, row: 0, col: 0, unshifted: true } : { sheetIndex: 0, row: 0, col: 0 },
+      );
+      await act(async () => {
+        clipboard.clearClipboardState();
+      });
+    }
+  });
+
+  // A copy that FOLLOWED a shift while the paste was under way names other
+  // cells now: the paste starts again (bounded) and names where the source
+  // stands at the write. SABOTAGE: make `sourceMovedDuringPaste` answer false
+  // -- fails at "OLD ADDRESS".
+  it("a copy that follows an insert during the paste names its source where it stands now", async () => {
+    model.cells.set("1,0", { display: "5", formula: null, styleIndex: 0 });
+    await copyAt(1, 0);
+    await select(5, 3, 6, 3);
+    sys.onMerges = () => {
+      model.cells.delete("1,0");
+      model.cells.set("2,0", { display: "5", formula: null, styleIndex: 0 });
+      emitAppEvent(ApiAppEvents.STRUCTURAL_EDIT_ELSEWHERE, {
+        descriptions: ["Insert Rows"],
+        edits: [{ sheetIndex: 0, kind: "rowInsert", at: 0, count: 1 }],
+      });
+    };
+    await act(async () => {
+      await clipboard.paste();
+    });
+    await settle();
+    expect(getInternalClipboard()?.sourceSelection.startRow, "precondition: the copy followed the insert").toBe(2);
+    expect(api.updateCellsBatch).toHaveBeenCalledTimes(1);
+    const [updates] = api.updateCellsBatch.mock.calls[0] as unknown as [Update[]];
+    expect(updates.map((u) => u.source?.row), "OLD ADDRESS: the paste named the cell the copy left").toEqual([2, 2]);
+    expect(backend.wrote).toEqual([["5", "5"]]);
   });
 });

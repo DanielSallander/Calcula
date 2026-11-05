@@ -160,6 +160,11 @@ fn extract_recursive(expr: &Expression, deps: &mut CoordSet, bounds: GridBounds)
                         deps.insert((r, c));
                     }
                 }
+            } else {
+                // `a:C3`, `Table1[Col]:Table1[Col]` (BUG-0646): the halves
+                // are references of their own.
+                extract_recursive(start, deps, bounds);
+                extract_recursive(end, deps, bounds);
             }
         }
 
@@ -320,6 +325,10 @@ fn extract_recursive_with_sheets(
                         });
                     }
                 }
+            } else {
+                // The halves are references of their own (BUG-0646).
+                extract_recursive_with_sheets(start, deps, bounds);
+                extract_recursive_with_sheets(end, deps, bounds);
             }
         }
 

@@ -14,7 +14,7 @@
 // another sheet's colour whose rule id happens to match).
 
 import type { ConditionalFormatPainter } from "@api/conditionalFormatPaint";
-import { paintDataBar, findDataBarRule } from "./dataBarRenderer";
+import { paintDataBar, findDataBarRule, dataBarValueOf } from "./dataBarRenderer";
 import { paintIconSetIcon } from "./iconSetRenderer";
 
 export const conditionalFormatGlyphPainter: ConditionalFormatPainter = {
@@ -23,7 +23,8 @@ export const conditionalFormatGlyphPainter: ConditionalFormatPainter = {
     // (cf-data-bar priority 5, cf-icon-set priority 6).
     const bar = results.find((cf) => cf.dataBarPercent != null);
     if (bar && bar.dataBarPercent != null) {
-      paintDataBar(ctx, box, bar.dataBarPercent, findDataBarRule(rules, bar.ruleId));
+      // Length, axis and sign together, as the backend resolved them (BUG-0511).
+      paintDataBar(ctx, box, dataBarValueOf(bar), findDataBarRule(rules, bar.ruleId));
     }
     // The set and the index arrive together from the rule that produced them
     // (BUG-0107); an index without a set is skipped, never guessed at.

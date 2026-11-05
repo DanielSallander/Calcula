@@ -16,7 +16,12 @@
 //          on a cell with its own thick top border): the SOURCE's formatting
 //          replaces the destination's (bold arrives, the destination's italic
 //          goes, indent 2 arrives), the source's bottom border does NOT
-//          arrive, and the destination's OWN top border STAYS.
+//          arrive, and the destination's OWN top border STAYS -- in full
+//          detail (2026-11-04: a theme-coloured medium dashed side stays so).
+//          The style rides the content write, or (No Borders) goes as ONE
+//          style-only batch whose `keepBorders` the backend decides (BUG-0345,
+//          BUG-0347; pinned in Rust by cell_target_content_tests::
+//          no_borders_keeps_a_theme_coloured_medium_dashed_border_in_full_on_a_sheet_and_a_grid).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -69,6 +74,8 @@ const h = vi.hoisted(() => ({
   /** Whether each write was flagged as a PASTE (CellUpdateInput.pasted), in order. */
   pasted: [] as Array<boolean | undefined>,
   styled: [] as Array<[number, number, number]>,
+  /** The cells a style-only write told to keep their own borders (No Borders). */
+  keptBorders: [] as Array<[number, number]>,
   formatted: [] as Array<{ rows: number[]; cols: number[]; fmt: Record<string, unknown> }>,
   widths: new Map<number, number>(),
   widthWrites: [] as Array<[number, number]>,
@@ -109,13 +116,23 @@ vi.mock("@api/lib", async (importOriginal) => {
       return { cells: [] };
     }),
     // A pasted formula or stored value is written through the batch, flagged pasted.
-    updateCellsBatch: vi.fn(async (updates: Array<{ row: number; col: number; value: string; pasted?: boolean }>) => {
+    updateCellsBatch: vi.fn(async (updates: Array<{ row: number; col: number; value: string; pasted?: boolean; styleIndex?: number }>) => {
       for (const u of updates) {
         h.writes.push("updateCellsBatch");
         h.updates.push([u.row, u.col, u.value]);
         h.pasted.push(u.pasted);
+        // The source's style riding the content write (as plain Paste sends it).
+        if (u.styleIndex !== undefined) h.styled.push([u.row, u.col, u.styleIndex]);
       }
       return [];
+    }),
+    // The style-only BATCH (one call for every style-only write).
+    setCellStyles: vi.fn(async (writes: Array<{ row: number; col: number; styleIndex: number; keepBorders?: boolean }>) => {
+      h.writes.push("setCellStyles");
+      for (const w of writes) {
+        h.styled.push([w.row, w.col, w.styleIndex]);
+        if (w.keepBorders) h.keptBorders.push([w.row, w.col]);
+      }
     }),
     setCellStyle: vi.fn(async (r: number, c: number, i: number) => {
       h.writes.push("setCellStyle");
@@ -227,6 +244,7 @@ beforeEach(() => {
   h.updates = [];
   h.pasted = [];
   h.styled = [];
+  h.keptBorders = [];
   h.formatted = [];
   h.widths = new Map();
   h.widthWrites = [];
@@ -362,28 +380,25 @@ describe("No Borders: every style field of the source except borders; the destin
     h.clipboard = clipboardOf([[{ display: "5", styleIndex: 5 }]]);
   });
 
-  it("the cell takes the SOURCE's style whole (no hand-copied field list), then only borders are written", async () => {
+  it("the cell takes the SOURCE's style whole (no hand-copied field list) and keeps its OWN borders, decided by the backend", async () => {
     await run(CoreCommands.PASTE_NO_BORDERS);
     expect(h.updates).toEqual([[4, 4, "5"]]);
     expect(h.styled, "the source style was not applied whole").toEqual([[4, 4, 5]]);
-    for (const f of h.formatted) {
-      const keys = Object.keys(f.fmt);
-      expect(keys.length).toBeGreaterThan(0);
-      expect(
-        keys.every((k) => k.startsWith("border")),
-        `No Borders re-applied a non-border field by hand: ${keys.join(", ")}`,
-      ).toBe(true);
-    }
+    expect(h.keptBorders, "the destination's own borders were not kept").toEqual([[4, 4]]);
+    expect(h.formatted, "No Borders re-applied a field by hand").toEqual([]);
   });
 
-  it("the destination's own top border stays, the source's bottom border does not arrive (Excel, live)", async () => {
+  // BUG-0347: the destination's borders used to be READ and put back side by
+  // side through applyFormatting, whose wire takes a side as {style, color} --
+  // a theme-coloured border came back as a fixed colour, a medium dashed one
+  // as thin. Excel keeps every detail [LIVE, 2026-11-04]; so does the backend's
+  // keepBorders, which copies the cell's own border sides as they are.
+  it("no border side goes back through the lossy {style, color} wire, and no destination is read for it (BUG-0347)", async () => {
+    const lib = await import("@api/lib");
     await run(CoreCommands.PASTE_NO_BORDERS);
-    const borders = Object.assign({}, ...h.formatted.map((f) => f.fmt)) as Record<string, { style: string; color: string }>;
-    expect(borders.borderTop).toEqual({ style: "thick", color: "#ff0000" });
-    expect(borders.borderBottom?.style).toBe("none");
-    // Sides that are the same on both (none / none) are not rewritten.
-    expect(borders.borderLeft).toBeUndefined();
-    expect(borders.borderDiagonalUp).toBeUndefined();
+    expect(h.formatted.filter((f) => Object.keys(f.fmt).some((k) => k.startsWith("border"))), "a border was put back by hand").toEqual([]);
+    expect(vi.mocked(lib.getCell), "the destination was read for its borders").not.toHaveBeenCalled();
+    expect(h.writes.filter((w) => w === "setCellStyles"), "the style-only writes were not ONE batch").toHaveLength(1);
   });
 
   it("a source with no borders over a destination with none writes no border at all", async () => {

@@ -23,15 +23,113 @@ import {
 } from "@api";
 import type { CellBox } from "@api/cellPaint";
 import { getEvaluationForCell, getRules } from "../lib/cfStore";
-import type { DataBarRule, ConditionalFormatDefinition } from "@api";
+import type { DataBarRule, ConditionalFormatDefinition, CellConditionalFormat } from "@api";
 
 /** Excel's default data bar colour (Blue Data Bar). */
 export const DEFAULT_DATA_BAR_COLOR = "#638EC6";
+/** Excel's default negative bar fill and border colour. */
+export const DEFAULT_NEGATIVE_BAR_COLOR = "#FF0000";
+/** Excel's default axis colour. */
+export const DEFAULT_AXIS_COLOR = "#000000";
 /** Inset of the bar inside its cell box, in px. */
 const BAR_PADDING = 2;
+/**
+ * The axis's dash, in px: Excel's is ~3.8px on, ~1.3px off ([LIVE] PDF of a
+ * 51pt cell, 2.88pt dashes at a 3.84pt pitch).
+ */
+const AXIS_DASH = [4, 1];
 
-/** The styling a data bar takes from its rule. */
-export type DataBarStyle = Pick<DataBarRule, "fillColor" | "gradientFill">;
+/**
+ * The styling a data bar takes from its rule. Everything but the two original
+ * fields is optional, so an object holding only `{ fillColor, gradientFill }`
+ * still paints (borderless, LTR, Excel's default negative colours).
+ */
+export type DataBarStyle = Pick<DataBarRule, "fillColor" | "gradientFill"> &
+  Partial<
+    Pick<
+      DataBarRule,
+      "borderColor" | "negativeFillColor" | "negativeBorderColor" | "axisColor" | "axisPosition" | "direction"
+    >
+  >;
+
+/**
+ * One cell's bar as the backend resolved it (`CellConditionalFormat`): the
+ * LENGTH (0..1 of the bar area), the AXIS when there is one (0..1 from the start
+ * edge), and the sign.
+ */
+export interface DataBarValue {
+  percent: number;
+  axis?: number | null;
+  negative?: boolean;
+}
+
+/** Where a bar and its axis land in a box. Pure geometry; see {@link layoutDataBar}. */
+export interface DataBarLayout {
+  /** The bar rectangle, or null for a zero-length bar. */
+  bar: { x: number; y: number; width: number; height: number } | null;
+  /** The x of the axis line, or null when none is drawn (no axis, or at an edge). */
+  axisX: number | null;
+  /** The bar's BASE end -- the axis side, where a gradient starts. */
+  baseX: number;
+  negative: boolean;
+}
+
+/**
+ * Lay one data bar out inside a cell box, as Excel does ([LIVE] 2026-11-04,
+ * the measurements are in `data_bar_geometry`, conditional_formatting.rs):
+ *   - no axis: the bar runs from the start edge, `percent` of the area long;
+ *   - an axis: a positive bar runs from the axis toward the far edge, a
+ *     NEGATIVE one from the axis back toward the start edge;
+ *   - right-to-left mirrors everything (the start edge is the right one).
+ * The bar area is the box inset by 2px on every side.
+ */
+export function layoutDataBar(
+  box: CellBox,
+  value: DataBarValue,
+  direction: DataBarStyle["direction"] = "context",
+): DataBarLayout | null {
+  const areaX = box.x + BAR_PADDING;
+  const areaY = box.y + BAR_PADDING;
+  const areaW = box.width - BAR_PADDING * 2;
+  const areaH = box.height - BAR_PADDING * 2;
+  if (areaW <= 0 || areaH <= 0) return null;
+
+  const length = Math.max(0, Math.min(1, value.percent));
+  const negative = value.negative === true;
+  const axis = value.axis == null ? null : Math.max(0, Math.min(1, value.axis));
+  // Fractions from the START edge: [from, to], `base` the axis-side end.
+  let from: number;
+  let to: number;
+  let base: number;
+  if (axis === null) {
+    from = 0;
+    to = length;
+    base = 0;
+  } else if (negative) {
+    from = Math.max(0, axis - length);
+    to = axis;
+    base = axis;
+  } else {
+    from = axis;
+    to = Math.min(1, axis + length);
+    base = axis;
+  }
+  // "context" follows the sheet's direction, and a Calcula sheet is
+  // left-to-right.
+  const rtl = direction === "rightToLeft";
+  const toX = (f: number) => (rtl ? areaX + (1 - f) * areaW : areaX + f * areaW);
+  const x1 = toX(from);
+  const x2 = toX(to);
+  const left = Math.min(x1, x2);
+  const width = Math.abs(x2 - x1);
+  const axisX = axis !== null && axis > 0 && axis < 1 ? toX(axis) : null;
+  return {
+    bar: width > 0 ? { x: left, y: areaY, width, height: areaH } : null,
+    axisX,
+    baseX: toX(base),
+    negative,
+  };
+}
 
 /**
  * The data-bar rule with `ruleId` in `rules`, or null when there is none (or it
@@ -49,49 +147,90 @@ export function findDataBarRule(
 
 /**
  * Paint one data bar into `box` (the cell's box; the bar is inset by 2px).
- * `percent` is the backend's 0..1 fill fraction. `rule` supplies the colour and
- * the gradient switch; null paints Excel's default gradient blue.
+ *
+ * `value` is the backend's resolved bar (`dataBarPercent`, `dataBarAxis`,
+ * `dataBarNegative`); a bare number is a length from the start edge. `rule`
+ * supplies every styling option the rule carries (BUG-0511 -- the painter used
+ * to read only the fill colour and the gradient switch, so a negative value
+ * was a positive-coloured bar from the left edge):
+ *   - positive bars in `fillColor`, negative ones in `negativeFillColor`
+ *     (Excel's red by default);
+ *   - a border only when the rule HAS one (`borderColor`; a negative bar's
+ *     is `negativeBorderColor`, else its fill colour), as Excel's solid-fill
+ *     presets have none;
+ *   - the axis as Excel's dashed line in `axisColor` (black by default);
+ *   - `direction` "rightToLeft" mirrors the bar;
+ *   - opaque, as Excel paints it ([LIVE]: the PDF's fill alpha is 1). The
+ *     painter used to draw every bar at 35% opacity.
+ * null paints Excel's default bar: gradient blue with a blue border.
  */
 export function paintDataBar(
   ctx: CanvasRenderingContext2D,
   box: CellBox,
-  percent: number,
+  value: number | DataBarValue,
   rule: DataBarStyle | null,
 ): void {
-  const fillColor = rule?.fillColor || DEFAULT_DATA_BAR_COLOR;
+  const bar: DataBarValue = typeof value === "number" ? { percent: value } : value;
+  const layout = layoutDataBar(box, bar, rule?.direction);
+  if (!layout) return;
+
   const gradientFill = rule?.gradientFill ?? true;
-
-  const barX = box.x + BAR_PADDING;
-  const barY = box.y + BAR_PADDING;
-  const maxBarW = box.width - BAR_PADDING * 2;
-  const barH = box.height - BAR_PADDING * 2;
-  if (maxBarW <= 0 || barH <= 0) return;
-
-  const clamped = Math.max(0, Math.min(1, percent));
-  const barW = maxBarW * clamped;
+  const positiveFill = rule?.fillColor || DEFAULT_DATA_BAR_COLOR;
+  const positiveBorder = rule ? rule.borderColor : DEFAULT_DATA_BAR_COLOR;
+  const fillColor = layout.negative ? rule?.negativeFillColor || DEFAULT_NEGATIVE_BAR_COLOR : positiveFill;
+  // A negative bar has a border exactly when the positive one does.
+  const borderColor = positiveBorder
+    ? layout.negative
+      ? rule?.negativeBorderColor || fillColor
+      : positiveBorder
+    : undefined;
 
   ctx.save();
 
-  if (gradientFill) {
-    // Gradient: solid color at left, fading to lighter at right
-    const gradient = ctx.createLinearGradient(barX, 0, barX + barW, 0);
-    gradient.addColorStop(0, fillColor);
-    gradient.addColorStop(1, adjustColorBrightness(fillColor, 0.6));
-    ctx.fillStyle = gradient;
-  } else {
-    ctx.fillStyle = fillColor;
+  if (layout.bar) {
+    const { x, y, width, height } = layout.bar;
+    if (gradientFill) {
+      // The colour at the bar's BASE (its axis end, or the start edge), fading
+      // toward the end the value reaches.
+      const farX = layout.baseX === x ? x + width : x;
+      const gradient = ctx.createLinearGradient(layout.baseX, 0, farX, 0);
+      gradient.addColorStop(0, fillColor);
+      gradient.addColorStop(1, adjustColorBrightness(fillColor, 0.6));
+      ctx.fillStyle = gradient;
+    } else {
+      ctx.fillStyle = fillColor;
+    }
+    ctx.fillRect(x, y, width, height);
+
+    if (borderColor) {
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, width - 1, height - 1);
+    }
   }
 
-  ctx.globalAlpha = 0.35;
-  ctx.fillRect(barX, barY, barW, barH);
-
-  // Draw border on the bar
-  ctx.globalAlpha = 0.6;
-  ctx.strokeStyle = fillColor;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(barX + 0.5, barY + 0.5, barW - 1, barH - 1);
+  if (layout.axisX !== null) {
+    ctx.strokeStyle = rule?.axisColor || DEFAULT_AXIS_COLOR;
+    ctx.lineWidth = 1;
+    ctx.setLineDash(AXIS_DASH);
+    ctx.beginPath();
+    const ax = Math.round(layout.axisX) + 0.5;
+    ctx.moveTo(ax, box.y);
+    ctx.lineTo(ax, box.y + box.height);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   ctx.restore();
+}
+
+/** The bar a result carries, in the painter's terms. */
+export function dataBarValueOf(cf: CellConditionalFormat): DataBarValue {
+  return {
+    percent: cf.dataBarPercent ?? 0,
+    axis: cf.dataBarAxis ?? null,
+    negative: cf.dataBarNegative === true,
+  };
 }
 
 /**
@@ -145,7 +284,7 @@ export function renderDataBars(context: OverlayRenderContext): void {
     paintDataBar(
       ctx,
       { x: left, y: top, width: right - left, height: bottom - top },
-      barCf.dataBarPercent,
+      dataBarValueOf(barCf),
       rule,
     );
   }

@@ -68,8 +68,20 @@ export function AlignmentTab(): React.ReactElement {
     if (next > 0 && (textAlign === "general" || textAlign === "center" || textAlign === "")) {
       setTextAlign("left");
     }
+    // AN INDENT AND AN ANGLE NEVER COEXIST (BUG-0366; Excel 16 [LIVE],
+    // 2026-11-04, lane multiarea probe2/3): Orientation 45 or 90 on a cell then
+    // IndentLevel 2 reads back as horizontal text with indent 2. Stacked text
+    // keeps its indent (xlVertical survives IndentLevel 2 either way).
+    if (next > 0 && !orientation.stacked && orientation.degrees !== 0) {
+      setTextRotation("none");
+    }
     setIndent(next);
   };
+
+  // With an indent the orientation ANGLES are greyed, as in Excel's dialog: an
+  // angle set on an indented cell is ignored there (Orientation 45 after
+  // IndentLevel 2 reads back horizontal). The stacked "Text" box stays.
+  const anglesDisabled = indent > 0;
 
   return (
     <Container>
@@ -203,6 +215,8 @@ export function AlignmentTab(): React.ReactElement {
                   type="button"
                   aria-pressed={active}
                   $active={active}
+                  disabled={anglesDisabled}
+                  title={anglesDisabled ? "An indented cell is not rotated (set the indent to 0 first)" : undefined}
                   onClick={() => setTextRotation(textRotationForDegrees(deg))}
                   data-testid={`fc-orientation-${deg}`}
                 >
@@ -221,6 +235,7 @@ export function AlignmentTab(): React.ReactElement {
             max={90}
             step={1}
             value={orientation.degrees}
+            disabled={anglesDisabled}
             onChange={(n) => {
               if (n === null) return;
               // Excel's range is -90..90. Typing an angle leaves stacked text,
@@ -419,6 +434,11 @@ const AngleButton = styled.button<{ $active: boolean }>`
   border-radius: 4px;
   cursor: pointer;
   overflow: hidden;
+
+  &:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
 `;
 
 const AngleSample = styled.span`

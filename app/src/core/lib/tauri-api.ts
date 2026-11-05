@@ -21,6 +21,7 @@ import type {
   UsedRangeResult,
   ClearApplyTo,
   ClearArea,
+  FormattingArea,
   SplitConfig,
   MergedRegion,
   MergeResult,
@@ -413,6 +414,30 @@ export type RecordedGridEvent =
   | { kind: "deleteRows"; startRow: number; count: number }
   | { kind: "insertColumns"; startCol: number; count: number }
   | { kind: "deleteColumns"; startCol: number; count: number }
+  /**
+   * Excel's Insert Cells / Delete Cells on the active sheet (BUG-0358): the
+   * block and the shift, and whether the person answered OK to unmerging the
+   * merged blocks the shift cut. A block spanning every column (row) is
+   * recorded as the entire-row (column) edit it is, never as this.
+   */
+  | {
+      kind: "insertCells";
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+      shift: InsertCellsShift;
+      unmergeCutMerges: boolean;
+    }
+  | {
+      kind: "deleteCells";
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+      shift: DeleteCellsShift;
+      unmergeCutMerges: boolean;
+    }
   | {
       kind: "mergeCells";
       startRow: number;
@@ -742,6 +767,37 @@ export interface CellUpdateInput {
    * `CellUpdateInput.moved` / `MovedFrom`.
    */
   moved?: MovedFrom;
+  /**
+   * Set, this write PASTES the named source cell as it holds it AT THE WRITE
+   * (BUG-0657): the backend reads it under the batch's own guards, before any
+   * of its writes, and writes its formula shifted by (this cell - the source)
+   * as Copy + Paste shifts it -- or, with `valuesOnly` or no formula, its
+   * stored value as a paste. `value` is then only the fallback for a source
+   * the backend cannot vouch for (a collection value, a `TABLE(..)` formula, a
+   * source that does not resolve). Mirrors Rust `CellUpdateInput.source` /
+   * `PasteSource`.
+   */
+  source?: PasteSource;
+}
+
+/**
+ * The source cell of a pasted write (`CellUpdateInput.source`): a cell of the
+ * sheet at `sheetIndex`, or -- with `target` -- a cell of that object (its own
+ * coordinates; `sheetIndex` is then not used). `valuesOnly`: paste the
+ * source's value (a formula's result), never its formula. `unshifted`: the
+ * write MOVES the source (Cut + Paste, a drag move), so its formula lands as
+ * the source holds it -- the move's relocation re-points it -- where a copy's
+ * is shifted by (this cell - the source). A source formula its protected
+ * sheet hides is pasted as its value, and a data table's body cell is copied
+ * as its value. Mirrors Rust `PasteSource`.
+ */
+export interface PasteSource {
+  sheetIndex: number;
+  row: number;
+  col: number;
+  target?: CellTargetRef;
+  valuesOnly?: boolean;
+  unshifted?: boolean;
 }
 
 /**
@@ -839,13 +895,20 @@ export async function clearRange(
     endRow,
     endCol,
   });
+  // `clear_range` REMOVES every stored cell of the rectangle -- its value AND
+  // its own format (`Grid::clear_cell`) -- so the recorder hears a Clear ALL.
+  // It said "contents", and a replayed recording of a row move / copy (the
+  // callers in useClipboard) then left the destination cells' formats that
+  // the gesture itself had wiped. (One residual difference: a replayed "all"
+  // over WHOLE rows or columns also removes their row / column format, which
+  // `clear_range` leaves.)
   recordGridEvent({
     kind: "clearRange",
     startRow,
     startCol,
     endRow,
     endCol,
-    applyTo: "contents",
+    applyTo: "all",
   });
   return result;
 }
@@ -872,10 +935,20 @@ export async function clearRangeWithOptions(
   endCol: number,
   applyTo: ClearApplyTo = "all",
   sheetIndex?: number,
-  opts?: CellTargetOptions,
+  opts?: CellTargetOptions & {
+    /**
+     * The OTHER blocks of a multi-area selection (BUG-0394 / BUG-0395),
+     * cleared by this same call on the active sheet: every block is gated
+     * before any is written (one refusing block clears none), as ONE undo
+     * step with ONE dependents cascade. Contents, formats, all only; no
+     * `sheetIndex`, no target.
+     */
+    moreAreas?: ClearArea[];
+  },
 ): Promise<unknown> {
   // `target` rides INSIDE the params struct, beside `sheetIndex` (TARGET_IN_PARAMS).
   const placed = cellTargetArg("clear_range_with_options", opts, sheetIndex);
+  const moreAreas = opts?.moreAreas ?? [];
   const result = await invoke("clear_range_with_options", {
     params: {
       startRow,
@@ -886,19 +959,27 @@ export async function clearRangeWithOptions(
       sheetIndex: sheetIndex ?? null,
       ...placed,
     },
+    ...moreAreasArg(moreAreas),
   });
   if (!placed.target) {
-    recordGridEvent({
-      kind: "clearRange",
-      startRow,
-      startCol,
-      endRow,
-      endCol,
-      applyTo,
-      ...(typeof sheetIndex === "number" ? { sheetIndex } : {}),
-    });
+    // One recorded clear per block, so a recorded multi-area clear replays
+    // exactly as the single-block calls it replaced.
+    for (const area of [{ startRow, startCol, endRow, endCol }, ...moreAreas]) {
+      recordGridEvent({
+        kind: "clearRange",
+        ...area,
+        applyTo,
+        ...(typeof sheetIndex === "number" ? { sheetIndex } : {}),
+      });
+    }
   }
   return result;
+}
+
+/** `{ moreAreas }` for a clear command when there are other blocks, else nothing
+ *  (a one-block call keeps the wire shape it always had). */
+function moreAreasArg(moreAreas: readonly ClearArea[] | undefined): { moreAreas?: ClearArea[] } {
+  return moreAreas && moreAreas.length > 0 ? { moreAreas: moreAreas.map((a) => ({ ...a })) } : {};
 }
 
 /**
@@ -908,13 +989,15 @@ export async function clearHyperlinksInRange(
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
+  endCol: number,
+  moreAreas?: ClearArea[],
 ): Promise<number> {
   const cleared = await invoke<number>("clear_hyperlinks_in_range", {
     startRow,
     startCol,
     endRow,
     endCol,
+    ...moreAreasArg(moreAreas),
   });
   if (cleared > 0) {
     emitAppEvent(AppEvents.HYPERLINKS_CHANGED, { sheetIndex: null });
@@ -1639,14 +1722,29 @@ export async function applyFormatting(
   rows: number[],
   cols: number[],
   formatting: FormattingOptions,
-  opts?: FormatPlacementOptions,
+  opts?: FormatPlacementOptions & {
+    /**
+     * The OTHER blocks of a multi-area selection (BUG-0394), formatted by this
+     * same call as ONE undo step -- each as the rows and columns of its own
+     * cross product. Not with a `target`.
+     */
+    moreAreas?: FormattingArea[];
+  },
 ): Promise<FormattingResult> {
   const placement = placementArgs("apply_formatting", opts);
+  const moreAreas = opts?.moreAreas ?? [];
+  if (placement.target && moreAreas.length > 0) {
+    throw new Error("Several areas are formatted on the sheet, not in an object's cells.");
+  }
   console.log(
     "[tauri-api] applyFormatting:",
     `${rows.length} rows x ${cols.length} cols`,
+    moreAreas.length > 0 ? `+ ${moreAreas.length} more area(s)` : "",
   );
   const result = await invoke<FormattingResult>("apply_formatting", {
+    ...(moreAreas.length > 0
+      ? { moreAreas: moreAreas.map((a) => ({ rows: encodeIndexList(a.rows), cols: encodeIndexList(a.cols) })) }
+      : {}),
     params: {
       rows: encodeIndexList(rows),
       cols: encodeIndexList(cols),
@@ -1696,7 +1794,11 @@ export async function applyFormatting(
   // event names them: recorded without, a grouped Bold replayed on the active
   // sheet alone.
   if (!placement.target) {
-    recordGridEvent({ kind: "formatting", rows, cols, formatting, ...recordedSheets(placement.sheetIndices) });
+    // One recorded formatting per block (a multi-area call replays as the
+    // single-block calls it replaced).
+    for (const area of [{ rows, cols }, ...moreAreas]) {
+      recordGridEvent({ kind: "formatting", rows: area.rows, cols: area.cols, formatting, ...recordedSheets(placement.sheetIndices) });
+    }
   }
   return result;
 }
@@ -1882,7 +1984,14 @@ export async function adjustNumberFormatDecimals(
   rows: number[],
   cols: number[],
   delta: 1 | -1,
-  opts?: FormatPlacementOptions,
+  opts?: FormatPlacementOptions & {
+    /**
+     * The text the ACTIVE cell shows at its column's width (BUG-0355,
+     * `@api/shownCellText`): a General number steps from the decimals SHOWN,
+     * as in Excel. Absent: General's full rendering.
+     */
+    shownText?: string | null;
+  },
 ): Promise<FormattingResult> {
   const placement = placementArgs("adjust_number_format_decimals", opts);
   const rowWire = encodeActiveFirstIndexList(rows);
@@ -1894,6 +2003,7 @@ export async function adjustNumberFormatDecimals(
     ...(rowWire.lead !== undefined ? { activeRow: rowWire.lead } : {}),
     ...(colWire.lead !== undefined ? { activeCol: colWire.lead } : {}),
     ...placement,
+    ...(opts?.shownText ? { shownText: opts.shownText } : {}),
   });
   announceStyleEntries(result);
 
@@ -2970,6 +3080,8 @@ export async function insertRows(
   const result = await invoke<CellData[]>("insert_rows", { row, count });
   console.log(`[tauri-api] insertRows returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.ROWS_INSERTED, { startRow: row, count });
+  // The sizes moved with the lines (BUG-0360): every caller re-reads them.
+  refreshDimensionsAfterLineEdit();
   recordGridEvent({ kind: "insertRows", startRow: row, count });
   return result;
 }
@@ -3006,6 +3118,7 @@ export async function insertColumns(
   const result = await invoke<CellData[]>("insert_columns", { col, count });
   console.log(`[tauri-api] insertColumns returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.COLUMNS_INSERTED, { startCol: col, count });
+  refreshDimensionsAfterLineEdit(); // BUG-0360
   recordGridEvent({ kind: "insertColumns", startCol: col, count });
   return result;
 }
@@ -3048,6 +3161,7 @@ export async function deleteRows(
   console.log(`[tauri-api] deleteRows returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.ROWS_DELETED, { startRow: row, count });
   announceStructuralDeleteCascade();
+  refreshDimensionsAfterLineEdit(); // BUG-0360
   recordGridEvent({ kind: "deleteRows", startRow: row, count });
   return result;
 }
@@ -3108,6 +3222,7 @@ export async function deleteColumns(
   console.log(`[tauri-api] deleteColumns returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.COLUMNS_DELETED, { startCol: col, count });
   announceStructuralDeleteCascade();
+  refreshDimensionsAfterLineEdit(); // BUG-0360
   recordGridEvent({ kind: "deleteColumns", startCol: col, count });
   return result;
 }
@@ -3142,10 +3257,30 @@ function wholeLineSpan(
   endRow: number,
   endCol: number,
 ): { axis: "rows" | "columns"; start: number; count: number } | null {
+  // THE SHEET-SIZE BOUND OF THIS ROUTE'S OWN (BUG-0399). A script reaches
+  // this wrapper through @api with any numbers: a range "spanning every
+  // column" whose rows ran past the sheet (endRow 5,000,000) became an
+  // insert/delete of millions of rows, refused only by the backend's push-off
+  // gate. Every coordinate must be a cell index of the sheet; an end past the
+  // sheet's last line is that last line, so a count is never more lines than
+  // the sheet has from `start` on.
+  for (const [name, value] of [
+    ["startRow", startRow],
+    ["startCol", startCol],
+    ["endRow", endRow],
+    ["endCol", endCol],
+  ] as const) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RangeError(`Insert/Delete Cells: ${name} must be a cell index of the sheet (got ${String(value)}).`);
+    }
+  }
   const r0 = Math.min(startRow, endRow);
-  const r1 = Math.max(startRow, endRow);
+  const r1 = Math.min(Math.max(startRow, endRow), SHEET_LAST_ROW_INDEX);
   const c0 = Math.min(startCol, endCol);
-  const c1 = Math.max(startCol, endCol);
+  const c1 = Math.min(Math.max(startCol, endCol), SHEET_LAST_COL_INDEX);
+  if (r0 > SHEET_LAST_ROW_INDEX || c0 > SHEET_LAST_COL_INDEX) {
+    throw new RangeError("Insert/Delete Cells: the range starts outside the sheet.");
+  }
   if (c0 === 0 && c1 >= SHEET_LAST_COL_INDEX) return { axis: "rows", start: r0, count: r1 - r0 + 1 };
   if (r0 === 0 && r1 >= SHEET_LAST_ROW_INDEX) return { axis: "columns", start: c0, count: c1 - c0 + 1 };
   return null;
@@ -3181,13 +3316,20 @@ function announceCellShift(description: string, delta: StructuralDelta | null | 
 }
 
 /**
- * A whole-line route (a range spanning every column / row) moved the
- * backend's row heights or column widths -- and an inserted line now TAKES
- * its neighbour's size (Excel's "Format Same As Above"). The callers of this
- * route re-read only the cells, so the grid is told here to re-read its
- * dimensions too (Core's own `dimensions:refresh`, which Spreadsheet answers
- * by fetching the sizes, the defaults and the hidden sets); without it the
- * old sizes stayed painted on the old lines.
+ * A row / column insert or delete on the ACTIVE sheet moved the backend's row
+ * heights or column widths -- and an inserted line now TAKES its neighbour's
+ * size (Excel's "Format Same As Above"). Most callers re-read only the cells,
+ * so the grid is told here to re-read its dimensions too (Core's own
+ * `dimensions:refresh`, which Spreadsheet answers by fetching the sizes, the
+ * defaults and the hidden sets); without it the old sizes stayed painted on
+ * the old lines until the next sheet switch.
+ *
+ * ASKED BY THE FOUR LINE WRAPPERS THEMSELVES (BUG-0360), so EVERY caller gets
+ * it: a script's table row insert, Insert Copied Cells' whole rows, the cell
+ * shift's whole-line route, a CLI or extension call -- not only the callers
+ * that remembered to ask. Core's own row/column gesture still awaits its own
+ * `refreshDimensions()` before it animates; the second, queued re-read this
+ * adds is an idempotent fetch of the same sizes.
  */
 function refreshDimensionsAfterLineEdit(): void {
   if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("dimensions:refresh"));
@@ -3209,9 +3351,9 @@ export async function insertCellsRange(
 ): Promise<CellShiftResult> {
   const whole = wholeLineSpan(startRow, startCol, endRow, endCol);
   if (whole) {
+    // The row / column wrapper re-reads the dimensions itself (BUG-0360).
     if (whole.axis === "rows") await insertRows(whole.start, whole.count);
     else await insertColumns(whole.start, whole.count);
-    refreshDimensionsAfterLineEdit();
     return { applied: true, confirm: null, wholeLines: true };
   }
   const result = await invoke<CellShiftResult>("insert_cells", {
@@ -3222,7 +3364,19 @@ export async function insertCellsRange(
     shift,
     unmergeCutMerges: options.unmergeCutMerges ?? false,
   });
-  if (result.applied) announceCellShift("Insert Cells", result.delta);
+  if (result.applied) {
+    announceCellShift("Insert Cells", result.delta);
+    // Recorded once it landed (BUG-0358); a stop to ask changed nothing.
+    recordGridEvent({
+      kind: "insertCells",
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      shift,
+      unmergeCutMerges: options.unmergeCutMerges ?? false,
+    });
+  }
   return result;
 }
 
@@ -3242,7 +3396,6 @@ export async function deleteCellsRange(
   if (whole) {
     if (whole.axis === "rows") await deleteRows(whole.start, whole.count);
     else await deleteColumns(whole.start, whole.count);
-    refreshDimensionsAfterLineEdit();
     return { applied: true, confirm: null, wholeLines: true };
   }
   const result = await invoke<CellShiftResult>("delete_cells", {
@@ -3253,7 +3406,18 @@ export async function deleteCellsRange(
     shift,
     unmergeCutMerges: options.unmergeCutMerges ?? false,
   });
-  if (result.applied) announceCellShift("Delete Cells", result.delta);
+  if (result.applied) {
+    announceCellShift("Delete Cells", result.delta);
+    recordGridEvent({
+      kind: "deleteCells",
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      shift,
+      unmergeCutMerges: options.unmergeCutMerges ?? false,
+    });
+  }
   return result;
 }
 
@@ -3855,9 +4019,10 @@ function recordMergeResult(result: MergeResult | null | undefined, sheetIndex?: 
  * result then describes the TARGET sheet's merge set and `updatedCells` is
  * empty (no active-canvas repaint).
  *
- * `options` (the ribbon's Merge menu): across / absorb / keepFirstValue /
- * probe -- see `MergeOptions`. Left out, this is a plain Range.Merge, exactly
- * as before. A probe changes nothing and records nothing.
+ * `options` (the ribbon's Merge menu): across / probe -- see `MergeOptions`.
+ * Left out, this is a plain Range.Merge. EVERY merge applies Excel's value
+ * rule (an empty top-left takes the first value, moved, its readers
+ * re-pointed by the backend). A probe changes nothing and records nothing.
  */
 export async function mergeCells(
   startRow: number,
@@ -3981,6 +4146,10 @@ export interface FormulaShiftInput {
   formula: string;
   rowDelta: number;
   colDelta: number;
+  /** The cell the formula is copied FROM (Rust `FormulaShiftInput.source_row`):
+   *  only an unqualified structured reference (`[@Qty]`) needs it. */
+  sourceRow?: number;
+  sourceCol?: number;
 }
 
 /**
@@ -4600,7 +4769,8 @@ export async function clearCommentsInRange(
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
+  endCol: number,
+  moreAreas?: ClearArea[],
 ): Promise<number> {
   console.log(
     `[tauri-api] clearCommentsInRange(${startRow}, ${startCol}, ${endRow}, ${endCol})`
@@ -4610,6 +4780,7 @@ export async function clearCommentsInRange(
     startCol,
     endRow,
     endCol,
+    ...moreAreasArg(moreAreas),
   });
   if (changed > 0) emitAnnotationsChanged();
   return changed;
@@ -4764,7 +4935,8 @@ export async function clearNotesInRange(
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
+  endCol: number,
+  moreAreas?: ClearArea[],
 ): Promise<number> {
   console.log(
     `[tauri-api] clearNotesInRange(${startRow}, ${startCol}, ${endRow}, ${endCol})`
@@ -4774,6 +4946,7 @@ export async function clearNotesInRange(
     startCol,
     endRow,
     endCol,
+    ...moreAreasArg(moreAreas),
   });
   if (changed > 0) emitAnnotationsChanged();
   return changed;

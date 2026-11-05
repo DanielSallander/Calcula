@@ -85,7 +85,10 @@ export function BorderTab(): React.ReactElement {
     current: BorderSide,
     setter: (v: BorderSide) => void
   ) => {
-    if (current.style !== "none") {
+    // A MIXED edge (BUG-0365: its cells draw different lines) is greyed, and a
+    // click draws the chosen line along all of it -- Excel's greyed edge
+    // button goes to ON, never to OFF.
+    if (current.style !== "none" && !current.mixed) {
       setter({ style: "none", color: lineColor });
     } else {
       setter({ style: lineStyle === "none" ? "thin" : lineStyle, color: lineColor });
@@ -179,7 +182,8 @@ export function BorderTab(): React.ReactElement {
             <BorderToggle
               type="button"
               $active={borderTop.style !== "none"}
-              aria-pressed={borderTop.style !== "none"}
+              $mixed={Boolean(borderTop.mixed)}
+              aria-pressed={borderTop.mixed ? "mixed" : borderTop.style !== "none"}
               onClick={() => toggleBorder("top", borderTop, setBorderTop)}
               data-testid="fc-border-top"
             >
@@ -199,7 +203,8 @@ export function BorderTab(): React.ReactElement {
             <BorderToggle
               type="button"
               $active={borderBottom.style !== "none"}
-              aria-pressed={borderBottom.style !== "none"}
+              $mixed={Boolean(borderBottom.mixed)}
+              aria-pressed={borderBottom.mixed ? "mixed" : borderBottom.style !== "none"}
               onClick={() => toggleBorder("bottom", borderBottom, setBorderBottom)}
               data-testid="fc-border-bottom"
             >
@@ -208,7 +213,8 @@ export function BorderTab(): React.ReactElement {
             <BorderToggle
               type="button"
               $active={borderLeft.style !== "none"}
-              aria-pressed={borderLeft.style !== "none"}
+              $mixed={Boolean(borderLeft.mixed)}
+              aria-pressed={borderLeft.mixed ? "mixed" : borderLeft.style !== "none"}
               onClick={() => toggleBorder("left", borderLeft, setBorderLeft)}
               data-testid="fc-border-left"
             >
@@ -228,7 +234,8 @@ export function BorderTab(): React.ReactElement {
             <BorderToggle
               type="button"
               $active={borderRight.style !== "none"}
-              aria-pressed={borderRight.style !== "none"}
+              $mixed={Boolean(borderRight.mixed)}
+              aria-pressed={borderRight.mixed ? "mixed" : borderRight.style !== "none"}
               onClick={() => toggleBorder("right", borderRight, setBorderRight)}
               data-testid="fc-border-right"
             >
@@ -434,10 +441,11 @@ const BorderButtonRow = styled.div`
   gap: 6px;
 `;
 
-const BorderToggle = styled.button<{ $active: boolean }>`
+const BorderToggle = styled.button<{ $active: boolean; $mixed?: boolean }>`
   padding: 4px 10px;
   font-size: 11px;
-  background: ${(p) => (p.$active ? v("--accent-primary") : v("--grid-bg"))};
+  /* MIXED (BUG-0365): Excel's greyed edge button. */
+  background: ${(p) => (p.$mixed ? v("--border-default") : p.$active ? v("--accent-primary") : v("--grid-bg"))};
   border: 1px solid ${v("--border-default")};
   border-radius: 4px;
   color: ${(p) => (p.$active ? "#ffffff" : v("--text-primary"))};

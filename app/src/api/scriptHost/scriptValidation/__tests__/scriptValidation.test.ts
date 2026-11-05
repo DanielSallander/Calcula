@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import { validateScriptSource, repairPrompt } from "../index";
 import { analyzeScript, parseDeclaredCapabilities } from "../analyze";
 import { SURFACE_SIZE, suggestChains, surfaceScopeFor } from "../surface";
-import { capabilitiesFor, isKnownChain } from "../surface";
+import { capabilitiesFor, capabilitiesForDoor, isKnownChain, rowsForDoor, surfaceMemberForDoor } from "../surface";
 import { SCRIPTABLE_OBJECT_TYPES } from "../../../scriptableObjects";
 import { contextInterfaceFor, objectHooksFor } from "../../scriptPreview/objectHooks";
 import { OBJECT_TYPE_CONTEXTS, SCRIPT_SURFACE } from "../../generated/scriptSurfacePolicy";
@@ -862,5 +862,39 @@ describe("the tripwires under the narrowing", () => {
     for (const objectType of ALL_OBJECT_TYPES) {
       expect(surfaceScopeFor(objectType).iface, objectType).toBe(contextInterfaceFor(objectType));
     }
+  });
+});
+
+// ============================================================================
+// The DOOR a chain is reached through decides its policy (one row per door)
+// ============================================================================
+
+describe("L2 reads the policy row of the door the script's context reaches", () => {
+  it("a sheet script's range.setValues is sheet.setRangeValues; a table script's is object.setState", () => {
+    expect(surfaceMemberForDoor("range.setValues", surfaceScopeFor("sheet"))?.broker).toBe("sheet.setRangeValues");
+    expect(surfaceMemberForDoor("range.setValues", surfaceScopeFor("sheet"))?.tier).toBe("restricted");
+    expect(surfaceMemberForDoor("range.setValues", surfaceScopeFor("table"))?.broker).toBe("object.setState");
+    expect(surfaceMemberForDoor("api.table.range.setValues", surfaceScopeFor("sheet"))?.broker).toBe("api.objectSetState");
+    expect(surfaceMemberForDoor("api.table.range.setValues", surfaceScopeFor("sheet"))?.tier).toBe("unlocked");
+    // Unnarrowed: every door stays (no context to choose by).
+    expect(rowsForDoor("range.setValues", surfaceScopeFor()).length).toBeGreaterThan(1);
+  });
+
+  it("a PANEL script's close() needs no capability; a FORM script's needs ui.dialog", () => {
+    const src = [
+      "export async function setup(context) {",
+      "  context.close();",
+      "}",
+    ].join("\n");
+    const panel = validateScriptSource(src, "panel");
+    expect(
+      panel.findings.filter((f) => f.code === "undeclared-capability"),
+      "a panel's close is object.setState, no capability",
+    ).toEqual([]);
+    expect(capabilitiesForDoor("close", surfaceScopeFor("panel")).size).toBe(0);
+    const form = validateScriptSource(src, "form");
+    const f = form.findings.find((x) => x.code === "undeclared-capability");
+    expect(f?.capability, JSON.stringify(form.findings)).toBe("ui.dialog");
+    expect(f?.message).toContain("form.close");
   });
 });

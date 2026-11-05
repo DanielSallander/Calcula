@@ -364,6 +364,9 @@ impl Qualify<'_> {
             }
             // The Calcula all-sheets wildcard: `'*'!A1`. Not a sheet name.
             Some(s) if s == "*" => {}
+            // A DELETED sheet's reference (`#REF!A1`, `parser::ast::REF_ERROR_SHEET`,
+            // what a sheet delete leaves): no sheet to spell, and it reads #REF!.
+            Some(s) if s == parser::ast::REF_ERROR_SHEET => {}
             Some(s) => self.canonicalise(s)?,
         }
         Ok(())

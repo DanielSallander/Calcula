@@ -2,8 +2,10 @@
 // PURPOSE: Core's own grid keyboard does not WRITE to Core's selection while a
 //          selection owner holds the selection: the format keys (Ctrl+B/I/U,
 //          Ctrl+2..5, the Ctrl+Shift number formats), Ctrl+; / Ctrl+Shift+:,
-//          Ctrl+Alt+V, F11, Space and the bare Delete/Backspace refuse with one
-//          announcement. Navigation still moves.
+//          F11, Space and the bare Delete/Backspace refuse with one
+//          announcement. Navigation still moves. Ctrl+Alt+V is not this
+//          keyboard's at all: the keybinding registry runs Paste Special, whose
+//          door asks the owner itself (gridKeyboardPasteSpecialRegistry.test.tsx).
 // CONTEXT: BUG-0185. With a floating grid's cell selected, Core's selection is
 //          a cell HIDDEN under the floating grid and the grid container keeps
 //          the keyboard. The floating grid used to refuse these combos one by
@@ -133,7 +135,6 @@ const WRITES: [string, string, KeyboardEventInit, string][] = [
   ["Ctrl+Shift+~", "~", { ctrlKey: true, shiftKey: true }, "format.numberGeneral"],
   ["Ctrl+;", ";", { ctrlKey: true }, "edit.insertDate"],
   ["Ctrl+Shift+:", ":", { ctrlKey: true, shiftKey: true }, "edit.insertTime"],
-  ["Ctrl+Alt+V", "v", { ctrlKey: true, altKey: true }, "clipboard.pasteSpecial"],
   ["F11", "F11", {}, "insert.chart"],
   ["Space", " ", {}, "checkbox.toggle"],
 ];
@@ -164,6 +165,20 @@ describe("the grid keyboard while a selection owner holds the selection", () => 
     });
     expect(getGridStateSnapshot()?.selection?.endRow).toBe(3);
     expect(announced).toEqual([]);
+  });
+});
+
+// NEW-ctrl-alt-v-hardcoded: the grid keyboard used to run Paste Special on
+// Ctrl+Alt+V itself, so a user who rebound Paste Special in Settings still
+// opened it with the old key. The registry is the one source now.
+// SABOTAGE: restore the Ctrl+Alt+V branch in useGridKeyboard -> red.
+describe("Ctrl+Alt+V is the registry's, never the grid keyboard's", () => {
+  it("with or without an owner, the grid keyboard neither runs nor refuses it", async () => {
+    await press("v", { ctrlKey: true, altKey: true });
+    owns = true;
+    await press("v", { ctrlKey: true, altKey: true });
+    expect(commands, "the grid keyboard ran its own Paste Special").toEqual([]);
+    expect(announced, "the grid keyboard answered Ctrl+Alt+V").toEqual([]);
   });
 });
 
@@ -203,7 +218,7 @@ function floatingGrid(actsOn?: readonly CellTargetCapability[]): void {
 }
 
 /** The keys whose command may act on an owner's cells, and the rest. */
-const TARGETED = WRITES.filter(([, , , c]) => c.startsWith("format.") || c === "clipboard.pasteSpecial");
+const TARGETED = WRITES.filter(([, , , c]) => c.startsWith("format."));
 const REFUSED = WRITES.filter(([, , , c]) => !TARGETED.some(([, , , t]) => t === c));
 
 describe("a floating grid that admits the act: the keyboard hands its cells on", () => {

@@ -161,7 +161,7 @@ pub(crate) fn cancel_goal_seek_impl(
     // Excel's Cancel also leaves the whole workbook calculated [LIVE: under
     // manual calculation, Cancel in Goal Seek Status puts A1 back and
     // recalculates stale cells that never read it, CalculationState xlDone].
-    calculate_workbook_at_run_end(state, states, &mut updated_cells);
+    calculate_workbook_at_run_end(state, states, &_run, &mut updated_cells);
     let restored = match previous.as_ref().map(|c| &c.value) {
         Some(CellValue::Number(n)) => *n,
         _ => 0.0,
@@ -493,7 +493,7 @@ pub(crate) fn goal_seek_impl(
     // does under manual calculation [LIVE]: every stale cell on every sheet,
     // and the "calculation incomplete" mark cleared (see
     // `calculate_workbook_at_run_end`). The trials above stayed seeded.
-    calculate_workbook_at_run_end(state, states, &mut updated_cells);
+    calculate_workbook_at_run_end(state, states, &_run, &mut updated_cells);
 
     GoalSeekResult {
         found_solution: found,

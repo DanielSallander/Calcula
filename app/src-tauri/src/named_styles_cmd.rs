@@ -168,6 +168,75 @@ pub(crate) fn apply_named_style_impl(
     cols: &[u32],
     target: Option<&CellTargetRef>,
 ) -> Result<FormattingResult, String> {
+    apply_named_style_inner(state, file_state, name, rows, cols, target, None)
+}
+
+/// [`apply_named_style_impl`] on the sheet at TRUE index `sheet` -- active or
+/// not -- instead of the active sheet: the module runtime's queued
+/// `Calcula.applyNamedStyle`, applied by Rust inside the run's own undo step
+/// on the sheet the run had made active when it queued it
+/// (`scripting::commands::apply_queued_named_styles`). Gated by THAT sheet's
+/// protection, exactly as the active-sheet door is.
+pub(crate) fn apply_named_style_on_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    name: &str,
+    rows: &[u32],
+    cols: &[u32],
+    sheet: usize,
+) -> Result<FormattingResult, String> {
+    apply_named_style_inner(state, file_state, name, rows, cols, None, Some(sheet))
+}
+
+/// Does applying the named style `ns` write its PROTECTION (Locked, Hidden)?
+/// Excel's `Style.IncludeProtection` [LIVE, Excel 16 COM, 2026-11-05]: the
+/// built-in "Normal" is True and every other built-in style ("Good",
+/// "Heading 1", ...) False -- applying "Good" keeps a cell's Locked=False and
+/// FormulaHidden=True -- while a style the user creates (`Styles.Add`, with
+/// or without a cell to base it on) is True, so applying it writes the
+/// protection it was made with. Calcula has no door that creates a style with
+/// Protection unticked, so the flag is DERIVED rather than stored.
+fn named_style_includes_protection(ns: &NamedCellStyle) -> bool {
+    !ns.built_in || ns.name == "Normal"
+}
+
+/// The OWN style index to write at `(row, col)` so the cell keeps BOTH halves
+/// of its protection -- Locked and Hidden (`formula_hidden`) -- that it had
+/// before the write: what a named style without IncludeProtection does, and
+/// what EVERY named style does on a protected sheet [LIVE]. (Paste's rule is
+/// narrower -- only Locked is kept, `commands::styles::keep_cell_lock`.)
+fn keep_cell_protection(
+    styles: &mut engine::StyleRegistry,
+    grid: &engine::Grid,
+    row: u32,
+    col: u32,
+    own: usize,
+    locked: bool,
+    formula_hidden: bool,
+) -> usize {
+    let shown = if own != 0 { own } else { crate::commands::styles::line_format_index_at(grid, row, col) };
+    let look = styles.get(shown);
+    if look.locked == locked && look.formula_hidden == formula_hidden {
+        return own;
+    }
+    let mut style = look.clone();
+    style.locked = locked;
+    style.formula_hidden = formula_hidden;
+    styles.get_or_create_explicit(style)
+}
+
+/// The body of [`apply_named_style_impl`] / [`apply_named_style_on_sheet`]:
+/// `on_sheet` names the sheet written when there is no cell target (the
+/// active sheet when `None`).
+fn apply_named_style_inner(
+    state: &AppState,
+    file_state: &FileState,
+    name: &str,
+    rows: &[u32],
+    cols: &[u32],
+    target: Option<&CellTargetRef>,
+    on_sheet: Option<usize>,
+) -> Result<FormattingResult, String> {
     // A cell target resolves, holding nothing, before any guard below.
     let resolved = match target {
         Some(target) => Some(crate::cell_target::resolve_cell_target(state, target)?),
@@ -175,13 +244,14 @@ pub(crate) fn apply_named_style_impl(
     };
     // Sheet protection: the Format Cells option only (the HOST's for a cell
     // target), as every style command asks it. Excel applies a cell style to a
-    // LOCKED cell when Format Cells is allowed and keeps the cell's Locked flag
-    // [LIVE, Excel 16 COM, 2026-10-30: Range.Style = "Good" on a locked and on
-    // an unlocked cell, each keeps its flag]. Applying a named style rewrites
-    // the style_index wholesale -- the built-in "Normal" carries locked:true,
-    // a user style may carry locked:false -- so on a protected sheet each cell
-    // keeps the Locked flag it had (`keep_cell_lock`, below), which keeps this
-    // from being an unlock vector.
+    // LOCKED cell when Format Cells is allowed [LIVE, Excel 16 COM, 2026-10-30].
+    // Applying a named style rewrites the style_index wholesale, but what it
+    // does to the cell's PROTECTION is Excel's IncludeProtection
+    // (`named_style_includes_protection`, [LIVE] 2026-11-05): a built-in
+    // style other than "Normal" keeps each cell's Locked AND Hidden flags on
+    // any sheet; "Normal" and a user's own style write theirs -- except on a
+    // PROTECTED sheet, where every style keeps both (`keep_cell_protection`,
+    // below), which keeps a style from being an unlock or an un-hide vector.
     match &resolved {
         Some(t) => {
             let bounds = (
@@ -196,16 +266,16 @@ pub(crate) fn apply_named_style_impl(
             crate::cell_target::gate_host_action(state, t.host_index, t.backing_index, "formatCells", "apply a named style")?;
         }
         None => {
-            let active_sheet = *state.active_sheet.read().unwrap();
-            crate::protection::check_sheet_action(state, active_sheet, "formatCells", "apply a named style")?;
+            let sheet = on_sheet.unwrap_or_else(|| *state.active_sheet.read().unwrap());
+            crate::protection::check_sheet_action(state, sheet, "formatCells", "apply a named style")?;
         }
     }
 
     // Look up the named style
-    let style_index = {
+    let (style_index, includes_protection) = {
         let named = state.named_styles.read().unwrap();
         match named.get(name) {
-            Some(ns) => ns.style_index,
+            Some(ns) => (ns.style_index, named_style_includes_protection(ns)),
             None => return Err(format!("Named style '{}' not found", name)),
         }
     };
@@ -223,10 +293,14 @@ pub(crate) fn apply_named_style_impl(
             crate::cell_target::ensure_target_still_at(state, t)?;
             t.backing_index
         }
-        None => active_sheet,
+        None => on_sheet.unwrap_or(active_sheet),
     };
     if sheet != active_sheet && sheet >= grids.len() {
-        return Err("Floating range backing sheet is missing".to_string());
+        return Err(if resolved.is_some() {
+            "Floating range backing sheet is missing".to_string()
+        } else {
+            format!("There is no sheet {} to apply the style '{}' on.", sheet + 1, name)
+        });
     }
     let styles = state.style_registry.lock_pending().unwrap();
     // The option asked again under the guards the write uses, and whether the
@@ -302,16 +376,19 @@ pub(crate) fn apply_named_style_impl(
             } else {
                 style_index
             };
-            // A protected sheet: the cell keeps the Locked flag it had.
-            if protected {
-                let locked = crate::protection::cell_is_locked(grid, &styles, row, col);
-                updated_cell.style_index = crate::commands::styles::keep_cell_lock(
+            // The cell keeps BOTH halves of its protection when the style does
+            // not include protection, and on a protected sheet whatever the style.
+            if protected || !includes_protection {
+                let before = styles.get(grid.effective_style_index(row, col));
+                let (locked, formula_hidden) = (before.locked, before.formula_hidden);
+                updated_cell.style_index = keep_cell_protection(
                     &mut styles,
                     grid,
                     row,
                     col,
                     updated_cell.style_index,
                     locked,
+                    formula_hidden,
                 );
             }
             grid.set_cell(row, col, updated_cell.clone());

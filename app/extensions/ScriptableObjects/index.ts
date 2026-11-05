@@ -549,7 +549,8 @@ async function emitPackageConsentPrompt(
     moduleScriptIds: approvableMacros.map((m) => m.id),
     // ...and which of them are WRITTEN AS OBJECT SCRIPTS (owner decision B):
     // they run in a restricted realm, and a run you start may change the cells
-    // of any sheet -- the screen says so in a paragraph of their own. The
+    // of any sheet and how they look -- the screen says so in a paragraph of
+    // their own. The
     // runtime marker is the one the run routes read (macroRunRoute).
     objectScriptMacroIds: approvableMacros
       .filter((m) => parseModuleScriptRuntime(m.description) === "objectScript")

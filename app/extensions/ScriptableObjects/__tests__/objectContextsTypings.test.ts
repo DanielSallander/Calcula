@@ -20,7 +20,7 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
-import { generateObjectContexts } from "../../../scripts/scriptTypings/generateObjectContexts";
+import { collectSurfaceRows, generateObjectContexts } from "../../../scripts/scriptTypings/generateObjectContexts";
 import { probeSurface, OBJECT_TYPE_INTERFACES } from "../../../scripts/scriptTypings/probeShim";
 import { ALLOWLIST } from "@api/scriptHost/allowlist";
 
@@ -180,8 +180,11 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // 2026-10-31 (round 15, NEW-recorder-select-all): 737 -> 739 chains and
     // 794 -> 796 entries -- the run-based resize rows on UnlockedAPI,
     // `api.setRowHeights` and `api.setColumnWidths`, one declaration each.
-    expect(chains.size).toBe(739);
-    expect(entries.length).toBe(796);
+    // 2026-11-05 (BUG-0358): 739 -> 741 chains and 796 -> 798 entries --
+    // Excel's Insert / Delete Cells on UnlockedAPI, `api.insertCells` and
+    // `api.deleteCells`, one declaration each.
+    expect(chains.size).toBe(741);
+    expect(entries.length).toBe(798);
     expect(entries.length).toBeGreaterThan(chains.size);
 
     const policyPairs = new Set(
@@ -208,7 +211,9 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // each probed under exactly one interface (UnlockedAPI).
     // 2026-10-31 (round 15): 998 -> 1000, api.setRowHeights and
     // api.setColumnWidths, each probed under exactly one interface (UnlockedAPI).
-    expect(policyPairs.size).toBe(1000);
+    // 2026-11-05 (BUG-0358): 1000 -> 1002, api.insertCells and
+    // api.deleteCells, each probed under exactly one interface (UnlockedAPI).
+    expect(policyPairs.size).toBe(1002);
     expect(entries.length).toBeLessThan(policyPairs.size);
 
     // TOTALITY, which is what makes `entryFor`'s exact match total: every
@@ -468,5 +473,46 @@ describe("the surface the drift actually hid", () => {
     const shapeIface = generated.slice(generated.indexOf("declare interface ShapeContext"));
     const renderBlock = shapeIface.slice(shapeIface.indexOf("render: {"), shapeIface.indexOf("\n}"));
     expect(renderBlock).not.toContain("declareProperties");
+  });
+});
+
+describe("a named interface's brokers are recorded per door, not per interface (BUG-0472)", () => {
+  // ScriptRange is ONE shape handed out by THREE doors: a sheet script's own
+  // range()/cell() (the restricted sheet.* rows), a table script's own
+  // range()/cell() (object.setState aspects, table-relative) and
+  // api.table(id).range() (api.objectSetState, unlocked). The probe walked a
+  // named interface once, so the generated policy -- and the JSDoc an author
+  // hovers -- said a restricted sheet script's `range(...).setValues` needs
+  // unlocked access.
+  const probe = probeSurface();
+  const rows = collectSurfaceRows(probe);
+  const brokersOf = (chain: string) =>
+    rows.filter((r) => r.chain === chain).map((r) => `${r.broker} ${r.tier}`).sort();
+
+  it("the probe records every door ScriptRange.setValues is reached through", () => {
+    const setValues = probe.interfaces.get("ScriptRange")?.members.get("setValues");
+    const doors = (setValues?.doors ?? []).map((d) => `${d.owner} ${d.prefix} ${d.broker}`).sort();
+    expect(doors).toEqual(
+      expect.arrayContaining([
+        "SheetContext range sheet.setRangeValues",
+        "SheetContext cell sheet.setRangeValues",
+        "TableContext range object.setState",
+        "ScriptTableHandle api.table.range api.objectSetState",
+      ]),
+    );
+  });
+
+  it("range.setValues reads the restricted doors; api.table.range.setValues keeps api.objectSetState", () => {
+    expect(brokersOf("range.setValues")).toEqual(["object.setState restricted", "sheet.setRangeValues restricted"]);
+    expect(brokersOf("cell.setValue")).toEqual(["object.setState restricted", "sheet.setCellValue restricted"]);
+    expect(brokersOf("api.table.range.setValues")).toEqual(["api.objectSetState unlocked"]);
+  });
+
+  it("the spliced JSDoc on ScriptRange.setValues names each door's reach", () => {
+    const result = generateObjectContexts(readTemplate(), path.basename(TEMPLATE_PATH));
+    expect(result.problems).toEqual([]);
+    expect(result.output).toContain(
+      "- Through `range` on SheetContext, `cell` on SheetContext: Write a block of cells on the sheet currently shown",
+    );
   });
 });

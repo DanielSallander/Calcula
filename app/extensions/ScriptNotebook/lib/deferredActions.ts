@@ -242,6 +242,11 @@ async function applyDeferredAction(
     }
 
     case "applyNamedStyle": {
+      // A MODULE RUN (run_script, a button's code) never sends this any more:
+      // Rust applies the styles it queued with its cells, in the run's ONE undo
+      // step, and a style that fails takes the whole run back
+      // (`apply_run_with_queued_styles`, owner decision B). What still arrives
+      // here is a notebook cell's queue, replayed after that cell's own step.
       if (!action.name || !isCellCoord(action.row) || !isCellCoord(action.col)) return false;
       // endRow/endCol widen the target to an inclusive rect. Same half-set
       // rule as goto: both or neither.

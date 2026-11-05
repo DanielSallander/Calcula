@@ -76,8 +76,12 @@ pub enum AggregateFunction {
     Min,
     /// `MAX`
     Max,
-    /// `COUNT(DISTINCT ...)`
+    /// DAX `DISTINCTCOUNT`: `COUNT(DISTINCT ...)` plus one for BLANK when
+    /// any row is BLANK ("The DISTINCTCOUNT function counts the BLANK value"
+    /// -- Microsoft). Rendered by the connector's SQL builder.
     CountDistinct,
+    /// DAX `DISTINCTCOUNTNOBLANK`: `COUNT(DISTINCT ...)` (skips BLANK).
+    CountDistinctNoBlank,
     /// `COUNT(*)` — count all rows including nulls.
     CountAll,
 }
@@ -95,6 +99,7 @@ impl AggregateFunction {
             Self::Min => "MIN",
             Self::Max => "MAX",
             Self::CountDistinct => "COUNT",
+            Self::CountDistinctNoBlank => "COUNT",
             Self::CountAll => "COUNT",
         }
     }

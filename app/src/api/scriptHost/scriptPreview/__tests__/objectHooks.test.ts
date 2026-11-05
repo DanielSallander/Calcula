@@ -103,6 +103,8 @@ describe("the generator's dedup key keeps the interface", () => {
       resolve(__dirname, "../../../../../scripts/scriptTypings/generateObjectContexts.ts"),
       "utf8",
     );
-    expect(gen).toMatch(/const key = `\$\{ifaceName\} \$\{chain\}/);
+    // The key leads with the interface (per-door rows since BUG-0472 add the
+    // owner, broker and capability after it).
+    expect(gen).toMatch(/const key = `\$\{row\.iface\} \$\{row\.chain\}/);
   });
 });

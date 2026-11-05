@@ -6,6 +6,7 @@
 
 import { pivot } from "@api/pivot";
 import { pivotCellDisplayText } from "@api/pivotMembers";
+import { nonFiniteNumberText } from "@api/locale";
 import type {
   PivotViewResponse,
   PivotRowData,
@@ -235,6 +236,9 @@ function cellDisplayText(cell: PivotCellData): string {
  * §4.9), so the two sources cannot disagree about one cell.
  */
 function cellShownText(cell: PivotCellData): string {
+  // A measure's 1/0, -1/0, 0/0: the cell is "#NUM!" (Excel's grid) and a
+  // visual writes Power BI's word for it ("Infinity", "-Infinity", "NaN").
+  if (cell.nonFinite) return nonFiniteNumberText(cell.nonFinite);
   if (cell.formattedValue) return cell.formattedValue;
   const v = cell.value;
   if (typeof v === "string") return v;

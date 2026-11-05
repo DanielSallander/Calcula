@@ -60,6 +60,7 @@ const api = vi.hoisted(() => ({
   commitUndoTransaction: vi.fn(async (t?: number | null) => slot.close(slot.committed, t)),
   cancelUndoTransaction: vi.fn(async (t?: number | null) => slot.close(slot.dropped, t)),
   updateCellsBatch: vi.fn(async () => [] as unknown[]),
+  getMergedRegions: vi.fn(async () => [] as unknown[]),
 }));
 
 vi.mock("../../lib/tauri-api", async (importOriginal) => ({
@@ -77,7 +78,7 @@ vi.mock("../../lib/tauri-api", async (importOriginal) => ({
     { row: r0, col: c0, display: "x", formula: null, styleIndex: 0 },
   ]),
   shiftFormulasBatch: vi.fn(async (inputs: { formula: string }[]) => inputs.map((i) => i.formula)),
-  getMergedRegions: vi.fn(async () => []),
+  getMergedRegions: () => api.getMergedRegions(),
   mergeCells: vi.fn(async () => {}),
 }));
 
@@ -87,6 +88,8 @@ vi.mock("../../lib/dialogs", () => ({
 }));
 
 import { useFillHandle, type UseFillHandleReturn } from "../useFillHandle";
+import { alertAsync } from "../../lib/dialogs";
+import { FILL_MERGE_SHAPES_MESSAGE } from "../../lib/fillEngine";
 import { GridProvider, useGridContext } from "../../state/GridContext";
 import { setSelection } from "../../state/gridActions";
 import type { GridConfig } from "../../types";
@@ -166,6 +169,8 @@ beforeEach(async () => {
   api.cancelUndoTransaction.mockClear();
   api.updateCellsBatch.mockReset();
   api.updateCellsBatch.mockImplementation(async () => []);
+  api.getMergedRegions.mockReset();
+  api.getMergedRegions.mockImplementation(async () => []);
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -225,5 +230,22 @@ describe.each(GESTURES)("fill gesture: $name", (g) => {
     await settle();
     expect(slot.dropped).toEqual([g.label]);
     expect(slot.open).toBeNull();
+  });
+});
+
+// NEW-fill-merge-replace: [LIVE, Excel 16, tablec/probe2.ps1 + probe3.ps1]
+// a fill whose destination holds a merge that is not the source's own
+// pattern is refused "To do this, all the merged cells need to be the same
+// size." BEFORE anything is written -- no step opened, no cell written.
+// SABOTAGE (tablec-tsfill): `fillMergeRefusal` always answers null.
+describe.each(GESTURES)("fill gesture over a merge in its way: $name", (g) => {
+  it("is refused with Excel's message before anything is written", async () => {
+    // B2:C2 merged: the fill of B1 down covers B2 and only half the merge.
+    api.getMergedRegions.mockImplementation(async () => [{ startRow: 1, startCol: 1, endRow: 1, endCol: 2 }]);
+    await g.run();
+    await settle();
+    expect(alertAsync).toHaveBeenCalledWith(FILL_MERGE_SHAPES_MESSAGE);
+    expect(api.updateCellsBatch, "the refused fill wrote cells").not.toHaveBeenCalled();
+    expect(api.beginUndoTransaction, "the refused fill opened a step").not.toHaveBeenCalled();
   });
 });

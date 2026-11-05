@@ -108,6 +108,31 @@ export const NAMED_SUBTREES: ReadonlyArray<readonly [path: string, iface: string
 
 export type MemberKind = "method" | "getter" | "property";
 
+/**
+ * ONE WAY AN AUTHOR REACHES A MEMBER, and what it dispatches to through that
+ * way (BUG-0472). A named interface is a SHAPE, not a door: `ScriptRange` is
+ * handed out by a sheet's `range()` (the restricted `sheet.*` rows), by a
+ * table's `range()` (`object.setState` aspects, table-relative) and by
+ * `api.table(id).range()` (`api.objectSetState`, unlocked) -- the same members,
+ * three different brokers. The probe used to walk a named interface ONCE and
+ * record the first door's brokers for every chain, so the generated policy told
+ * a restricted sheet script that its own `range(...).setValues` needed unlocked
+ * access. Every member now carries one door per way the probe reached it.
+ */
+export interface ProbedDoor {
+  /**
+   * The chain prefix an author writes to get here, rooted at the context with
+   * call parentheses erased: "" on a context root, "range", "api.table.range".
+   */
+  prefix: string;
+  /** The interface whose member handed the object out ("SheetContext",
+   *  "TableContext", "ScriptTableHandle"); the root context for a root member. */
+  owner: string;
+  broker?: string;
+  aspect?: string;
+  hook?: string;
+}
+
 export interface ProbedMember {
   /** Dotted path within its owning interface, e.g. "style.setProperty". */
   path: string;
@@ -125,6 +150,13 @@ export interface ProbedMember {
   aspect?: string;
   /** The hook name a subscription member registers (post `hookRegistered`). */
   hook?: string;
+  /**
+   * Every way the probe reached this member, with what it dispatched through
+   * each (see {@link ProbedDoor}). `broker` / `aspect` / `hook` above are the
+   * FIRST door's, kept for the membership checks; anything that states a
+   * member's policy for a CHAIN reads the doors.
+   */
+  doors: ProbedDoor[];
 }
 
 export interface ProbedInterface {
@@ -182,8 +214,13 @@ interface WalkCtx {
   posted: W2H[];
   result: Map<string, ProbedInterface>;
   named: Map<string, string>;
-  /** Interfaces already fully walked, so a self-referential shape (ScriptRange
-   *  .offset() -> ScriptRange) terminates. */
+  /**
+   * `iface|owner|probePath` of every named interface already walked -- keyed by
+   * the DOOR, not by the interface (BUG-0472): a named interface reached
+   * through another member, of another interface, is walked again and records
+   * that door's brokers. Within one door a self-referential shape (ScriptRange
+   * .offset() -> ScriptRange) still terminates, through `shapes`.
+   */
   walked: Set<string>;
   /**
    * `owner|sortedKeys` of every ANONYMOUS sub-object already walked. Without it
@@ -274,12 +311,94 @@ function invoke(ctx: WalkCtx, fn: (...a: unknown[]) => unknown): {
   return out;
 }
 
+/**
+ * The door a walk records its members under: the chain prefix and the handing
+ * interface (see {@link ProbedDoor}), plus `walkId`, which scopes the anonymous
+ * sub-shape memory to THIS door, so a re-walk through another door records the
+ * nested anonymous members too.
+ */
+interface WalkDoor {
+  prefix: string;
+  owner: string;
+  walkId: string;
+}
+
 /** Record an anonymous sub-shape; false when it has already been walked here. */
-function markShape(ctx: WalkCtx, owner: string, value: object): boolean {
-  const sig = `${owner}|${Object.keys(value).sort().join(",")}`;
+function markShape(ctx: WalkCtx, door: WalkDoor, owner: string, value: object): boolean {
+  const sig = `${door.walkId}|${owner}|${Object.keys(value).sort().join(",")}`;
   if (ctx.shapes.has(sig)) return false;
   ctx.shapes.add(sig);
   return true;
+}
+
+/** The chain prefix for a probe path: call parentheses erased. */
+function chainPrefixOf(probePath: string): string {
+  return probePath.replace(/\(\)/g, "");
+}
+
+/**
+ * Record `member` (one sighting through `door`) on `iface`: the first sighting
+ * makes the entry, every later one adds its door when that door is new.
+ */
+function record(
+  iface: ProbedInterface,
+  door: WalkDoor,
+  member: Omit<ProbedMember, "doors">,
+): void {
+  const seen: ProbedDoor = {
+    prefix: door.prefix,
+    owner: door.owner,
+    ...(member.broker !== undefined ? { broker: member.broker } : {}),
+    ...(member.aspect !== undefined ? { aspect: member.aspect } : {}),
+    ...(member.hook !== undefined ? { hook: member.hook } : {}),
+  };
+  const existing = iface.members.get(member.path);
+  if (!existing) {
+    iface.members.set(member.path, { ...member, doors: [seen] });
+    return;
+  }
+  // Shape: the latest sighting, as before doors existed. The single
+  // `broker` / `aspect` / `hook` stay the FIRST door's (its latest pass -- the
+  // restricted pass after the unlocked one), which is exactly what they were
+  // when a named interface was walked once.
+  existing.kind = member.kind;
+  existing.arity = member.arity;
+  const first = existing.doors[0];
+  if (first.prefix === door.prefix && first.owner === door.owner) {
+    existing.broker = member.broker;
+    existing.aspect = member.aspect;
+    existing.hook = member.hook;
+  }
+  const same = existing.doors.some(
+    (d) =>
+      d.prefix === seen.prefix &&
+      d.owner === seen.owner &&
+      d.broker === seen.broker &&
+      d.aspect === seen.aspect &&
+      d.hook === seen.hook,
+  );
+  if (!same) existing.doors.push(seen);
+}
+
+/** Walk a NAMED interface reached through `owner`'s member at `probePath`,
+ *  once per door (BUG-0472). */
+function walkNamed(
+  ctx: WalkCtx,
+  value: Record<string, unknown>,
+  named: string,
+  owner: string,
+  probePath: string,
+  depth: number,
+): void {
+  const walkId = `${named}|${owner}|${probePath}`;
+  if (ctx.walked.has(walkId)) return;
+  ctx.walked.add(walkId);
+  const door: WalkDoor = { prefix: chainPrefixOf(probePath), owner, walkId };
+  // Register the shape under its own interface too: ScriptRange hands back a
+  // ScriptRange from offset()/resize()/getCell(), and without this those would
+  // be walked again as anonymous members.
+  markShape(ctx, door, named, value);
+  walk(ctx, value, named, "", probePath, depth + 1, door);
 }
 
 function walk(
@@ -289,6 +408,7 @@ function walk(
   memberPrefix: string,
   probePath: string,
   depth: number,
+  door: WalkDoor,
 ): void {
   if (depth > 6) return;
   for (const key of Object.keys(target)) {
@@ -300,14 +420,14 @@ function walk(
     const iface = ensure(ctx, ownerIface);
 
     if (desc?.get) {
-      iface.members.set(memberPath, { path: memberPath, kind: "getter", arity: 0 });
+      record(iface, door, { path: memberPath, kind: "getter", arity: 0 });
       continue;
     }
     const value = desc?.value;
 
     if (typeof value === "function") {
       const probe = invoke(ctx, value as (...a: unknown[]) => unknown);
-      iface.members.set(memberPath, {
+      record(iface, door, {
         path: memberPath,
         kind: "method",
         arity: (value as (...a: unknown[]) => unknown).length,
@@ -319,16 +439,9 @@ function walk(
         const returnedPath = `${childProbePath}()`;
         const named = ifaceFor(ctx, returnedPath);
         if (named) {
-          if (!ctx.walked.has(named)) {
-            ctx.walked.add(named);
-            // Register the shape under its own interface too: ScriptRange
-            // hands back a ScriptRange from offset()/resize()/getCell(), and
-            // without this those would be walked again as anonymous members.
-            markShape(ctx, named, probe.sub);
-            walk(ctx, probe.sub, named, "", returnedPath, depth + 1);
-          }
-        } else if (markShape(ctx, ownerIface, probe.sub)) {
-          walk(ctx, probe.sub, ownerIface, `${memberPath}()`, returnedPath, depth + 1);
+          walkNamed(ctx, probe.sub, named, ownerIface, returnedPath, depth);
+        } else if (markShape(ctx, door, ownerIface, probe.sub)) {
+          walk(ctx, probe.sub, ownerIface, `${memberPath}()`, returnedPath, depth + 1, door);
         }
       }
       continue;
@@ -336,24 +449,18 @@ function walk(
 
     if (value && typeof value === "object") {
       const named = ifaceFor(ctx, childProbePath);
+      record(iface, door, { path: memberPath, kind: "property", arity: 0 });
       if (named) {
-        iface.members.set(memberPath, { path: memberPath, kind: "property", arity: 0 });
-        if (!ctx.walked.has(named)) {
-          ctx.walked.add(named);
-          walk(ctx, value as Record<string, unknown>, named, "", childProbePath, depth + 1);
-        }
-      } else {
-        iface.members.set(memberPath, { path: memberPath, kind: "property", arity: 0 });
-        if (markShape(ctx, ownerIface, value)) {
-          walk(ctx, value as Record<string, unknown>, ownerIface, memberPath, childProbePath, depth + 1);
-        }
+        walkNamed(ctx, value as Record<string, unknown>, named, ownerIface, childProbePath, depth);
+      } else if (markShape(ctx, door, ownerIface, value)) {
+        walk(ctx, value as Record<string, unknown>, ownerIface, memberPath, childProbePath, depth + 1, door);
       }
       continue;
     }
 
     // A primitive or an explicit null (context.api on a restricted script,
     // context.package on a local one).
-    iface.members.set(memberPath, { path: memberPath, kind: "property", arity: 0 });
+    record(iface, door, { path: memberPath, kind: "property", arity: 0 });
   }
 }
 
@@ -400,10 +507,12 @@ export function probeSurface(): ProbeResult {
         posted.push(msg);
       });
       const ctx: WalkCtx = { rt: built.rt, posted, result, named, walked, shapes };
-      // Named subtrees are shared across contexts; only the first context to
-      // reach one walks it, which is also what keeps ScriptRange from being
-      // re-walked once per objectType.
-      walk(ctx, built.context, ifaceName, "", "", 0);
+      // A named subtree is walked once per DOOR -- per interface whose member
+      // hands it out, at that path (BUG-0472) -- so ScriptRange is walked for a
+      // sheet's range(), a table's range() and api.table().range(), and not
+      // again once per objectType that reaches the same door.
+      const root: WalkDoor = { prefix: "", owner: ifaceName, walkId: `${ifaceName}|root` };
+      walk(ctx, built.context, ifaceName, "", "", 0, root);
       drain(ctx);
     }
   }

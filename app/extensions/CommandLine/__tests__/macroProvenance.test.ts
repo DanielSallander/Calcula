@@ -66,7 +66,9 @@ describe("macroEntriesFrom", () => {
   it("says, before the run, that a macro you run yourself may change cells", () => {
     const notice = macroProvenanceNotice(entryOf({ sourcePackage: "Sales" }))!;
     expect(notice).toContain("It runs only if you have approved that application's code.");
-    expect(notice).toContain("Because you are running it yourself, it may read and change cells on any sheet");
+    expect(notice).toContain(
+      "Because you are running it yourself, it may read and change cells, and how they look, on any sheet",
+    );
     expect(notice).toContain("a macro written as an object script gets that and nothing more");
     expect(notice).not.toMatch(/restricted tier/);
   });

@@ -1285,6 +1285,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("ai/preview_eval.rs", "build_grid", "IS NOT A DOCUMENT WRITE: fills a `Grid::new()` built inside the function for the script preview's formula evaluator. It never reaches AppState and has no spill map to orphan."),
         ("ai/preview_eval.rs", "evaluate_preview", "IS NOT A DOCUMENT WRITE: iterates formulas to a fixed point over that same detached grid. It cannot orphan a spill because it REFUSES to store one — a dynamic-array result is counted in `spilled` and the caller rejects the whole batch rather than fabricating half a spill."),
         ("insights/report.rs", "paint", "WRITES ONLY LITERALS, INTO A GRID ITS CALLER JUST CREATED. `insights_create_report_sheet` builds a fresh `Grid::new()` for a brand-new sheet whose name was proved free first, and every cell painted is text or a number — `ReportCell` has no formula variant at all, which is what makes this exemption structural rather than a promise. A grid with no formulas has no spill origin to orphan, and a sheet that did not exist a moment ago has no spill map."),
+        ("data_tables.rs", "whole_table_moves", "IS NOT A WRITE: reads the grids and RETURNS which move claims carry a whole data table. The marker cells are written by update_cells_batch_core's own write path, which maintains the spill map for every cell it writes; a data-table body is never a spill origin."),
         // -- It IS the spill machinery, or an inner step of it ---------------
         ("commands/data.rs", "erase_released_spill_cells", "IS the tear-down's grid half: it erases exactly the cells take_spills_* released"),
         // §3bm REMOVED SIX ENTRIES FROM THIS LIST, and that is the point of the
@@ -1311,7 +1312,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("cell_target.rs", "keep_backing_lock", "style_index only (puts back the cell's Locked flag on a protected host) -- no formula is removed (update_cells_batch_on_target refuses spilled cells first)"),
         ("commands/styles.rs", "write_range_style_plan", "style_index and row/column style tiers only"),
         ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
-        ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
+        ("named_styles_cmd.rs", "apply_named_style_inner", "style_index only (the body of apply_named_style_impl / apply_named_style_on_sheet since rev-sec-1)"),
         ("computed_properties.rs", "apply_fill_color", "style_index only"),
         ("computed_properties.rs", "apply_style_change", "style_index only"),
         // (`mcp/tools.rs` `apply_cell_formatting` is no longer here: the AI's
@@ -1322,7 +1323,9 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("named_ranges.rs", "rename_name_in_grids", "re-points defined-name references at the same range; every origin keeps its formula, so no spill ORIGIN is removed or overwritten and the map cannot be orphaned. Same class as the two table renames below"),
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; every origin keeps its formula"),
         ("tables.rs", "rename_table_column_in_formulas", "re-points a COLUMN specifier at the same cells; every origin keeps its formula"),
-        ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; every origin keeps its formula"),
+        ("tables.rs", "carry_column_rename", "the column rename's shared tail: re-points COLUMN specifiers (rename_table_column_in_formulas); every origin keeps its formula"),
+        ("tables.rs", "copy_tables_to_copied_sheet", "re-points the copied sheet's structured references at the copied tables; every origin keeps its formula"),
+        ("tables.rs", "retire_table_core", "Convert to Range / Delete Table: rewrites references to the retired table (every origin keeps its formula) and, for Delete, clears the TABLE's own cells -- a table cell is never a spill origin (a dynamic array inside a table is refused, #SPILL!), so no origin is removed; it runs the shared cascade after"),
         ("commands/structure.rs", "shift_cross_sheet_formulas", "re-points references inside surviving formulas"),
         ("commands/structure.rs", "shift_cross_sheet_formulas_for_off_sheet_edit", "re-points references inside surviving formulas"),
         ("commands/structure.rs", "relocate_cell_references_recording", "re-points references (the `relocate_cell_references` command and `relocate_cell_references_core` are one-line delegations to it); seeds the shared cascade for the values"),
@@ -1379,7 +1382,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("bi/commands.rs", "bi_insert_result", "writes a query result block and seeds the shared cascade"),
         ("bi/commands.rs", "bi_refresh_connection", "rewrites the same result block and seeds the shared cascade"),
         ("bi/cube.rs", "snapshot_prefetch_sheet", "read-only: the `cells.insert(` the detector matches is `cube_cells.insert`, the pre-fetch's OWN map of cube-bearing cells; the grids are taken with .read() and no cell is written (build_cube_prefetch's synchronous half, split out by rev4A#4 -- this entry named build_cube_prefetch, whose `cube_cells.insert` it was)"),
-        ("tables.rs", "check_table_auto_expand", "extends a table's own rows; seeds the shared cascade"),
+        ("tables.rs", "check_table_auto_expand_core", "extends a table's own rows; seeds the shared cascade"),
         // -- Reads, or writes something that is not the document ---------------
         ("commands/data.rs", "get_viewport_cells", "read path: builds the payload the canvas paints"),
         ("scripting/udf.rs", "collect_udf_calls_impl", "collects call sites into a SCRATCH clone of the grids; writes no document cell (the body of the `collect_udf_calls` command, moved so it runs without a Tauri runtime)"),
@@ -1468,7 +1471,8 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         // door write through their shared per-rectangle body (review G#9).
         ("commands/data.rs", "clear_range_with_options_inner"),
         ("commands/data.rs", "clear_rect_on_background_sheet"),
-        ("commands/data.rs", "clear_cell"),
+        // The `clear_cell` command delegates to this body (testability split).
+        ("commands/data.rs", "clear_cell_core"),
         ("commands/data.rs", "sort_range"),
         ("commands/data.rs", "fill_range_core"),
         ("commands/data.rs", "remove_duplicates"),
@@ -1666,17 +1670,36 @@ fn every_release_policy_call_site_actually_releases_the_spill() {
 
     // The clears are the reason the exemption exists; if one drops out of the
     // list, the detector is reading the wrong thing.
-    for expected in [
-        "clear_range",
-        "clear_range_with_options_inner",
-        "clear_range_with_options_off_sheet_at",
-        "clear_range_on_sheets_inner",
-    ] {
+    for expected in ["clear_range"] {
         assert!(
             takers.iter().any(|t| t == expected),
             "`{}` no longer takes the origin exemption — 'select the spill and \
              press Delete' is refused again (§2y's second impossible remedy)",
             expected
+        );
+    }
+
+    // The content clears of Delete / Clear Contents / Clear All refuse NO
+    // spilled cell at all any more (Excel [LIVE, 2026-11-05]: a spilled value
+    // whose origin the selection does not hold is SKIPPED): they ask
+    // `spill_cells_a_clear_keeps` and still tear down a swallowed origin's
+    // array. Taking the refusing guard back would bring the refusal back.
+    for skipper in [
+        "clear_range_with_options_inner",
+        "clear_range_with_options_off_sheet_at",
+        "clear_range_on_sheets_inner",
+    ] {
+        let body = body_of(DATA_RS, skipper);
+        assert!(
+            body.contains("spill_cells_a_clear_keeps(") && !body.contains("check_spill_protection("),
+            "`{}` must skip the spilled cells it does not own (spill_cells_a_clear_keeps) \
+             instead of refusing them (check_spill_protection)",
+            skipper
+        );
+        assert!(
+            body.contains("take_spills_owned_within(") || body.contains("spilled_cells_owned_within("),
+            "`{}` no longer tears down the array of an origin it clears",
+            skipper
         );
     }
 }

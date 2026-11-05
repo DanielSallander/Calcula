@@ -524,7 +524,7 @@ async function filterOneTarget(
   const level = slicer.filterLevel ?? 1;
   switch (target.kind) {
     case "table":
-      await applyTableFilterForSource(target.tableId, slicer.fieldName, selectedItems, slicer.sheetIndex);
+      await applyTableFilterForSource(slicer.id, target.tableId, slicer.fieldName, selectedItems, slicer.sheetIndex);
       return;
     case "pivot":
       await applyPivotFilterForSource(target.pivotId, slicer.fieldName, selectedItems, level, slicer.id, run);
@@ -845,6 +845,7 @@ export async function runSlicerSelectionGesture(
  * (and the owner's cached range stale) until something else re-read it.
  */
 async function applyTableFilterForSource(
+  slicerId: string,
   tableId: string,
   fieldName: string,
   selectedItems: string[] | null,
@@ -902,10 +903,27 @@ async function applyTableFilterForSource(
   if (selectedItems === null) {
     await autoFilter.clear(colIndex);
   } else {
+    const isBlank = (v: string) => v === "" || v === "(Blanks)";
     await autoFilter.setColumn(colIndex, {
       kind: "values",
-      values: selectedItems.filter((v) => v !== "" && v !== "(Blanks)"),
-      includeBlanks: selectedItems.some((v) => v === "" || v === "(Blanks)"),
+      values: await displayTextsOfKeys(slicerId, selectedItems.filter((v) => !isBlank(v))),
+      includeBlanks: selectedItems.some(isBlank),
     });
   }
+}
+
+/**
+ * The display texts AutoFilter matches for a slicer's selected member KEYS
+ * (BUG-0523): a table slicer keys its items by the cell's invariant value
+ * (`1234.5`) and shows the display text (`1 234,5`); an AutoFilter value
+ * list matches display text (Excel's semantics), so each key is written as
+ * its item's LABEL. A key the slicer no longer lists is written as itself.
+ * (The click path does this in the backend, per cell of the target table:
+ * `table_display_texts_for_keys` in slicer/commands.rs.)
+ */
+async function displayTextsOfKeys(slicerId: string, keys: string[]): Promise<string[]> {
+  if (keys.length === 0) return [];
+  const items = await slicerBackend.invoke<Array<{ key: string; label: string }>>("get_slicer_items", { slicerId });
+  const labelOf = new Map((items ?? []).map((item) => [item.key, item.label] as const));
+  return keys.map((key) => labelOf.get(key) ?? key);
 }

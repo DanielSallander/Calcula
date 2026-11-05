@@ -287,9 +287,10 @@ export function useHomeTabState() {
    * own, when it admits the act (written through `{ target }`), else it
    * refuses, once. A write of the number format alone asks "numberFormat".
    *
-   * EVERY BLOCK of the selection, one applyFormatting call each, inside ONE
-   * owned undo transaction when there are several (so one Ctrl+Z restores
-   * every area). A block refused part-way stops the gesture: what landed is
+   * EVERY BLOCK of the selection, inside ONE owned undo transaction when there
+   * are several (so one Ctrl+Z restores every area): on the sheet ONE
+   * applyFormatting call with the other blocks as `moreAreas` (BUG-0394), in a
+   * floating grid's cells one call each. A block refused part-way stops the gesture: what landed is
    * COMMITTED -- a cancel would drop the undo record and keep the writes --
    * and an empty step is cancelled.
    *
@@ -326,10 +327,17 @@ export function useHomeTabState() {
           : null;
       const landed: FormattingResult[] = [];
       try {
-        for (const block of blocks) {
-          landed.push(
-            await applyFormatting(block.rows, block.cols, formatting as Parameters<typeof applyFormatting>[2], { target }),
-          );
+        const options = formatting as Parameters<typeof applyFormatting>[2];
+        if (!target && blocks.length > 1) {
+          // The sheet's blocks in ONE call (BUG-0394): the other blocks ride as
+          // `moreAreas`, one undo step inside the one opened above. It was one
+          // call per block -- 10,000 after Go To Special.
+          const [first, ...more] = blocks;
+          landed.push(await applyFormatting(first.rows, first.cols, options, { target, moreAreas: more }));
+        } else {
+          for (const block of blocks) {
+            landed.push(await applyFormatting(block.rows, block.cols, options, { target }));
+          }
         }
         await tx?.commit();
       } catch (err) {

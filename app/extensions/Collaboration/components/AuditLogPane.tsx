@@ -7,6 +7,11 @@
 //          was that nothing surfaced them ("review it via the API"). This is the
 //          transparency pillar's audit-trail UI, paired with the Code-in-This-File
 //          inspector.
+//          Beside the workbook's trail it lists THIS COMPUTER's trail
+//          ("This computer", BUG-0653): rows that belong to no open workbook,
+//          such as a push whose workbook was replaced (File > Open / New)
+//          before it finished. That trail is append-only and machine-scoped,
+//          so Clear never touches it.
 
 import React, { useState, useEffect, useCallback } from "react";
 import { onAppEvent, AppEvents } from "@api";
@@ -16,11 +21,47 @@ import {
   clearAuditLog,
   type AuditLog,
   type AuditEntry,
+  type MachineAuditEntry,
 } from "@api/collaboration";
 import { confirmAsync } from "@api/dialogs";
 import { formatDateTime } from "@api/locale";
 
-type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "capability" | "protection" | "ai" | "other";
+type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "capability" | "protection" | "ai" | "computer" | "other";
+
+/** One row of the merged list: where it is kept decides what it means. */
+export interface ShownAuditRow {
+  entry: AuditEntry;
+  /** `workbook`: this document's trail. `computer`: this computer's trail. */
+  trail: "workbook" | "computer";
+}
+
+/**
+ * The workbook's rows and this computer's rows as ONE list, newest first. A
+ * row of this computer's trail is in category `computer` whatever its event,
+ * because the fact the user needs is where it is kept: no workbook holds it.
+ * Exported for the unit test.
+ */
+export function mergeAuditRows(log: AuditLog | null): ShownAuditRow[] {
+  const rows: ShownAuditRow[] = [
+    ...(log?.entries ?? []).map((entry) => ({ entry, trail: "workbook" as const })),
+    ...(log?.machine?.entries ?? []).map((entry) => ({ entry, trail: "computer" as const })),
+  ];
+  const at = (r: ShownAuditRow) => {
+    const t = Date.parse(r.entry.timestamp);
+    return isNaN(t) ? 0 : t;
+  };
+  // Each trail is oldest first; a stable sort by time keeps that order for
+  // equal timestamps, and the reverse puts the newest on top.
+  return rows
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => at(a.r) - at(b.r) || a.i - b.i)
+    .map(({ r }) => r)
+    .reverse();
+}
+
+function rowCategory(row: ShownAuditRow): Category {
+  return row.trail === "computer" ? "computer" : eventMeta(row.entry.event).category;
+}
 
 /** Event id (snake_case, mirrors Rust AuditEvent) -> label + category. */
 const EVENT_META: Record<string, { label: string; category: Category }> = {
@@ -98,6 +139,7 @@ const CATEGORY_COLOR: Record<Category, { bg: string; fg: string }> = {
   script: { bg: "#fce8e6", fg: "#c5221f" },
   capability: { bg: "#e8eaed", fg: "#3c4043" },
   ai: { bg: "#e0f2f1", fg: "#00695c" },
+  computer: { bg: "#fff4e5", fg: "#8a4b00" },
   other: { bg: "#f1f3f4", fg: "#5f6368" },
 };
 
@@ -110,6 +152,7 @@ const FILTERS: { id: Category | "all"; label: string }[] = [
   { id: "script", label: "Scripts" },
   { id: "capability", label: "Capabilities" },
   { id: "ai", label: "AI" },
+  { id: "computer", label: "This computer" },
 ];
 
 const DEFAULT_MAX_ENTRIES = 1000;
@@ -179,7 +222,7 @@ export function AuditLogPane(): React.ReactElement {
     setLoading(true);
     setError(null);
     try {
-      setLog(await getAuditLog());
+      setLog(await getAuditLog({ includeMachine: true }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -247,11 +290,10 @@ export function AuditLogPane(): React.ReactElement {
   }
 
   const entries: AuditEntry[] = log?.entries ?? [];
+  const machine = log?.machine;
+  const all = mergeAuditRows(log);
   // Newest first; apply the category filter.
-  const shown = entries
-    .slice()
-    .reverse()
-    .filter((e) => filter === "all" || eventMeta(e.event).category === filter);
+  const shown = all.filter((r) => filter === "all" || rowCategory(r) === filter);
 
   return (
     <div style={root}>
@@ -259,7 +301,9 @@ export function AuditLogPane(): React.ReactElement {
         Script grid-mutations, capability use, writeback (submit, review, invalidation),
         publishing, protection changes and AI-assisted edits are <b>always</b> recorded here.
         Subscribe, refresh and override events are recorded only while audit logging is
-        enabled. Newest first.
+        enabled. Newest first. Rows marked <b>this computer</b> belong to no workbook (a push whose
+        workbook was replaced before it finished) and are kept on this computer; Clear does not
+        remove them.
       </div>
       {log && !log.enabled && (
         <div style={{ ...empty, color: "#9a6700", textAlign: "left", padding: "6px 8px", marginBottom: 4 }}>
@@ -291,29 +335,51 @@ export function AuditLogPane(): React.ReactElement {
       </div>
 
       <div style={{ color: "#999", fontSize: 11, marginBottom: 4 }}>
-        {shown.length} of {entries.length} event{entries.length === 1 ? "" : "s"}
-        {log && log.maxEntries > 0 ? ` (keeping the most recent ${log.maxEntries})` : ""}
+        {shown.length} of {all.length} event{all.length === 1 ? "" : "s"}
+        {log && log.maxEntries > 0 ? ` (keeping the most recent ${log.maxEntries} in this workbook)` : ""}
       </div>
+      {machine && (machine.unreadableLines > 0 || machine.lastWriteError) && (
+        <div
+          data-testid="audit-machine-trail-health"
+          style={{ ...empty, color: "#c5221f", textAlign: "left", padding: "6px 8px", marginBottom: 4 }}
+        >
+          {machine.lastWriteError
+            ? `This computer's audit trail has a problem: ${machine.lastWriteError}`
+            : `${machine.unreadableLines} line${machine.unreadableLines === 1 ? "" : "s"} of this computer's audit trail could not be read.`}{" "}
+          The file is {machine.path}.
+        </div>
+      )}
 
       <div style={{ flex: 1, overflowY: "auto" }}>
         {shown.length === 0 ? (
           <div style={empty}>
-            {entries.length === 0
+            {all.length === 0
               ? (log?.enabled ? "No actions recorded yet." : "No script or capability activity recorded yet.")
               : "No events match this filter."}
           </div>
         ) : (
-          shown.map((e, i) => {
+          shown.map((row, i) => {
+            const e = row.entry;
             const meta = eventMeta(e.event);
+            const onComputer = row.trail === "computer";
             return (
-              <div key={`${e.timestamp}-${i}`} style={entryRow}>
+              <div key={`${row.trail}-${e.timestamp}-${i}`} style={entryRow} data-audit-trail={row.trail}>
                 <div style={entryTop}>
-                  <span style={eventBadge(meta.category)}>{meta.label}</span>
+                  <span style={eventBadge(onComputer ? "computer" : meta.category)}>
+                    {onComputer ? `${meta.label} (this computer)` : meta.label}
+                  </span>
                   <span style={{ fontSize: 10, color: "#999", whiteSpace: "nowrap" }}>
                     {fmtTime(e.timestamp)}
                   </span>
                 </div>
                 <div style={{ marginTop: 2, color: "#444" }}>{e.description}</div>
+                {onComputer && (
+                  <div style={{ marginTop: 1, fontSize: 10, color: "#8a4b00" }}>
+                    {(e as MachineAuditEntry).reason === "documentReplaced"
+                      ? "Kept on this computer, not in any workbook: the workbook that did this was replaced (File > Open or New) before it finished."
+                      : "Kept on this computer, not in any workbook."}
+                  </div>
+                )}
                 {e.user && (
                   <div style={{ marginTop: 1, fontSize: 10, color: "#999" }}>by {e.user}</div>
                 )}

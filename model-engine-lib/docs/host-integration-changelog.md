@@ -67,6 +67,135 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 
 ---
 
+## Each measure sees only its own filter context: a KEEP in a comparison, a dimension KEEP beside other measures, KEEP conditions under pre-aggregation, the boundary combiner's keys (no `MODEL_FORMAT_VERSION` change)
+
+Calcula open-ledger round E. **Values change** on the local (in-memory, DataFusion) path, and some queries that answered a wrong number now refuse. No public type, request or result shape changed.
+
+- **A KEEP inside a measure-level comparison was dropped.** `IF(SUM(Sales[amount], KEEP(Sales, Sales[cat] = "Helmets")) > SUM(Sales[qty]), SUM(Sales[qty]), BLANK())` answered 7 over a table with no Helmets row; DAX answers BLANK. The compound route resolved the whole comparison as ONE context and the conditional renderer's comparison arm fell back to plain SQL (`SUM("amount") > SUM("qty")`). Now:
+  - a measure-level comparison, `AND`, `OR`, `XOR`, `NOT` and `ISBLANK` are compound combinators on every local route (the main SELECT, the multi-fact groups, the two-level percent-of-parent query, and `MeasureEngine`'s boundary combiner): each operand resolves its own context, so the KEEP filters only its own sum;
+  - `Expression::to_case_when_sql` (the conditional renderer) recurses through comparisons, `AND` / `OR`, `SWITCH` and `IN`, so the condition reaches every aggregate there. **Pinned text changed:** an `IF` condition's aggregate is now `CASE WHEN`-wrapped and fact-qualified like the branches (`complex_expression_pinned_case_when_sql`);
+  - a compound measure's KEEP **expression conditions** (`IN {...}`, column-vs-column) now apply on the compound routes too; only its simple filters did.
+- **A dimension KEEP filtered every OTHER measure.** `SUM(Sales[amount], KEEP(Product, Product[name] = "Bikes"))` beside `SUM(Sales[amount])` made the total answer the Bikes amount (10, not 18). The planner pushed the KEEP into the Product FETCH whenever no other measure filtered Product, and the shared SELECT inner-joined that pre-filtered dimension for every measure. Now:
+  - a KEEP predicate is pushed into a dimension fetch only when it holds for every row EVERY measure of the query aggregates (it is on the root KEEP spine of each). A KEEP on one operand of a compound measure, or a measure without it, keeps the fetch whole. This is a performance change only where it was a correctness bug;
+  - a dimension joined only for a measure's KEEP is a `LEFT JOIN`, so a fact row with no dimension row still counts for the other measures (it never satisfies the KEEP: a NULL condition is FALSE);
+  - grouped, a group shows when ANY measure answers in it: the `HAVING` tested the `CASE WHEN` measures only, so a Bikes KEEP hid the Helmets row of a plain total grouped by Product.
+- **Two-stage pre-aggregation** (a group-by through a many-to-many or non-equi relationship) counted a KEEP's expression conditions as context but rendered only its simple filters: a condition alone produced an empty `CASE WHEN` (a SQL parse error), beside a filter it was dropped. It now renders both, joins (LEFT) the dimensions they read in Stage 1, and refuses with `QueryError::InvalidQuery` rather than answer an unfiltered value when:
+  - the KEEP has an `IN variable[col]` membership;
+  - the measure is not a single aggregate;
+  - the KEEP's table is reached through a many-to-many / non-equi relationship.
+- **`MeasureEngine`'s boundary combiner** (a compound measure grouped through a non-equi relationship) took the group keys from the first sub-result, so a group that sub-aggregate had no row in came back keyed NULL. A sub-aggregate with no rows at all was registered without columns, and the combine failed with DataFusion `FieldNotFound __sub_tbl_0.<column>`. The combine is now a full outer join keyed by `COALESCE` over every sub-result, joined `IS NOT DISTINCT FROM` (the BLANK member matches itself), and an empty sub-result keeps its columns: a missing sub-aggregate is BLANK in that group (`BLANK + 30 = 30`).
+
+Not changed: a comparison of two aggregates where one is BLANK still answers SQL's NULL as a bare boolean measure (inside an `IF` it is FALSE, DAX's answer).
+
+> **Calcula action:** none beyond taking the new answers and surfacing the new `InvalidQuery` refusals as the query error they are.
+
+---
+
+## A NULL condition takes no `CASE` branch on the local engine; a context column's DISTINCTCOUNT counts BLANK (no `MODEL_FORMAT_VERSION` change)
+
+Calcula open-ledger round D. **Values change** on the local (in-memory, DataFusion) path; pushed PostgreSQL / SQL Server SQL is unchanged.
+
+- **Conditional aggregates counted rows whose condition is NULL.** DataFusion 44 answers `CASE WHEN c THEN col END` with `col` when `c` is NULL. That `CASE` has one WHEN, a bare column, and no ELSE (or `ELSE NULL`, which its planner drops). The cause is its `case_column_or_null` fast path, `nullif(col, not(c))` (datafusion-physical-expr 44.0.0, `expressions/case.rs`). Every local conditional aggregate also aggregated the rows whose condition is NULL: a KEEP on a BLANK attribute, an `IF(t[cat] = t[cat2], t[amount])` over a BLANK `cat`, an `IF(SUM(x) > SUM(y), SUM(y))` whose `SUM(x)` is BLANK. One example: `COUNT(CASE WHEN cat = 'Bikes' THEN amount END)` over `(Bikes, 10), (Bikes, NULL), (NULL, 7)` answered 2, not 1. DAX and SQL both take a branch only when its condition is TRUE.
+  - The engine's own (DataFusion) SQL now spells every model condition of a `CASE` as `COALESCE(c, FALSE)`. A condition that is not a predicate by its shape (a number used as a condition) is spelled `COALESCE(CAST(c AS BOOLEAN), FALSE)`.
+  - It is not `(c) IS TRUE`: DataFusion 44 types `IS TRUE` non-nullable in the logical plan but nullable in the physical plan. A query that uses one twice fails with "Physical input schema should be the same as the one converted from logical input schema".
+  - The routes this covers:
+    - `AggregateOp::render_case_when_sql` (the DataFusion dialect, and a table transformation's conditional Group By);
+    - `Expression::to_case_when_sql`;
+    - the KEEP scope of `SqlRenderer::with_keep_case_when`, and DISTINCTCOUNT's BLANK flag;
+    - every `IF` / `COUNTIF` render;
+    - the boundary combiner (`MeasureEngine`, a compound measure grouped through a many-to-many dimension);
+    - the local pipeline's hoisted and two-level percent-of-parent compounds;
+    - two-stage pre-aggregation;
+    - the contested-filter `HAVING` probe.
+  - `SWITCH`'s `CASE subject WHEN v` form already treats a NULL as no match and is unchanged.
+- **New API.**
+  - `engine_core::compute::sql_util::null_is_false_condition(condition_sql, is_predicate)`.
+  - `Expression::is_boolean_predicate()`.
+  - `Dialect::case_condition(condition_sql, is_predicate)`, a provided method. The default returns the condition unchanged, which is right for a SQL-standard source, so a vendor's existing `Dialect` impl needs no change.
+- **Pinned text changed.** `AggregateOp::render_case_when_sql`, `Expression::to_sql_string` / `to_case_when_sql` of an `IF`, `COUNTIF` or KEEP, and a lookup resolution's `CASE` now carry the `COALESCE(.., FALSE)`. The PostgreSQL dialect's text does not change.
+- **A context column's scalar measure** (`ContextColumn`, resolved by a probe query) rendered SQL's `COUNT(DISTINCT x)`, which skips BLANK, for a `DISTINCTCOUNT`. It now counts BLANK as one value, as the query's own measure columns do. A count of nothing stays the literal 0 there rather than DAX's BLANK. A BLANK scalar is that resolver's v1 error, while 0 is what DAX reads a BLANK as in every comparison and in `+` / `-`.
+
+> **Calcula action:** none beyond taking the new answers; no wire or model-file shape changed.
+
+---
+
+## DAX semantics, round D: pushed KEEP counts, DISTINCTCOUNT's BLANK, `DIVIDE(BLANK, 0, alt)`, row-level BLANK comparisons (no `MODEL_FORMAT_VERSION` change)
+
+Four places where the engine still answered SQL's way, not DAX's (Calcula open-ledger round D). The evidence is Microsoft's DAX reference plus a [LIVE] probe of Excel 16's data model (the Power BI VertiPaq/DAX engine) over CUBEVALUE, 2026-11-05.
+
+- **A pushed filtered count counted every row.** On the PostgreSQL pushdown, `COUNTROWS(Sales, KEEP(...))` rendered a plain `COUNT(*)`, so the KEEP filter was dropped. It was pinned as "legacy" by `countrows_keep_pushdown_preserves_legacy_count_star`, a test now replaced deliberately. In KEEP-as-CASE-WHEN mode (`SqlRenderer::with_keep_case_when`) the KEEP condition now reaches EVERY aggregate under the KEEP:
+  - `COUNTROWS` renders `SUM(CASE WHEN c THEN 1 END)`, which is BLANK when the KEEP keeps no row.
+  - Aggregates under a scalar function, an `IF`, `COUNTIF`, `LISTAGG`, `MAX_BY`/`MIN_BY`, `HASONEVALUE`, `SELECTEDVALUE` or `FIRSTNONBLANK` now take the condition. A measure reference expands to any of these, so `[Margin](KEEP(...))` was such a case.
+  - A KEEP inside a KEEP ANDs both conditions. Before, the outer one was dropped.
+- **Fail-closed changes in the same renderer mode.** These used to render their inner expression with the context silently dropped. They are now `EngineError::InvalidExpression`:
+  - a KEEP with variables, expression conditions or IN predicates;
+  - a CLEAR / RESET / USING / TRAVERSE / USERELATIONSHIP / KEEPIN reaching the plain renderer.
+
+  The pushdown planner keeps such measures local, so a host never sees the error. `has_unpushable_ops` also now keeps a CLEAR local when it sits where the connector's window renderer cannot reach it: beneath a KEEP (`SUM(x, CLEAR(t), KEEP(...))`), a scalar function, and so on. Before, the pushed SQL dropped that CLEAR.
+- **DISTINCTCOUNT counts BLANK; new `DISTINCTCOUNTNOBLANK`.** "The DISTINCTCOUNT function counts the BLANK value. To skip the BLANK value, use the DISTINCTCOUNTNOBLANK function." (Microsoft). [LIVE]: over `10, 0, BLANK, 7` the answer is 4, and over one BLANK row it is 1.
+  - A measure's `DISTINCTCOUNT` now renders `COUNT(DISTINCT x) + MAX(CASE WHEN x IS NULL THEN 1 ELSE 0 END)`, which stays BLANK over no rows. This holds on every route: the unified renderer in both dialects and under a KEEP, the conditional mode, the local pipeline's hand-built measure SELECTs through the new `dax_semantics::measure_aggregate_sql`, pre-aggregation, and the structured connector aggregate.
+  - **New API:**
+    - `AggregateOp::DistinctCountNoBlank` (serde `"DistinctCountNoBlank"`; DSL `DISTINCTCOUNTNOBLANK(t[c])`, `COUNT(DISTINCT x)`).
+    - `engine_connectors::AggregateFunction::CountDistinctNoBlank`.
+    - `dax_semantics::{distinct_count_counting_blank, measure_aggregate_sql}`.
+    - `Expression::contains_clear`.
+  - A table transformation's Group By keeps SQL's count.
+  - A model with a DISTINCTCOUNTNOBLANK measure fails to deserialize on an older engine (an unknown variant). No format-version link was added (no backward compatibility is required).
+- **`DIVIDE(BLANK, 0, alt)` is BLANK.** The SQL rendered the alternate and the constant folder (`fold_const_scalar`) answered BLANK. [LIVE] DAX agrees with the folder:
+  - `DIVIDE(BLANK(), 0, 7)` and `DIVIDE(BLANK(), BLANK(), 7)` are BLANK;
+  - `DIVIDE(0, 0, 7)` and `DIVIDE(0, BLANK(), 7)` are 7.
+
+  `dax_semantics::safe_divide_sql` now decides a BLANK numerator first. It renders `WHEN n IS NULL THEN NULL` only when an alternate is given.
+- **Row-level comparisons read BLANK as DAX does.** `t[amount] < 5` in a calculated column, an iterator's row expression or a KEEP expression condition now renders `COALESCE(t.amount, 0) < 5`, so a BLANK row is kept. [LIVE] confirms each case:
+  - `FILTER(T, T[amount] < 5)` keeps 0 and BLANK; `= 0`, `>= 0` and `<> 10` keep BLANK; `> 0` does not.
+  - `T[name] < "x"` and `T[name] = ""` keep BLANK.
+  - `IN {0}` stays strict.
+
+  Not changed: a KEEP's simple `table[column] op literal` `FilterPredicate`. It keeps SQL's comparison: its literal's type is not stored, and it is also the row-level-security predicate type.
+- **Result contract.**
+  - A `DISTINCTCOUNT` over a column with BLANKs answers one more than before.
+  - A pushed `COUNTROWS(t, KEEP)` answers the filtered count.
+  - `DIVIDE(<BLANK>, 0, alt)` answers BLANK.
+  - A row-level comparison against a literal keeps BLANK rows.
+- **Host action:** none required to build. A host that matches `AggregateOp` exhaustively must add `DistinctCountNoBlank`. A host that maps `AggregateFunction` must add `CountDistinctNoBlank`.
+
+---
+
+## DAX BLANK semantics: counts of nothing are BLANK, BLANK arithmetic, `/` never fails (no `MODEL_FORMAT_VERSION` change)
+
+Measures computed SQL's answers where DAX (Power BI) gives different ones (Calcula open-ledger round C): `COUNTROWS(Sales) / COUNTROWS(Sales)` over an empty table failed the WHOLE query (`Arrow error: Divide by zero error` -- integer `/` had no zero guard); `COUNTROWS` / `COUNT` / `DISTINCTCOUNT` over no rows answered 0 (while the hoisted RESET total of the same count was BLANK); `SUM(Sales[amount]) + 1` over an empty table answered NULL; and `COUNTROWS(Sales) / 3` was SQL's INTEGER quotient.
+
+- **Semantics (measures and calculated columns).** One table, `engine_core::compute::dax_semantics`, with its sources cited in the module: Microsoft's "Blanks, empty strings, and zero values" table (`BLANK + BLANK = BLANK`, `BLANK + 5 = 5`, `BLANK * 5 = BLANK`, `5 / BLANK = Infinity`, `0 / BLANK = NaN`, `BLANK / BLANK = BLANK`), *The Definitive Guide to DAX* (`BLANK - 10 = -10`, `BLANK / 3 = BLANK`, `10 / 0 = Infinity`, `0 / 0 = NaN`) and SQLBI (`BLANK - BLANK = BLANK`). So: in `+` / `-` a BLANK reads as 0 and a chain is BLANK only when every term is (`additive_terms` flattens `a + b - c`, so each term renders twice at most, never exponentially); `*` and a BLANK numerator propagate BLANK; a BLANK denominator reads as 0, `x / 0` is `+/-Infinity` and `0 / 0` is `NaN` (never an error), and `/` always answers a REAL; unary minus keeps BLANK (the parser now builds `-x` as `-1 * x`, was `0 - x`). `COUNT`, `DISTINCTCOUNT` and `COUNTROWS` answer BLANK, never 0, when there is nothing to count (`NULLIF(count, 0)`; DAX: "When the table argument contains no rows, the function returns BLANK"). `DIVIDE(n, d, alt)` answers `alt` for a zero OR BLANK denominator (was: zero only). A MEASURE-level operand (one holding an aggregate) that is BLANK compares as `0` / `''` / `FALSE` against a literal (`COALESCE(x, 0) = 0`), so `IF(COUNTROWS(t) = 0, ...)` and `SWITCH(COUNTROWS(t), 0, ...)` keep answering as they did when the count was 0; a row-level comparison (`t[amount] < 5` in a filter) keeps SQL's rule. The constant folders (`GVAR` bindings, format-string folding) use the same table (`arithmetic_f64`).
+- **Every route agrees.** The unified renderer (`SqlRenderer`, both dialects; local, KEEP-as-CASE-WHEN and conditional rendering), the local pipeline's compound / hoisted / multi-group / pre-aggregate / CLEAR-window SQL (`resolve_compound_sql`, `hoist_measure_sql`, the simple-aggregate sites), the PostgreSQL pushdown (`expression_to_source_sql_with_clear`, the connector's `expr_to_sql_with_clear`) and the pushed simple aggregates of every SQL connector (`sql_builder::aggregate_select_clause`: `NULLIF(COUNT(..), 0)`). PostgreSQL's float division by zero is an error, so its `/` guards the zero denominator (`DivideStyle::Guarded`: `SIGN(n) * 'Infinity'`); DataFusion's float division is already IEEE.
+- **Transformations keep SQL's rules.** A table transformation is Power Query, not DAX: its row formulas render through `Expression::to_relational_sql_string` / `SqlRenderer::with_relational_semantics` (`null + 5 = null`, counts of nothing 0), unchanged.
+- **New API.** `engine_core::compute::dax_semantics` (pub module); `Dialect::divide_style` and `Dialect::non_finite_float` (default methods -- an existing `Dialect` impl compiles unchanged and gets the guarded spelling); `SqlRenderer::with_relational_semantics`; `Expression::to_relational_sql_string`.
+- **Result contract.** A measure column can now hold `+/-Infinity` / `NaN` (a `/` by zero) where the query used to fail, and NULL where a count used to say 0; a `/` measure's column is Float64 even over integer operands.
+- **Host action:** none required to build. A host that treats a count of 0 specially must test for BLANK as well (Calcula's pivots and cards already show BLANK as an empty cell), and one that formats a measure value should expect the special floating values.
+
+---
+
+## DAX `FORMAT` reads DAX format strings, in a host-set culture: `Engine::set_format_culture` (no `MODEL_FORMAT_VERSION` change)
+
+`FORMAT(value, format_string)` compiled to SQL `TO_CHAR`, which implements PostgreSQL's template patterns, not DAX's: `FORMAT(x, "#,0.00")` was wrong in every locale and a measure that formats itself came out en-US-shaped everywhere (Calcula BUG-0522).
+
+- **Semantics.** FORMAT now compiles to the local UDF `calcula_format` (`engine_core::compute::format_string`): DAX's named formats ("Currency", "Fixed", "Standard", "Percent", "Scientific", "Yes/No", "Short Date", "Long Date", "General Date", ...) and custom number / date-time patterns in the VBA-compatible token language DAX documents. See `docs/functions/Text Functions/FORMAT.md`. BLANK formats to `""` (DAX). Postgres-style patterns that are also DAX patterns (`"YYYY-MM"`, `"YYYY-MM-DD"`, `"YYYY-Q"`) keep their output.
+- **Never pushed down.** An expression containing FORMAT is `has_unpushable_ops` (local aggregation), like a UDF call.
+- **New API.** `Engine::set_format_culture(FormatCulture)` / `Engine::format_culture()`; `bi_engine::{FormatCulture, FormatValue, format_value}` re-exported. `FormatCulture` is plain data (separators, currency symbol and placement, the Short/Long Date and Long Time patterns in the FORMAT token language, AM/PM designators, month and day names); built in: `FormatCulture::en_us()` (the default), `sv_se()`, `de_de()`, and `FormatCulture::builtin(tag)`. A change rebuilds the effective UDF registry -- the built-in UDF's version is the culture's identity, so every query-cache key changes -- and invalidates the query cache.
+- **Effective registry.** The effective UDF registry now always holds `calcula_format`, unless the host registered a native UDF of that name (which then wins).
+- **Host action:** set the culture from the app locale on every engine you build and again when the locale changes (Calcula: `bi::commands::build_configured_engine` and `locale_commands::set_locale`). Unchanged: a measure's static `format_string` metadata is still formatted by the host.
+
+---
+
+## A compound RESET share groups by a FACT column (no `MODEL_FORMAT_VERSION` change)
+
+`DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], RESET()))` -- or any compound measure whose `RESET` / full-axis `CLEAR` total is rendered inside the expression -- failed whenever the query grouped ONLY by columns of the measure's own fact table (a single-table model, or a star model grouped by a fact column): `Schema error: No field named __scalar_sq_1.__clear_scalar` (Calcula BUG-0444). Grouping by a dimension column worked.
+
+- **Cause.** The grand total was an uncorrelated scalar subquery inside the measure SQL, and the grouped query's `HAVING ("<measure>" IS NOT NULL)` repeats the measure, so DataFusion (44) decorrelated the subquery twice; with no JOIN in the outer query its `optimize_projections` rule dropped one copy while the plan still named it.
+- **Now.** Each distinct grand total of a compound measure is a one-row `CROSS JOIN (SELECT ... AS __clear_scalar FROM <fact>) AS __csN`, read as `MAX(__csN.__clear_scalar)` (`hoist_clear_scalars`, `engine-query/src/executor/pipeline/sql.rs`; both the single-fact and the multi-group local paths). Same number row for row whenever the fact table has a row: the derived table has exactly one row and reads the same registered (already RLS/slicer-filtered) fact batch. Over an EMPTY fact table an ungrouped query (or a ROLLUP grand-total row) reads the total as BLANK, where the old subquery read the empty set's aggregate -- the same NULL for SUM/AVG/MIN/MAX, but BLANK instead of 0 for a COUNT. That is kept deliberately: it is DAX's answer (COUNTROWS of an empty table is BLANK), and it makes `COUNTROWS(f) / COUNTROWS(f, RESET())` BLANK rather than an integer divide-by-zero that failed the query (`clear_reset_tests::a_reset_total_over_an_empty_fact_table_is_blank`).
+- **Host action:** none required. A share Card or pivot over a single-table model now answers instead of erroring. Unchanged: a compound RESET/CLEAR measure under a request filter that its clear would have to remove is still the typed contested-filter refusal (`reset_with_slicer_on_cleared_table_fails_closed`).
+
+---
+
 ## Tuple (multi-column) slicers: `QueryRequest::scoped_tuple_filters` (no `MODEL_FORMAT_VERSION` change)
 
 A Ctrl+click selection across two fields -- (A, x) and (B, y) -- could only be sent as two per-column IN-lists, which also keep (A, y) and (B, x). Calcula's Power BI-style cross-filter (round 2, P4) needs the exact set.

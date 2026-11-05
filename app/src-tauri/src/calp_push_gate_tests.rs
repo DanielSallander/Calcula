@@ -864,3 +864,81 @@ fn the_audit_row_of_a_push_whose_workbook_was_replaced_never_lands_in_the_next_w
     let call = &publish[publish.find("record_push_audit_row(").expect("the push's audit row moved")..];
     assert!(call[..call.find(");").unwrap()].contains("document_epoch,"), "the audit row is not handed the epoch");
 }
+
+/// BUG-0653: THE ROW OF A PUSH WHOSE WORKBOOK WAS REPLACED HAS A DURABLE,
+/// VISIBLE HOME. It used to reach only the session log -- no audit viewer
+/// showed it and the next start lost it, while the workspace's signed version
+/// list recorded the version. It now lands in THIS COMPUTER's append-only
+/// trail (`machine_audit`, `collaboration-audit.jsonl` in the profile) with
+/// every field it carried plus `reason: documentReplaced`, and the audit
+/// viewer reads it through `calp_get_audit_log`'s `includeMachine`. A row
+/// that DID reach its workbook is not copied there (positive control), and
+/// the model-only publish -- which wrote its row straight into whatever
+/// workbook was on screen -- now goes through the same helper.
+///
+/// SABOTAGES (separate builds, each fails its own assertion): (1) drop the
+/// `machine_audit::record` call from `record_push_audit_row` -- "this
+/// computer's trail must hold the replaced push". (2) `audit_log_view`
+/// ignores `include_machine` -- "the viewer's read must carry this
+/// computer's trail".
+#[test]
+fn the_audit_row_of_a_push_whose_workbook_was_replaced_lands_in_this_computers_trail() {
+    let profile = tempfile::TempDir::new().unwrap();
+    crate::profile_dir::with_test_profile(profile.path(), || {
+        let state = crate::create_app_state();
+        let file = crate::persistence::FileState::default();
+        let row = |epoch: u64| {
+            let mut extra = std::collections::HashMap::new();
+            extra.insert("package".to_string(), serde_json::json!("x-app"));
+            extra.insert("version".to_string(), serde_json::json!("1.1.0"));
+            crate::calp_commands::record_push_audit_row(
+                &state,
+                &file,
+                epoch,
+                "Published x-app v1.1.0 (1 sheets)",
+                "author",
+                "2026-11-04T10:00:00Z",
+                extra,
+            )
+        };
+        let machine_rows = || crate::machine_audit::read_trail(profile.path()).entries;
+
+        // Positive control: a push from the workbook on screen stays in it.
+        assert!(row(file.document_epoch()));
+        assert!(machine_rows().is_empty(), "a row that reached its workbook must not be copied to this computer's trail");
+
+        // The push starts on A; B is opened before the row is written.
+        let epoch = file.document_epoch();
+        open_another_workbook(&state, &file, None);
+        assert!(!row(epoch), "the premise: the row has no workbook");
+        let rows = machine_rows();
+        assert_eq!(rows.len(), 1, "this computer's trail must hold the replaced push");
+        assert!(matches!(rows[0].event, calp::audit::AuditEvent::Published));
+        assert_eq!(rows[0].description, "Published x-app v1.1.0 (1 sheets)");
+        assert_eq!(rows[0].user, "author");
+        assert_eq!(rows[0].extra["package"], serde_json::json!("x-app"), "every field the row carried");
+        assert_eq!(rows[0].extra["reason"], serde_json::json!(crate::machine_audit::REASON_DOCUMENT_REPLACED));
+
+        // The viewer reads it beside the workbook's own trail.
+        let view = crate::calp_commands::audit_log_view(&state, true).unwrap();
+        let machine = view.machine.expect("the viewer's read must carry this computer's trail");
+        assert_eq!(machine.entries.len(), 1);
+        assert!(view.log.entries.is_empty(), "B's own trail still holds nothing of A's push");
+        assert!(crate::calp_commands::audit_log_view(&state, false).unwrap().machine.is_none(), "only when asked");
+    });
+
+    // ...and the model-only publish writes its row only through the helper,
+    // handed the epoch it read at entry.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let calp = std::fs::read_to_string(root.join("src/calp_commands.rs")).unwrap();
+    let at = calp.find("pub fn calp_publish_model(").expect("calp_publish_model moved");
+    let rest = &calp[at..];
+    let body: String = rest[..rest.find("\n}").unwrap()]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!body.contains("audit_log.write("), "calp_publish_model writes its audit row around the epoch check");
+    let call = &body[body.find("record_push_audit_row(").expect("the model publish's audit row moved")..];
+    assert!(call[..call.find(");").unwrap()].contains("document_epoch,"), "the model publish's row is not handed the epoch");
+}

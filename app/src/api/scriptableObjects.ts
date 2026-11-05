@@ -746,7 +746,7 @@ export interface UnlockedAPI {
     endCol: number,
     options?: { name?: string; hasHeaders?: boolean },
   ): Promise<ScriptObjectRef>;
-  /** Delete a table (its cells and values are kept). ACTIVE SHEET only. */
+  /** Delete a table: its cells are cleared and references to it become #REF! (Excel's ListObject.Delete). ACTIVE SHEET only. */
   deleteTable(tableId: string): Promise<void>;
   /** Create a named range. Omit `sheetIndex` (or pass null) for workbook scope. */
   createNamedRange(

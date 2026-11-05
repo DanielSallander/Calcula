@@ -183,12 +183,16 @@ pub fn get_object_json(
 /// scripts, notebooks, pivots, pivot layouts, the document theme, workbook properties
 /// and sheet layouts -- almost all of which are persisted. It marked nothing dirty.
 ///
-/// The decision is taken on the RESULT rather than per arm, for a reason: some arms
-/// (`sheet_layout`) `return` early from the middle of the match, so a mark
-/// placed per arm is exactly the kind of thing that gets missed when a new object type
-/// is added. Every arm's error path is a refusal that mutated nothing -- an unparseable
-/// blob or an id that does not resolve -- so "Ok implies committed" holds uniformly and
-/// keeps refusals clean.
+/// The decision is taken PER ARM, inside the critical section that writes: each arm
+/// resolves its object, runs every gate, compares the replacement with what is stored
+/// (`json_differs`), and only then mints its `DocumentEffect` -- so a refusal AND an
+/// apply that changes nothing (the user pressed Apply on the JSON they were shown)
+/// both leave the document clean. The command used to mint one more effect on EVERY
+/// `Ok` (rev-backend-3), which dirtied the workbook for an unchanged table or script
+/// although those arms had decided not to write. A new arm therefore owns its effect:
+/// `every_arm_leaves_an_unchanged_apply_clean_and_dirties_a_changed_one` drives every
+/// arm both ways, so an arm that forgets to mint fails it (lost work is the worse
+/// direction), and so does a blanket mint coming back.
 ///
 /// KNOWN OVER-APPROXIMATION: the `timeline_slicer` arm now dirties, but
 /// `TimelineSlicerState` is never collected by `assemble_workbook_for_save`, so
@@ -211,198 +215,372 @@ pub fn set_object_json(
     json: String,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    // A borrowed handle the `move` closure can capture by value (`&FileState` is Copy)
-    // without moving `file_state` itself, which is still needed after the call.
-    let fs: &FileState = &file_state;
-    // The `script` arm's changed Custom Functions library: the generation the
-    // page must re-install (see `set_script_json`), announced after the write.
-    let library_generation_cell: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
-    let library_generation = &library_generation_cell;
-    let result = (move || -> Result<(), String> {
-    match object_type.as_str() {
-        "chart" => {
-            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid chart id".to_string())?;
-            let new_entry: api_types::ChartEntry = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid chart JSON: {}", e))?;
-            // Resolve under a read guard, then decide, then write -- so an id that
-            // does not resolve leaves the document clean.
-            if !state.charts.read().unwrap().iter().any(|c| c.id == id) {
-                return Err(format!("Chart {} not found", id));
-            }
-            let effect = DocumentEffect::mutates(fs);
-            let mut charts = state.charts.write(&effect).unwrap();
-            if let Some(existing) = charts.iter_mut().find(|c| c.id == id) {
-                *existing = new_entry;
-            }
-            Ok(())
-        }
-        "table" => set_table_json(
-            &state,
-            fs,
-            &user_files_state,
-            &pivot_state,
-            &pane_control_state,
-            &ribbon_filter_state,
-            &object_id,
-            &json,
-        ),
-        "slicer" => {
-            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid slicer id".to_string())?;
-            let new_slicer: crate::slicer::Slicer = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid slicer JSON: {}", e))?;
-            let effect = DocumentEffect::mutates(fs);
-            let mut slicers = slicer_state.slicers.write(&effect).unwrap();
-            if let Some(existing) = slicers.get_mut(&id) {
-                *existing = new_slicer;
-                Ok(())
-            } else {
-                Err(format!("Slicer {} not found", id))
-            }
-        }
-        "ribbon_filter" => {
-            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid ribbon filter id".to_string())?;
-            let new_filter: crate::ribbon_filter::RibbonFilter = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid ribbon filter JSON: {}", e))?;
-            // Resolve under a read guard, then decide, then write -- so an id that
-            // does not resolve leaves the document clean.
-            if !ribbon_filter_state.filters.read().unwrap().contains_key(&id) {
-                return Err(format!("Ribbon filter {} not found", id));
-            }
-            let effect = DocumentEffect::mutates(fs);
-            let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
-            if let Some(existing) = filters.get_mut(&id) {
-                *existing = new_filter;
-                Ok(())
-            } else {
-                Err(format!("Ribbon filter {} not found", id))
-            }
-        }
-        "timeline_slicer" => {
-            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid timeline slicer id".to_string())?;
-            let new_timeline: crate::timeline_slicer::TimelineSlicer = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid timeline slicer JSON: {}", e))?;
-            // Resolve under a read guard, then decide, then write -- so an id that
-            // does not resolve leaves the document clean. Same shape as the
-            // ribbon_filter arm above.
-            if !timeline_slicer_state.timelines.read().unwrap().contains_key(&id) {
-                return Err(format!("Timeline slicer {} not found", id));
-            }
-            let effect = DocumentEffect::mutates(fs);
-            let mut timelines = timeline_slicer_state.timelines.write(&effect).unwrap();
-            if let Some(existing) = timelines.get_mut(&id) {
-                *existing = new_timeline;
-                Ok(())
-            } else {
-                Err(format!("Timeline slicer {} not found", id))
-            }
-        }
-        "sparkline" => {
-            let idx: usize = object_id.parse().map_err(|_| "Invalid sparkline index".to_string())?;
-            let new_entry: api_types::SparklineEntry = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid sparkline JSON: {}", e))?;
-            if idx >= state.sparklines.read().unwrap().len() {
-                return Err(format!("Sparkline entry {} not found", idx));
-            }
-            let effect = DocumentEffect::mutates(fs);
-            state.sparklines.write(&effect).unwrap()[idx] = new_entry;
-            Ok(())
-        }
-        "script" => {
-            library_generation.set(set_script_json(&state, fs, &script_state, object_id, &json)?);
-            Ok(())
-        }
-        "notebook" => set_notebook_json(fs, &script_state, object_id, &json),
-        "pivot" => {
-            let id: pivot_engine::PivotId = serde_json::from_value(
-                serde_json::Value::String(object_id.clone())
-            ).map_err(|_| "Invalid pivot id".to_string())?;
-            let new_definition: pivot_engine::PivotDefinition = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid pivot JSON: {}", e))?;
-            // Both refusals (bad id, bad JSON) are above, so the eager token is safe here.
-            let effect = DocumentEffect::mutates(fs);
-            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
-            if let Some((definition, _cache)) = pivot_tables.get_mut(&id) {
-                *definition = new_definition;
-                Ok(())
-            } else {
-                Err(format!("Pivot {} not found", object_id))
-            }
-        }
-        "pivot_layout" => {
-            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid pivot layout id".to_string())?;
-            let new_layout: ::persistence::SavedPivotLayout = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid pivot layout JSON: {}", e))?;
-            if !state.pivot_layouts.read().unwrap().iter().any(|l| l.id == id) {
-                return Err(format!("Pivot layout {} not found", id));
-            }
-            let effect = DocumentEffect::mutates(fs);
-            let mut layouts = state.pivot_layouts.write(&effect).unwrap();
-            if let Some(existing) = layouts.iter_mut().find(|l| l.id == id) {
-                *existing = new_layout;
-            }
-            Ok(())
-        }
-        "theme" => {
-            let new_theme: engine::ThemeDefinition = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid theme JSON: {}", e))?;
-            let effect = DocumentEffect::mutates(fs);
-            let mut theme = state.theme.write(&effect).unwrap();
-            *theme = new_theme;
-            Ok(())
-        }
-        "properties" => {
-            let new_props: api_types::WorkbookProperties = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid properties JSON: {}", e))?;
-            let effect = DocumentEffect::mutates(fs);
-            let mut props = state.workbook_properties.write(&effect).unwrap();
-            *props = new_props;
-            Ok(())
-        }
-        "sheet_layout" => {
-            let idx: usize = object_id.parse().map_err(|_| "Invalid sheet index".to_string())?;
-            let layout: calcula_format::sheet_layout::SheetLayout = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid sheet layout JSON: {}", e))?;
-            let (col_widths, row_heights) = layout.to_dimensions();
-            // Write into the per-sheet vectors (growing them if needed) so the
-            // change survives a sheet switch, and mirror the active sheet into
-            // the live primary maps.
-            // `lock_pending` because the bounds check can still REFUSE: minting
-            // the effect first would leave a rejected edit with a dirty flag.
-            let all_cw = state.all_column_widths.lock_pending().unwrap();
-            let all_rh = state.all_row_heights.lock_pending().unwrap();
-            if idx >= all_cw.len() || idx >= all_rh.len() {
-                return Err(format!("Sheet {} not found", idx));
-            }
-            let effect = DocumentEffect::mutates(fs);
-            {
-                let mut all_cw = all_cw.authorize(&effect);
-                let mut all_rh = all_rh.authorize(&effect);
-                all_cw[idx] = col_widths.clone();
-                all_rh[idx] = row_heights.clone();
-            }
-            if idx == *state.active_sheet.read().unwrap() {
-                *state.column_widths.write(&effect).unwrap() = col_widths;
-                *state.row_heights.write(&effect).unwrap() = row_heights;
-            }
-            Ok(())
-        }
-        _ => Err(format!("Unknown object type: {}", object_type)),
-    }
-    })();
-    if result.is_ok() {
-        // Committed: the object was replaced.
-        let _effect = DocumentEffect::mutates(&file_state);
-    }
+    let stores = ObjectJsonStores {
+        state: &state,
+        file_state: &file_state,
+        slicer_state: &slicer_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        script_state: &script_state,
+        timeline_slicer_state: &timeline_slicer_state,
+        pivot_state: &pivot_state,
+        user_files_state: &user_files_state,
+        pane_control_state: &pane_control_state,
+    };
     // A Custom Functions library edited here: the page re-installs it, and only
     // then are the held functions' served answers filed again (rev12C).
-    if let Some(generation) = library_generation_cell.get() {
+    if let Some(generation) = apply_object_json(&stores, &object_type, &object_id, &json)? {
         let _ = tauri::Emitter::emit(
             &app,
             "custom-functions:refresh",
             crate::bi::cube::CustomFunctionsRefresh { generation },
         );
     }
-    result
+    Ok(())
+}
+
+/// The stores [`set_object_json`] reaches, as plain references, so the whole
+/// dispatch -- every arm -- can be driven by a test without a Tauri runtime.
+pub(crate) struct ObjectJsonStores<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) file_state: &'a FileState,
+    pub(crate) slicer_state: &'a crate::slicer::SlicerState,
+    pub(crate) ribbon_filter_state: &'a crate::ribbon_filter::RibbonFilterState,
+    pub(crate) script_state: &'a crate::scripting::ScriptState,
+    pub(crate) timeline_slicer_state: &'a crate::timeline_slicer::TimelineSlicerState,
+    pub(crate) pivot_state: &'a crate::pivot::PivotState,
+    pub(crate) user_files_state: &'a crate::persistence::UserFilesState,
+    pub(crate) pane_control_state: &'a crate::pane_control::PaneControlState,
+}
+
+/// The body of [`set_object_json`]: dispatch to the object type's arm. Each
+/// arm mints its OWN `DocumentEffect`, after its gates and only when the
+/// replacement changes what is stored; nothing here mints one (rev-backend-3).
+/// Returns the `script` arm's changed Custom Functions library generation, the
+/// one the command announces as `custom-functions:refresh`.
+pub(crate) fn apply_object_json(
+    stores: &ObjectJsonStores<'_>,
+    object_type: &str,
+    object_id: &str,
+    json: &str,
+) -> Result<Option<u64>, String> {
+    let state = stores.state;
+    let fs = stores.file_state;
+    let none = |r: Result<(), String>| r.map(|()| None);
+    match object_type {
+        "chart" => none(set_chart_json(state, fs, object_id, json)),
+        "table" => none(set_table_json(
+            state,
+            fs,
+            stores.user_files_state,
+            stores.pivot_state,
+            stores.pane_control_state,
+            stores.ribbon_filter_state,
+            object_id,
+            json,
+        )),
+        "slicer" => none(set_slicer_json(state, fs, stores.slicer_state, object_id, json)),
+        "ribbon_filter" => none(set_ribbon_filter_json(fs, stores.ribbon_filter_state, object_id, json)),
+        "timeline_slicer" => none(set_timeline_json(state, fs, stores.timeline_slicer_state, object_id, json)),
+        "sparkline" => none(set_sparkline_json(state, fs, object_id, json)),
+        "script" => set_script_json(state, fs, stores.script_state, object_id.to_string(), json),
+        "notebook" => none(set_notebook_json(fs, stores.script_state, object_id.to_string(), json)),
+        "pivot" => none(set_pivot_json(state, fs, stores.pivot_state, object_id, json)),
+        "pivot_layout" => none(set_pivot_layout_json(state, fs, object_id, json)),
+        "theme" => {
+            let new_theme: engine::ThemeDefinition =
+                serde_json::from_str(json).map_err(|e| format!("Invalid theme JSON: {}", e))?;
+            let pending = state.theme.lock_pending().map_err(|e| e.to_string())?;
+            if !json_differs(&*pending, &new_theme) {
+                return Ok(None);
+            }
+            let effect = DocumentEffect::mutates(fs);
+            *pending.authorize(&effect) = new_theme;
+            Ok(None)
+        }
+        "properties" => {
+            let new_props: api_types::WorkbookProperties =
+                serde_json::from_str(json).map_err(|e| format!("Invalid properties JSON: {}", e))?;
+            let pending = state.workbook_properties.lock_pending().map_err(|e| e.to_string())?;
+            if !json_differs(&*pending, &new_props) {
+                return Ok(None);
+            }
+            let effect = DocumentEffect::mutates(fs);
+            *pending.authorize(&effect) = new_props;
+            Ok(None)
+        }
+        "sheet_layout" => none(set_sheet_layout_json(state, fs, object_id, json)),
+        _ => Err(format!("Unknown object type: {}", object_type)),
+    }
+}
+
+/// Does a JSON replacement change the stored object? Compared as the JSON
+/// values this view shows and edits, so key order and whitespace are not a
+/// change. A value that cannot be serialized counts as changed: the write then
+/// goes ahead and dirties the document, the safe direction of the error.
+pub(crate) fn json_differs<A: Serialize + ?Sized, B: Serialize + ?Sized>(existing: &A, replacement: &B) -> bool {
+    match (serde_json::to_value(existing), serde_json::to_value(replacement)) {
+        (Ok(a), Ok(b)) => a != b,
+        _ => true,
+    }
+}
+
+// The three arms below used to resolve under a read guard, DROP it, then take
+// the write guard (rev-backend-4): a sparkline vector that shrank in between
+// made `sparklines[idx] = ...` panic, and a filter or layout deleted in
+// between was answered "not found" after the document had been dirtied. Each
+// now resolves, compares and writes under ONE hold (`lock_pending`), the
+// discipline of the chart, slicer, timeline and pivot arms.
+
+/// The `ribbon_filter` arm of [`set_object_json`]: replace an EXISTING ribbon
+/// filter.
+pub(crate) fn set_ribbon_filter_json(
+    fs: &FileState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    object_id: &str,
+    json: &str,
+) -> Result<(), String> {
+    let id = identity::EntityId::parse(object_id).ok_or_else(|| "Invalid ribbon filter id".to_string())?;
+    let new_filter: crate::ribbon_filter::RibbonFilter =
+        serde_json::from_str(json).map_err(|e| format!("Invalid ribbon filter JSON: {}", e))?;
+    let pending = ribbon_filter_state.filters.lock_pending().map_err(|e| e.to_string())?;
+    let existing = pending.get(&id).ok_or_else(|| format!("Ribbon filter {} not found", id))?;
+    if !json_differs(existing, &new_filter) {
+        return Ok(());
+    }
+    let effect = DocumentEffect::mutates(fs);
+    let mut filters = pending.authorize(&effect);
+    filters.insert(id, new_filter);
+    Ok(())
+}
+
+/// The `sparkline` arm of [`set_object_json`]: replace an EXISTING sparkline
+/// entry, addressed by its index.
+pub(crate) fn set_sparkline_json(state: &AppState, fs: &FileState, object_id: &str, json: &str) -> Result<(), String> {
+    let idx: usize = object_id.parse().map_err(|_| "Invalid sparkline index".to_string())?;
+    let new_entry: api_types::SparklineEntry =
+        serde_json::from_str(json).map_err(|e| format!("Invalid sparkline JSON: {}", e))?;
+    let pending = state.sparklines.lock_pending().map_err(|e| e.to_string())?;
+    let existing = pending.get(idx).ok_or_else(|| format!("Sparkline entry {} not found", idx))?;
+    if !json_differs(existing, &new_entry) {
+        return Ok(());
+    }
+    let effect = DocumentEffect::mutates(fs);
+    let mut sparklines = pending.authorize(&effect);
+    sparklines[idx] = new_entry;
+    Ok(())
+}
+
+/// The `pivot_layout` arm of [`set_object_json`]: replace an EXISTING saved
+/// pivot layout.
+pub(crate) fn set_pivot_layout_json(state: &AppState, fs: &FileState, object_id: &str, json: &str) -> Result<(), String> {
+    let id = identity::EntityId::parse(object_id).ok_or_else(|| "Invalid pivot layout id".to_string())?;
+    let new_layout: ::persistence::SavedPivotLayout =
+        serde_json::from_str(json).map_err(|e| format!("Invalid pivot layout JSON: {}", e))?;
+    let pending = state.pivot_layouts.lock_pending().map_err(|e| e.to_string())?;
+    let slot = pending
+        .iter()
+        .position(|l| l.id == id)
+        .ok_or_else(|| format!("Pivot layout {} not found", id))?;
+    if !json_differs(&pending[slot], &new_layout) {
+        return Ok(());
+    }
+    let effect = DocumentEffect::mutates(fs);
+    let mut layouts = pending.authorize(&effect);
+    layouts[slot] = new_layout;
+    Ok(())
+}
+
+/// The `sheet_layout` arm of [`set_object_json`]: replace a sheet's column
+/// widths and row heights.
+///
+/// Written into the per-sheet vectors (so the change survives a sheet switch)
+/// and, for the active sheet, mirrored into the live primary maps. UNCHANGED
+/// is judged against what `get_object_json` showed: the live maps for the
+/// active sheet (its per-sheet slot is stale by design), the per-sheet slot for
+/// any other. The live maps are copied out one lock at a time and released
+/// before the per-sheet vectors are taken, as the write below does, so no new
+/// lock nesting is introduced.
+pub(crate) fn set_sheet_layout_json(state: &AppState, fs: &FileState, object_id: &str, json: &str) -> Result<(), String> {
+    let idx: usize = object_id.parse().map_err(|_| "Invalid sheet index".to_string())?;
+    let layout: calcula_format::sheet_layout::SheetLayout =
+        serde_json::from_str(json).map_err(|e| format!("Invalid sheet layout JSON: {}", e))?;
+    let (col_widths, row_heights) = layout.to_dimensions();
+    let shown_active = *state.active_sheet.read().unwrap() == idx;
+    let live_unchanged = shown_active.then(|| {
+        let cw = state.column_widths.read().unwrap().clone();
+        let rh = state.row_heights.read().unwrap().clone();
+        !json_differs(&calcula_format::sheet_layout::SheetLayout::from_dimensions(&cw, &rh), &layout)
+    });
+    // `lock_pending` because the bounds check can still REFUSE: minting
+    // the effect first would leave a rejected edit with a dirty flag.
+    let all_cw = state.all_column_widths.lock_pending().unwrap();
+    let all_rh = state.all_row_heights.lock_pending().unwrap();
+    if idx >= all_cw.len() || idx >= all_rh.len() {
+        return Err(format!("Sheet {} not found", idx));
+    }
+    let unchanged = live_unchanged.unwrap_or_else(|| {
+        !json_differs(
+            &calcula_format::sheet_layout::SheetLayout::from_dimensions(&all_cw[idx], &all_rh[idx]),
+            &layout,
+        )
+    });
+    if unchanged {
+        return Ok(());
+    }
+    let effect = DocumentEffect::mutates(fs);
+    {
+        let mut all_cw = all_cw.authorize(&effect);
+        let mut all_rh = all_rh.authorize(&effect);
+        all_cw[idx] = col_widths.clone();
+        all_rh[idx] = row_heights.clone();
+    }
+    if idx == *state.active_sheet.read().unwrap() {
+        *state.column_widths.write(&effect).unwrap() = col_widths;
+        *state.row_heights.write(&effect).unwrap() = row_heights;
+    }
+    Ok(())
+}
+
+// ============================================================================
+// The object arms and LOCK OBJECTS (BUG-0656)
+// ============================================================================
+//
+// The JSON object editor IS a user edit: what it replaces is what the user
+// typed. So on a canvas page whose Lock Objects is on
+// (`CanvasLayout::objects_locked`), a replacement that MOVES or RESIZES the
+// object -- or takes it to another sheet -- is refused exactly as the geometry
+// doors refuse it, with the same message, and a replacement that keeps the
+// placement (a title, a colour, a field) goes through. Each arm resolves,
+// decides and writes under ONE hold of its store (`lock_pending`), the
+// BUG-0443 discipline every geometry door keeps, and every refusal -- an id
+// that does not resolve, the lock -- comes before the `DocumentEffect`, so it
+// leaves the document clean. (Undo and redo are NOT asked: restoring a state
+// from history is not a user move -- see `sheets::ensure_canvas_objects_unlocked`.)
+
+/// Does a JSON replacement move a slicer or a timeline: another sheet, or
+/// another rectangle?
+fn box_moves(before: (usize, f64, f64, f64, f64), after: (usize, f64, f64, f64, f64)) -> bool {
+    before != after
+}
+
+/// The `chart` arm of [`set_object_json`]: replace an EXISTING chart.
+pub(crate) fn set_chart_json(state: &AppState, fs: &FileState, object_id: &str, json: &str) -> Result<(), String> {
+    let id = identity::EntityId::parse(object_id).ok_or_else(|| "Invalid chart id".to_string())?;
+    let new_entry: api_types::ChartEntry =
+        serde_json::from_str(json).map_err(|e| format!("Invalid chart JSON: {}", e))?;
+    let pending = state.charts.lock_pending().map_err(|e| e.to_string())?;
+    let slot = pending.iter().position(|c| c.id == id).ok_or_else(|| format!("Chart {} not found", id))?;
+    if !json_differs(&pending[slot], &new_entry) {
+        return Ok(());
+    }
+    if crate::chart_commands::chart_moves(&pending[slot], &new_entry) {
+        crate::sheets::ensure_canvas_objects_unlocked(state, pending[slot].sheet_index, "move or resize a chart")?;
+    }
+    let effect = DocumentEffect::mutates(fs);
+    let mut charts = pending.authorize(&effect);
+    charts[slot] = new_entry;
+    Ok(())
+}
+
+/// The `slicer` arm of [`set_object_json`]: replace an EXISTING slicer.
+pub(crate) fn set_slicer_json(
+    state: &AppState,
+    fs: &FileState,
+    slicer_state: &crate::slicer::SlicerState,
+    object_id: &str,
+    json: &str,
+) -> Result<(), String> {
+    let id = identity::EntityId::parse(object_id).ok_or_else(|| "Invalid slicer id".to_string())?;
+    let new_slicer: crate::slicer::Slicer =
+        serde_json::from_str(json).map_err(|e| format!("Invalid slicer JSON: {}", e))?;
+    let pending = slicer_state.slicers.lock_pending().map_err(|e| e.to_string())?;
+    let before = pending.get(&id).ok_or_else(|| format!("Slicer {} not found", id))?;
+    if !json_differs(before, &new_slicer) {
+        return Ok(());
+    }
+    if box_moves(
+        (before.sheet_index, before.x, before.y, before.width, before.height),
+        (new_slicer.sheet_index, new_slicer.x, new_slicer.y, new_slicer.width, new_slicer.height),
+    ) {
+        crate::sheets::ensure_canvas_objects_unlocked(state, before.sheet_index, "move or resize a slicer")?;
+    }
+    let effect = DocumentEffect::mutates(fs);
+    let mut slicers = pending.authorize(&effect);
+    slicers.insert(id, new_slicer);
+    Ok(())
+}
+
+/// The `timeline_slicer` arm of [`set_object_json`]: replace an EXISTING
+/// timeline slicer.
+pub(crate) fn set_timeline_json(
+    state: &AppState,
+    fs: &FileState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    object_id: &str,
+    json: &str,
+) -> Result<(), String> {
+    let id = identity::EntityId::parse(object_id).ok_or_else(|| "Invalid timeline slicer id".to_string())?;
+    let new_timeline: crate::timeline_slicer::TimelineSlicer =
+        serde_json::from_str(json).map_err(|e| format!("Invalid timeline slicer JSON: {}", e))?;
+    let pending = timeline_state.timelines.lock_pending().map_err(|e| e.to_string())?;
+    let before = pending.get(&id).ok_or_else(|| format!("Timeline slicer {} not found", id))?;
+    if !json_differs(before, &new_timeline) {
+        return Ok(());
+    }
+    if box_moves(
+        (before.sheet_index, before.x, before.y, before.width, before.height),
+        (new_timeline.sheet_index, new_timeline.x, new_timeline.y, new_timeline.width, new_timeline.height),
+    ) {
+        crate::sheets::ensure_canvas_objects_unlocked(state, before.sheet_index, "move or resize a timeline")?;
+    }
+    let effect = DocumentEffect::mutates(fs);
+    let mut timelines = pending.authorize(&effect);
+    timelines.insert(id, new_timeline);
+    Ok(())
+}
+
+/// The `pivot` arm of [`set_object_json`]: replace an EXISTING pivot's
+/// definition. Lock Objects asks about its canvas BOX (`canvas_frame`): a
+/// frame that appears, disappears, moves or resizes on a locked page is
+/// refused; everything else in the definition is the pivot's content.
+pub(crate) fn set_pivot_json(
+    state: &AppState,
+    fs: &FileState,
+    pivot_state: &crate::pivot::PivotState,
+    object_id: &str,
+    json: &str,
+) -> Result<(), String> {
+    let id: pivot_engine::PivotId = serde_json::from_value(serde_json::Value::String(object_id.to_string()))
+        .map_err(|_| "Invalid pivot id".to_string())?;
+    let new_definition: pivot_engine::PivotDefinition =
+        serde_json::from_str(json).map_err(|e| format!("Invalid pivot JSON: {}", e))?;
+    // The box's page, resolved while `pivot_tables` is released (it takes the
+    // sheet-name lock), as `update_bi_pivot`'s frame door resolves it.
+    let page = {
+        let current = pivot_state.pivot_tables.read().map_err(|e| e.to_string())?.get(&id).map(|(d, _)| d.clone());
+        current.map(|d| crate::pivot::operations::resolve_dest_sheet_index(state, &d))
+    };
+    let pending = pivot_state.pivot_tables.lock_pending().map_err(|e| e.to_string())?;
+    let (definition, _cache) = pending.get(&id).ok_or_else(|| format!("Pivot {} not found", object_id))?;
+    if !json_differs(definition, &new_definition) {
+        return Ok(());
+    }
+    let frame_moves = match (definition.canvas_frame.as_ref(), new_definition.canvas_frame.as_ref()) {
+        (Some(old), Some(new)) => old.geometry_differs(new),
+        (None, None) => false,
+        _ => true,
+    };
+    if frame_moves {
+        if let Some(page) = page {
+            crate::sheets::ensure_canvas_objects_unlocked(state, page, "move or resize a PivotTable box")?;
+        }
+    }
+    let effect = DocumentEffect::mutates(fs);
+    let mut pivot_tables = pending.authorize(&effect);
+    if let Some((definition, _cache)) = pivot_tables.get_mut(&id) {
+        *definition = new_definition;
+    }
+    Ok(())
 }
 
 /// The `table` arm of [`set_object_json`]: replace an EXISTING table from its
@@ -553,6 +731,24 @@ pub(crate) fn set_script_json(
             new_script.id, object_id
         ));
     }
+    // UNCHANGED is not an edit (rev-backend-3): the record as the store's one
+    // writer would leave it (provenance is sticky) equals what is stored, so
+    // nothing is written, nothing is forgotten and the document stays clean.
+    // Decided under a read guard and answered with no write, so a concurrent
+    // writer simply lands after this no-op.
+    {
+        let scripts = script_state.workbook_scripts.read().map_err(|e| e.to_string())?;
+        if let Some(existing) = scripts.get(&object_id) {
+            let mut candidate = new_script.clone();
+            candidate.source_package = crate::scripting::commands::sticky_source_package(
+                candidate.source_package.take(),
+                existing.source_package.as_deref(),
+            );
+            if !json_differs(existing, &candidate) {
+                return Ok(None);
+            }
+        }
+    }
     crate::scripting::commands::update_existing_script_core(state, file_state, script_state, new_script)
 }
 
@@ -590,6 +786,9 @@ pub(crate) fn set_notebook_json(
         new_notebook.source_package.take(),
         existing_package.as_deref(),
     );
+    if pending.get(&object_id).is_some_and(|existing| !json_differs(existing, &new_notebook)) {
+        return Ok(());
+    }
     let effect = DocumentEffect::mutates(file_state);
     let mut notebooks = pending.authorize(&effect);
     notebooks.insert(object_id, new_notebook);
@@ -1142,7 +1341,9 @@ mod tests {
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/json_view.rs")).unwrap();
         let body = &src[src.find("pub fn set_object_json(").unwrap()..src.find("pub(crate) fn set_script_json(").unwrap()];
         assert!(
-            body.contains("\"custom-functions:refresh\"") && body.contains("library_generation.set("),
+            body.contains("\"custom-functions:refresh\"")
+                && body.contains("if let Some(generation) = apply_object_json(")
+                && body.contains("\"script\" => set_script_json("),
             "set_object_json no longer announces a library the JSON view changed"
         );
     }
@@ -1249,5 +1450,417 @@ mod tests {
         let stored = scripts.workbook_notebooks.read().unwrap();
         assert_eq!(stored.len(), 1, "a refused JSON edit wrote a record");
         assert_eq!(stored["nb1"].cells[0].source, "a();");
+    }
+
+    // ---- rev-backend-3: every arm owns its dirty decision ----
+
+    /// The stores `set_object_json` reaches, seeded with one object of every
+    /// type the view edits.
+    struct Fixture {
+        state: crate::AppState,
+        slicer: crate::slicer::SlicerState,
+        filters: crate::ribbon_filter::RibbonFilterState,
+        scripts: ScriptState,
+        timelines: crate::timeline_slicer::TimelineSlicerState,
+        pivots: crate::pivot::PivotState,
+        files: crate::persistence::UserFilesState,
+        pane: crate::pane_control::PaneControlState,
+    }
+
+    fn new_id() -> identity::EntityId {
+        identity::EntityId::from_bytes(identity::generate_uuid_v7())
+    }
+
+    impl Fixture {
+        fn apply(&self, file: &FileState, object_type: &str, object_id: &str, json: &str) -> Result<Option<u64>, String> {
+            let stores = super::ObjectJsonStores {
+                state: &self.state,
+                file_state: file,
+                slicer_state: &self.slicer,
+                ribbon_filter_state: &self.filters,
+                script_state: &self.scripts,
+                timeline_slicer_state: &self.timelines,
+                pivot_state: &self.pivots,
+                user_files_state: &self.files,
+                pane_control_state: &self.pane,
+            };
+            super::apply_object_json(&stores, object_type, object_id, json)
+        }
+    }
+
+    /// One case: the object's type and id, the JSON the view SHOWS (applying
+    /// it back changes nothing), an edited JSON, and how to read the stored
+    /// object back.
+    struct Case {
+        object_type: &'static str,
+        object_id: String,
+        shown: String,
+        edited: String,
+        stored: Box<dyn Fn(&Fixture) -> serde_json::Value>,
+    }
+
+    fn pretty<T: serde::Serialize>(value: &T) -> String {
+        serde_json::to_string_pretty(value).unwrap()
+    }
+
+    fn edited<T: serde::Serialize>(value: &T, edit: impl FnOnce(&mut serde_json::Value)) -> String {
+        let mut v = serde_json::to_value(value).unwrap();
+        edit(&mut v);
+        serde_json::to_string_pretty(&v).unwrap()
+    }
+
+    fn seeded() -> (Fixture, Vec<Case>) {
+        let seed = crate::document_effect::test_seed_effect();
+        let fx = Fixture {
+            state: crate::create_app_state(),
+            slicer: crate::slicer::SlicerState::new(),
+            filters: crate::ribbon_filter::RibbonFilterState::new(),
+            scripts: ScriptState::new(),
+            timelines: crate::timeline_slicer::TimelineSlicerState::new(),
+            pivots: crate::pivot::PivotState::new(),
+            files: crate::persistence::UserFilesState::default(),
+            pane: crate::pane_control::PaneControlState::new(),
+        };
+        let mut cases = Vec::new();
+
+        let chart = crate::api_types::ChartEntry {
+            id: new_id(),
+            sheet_index: 0,
+            spec_json: serde_json::json!({ "name": "Chart 1", "x": 10.0, "y": 20.0, "width": 300.0, "height": 200.0, "spec": { "title": "Sales" } })
+                .to_string(),
+        };
+        fx.state.charts.write(&seed).unwrap().push(chart.clone());
+        let chart_id = chart.id;
+        cases.push(Case {
+            object_type: "chart",
+            object_id: chart.id.to_string(),
+            shown: pretty(&chart),
+            edited: edited(&chart, |v| v["specJson"] = serde_json::json!(chart.spec_json.replace("Sales", "Revenue"))),
+            stored: Box::new(move |fx| serde_json::to_value(fx.state.charts.read().unwrap().iter().find(|c| c.id == chart_id).unwrap()).unwrap()),
+        });
+
+        let table = crate::tables::Table {
+            id: new_id(),
+            name: "Sales".to_string(),
+            sheet_index: 0,
+            start_row: 0,
+            start_col: 0,
+            end_row: 3,
+            end_col: 1,
+            columns: vec![],
+            style_options: crate::tables::TableStyleOptions::default(),
+            style_name: "TableStyleMedium2".to_string(),
+            auto_filter_id: None,
+        };
+        fx.state.tables.write(&seed).unwrap().entry(0).or_default().insert(table.id, table.clone());
+        fx.state.table_names.write(&seed).unwrap().insert("SALES".to_string(), (0, table.id));
+        let table_id = table.id;
+        cases.push(Case {
+            object_type: "table",
+            object_id: table.id.to_string(),
+            shown: pretty(&table),
+            edited: edited(&table, |v| v["styleName"] = serde_json::json!("TableStyleMedium9")),
+            stored: Box::new(move |fx| serde_json::to_value(&fx.state.tables.read().unwrap()[&0][&table_id]).unwrap()),
+        });
+
+        let slicer_id = new_id();
+        let slicer: crate::slicer::Slicer = serde_json::from_value(serde_json::json!({
+            "id": slicer_id.to_string(), "name": "Region", "sheetIndex": 0,
+            "x": 10.0, "y": 300.0, "width": 180.0, "height": 240.0,
+            "sourceType": "pivot", "cacheSourceId": slicer_id.to_string(), "fieldName": "Region",
+            "selectedItems": null, "showHeader": true, "columns": 1,
+            "stylePreset": "SlicerStyleLight1", "connectedSources": []
+        }))
+        .unwrap();
+        fx.slicer.slicers.write(&seed).unwrap().insert(slicer_id, slicer.clone());
+        cases.push(Case {
+            object_type: "slicer",
+            object_id: slicer_id.to_string(),
+            shown: pretty(&slicer),
+            edited: edited(&slicer, |v| v["name"] = serde_json::json!("Area")),
+            stored: Box::new(move |fx| serde_json::to_value(&fx.slicer.slicers.read().unwrap()[&slicer_id]).unwrap()),
+        });
+
+        let filter = crate::ribbon_filter::RibbonFilter {
+            id: new_id(),
+            name: "Region".to_string(),
+            connection_id: new_id(),
+            data_source_id: None,
+            field_name: "Sales.Region".to_string(),
+            field_data_type: "text".to_string(),
+            connection_mode: crate::ribbon_filter::ConnectionMode::Manual,
+            connected_pivots: vec![],
+            connected_sheets: vec![],
+            connected_visuals: vec![],
+            display_mode: Default::default(),
+            selected_items: None,
+            dependent_filters: vec![],
+            dependent_slicers: vec![],
+            advanced_filter: None,
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            show_select_all: false,
+            single_select: false,
+            order: 0,
+            button_columns: 2,
+            button_rows: 0,
+            filter_level: 1,
+        };
+        fx.filters.filters.write(&seed).unwrap().insert(filter.id, filter.clone());
+        let filter_id = filter.id;
+        cases.push(Case {
+            object_type: "ribbon_filter",
+            object_id: filter.id.to_string(),
+            shown: pretty(&filter),
+            edited: edited(&filter, |v| v["name"] = serde_json::json!("Area")),
+            stored: Box::new(move |fx| serde_json::to_value(&fx.filters.filters.read().unwrap()[&filter_id]).unwrap()),
+        });
+
+        let timeline = crate::timeline_slicer::TimelineSlicer {
+            id: new_id(),
+            name: "Order Date".to_string(),
+            header_text: None,
+            sheet_index: 0,
+            x: 10.0,
+            y: 20.0,
+            width: 350.0,
+            height: 100.0,
+            source_type: crate::timeline_slicer::TimelineSourceType::Pivot,
+            source_id: new_id(),
+            field_name: "OrderDate".to_string(),
+            level: crate::timeline_slicer::TimelineLevel::Months,
+            selection_start: None,
+            selection_end: None,
+            show_header: true,
+            show_level_selector: true,
+            show_scrollbar: true,
+            style_preset: "TimelineStyleLight1".to_string(),
+            connected_pivot_ids: vec![],
+            container: None,
+        };
+        fx.timelines.timelines.write(&seed).unwrap().insert(timeline.id, timeline.clone());
+        let timeline_id = timeline.id;
+        cases.push(Case {
+            object_type: "timeline_slicer",
+            object_id: timeline.id.to_string(),
+            shown: pretty(&timeline),
+            edited: edited(&timeline, |v| v["name"] = serde_json::json!("Ship Date")),
+            stored: Box::new(move |fx| serde_json::to_value(&fx.timelines.timelines.read().unwrap()[&timeline_id]).unwrap()),
+        });
+
+        let sparkline = crate::api_types::SparklineEntry { sheet_index: 0, groups_json: "[]".to_string() };
+        fx.state.sparklines.write(&seed).unwrap().push(sparkline.clone());
+        cases.push(Case {
+            object_type: "sparkline",
+            object_id: "0".to_string(),
+            shown: pretty(&sparkline),
+            edited: edited(&sparkline, |v| v["groupsJson"] = serde_json::json!("[{\"type\":\"line\"}]")),
+            stored: Box::new(|fx| serde_json::to_value(&fx.state.sparklines.read().unwrap()[0]).unwrap()),
+        });
+
+        let script = record("m1", "a();", Some("sales"));
+        crate::scripting::commands::save_script_core(&fx.state, &FileState::default(), &fx.scripts, script.clone())
+            .expect("the module saves");
+        cases.push(Case {
+            object_type: "script",
+            object_id: "m1".to_string(),
+            shown: pretty(&script),
+            edited: edited(&script, |v| v["source"] = serde_json::json!("b();")),
+            stored: Box::new(|fx| serde_json::to_value(&fx.scripts.workbook_scripts.read().unwrap()["m1"]).unwrap()),
+        });
+
+        seed_notebook(&fx.scripts, "nb1", "a();", None);
+        let notebook = fx.scripts.workbook_notebooks.read().unwrap()["nb1"].clone();
+        cases.push(Case {
+            object_type: "notebook",
+            object_id: "nb1".to_string(),
+            shown: pretty(&notebook),
+            edited: edited(&notebook, |v| v["cells"][0]["source"] = serde_json::json!("b();")),
+            stored: Box::new(|fx| serde_json::to_value(&fx.scripts.workbook_notebooks.read().unwrap()["nb1"]).unwrap()),
+        });
+
+        let pivot_id = new_id();
+        let definition = pivot_engine::PivotDefinition::new(pivot_id, (0, 0), (2, 1));
+        fx.pivots.pivot_tables.write(&seed).unwrap().insert(pivot_id, (definition.clone(), pivot_engine::PivotCache::new(pivot_id, 0)));
+        cases.push(Case {
+            object_type: "pivot",
+            object_id: pivot_id.to_string(),
+            shown: pretty(&definition),
+            edited: edited(&definition, |v| v["name"] = serde_json::json!("Sales by region")),
+            stored: Box::new(move |fx| serde_json::to_value(&fx.pivots.pivot_tables.read().unwrap()[&pivot_id].0).unwrap()),
+        });
+
+        let layout = ::persistence::SavedPivotLayout {
+            id: new_id(),
+            name: "Layout 1".to_string(),
+            dsl_text: "ROWS: Region".to_string(),
+            description: None,
+            source_type: "table".to_string(),
+            source_table_name: Some("Sales".to_string()),
+            source_bi_tables: vec![],
+            source_bi_measures: vec![],
+            created_at: 1.0,
+            updated_at: 1.0,
+        };
+        fx.state.pivot_layouts.write(&seed).unwrap().push(layout.clone());
+        let layout_id = layout.id;
+        cases.push(Case {
+            object_type: "pivot_layout",
+            object_id: layout.id.to_string(),
+            shown: pretty(&layout),
+            edited: edited(&layout, |v| v["name"] = serde_json::json!("Layout 2")),
+            stored: Box::new(move |fx| {
+                serde_json::to_value(fx.state.pivot_layouts.read().unwrap().iter().find(|l| l.id == layout_id).unwrap()).unwrap()
+            }),
+        });
+
+        let theme = fx.state.theme.read().unwrap().clone();
+        cases.push(Case {
+            object_type: "theme",
+            object_id: String::new(),
+            shown: pretty(&theme),
+            edited: edited(&theme, |v| v["name"] = serde_json::json!("My theme")),
+            stored: Box::new(|fx| serde_json::to_value(&*fx.state.theme.read().unwrap()).unwrap()),
+        });
+
+        let props = fx.state.workbook_properties.read().unwrap().clone();
+        cases.push(Case {
+            object_type: "properties",
+            object_id: String::new(),
+            shown: pretty(&props),
+            edited: edited(&props, |v| v["title"] = serde_json::json!("Budget")),
+            stored: Box::new(|fx| serde_json::to_value(&*fx.state.workbook_properties.read().unwrap()).unwrap()),
+        });
+
+        // Sheet 0 (active: the live maps) and sheet 1 (its per-sheet slot).
+        fx.state.column_widths.write(&seed).unwrap().insert(2, 90.0);
+        fx.state.all_column_widths.write(&seed).unwrap().push(std::collections::HashMap::from([(4, 70.0)]));
+        fx.state.all_row_heights.write(&seed).unwrap().push(std::collections::HashMap::new());
+        let wider = calcula_format::sheet_layout::SheetLayout::from_dimensions(
+            &std::collections::HashMap::from([(2, 90.0), (3, 120.0)]),
+            &std::collections::HashMap::new(),
+        );
+        let active_shown = calcula_format::sheet_layout::SheetLayout::from_dimensions(
+            &fx.state.column_widths.read().unwrap().clone(),
+            &fx.state.row_heights.read().unwrap().clone(),
+        );
+        cases.push(Case {
+            object_type: "sheet_layout",
+            object_id: "0".to_string(),
+            shown: pretty(&active_shown),
+            edited: pretty(&wider),
+            stored: Box::new(|fx| {
+                let cw = fx.state.column_widths.read().unwrap().clone();
+                let rh = fx.state.row_heights.read().unwrap().clone();
+                serde_json::to_value(calcula_format::sheet_layout::SheetLayout::from_dimensions(&cw, &rh)).unwrap()
+            }),
+        });
+        let other_shown = calcula_format::sheet_layout::SheetLayout::from_dimensions(
+            &std::collections::HashMap::from([(4, 70.0)]),
+            &std::collections::HashMap::new(),
+        );
+        cases.push(Case {
+            object_type: "sheet_layout",
+            object_id: "1".to_string(),
+            shown: pretty(&other_shown),
+            edited: pretty(&wider),
+            stored: Box::new(|fx| {
+                let cw = fx.state.all_column_widths.read().unwrap()[1].clone();
+                let rh = fx.state.all_row_heights.read().unwrap()[1].clone();
+                serde_json::to_value(calcula_format::sheet_layout::SheetLayout::from_dimensions(&cw, &rh)).unwrap()
+            }),
+        });
+        (fx, cases)
+    }
+
+    /// rev-backend-3: `set_object_json` minted a `DocumentEffect` on EVERY
+    /// `Ok`, so pressing Apply on the JSON the view showed -- an unchanged
+    /// table or script, whose arms had decided not to write -- dirtied the
+    /// workbook. Each arm now decides for itself: an unchanged apply leaves
+    /// the document clean, and a changed one still dirties it (an arm that
+    /// forgot to mint would lose the edit at the close prompt -- the worse
+    /// direction).
+    ///
+    /// SABOTAGE: mint a blanket effect on `Ok` in `apply_object_json` again
+    /// (every arm's unchanged apply dirties); separately, make the sparkline
+    /// arm mint a clean effect (its changed apply stays clean).
+    #[test]
+    fn every_arm_leaves_an_unchanged_apply_clean_and_dirties_a_changed_one() {
+        let (fx, cases) = seeded();
+        let types: std::collections::BTreeSet<&str> = cases.iter().map(|c| c.object_type).collect();
+        assert_eq!(types.len(), 13, "every object type the view writes has a case: {types:?}");
+        let mut failures: Vec<String> = Vec::new();
+        for case in &cases {
+            let what = format!("{} {:?}", case.object_type, case.object_id);
+            let before = (case.stored)(&fx);
+            let clean = FileState::default();
+            match fx.apply(&clean, case.object_type, &case.object_id, &case.shown) {
+                Ok(_) => {}
+                Err(e) => failures.push(format!("{what}: the shown JSON was refused: {e}")),
+            }
+            if clean.is_dirty() {
+                failures.push(format!("{what}: applying the JSON the view showed dirtied the workbook"));
+            }
+            if (case.stored)(&fx) != before {
+                failures.push(format!("{what}: an unchanged apply changed the stored object"));
+            }
+            let dirty = FileState::default();
+            match fx.apply(&dirty, case.object_type, &case.object_id, &case.edited) {
+                Ok(_) => {}
+                Err(e) => failures.push(format!("{what}: the edited JSON was refused: {e}")),
+            }
+            let wanted: serde_json::Value = serde_json::from_str(&case.edited).unwrap();
+            let stored = (case.stored)(&fx);
+            if stored != wanted {
+                failures.push(format!("{what}: the edit did not land: {stored} != {wanted}"));
+            }
+            if !dirty.is_dirty() {
+                failures.push(format!("{what}: a CHANGED apply left the workbook clean -- the edit would be lost at close"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// rev-backend-4: the ribbon_filter, sparkline and pivot_layout arms
+    /// resolved under a read guard, DROPPED it, then wrote -- a sparkline
+    /// vector that shrank in between made `sparklines[idx] = ...` panic. Each
+    /// now resolves, compares and writes under ONE `lock_pending` hold.
+    ///
+    /// SABOTAGE: give the sparkline arm its read-check-drop-write again.
+    #[test]
+    fn the_filter_sparkline_and_layout_arms_resolve_and_write_under_one_hold() {
+        // The source as COMPILED into this test, not as it is on disk when it runs.
+        let src = include_str!("json_view.rs");
+        for door in [
+            "pub(crate) fn set_ribbon_filter_json(",
+            "pub(crate) fn set_sparkline_json(",
+            "pub(crate) fn set_pivot_layout_json(",
+        ] {
+            let start = src.find(door).unwrap_or_else(|| panic!("{door} is gone"));
+            let body = &src[start..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(
+                body.contains(".lock_pending()") && body.contains("pending.authorize(&effect)"),
+                "{door} no longer decides and writes under one held lock"
+            );
+            assert!(
+                !body.contains(".read()") && !body.contains(".write(&effect)"),
+                "{door} resolves under one guard and writes under another again (a TOCTOU window)"
+            );
+        }
+        // And the dispatch reaches each of them.
+        let dispatch = &src[src.find("pub(crate) fn apply_object_json(").unwrap()..];
+        let dispatch = &dispatch[..dispatch.find("\n}\n").unwrap()];
+        for arm in ["set_ribbon_filter_json(", "set_sparkline_json(", "set_pivot_layout_json("] {
+            assert!(dispatch.contains(arm), "apply_object_json no longer dispatches to {arm}");
+        }
+        // An index past the end is a refusal, never a panic.
+        let (fx, _) = seeded();
+        let file = FileState::default();
+        let entry = serde_json::json!({ "sheetIndex": 0, "groupsJson": "[]" }).to_string();
+        let err = fx.apply(&file, "sparkline", "7", &entry).unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+        assert!(!file.is_dirty(), "a refused sparkline edit dirtied the document");
     }
 }

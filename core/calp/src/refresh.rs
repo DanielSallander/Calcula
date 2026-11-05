@@ -359,7 +359,9 @@ impl RefreshSheetNames {
 
     /// The reference rewrite this resolution implies: every publisher name whose
     /// local name differs (ignoring case), applied simultaneously -- and every
-    /// publisher name with NO local counterpart at all turned into `#REF!`.
+    /// reference to a publisher name with NO local counterpart at all reading
+    /// `#REF!` where the sheet was (`#REF!A1`, the text the host's own sheet
+    /// delete writes).
     ///
     /// THE GONE HALF. A subscriber who detached a pulled sheet and then deleted
     /// it (the remedy the delete guard itself names) left the pulled references
@@ -3007,23 +3009,24 @@ mod tests {
 
         assert_eq!(
             renames.rename_formula("Data!A1*2").as_deref(),
-            Some("#REF!*2"),
+            Some("#REF!A1*2"),
             "the application's Data is gone here; its name now means the subscriber's own sheet"
         );
-        assert_eq!(renames.rename_formula("SUM(Calc!A1:A3)").as_deref(), Some("SUM(#REF!)"));
+        assert_eq!(renames.rename_formula("SUM(Calc!A1:A3)").as_deref(), Some("SUM(#REF!A1:A3)"));
         assert_eq!(
             renames.rename_formula("Kept!A1+Report!A1").as_deref(),
             Some("'Kept (2)'!A1+REPORT!A1"),
             "a detached sheet that still exists is read where it lives, not turned into #REF!"
         );
-        assert_eq!(renames.rename_formula("=Data!$A$1").as_deref(), Some("=#REF!"), "a defined name");
+        assert_eq!(renames.rename_formula("=Data!$A$1").as_deref(), Some("=#REF!$A$1"), "a defined name");
         assert_eq!(renames.rename_reference("Data!A1:B5").as_deref(), Some("#REF!"), "a chart source");
-        // Every wrapper of a gone reference re-parses, and evaluates to #REF!.
+        // Every wrapper of a gone reference re-parses, and evaluates to #REF!:
+        // the reference reads `#REF!` where its sheet was, as Excel writes it.
         for (input, expected) in [
-            ("@Data!A1:A9", "#REF!"),
-            ("Data!A1#", "#REF!"),
-            ("SUM(Data:Report!A1)", "SUM(#REF!)"),
-            ("-Data!A1", "-#REF!"),
+            ("@Data!A1:A9", "@#REF!A1:A9"),
+            ("Data!A1#", "#REF!A1#"),
+            ("SUM(Data:Report!A1)", "SUM(#REF!A1)"),
+            ("-Data!A1", "-#REF!A1"),
         ] {
             let out = renames.rename_formula(input);
             assert_eq!(out.as_deref(), Some(expected), "{input}");

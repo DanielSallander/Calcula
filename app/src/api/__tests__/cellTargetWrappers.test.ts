@@ -126,6 +126,8 @@ const CASES: Case[] = [
   { wrapper: "reorderConditionalFormats", command: "reorder_conditional_formats", where: "top", call: (o) => backend.reorderConditionalFormats([7, 8], o) },
   { wrapper: "getAllConditionalFormats", command: "get_all_conditional_formats", where: "top", call: (o) => backend.getAllConditionalFormats(undefined, o) },
   { wrapper: "clearConditionalFormatsInRange", command: "clear_conditional_formats_in_range", where: "top", call: (o) => backend.clearConditionalFormatsInRange(0, 0, 3, 3, undefined, o) },
+  { wrapper: "canEditCells", command: "can_edit_cell", where: "top", call: (o) => backend.canEditCells([{ row: 0, col: 0 }], o) },
+  { wrapper: "canPerformAction", command: "can_perform_action", where: "top", call: (o) => backend.canPerformAction("formatCells", o) },
 ];
 
 const invokeMock = vi.mocked(invoke);

@@ -485,6 +485,19 @@ pub(crate) fn body_with_one_hop(
             }
         }
     }
+    // ...and so is a SHARED `_core` two commands hand their whole body to
+    // (`delete_table` and `convert_to_range` are both `retire_table_core`, lane
+    // tablec 2026-11-05): the core is the command's body, not its hop.
+    let shared_cores: Vec<&String> = bodies
+        .keys()
+        .filter(|name| name.ends_with("_core") && name.as_str() != command && root.contains(&format!("{}(", name)))
+        .collect();
+    for name in shared_cores {
+        for body in &bodies[name] {
+            root.push('\n');
+            root.push_str(body);
+        }
+    }
     let mut text = root.clone();
     for (name, group) in bodies {
         if name == command {

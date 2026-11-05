@@ -29,6 +29,7 @@ vi.mock("../../lib/cfStore", () => ({ invalidateAndRefresh: () => h.invalidateAn
 
 import { QuickCFDialog } from "../QuickCFDialog";
 import { NewRuleDialog } from "../NewRuleDialog";
+import { findHardcodedColours } from "@api/layout";
 
 const SELECTION = { startRow: 0, startCol: 0, endRow: 4, endCol: 0 };
 
@@ -237,4 +238,42 @@ describe("New Rule: where each door opens it", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(document.querySelector("[role='alert']")?.textContent).toContain("Formula is not valid");
   });
+});
+
+// ============================================================================
+// Theme (BUG-0376): every colour of the dialog chrome is a theme token, so the
+// dialog follows the dark skin. Both dialogs hard-coded a light palette.
+// ============================================================================
+
+describe("the CF dialogs paint with theme tokens only (BUG-0376)", () => {
+  it("the quick dialog, its refusal line included", async () => {
+    h.addConditionalFormat.mockRejectedValue(new Error("nope"));
+    render(<QuickCFDialog isOpen onClose={vi.fn()} data={{ ruleType: "greaterThan", selection: SELECTION }} />);
+    act(() => button("OK").click());
+    await settle();
+    expect(document.querySelector("[role='alert']")).not.toBeNull();
+    expect(findHardcodedColours(document.body)).toEqual([]);
+  });
+
+  for (const [category, style] of [
+    ["formatContaining", undefined],
+    ["aboveBelow", undefined],
+    ["uniqueDuplicate", undefined],
+    ["formula", undefined],
+    ["topBottom", undefined],
+    ["formatByValues", "colorScale"],
+    ["formatByValues", "dataBar"],
+    ["formatByValues", "iconSet"],
+  ] as const) {
+    it(`New Rule on ${category}${style ? ` (${style})` : ""}`, () => {
+      render(
+        <NewRuleDialog
+          isOpen
+          onClose={vi.fn()}
+          data={{ selection: SELECTION, initialCategory: category, ...(style ? { initialFormatStyle: style } : {}) }}
+        />,
+      );
+      expect(findHardcodedColours(document.body)).toEqual([]);
+    });
+  }
 });

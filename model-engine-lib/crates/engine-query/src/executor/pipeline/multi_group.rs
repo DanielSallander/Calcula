@@ -7,7 +7,6 @@ use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 
 use engine_core::compute::context::ContextResolver;
-use engine_core::compute::expression::Expression;
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::compute::sql_util::quote_ident_double;
@@ -79,24 +78,22 @@ impl QueryExecutor {
             // Resolve context operations for measures in this group.
             let mut context_join_tables: Vec<String> = Vec::new();
             let mut case_when_measures: Vec<String> = Vec::new();
+            // Every non-window measure column: a group shows when ANY answers.
+            let mut having_measures: Vec<String> = Vec::new();
             let mut override_joins: Vec<OverrideJoinEntry> = Vec::new();
+            // Grand totals of compound measures as one-row CROSS JOINs
+            // (`hoist_clear_scalars`, BUG-0444).
+            let mut clear_scalar_joins: Vec<String> = Vec::new();
 
             for measure in measures {
                 let name = measure.name();
                 let expr = measure.expression();
 
-                let is_compound_with_context = expr.has_context_ops()
-                    && matches!(
-                        expr,
-                        Expression::BinaryOp { .. }
-                            | Expression::SafeDivide { .. }
-                            | Expression::ScalarFunc { .. }
-                            | Expression::Coalesce(_)
-                            | Expression::If { .. }
-                    );
+                let is_compound_with_context = super::sql::is_compound_with_context(expr);
 
                 let sql_fragment = if is_compound_with_context {
                     case_when_measures.push(name.to_string());
+                    having_measures.push(name.to_string());
                     let expr_sql = resolve_compound_sql(
                         expr,
                         model,
@@ -106,7 +103,11 @@ impl QueryExecutor {
                         &mut context_join_tables,
                         &mut override_joins,
                     )?;
-                    format!("{expr_sql} AS {}", quote_ident_double(name))
+                    format!(
+                        "{} AS {}",
+                        super::sql::hoist_clear_scalars(&expr_sql, &mut clear_scalar_joins),
+                        quote_ident_double(name)
+                    )
                 } else {
                     let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
                     let in_conditions = render_in_filter_conditions(
@@ -165,7 +166,11 @@ impl QueryExecutor {
                         stripped_expr.to_case_when_sql(&condition, measure_table)?
                     } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
                         let fact = measure.table().to_lowercase();
-                        op.render_sql(&format!("{fact}.{}", quote_ident_double(col)))
+                        // A count answers BLANK, never 0 (DAX).
+                        engine_core::compute::dax_semantics::measure_aggregate_sql(
+                            &op,
+                            &format!("{fact}.{}", quote_ident_double(col)),
+                        )
                     } else {
                         stripped_expr.to_sql_string()?
                     };
@@ -180,6 +185,7 @@ impl QueryExecutor {
                             if has_case {
                                 case_when_measures.push(name.to_string());
                             }
+                            having_measures.push(name.to_string());
                             format!("{inner_sql} AS {}", quote_ident_double(name))
                         }
                     }
@@ -222,7 +228,10 @@ impl QueryExecutor {
                 if let Ok(rel) = model.find_relationship(fact_model_name, dim_table) {
                     let left_is_from = rel.from_table() == *fact_model_name;
                     let on_clause = rel.build_on_clause(fact_table, &dim_lower, left_is_from);
-                    sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
+                    // LEFT: read only by a measure's own CASE WHEN, so a fact
+                    // row with no dimension row still counts for every other
+                    // measure (open-ledger round E).
+                    sql.push_str(&format!(" LEFT JOIN {dim_lower} ON {on_clause}"));
                     joined_tables.insert(dim_lower);
                 }
             }
@@ -257,6 +266,12 @@ impl QueryExecutor {
                 }
             }
 
+            // Grand totals of compound measures, after every JOIN (BUG-0444).
+            for join in &clear_scalar_joins {
+                sql.push(' ');
+                sql.push_str(join);
+            }
+
             // WHERE clause for EXISTS/boundary semi-join conditions.
             if !mg_exists_conditions.is_empty() {
                 sql.push_str(" WHERE ");
@@ -268,8 +283,10 @@ impl QueryExecutor {
                 sql.push_str(" GROUP BY ");
                 sql.push_str(&group_parts.join(", "));
 
+                // A group stays when ANY measure answers in it, not only a
+                // CASE-WHEN one (open-ledger round E).
                 if !case_when_measures.is_empty() {
-                    let having_parts: Vec<String> = case_when_measures
+                    let having_parts: Vec<String> = having_measures
                         .iter()
                         .map(|m| format!("{} IS NOT NULL", quote_ident_double(m)))
                         .collect();

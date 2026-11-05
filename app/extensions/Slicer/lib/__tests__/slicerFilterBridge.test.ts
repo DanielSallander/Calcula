@@ -38,6 +38,8 @@ const calls: Call[] = [];
 let pivotsForConnection: Array<{ id: string; name: string; sheetIndex: number }> = [];
 let hierarchiesById: Record<string, unknown> = {};
 let columnValues: string[] = [];
+/** What get_slicer_items answers (undefined: the default switch arm). */
+let slicerItems: Array<{ key: string; label: string }> | undefined;
 /** What an apply/clear on a pivot reports it grew over (its response). */
 let overwriteById: Record<string, { overwrittenCellCount: number; overwriteToken?: number }> = {};
 
@@ -65,6 +67,8 @@ vi.mock("../slicerBackend", () => ({
               styleOptions: { headerRow: true, showFilterButton: true },
             },
           ]);
+        case "get_slicer_items":
+          return Promise.resolve(slicerItems);
         case "bi_get_column_values":
           // The backend answers MEMBERS (P2): key = label for plain text.
           return Promise.resolve(columnValues.map((key) => ({ key, label: key })));
@@ -428,6 +432,23 @@ describe("a table slicer's filter", () => {
       { op: "setColumn", column: 0, criteria: { kind: "values", values: ["East"], includeBlanks: true } },
     ]);
     expect(calls.filter((c) => RAW_TABLE_COMMANDS.has(c.cmd))).toEqual([]);
+  });
+
+  it("writes each selected KEY as its item's display text (BUG-0523)", async () => {
+    // A numeric table column: keyed by the invariant value, shown in the app locale.
+    slicerItems = [
+      { key: "99", label: "99,0" },
+      { key: "1234.5", label: "1 234,5" },
+    ];
+    try {
+      await applySlicerFilter(tableSlicer({ selectedItems: ["1234.5", ""] }));
+    } finally {
+      slicerItems = undefined;
+    }
+    expect(autoFilterCalls).toEqual([
+      { op: "get" },
+      { op: "setColumn", column: 0, criteria: { kind: "values", values: ["1 234,5"], includeBlanks: true } },
+    ]);
   });
 
   it("clears the column through the owner too", async () => {

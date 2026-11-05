@@ -913,6 +913,7 @@ mod tests {
                     invariant: Some(true),
                     pasted: None,
                     moved: None,
+                    source: None,
                 }],
                 vec!["MYFN".to_string()],
                 Vec::new(),

@@ -59,7 +59,11 @@ export function parseRefersTo(
 }
 
 /**
- * Client-side name validation matching Rust rules.
+ * Client-side FIRST FILTER for a name. The backend's `NamedRange::is_valid_name`
+ * (named_ranges.rs) decides, and refuses more than this does: names that read
+ * as R1C1 references (`R`, `C`, `RC`, `R1C1`, `R2x`), Lotus-style
+ * `A1.B1` ranges and names over 255 characters, as Excel does -- its refusal
+ * reaches the user through the create / rename result.
  */
 export function isValidName(name: string): boolean {
   if (!name || name.length === 0) return false;

@@ -1,11 +1,14 @@
 //! FILENAME: app/src/api/scriptHost/__tests__/explicitRunGrant.test.ts
 // PURPOSE: Owner decision B (2026-09-30): an approved application macro that a
 //          PERSON runs gets "the same CELL access" a module-runtime macro has --
-//          and nothing more. This pins the grant as a closed table, the broker's
-//          decision over it, the handle flag, and the pre-flight scan.
+//          and, since the owner's 2026-11-04 decision, FORMATTING as well -- and
+//          nothing more. This pins the grant as two closed tables, the broker's
+//          decision over them, the argument rules (no protection attributes,
+//          the restricted bound), the handle flags, and the pre-flight scan.
 // CONTEXT: explicitRunGrant.ts, brokerPolicy.ts decidePolicy, broker.ts
-//          buildHandleFromDefinition. The realm keeps tier "restricted"; one
-//          identity flag (`explicitRun.cells`) admits exactly the rows below.
+//          buildHandleFromDefinition. The realm keeps tier "restricted"; two
+//          identity flags (`explicitRun.cells` / `.formatting`) admit exactly
+//          the rows below.
 
 import { describe, it, expect } from "vitest";
 import { ALLOWLIST } from "../allowlist";
@@ -14,16 +17,21 @@ import { decidePolicy, type PolicyIdentity } from "../brokerPolicy";
 import { buildHandleFromDefinition } from "../broker";
 import {
   EXPLICIT_RUN_CELL_METHODS,
-  EXPLICIT_RUN_REFUSED_FORMAT_METHODS,
+  EXPLICIT_RUN_FORMAT_METHODS,
+  EXPLICIT_RUN_FORMAT_WRITES,
+  EXPLICIT_RUN_LINE_SIZE_METHODS,
+  EXPLICIT_RUN_RESTRICTED_FORMAT_METHODS,
   RUN_ONLY_REFUSED_METHODS,
   explicitRunAdmits,
   explicitRunArgsRefusal,
   explicitRunFormatRefusalMessage,
+  explicitRunProtectionRefusalMessage,
   explicitRunRefusalMessage,
   explicitRunRestrictedRefusal,
   runOnlyRefusalMessage,
   ungrantedApiCalls,
 } from "../explicitRunGrant";
+import { MAX_RANGE_CELLS, MAX_RESTRICTED_FORMAT_RECT_CELLS } from "../validators";
 
 /** Every capability id, from the ONE list (never re-typed). */
 const EVERY_CAP: ReadonlySet<CapabilityId> = new Set(ALL_CAPABILITY_IDS);
@@ -32,11 +40,13 @@ const EVERY_CAP: ReadonlySet<CapabilityId> = new Set(ALL_CAPABILITY_IDS);
  *  -- so a refusal below can only be the grant's, never the capability ceiling's. */
 const granted: PolicyIdentity = {
   tier: "restricted",
-  explicitRun: { cells: true },
+  explicitRun: { cells: true, formatting: true },
   grants: EVERY_CAP,
   declaredCapabilities: EVERY_CAP,
 };
-const expired: PolicyIdentity = { ...granted, explicitRun: { cells: false } };
+/** Rust granted cell access WITHOUT formatting (an older backend's answer). */
+const cellsOnly: PolicyIdentity = { ...granted, explicitRun: { cells: true, formatting: false } };
+const expired: PolicyIdentity = { ...granted, explicitRun: { cells: false, formatting: false } };
 const plainRestricted: PolicyIdentity = {
   tier: "restricted",
   grants: EVERY_CAP,
@@ -71,6 +81,23 @@ const THE_TWENTY = [
   "api.cancelBatch",
 ];
 
+/** The formatting table (owner, 2026-11-04), pinned row by row. */
+const THE_FORMAT_ROWS = [
+  "api.getRangeFormat",
+  "api.getCellFormat",
+  "api.listNamedStyles",
+  "api.getThemePalette",
+  "api.setRangeFormat",
+  "api.clearRangeFormat",
+  "api.applyNamedStyle",
+  "api.setRowHeight",
+  "api.setColumnWidth",
+  "api.setRowHeights",
+  "api.setColumnWidths",
+  "api.autoFitColumns",
+  "api.autoFitRows",
+];
+
 describe("the grant is a closed table of cell rows", () => {
   // SABOTAGE (c): add "api.executeCommand" to EXPLICIT_RUN_CELL_METHODS -> this
   // exact-set test and the curated executeCommand refusal go red.
@@ -90,18 +117,23 @@ describe("the grant is a closed table of cell rows", () => {
   // SABOTAGE (a): drop the `EXPLICIT_RUN_CELL_METHODS.has(method)` conjunct in
   // explicitRunAdmits -> every unlocked row (api.runMacro, api.executeCommand,
   // api.workbookSave, the protection family...) is admitted and this goes red.
-  it("EXHAUSTIVE: over every ALLOWLIST row, the grant admits a row iff it is in the table", () => {
+  it("EXHAUSTIVE: over every ALLOWLIST row, the grant admits a row iff it is in one of its tables", () => {
     const wronglyAdmitted: string[] = [];
     const wronglyRefused: string[] = [];
     for (const method of Object.keys(ALLOWLIST)) {
       const admits = explicitRunAdmits(granted, method);
-      const inTable = EXPLICIT_RUN_CELL_METHODS.has(method);
+      const inTable = EXPLICIT_RUN_CELL_METHODS.has(method) || EXPLICIT_RUN_FORMAT_METHODS.has(method);
       if (admits && !inTable) wronglyAdmitted.push(method);
       if (!admits && inTable) wronglyRefused.push(method);
+      // Cell access WITHOUT formatting admits the cell table alone.
+      expect(explicitRunAdmits(cellsOnly, method), `cells-only ${method}`).toBe(EXPLICIT_RUN_CELL_METHODS.has(method));
     }
-    expect(wronglyAdmitted, "the grant reaches beyond cell access").toEqual([]);
+    expect(wronglyAdmitted, "the grant reaches beyond cells and formatting").toEqual([]);
     expect(wronglyRefused).toEqual([]);
-    // The families the owner's words exclude, named so a reader sees them.
+    // The families the owner's words exclude, named so a reader sees them --
+    // including every formatting-ADJACENT row the line was drawn against
+    // (protection, visibility, rules, the style catalogue, merges, sheet-level
+    // settings: explicitRunGrant.ts "FORMATTING AS WELL, DRAWN").
     for (const method of [
       "api.runMacro",
       "api.executeCommand",
@@ -111,8 +143,27 @@ describe("the grant is a closed table of cell rows", () => {
       "api.workbookSaveAs",
       "api.protectSheet",
       "api.unprotectSheet",
-      "api.setRangeFormat",
+      "api.beginUnprotected",
       "api.sortRange",
+      "api.insertRows",
+      "api.deleteColumns",
+      "api.mergeCells",
+      "api.unmergeCells",
+      "api.createNamedStyle",
+      "api.deleteNamedStyle",
+      "api.setRowsHidden",
+      "api.setColumnsHidden",
+      "api.addConditionalFormat",
+      "api.clearConditionalFormats",
+      "api.setDataValidation",
+      "api.setTabColor",
+      "api.setPageSetup",
+      "api.setPrintArea",
+      "api.setViewOption",
+      "api.freezePanes",
+      "api.copyRange",
+      "api.pasteRange",
+      "api.addSheet",
       "api.objectSetState",
       "api.userName",
       "cap.pkgPull",
@@ -123,8 +174,32 @@ describe("the grant is a closed table of cell rows", () => {
     }
   });
 
+  // SABOTAGE: add "api.setRowsHidden" to EXPLICIT_RUN_FORMAT_METHODS -> red.
+  it("the formatting table is EXACTLY these thirteen rows, each a real capability-free unlocked row", () => {
+    expect([...EXPLICIT_RUN_FORMAT_METHODS].sort()).toEqual([...THE_FORMAT_ROWS].sort());
+    for (const method of EXPLICIT_RUN_FORMAT_METHODS) {
+      const policy = ALLOWLIST[method];
+      expect(policy, `${method} is not an ALLOWLIST row`).toBeDefined();
+      expect(policy.tier, method).toBe("unlocked");
+      expect(policy.capability, method).toBeUndefined();
+      expect(EXPLICIT_RUN_CELL_METHODS.has(method), `${method} is in both tables`).toBe(false);
+    }
+    // Every formatting WRITE is recorded for the trail; every resize is held
+    // to the hidden-line rule.
+    for (const method of EXPLICIT_RUN_FORMAT_METHODS) {
+      const writes = ALLOWLIST[method].class === "mutate";
+      expect(EXPLICIT_RUN_FORMAT_WRITES.has(method), method).toBe(writes);
+    }
+    for (const method of EXPLICIT_RUN_LINE_SIZE_METHODS) expect(EXPLICIT_RUN_FORMAT_METHODS.has(method), method).toBe(true);
+    expect([...EXPLICIT_RUN_FORMAT_WRITES].filter((m) => !EXPLICIT_RUN_FORMAT_METHODS.has(m)).sort()).toEqual([
+      "api.clearRange",
+      "sheet.clearRangeFormat",
+      "sheet.setRangeFormat",
+    ]);
+  });
+
   it("an expired or absent grant admits nothing", () => {
-    for (const method of EXPLICIT_RUN_CELL_METHODS) {
+    for (const method of [...EXPLICIT_RUN_CELL_METHODS, ...EXPLICIT_RUN_FORMAT_METHODS]) {
       expect(explicitRunAdmits(expired, method), method).toBe(false);
       expect(explicitRunAdmits(plainRestricted, method), method).toBe(false);
     }
@@ -140,9 +215,18 @@ describe("decidePolicy: the grant admits cell calls and refuses the rest, loudly
     ["api.beginBatch", ["m"]],
     ["api.commitBatch", []],
     ["api.getCellValue", [3, 4]],
+    // FORMATTING (owner, 2026-11-04), on any sheet.
+    ["api.setRangeFormat", [0, 0, 9, 3, { bold: true, numberFormat: "0.00", borderOutline: { style: "thin", color: "#000000" } }]],
+    ["api.setRangeFormat", [0, 2, 1_048_575, 2, { fill: { type: "solid", color: "#ffeeaa" } }, "Sheet2"]],
+    ["api.clearRangeFormat", [0, 0, 4, 4]],
+    ["api.applyNamedStyle", ["Good", 0, 0, 2, 2]],
+    ["api.setRowHeights", [[[0, 4]], 30]],
+    ["api.setColumnWidth", [2, 120]],
+    ["api.autoFitColumns", [0, 3]],
+    ["api.getRangeFormat", [0, 0, 1, 1, "Sheet2"]],
   ];
 
-  it("admits the cell rows for a granted realm (tier stays restricted)", () => {
+  it("admits the cell and formatting rows for a granted realm (tier stays restricted)", () => {
     for (const [method, args] of admittedCalls) {
       const decision = decidePolicy(granted, method, args);
       expect(decision.admitted, `${method} ${JSON.stringify(args)}`).toBe(true);
@@ -151,9 +235,18 @@ describe("decidePolicy: the grant admits cell calls and refuses the rest, loudly
 
   const refusedCalls: Array<[string, unknown[]]> = [
     ["api.runMacro", ["m"]],
-    ["api.setRangeFormat", [0, 0, 0, 0, { bold: true }]],
     ["api.executeCommand", ["x"]],
     ["api.workbookSave", []],
+    // Every non-formatting widening the owner's decision does NOT make.
+    ["api.createNamedStyle", ["Mine", { bold: true }]],
+    ["api.deleteNamedStyle", ["Mine"]],
+    ["api.setRowsHidden", [0, 2, true]],
+    ["api.setColumnsHidden", [0, 2, false]],
+    ["api.mergeCells", [0, 0, 1, 1]],
+    ["api.insertRows", [0, 1]],
+    ["api.setTabColor", [0, "#ff0000"]],
+    ["api.protectSheet", []],
+    ["api.unprotectSheet", []],
   ];
 
   it("refuses everything else unlocked with the grant's sentence -- after validation passed", () => {
@@ -200,34 +293,111 @@ describe("decidePolicy: the grant admits cell calls and refuses the rest, loudly
     }
   });
 
-  // BUG-0616 #2. SABOTAGE: drop the explicitRunArgsRefusal check from
-  // decidePolicy -> a granted Clear All (or Clear Formats) is admitted.
-  it("api.clearRange: a granted run clears CONTENTS on any sheet, never formats", () => {
+  // BUG-0616 #2 + the owner's 2026-11-04 decision. SABOTAGE: drop the
+  // explicitRunArgsRefusal check from decidePolicy -> a cells-only Clear All is
+  // admitted.
+  it("api.clearRange: contents with cell access; formats and all with the formatting grant only", () => {
     const contents: unknown[][] = [
       [0, 2, 9, 2, { applyTo: "contents" }],
       [0, 2, 1_048_575, 2, { applyTo: "contents" }, "Sheet2"],
     ];
-    for (const args of contents) {
-      expect(decidePolicy(granted, "api.clearRange", args).admitted, JSON.stringify(args)).toBe(true);
-    }
     const formats: unknown[][] = [
       [0, 2, 9, 2],
       [0, 2, 9, 2, { applyTo: "all" }],
       [0, 2, 9, 2, { applyTo: "formats" }, 1],
+      [0, 2, 1_048_575, 2, { applyTo: "formats" }, "Sheet2"],
     ];
+    for (const args of contents) {
+      expect(decidePolicy(granted, "api.clearRange", args).admitted, JSON.stringify(args)).toBe(true);
+      expect(decidePolicy(cellsOnly, "api.clearRange", args).admitted, JSON.stringify(args)).toBe(true);
+    }
     for (const args of formats) {
       // POSITIVE CONTROL: valid arguments, admitted for an unlocked script.
       expect(decidePolicy(unlocked, "api.clearRange", args).admitted, "args invalid").toBe(true);
-      const decision = decidePolicy(granted, "api.clearRange", args);
+      expect(decidePolicy(granted, "api.clearRange", args).admitted, `formatting ${JSON.stringify(args)}`).toBe(true);
+      const decision = decidePolicy(cellsOnly, "api.clearRange", args);
       expect(decision.admitted, JSON.stringify(args)).toBe(false);
       if (!decision.admitted) {
         expect(decision.code).toBe("PermissionDenied");
-        expect(decision.message).toBe(explicitRunArgsRefusal("api.clearRange", args));
-        expect(decision.message).toMatch(/not formatting/);
+        expect(decision.message).toBe(explicitRunArgsRefusal("api.clearRange", args, cellsOnly));
+        expect(decision.message).toMatch(/cell access but not formatting/);
       }
     }
     // The argument rule is the grant's alone: other rows are untouched by it.
-    expect(explicitRunArgsRefusal("api.setCellValue", [0, 0, "x"])).toBeNull();
+    expect(explicitRunArgsRefusal("api.setCellValue", [0, 0, "x"], granted)).toBeNull();
+  });
+
+  // SABOTAGE: drop the PROTECTION_FORMAT_KEYS arm of explicitRunArgsRefusal ->
+  // a granted run unlocks cells.
+  it("api.setRangeFormat: how cells look, never whether they are locked or hide their formula", () => {
+    for (const format of [{ locked: false }, { formulaHidden: true }, { bold: true, locked: true }]) {
+      const args = [0, 0, 4, 4, format];
+      expect(decidePolicy(unlocked, "api.setRangeFormat", args).admitted, "args invalid").toBe(true);
+      const decision = decidePolicy(granted, "api.setRangeFormat", args);
+      expect(decision.admitted, JSON.stringify(format)).toBe(false);
+      if (!decision.admitted) {
+        expect(decision.code).toBe("PermissionDenied");
+        expect(decision.message).toMatch(/is protection, which code from an application never sets/);
+      }
+    }
+    expect(explicitRunProtectionRefusalMessage("api.setRangeFormat", ["locked"])).toMatch(/not locked/);
+    // The restricted row never accepted them either (its validator refuses).
+    expect(decidePolicy(granted, "sheet.setRangeFormat", [0, 0, 0, 0, { locked: false }]).admitted).toBe(false);
+  });
+
+  // BUG-0659. SABOTAGE: set MAX_RESTRICTED_FORMAT_RECT_CELLS to 4_000_000 ->
+  // both the granted and the sheet.* refusals go red.
+  it("BUG-0659: a restricted realm's non-line format rectangle is bounded at 100,000 cells; whole lines are not", () => {
+    expect(MAX_RESTRICTED_FORMAT_RECT_CELLS).toBe(MAX_RANGE_CELLS);
+    expect(MAX_RESTRICTED_FORMAT_RECT_CELLS).toBe(100_000);
+    // 400 x 251 = 100,400 cells, not whole lines.
+    const big = [0, 0, 399, 250];
+    // 100 x 1000 = 100,000 exactly: inside.
+    const atBound = [0, 0, 99, 999];
+    const wholeColumns = [0, 2, 1_048_575, 40];
+    const wholeRows = [4, 0, 900, 16_383];
+    // THE GRANTED RUN, through the unlocked rows it reaches:
+    for (const [method, args] of [
+      ["api.setRangeFormat", [...big, { bold: true }]],
+      ["api.clearRangeFormat", big],
+      ["api.clearRange", [...big, { applyTo: "formats" }]],
+    ] as Array<[string, unknown[]]>) {
+      expect(decidePolicy(unlocked, method, args).admitted, `the user's own ${method}`).toBe(true);
+      const decision = decidePolicy(granted, method, args);
+      expect(decision.admitted, method).toBe(false);
+      if (!decision.admitted) expect(decision.message).toMatch(/range too large: 100400 cells \(max 100000/);
+    }
+    for (const rect of [atBound, wholeColumns, wholeRows]) {
+      expect(decidePolicy(granted, "api.setRangeFormat", [...rect, { bold: true }]).admitted, JSON.stringify(rect)).toBe(true);
+      expect(decidePolicy(granted, "api.clearRange", [...rect, { applyTo: "all" }]).admitted, JSON.stringify(rect)).toBe(true);
+    }
+    // A CONTENTS clear is cell access: only stored cells are touched, so the
+    // unlocked bound stands.
+    expect(decidePolicy(granted, "api.clearRange", [...big, { applyTo: "contents" }]).admitted).toBe(true);
+    // THE RESTRICTED ROWS, for every realm (their validator):
+    for (const identity of [plainRestricted, granted, unlocked]) {
+      expect(decidePolicy(identity, "sheet.setRangeFormat", [...big, { bold: true }]).admitted).toBe(false);
+      expect(decidePolicy(identity, "sheet.clearRangeFormat", big).admitted).toBe(false);
+      expect(decidePolicy(identity, "sheet.setRangeFormat", [...wholeColumns, { bold: true }]).admitted).toBe(true);
+      expect(decidePolicy(identity, "sheet.clearRangeFormat", wholeRows).admitted).toBe(true);
+    }
+    expect(ALLOWLIST["sheet.setRangeFormat"].limits?.maxCells).toBe(MAX_RESTRICTED_FORMAT_RECT_CELLS);
+    expect(ALLOWLIST["sheet.clearRangeFormat"].limits?.maxCells).toBe(MAX_RESTRICTED_FORMAT_RECT_CELLS);
+  });
+
+  // SANDBOX: a run a SCRIPT starts has no pass, so it is a plain restricted
+  // realm -- every formatting row of the grant is refused at the tier, with the
+  // old sentence, and the sheet on screen is all it may format.
+  it("a run a SCRIPT started gets no formatting: every grant row is refused at the tier", () => {
+    for (const [method, args] of admittedCalls.filter(([m]) => EXPLICIT_RUN_FORMAT_METHODS.has(m))) {
+      const decision = decidePolicy(plainRestricted, method, args);
+      expect(decision.admitted, method).toBe(false);
+      if (!decision.admitted) {
+        expect(decision.message).toBe(`${method} requires unlocked access; this script is restricted`);
+      }
+    }
+    const clear = decidePolicy(plainRestricted, "api.clearRange", [0, 0, 1, 1, { applyTo: "formats" }]);
+    expect(clear.admitted).toBe(false);
   });
 
   it("api.clearRange: a run a SCRIPT started (no grant) and an expired grant are refused as before", () => {
@@ -276,24 +446,29 @@ describe("decidePolicy: the grant admits cell calls and refuses the rest, loudly
     ["sheet.clearRangeFormat", [0, 0, 0, 0]],
   ];
 
-  // The composition the twenty-row walk above cannot see: api.setActiveSheet is
+  // The composition the table walk above cannot see: api.setActiveSheet is
   // granted, and every restricted sheet.* row is clamped to the LIVE active
-  // sheet -- so the restricted formatting rows would follow the run to every
-  // sheet it switches to.
-  // SABOTAGE: drop the EXPLICIT_RUN_REFUSED_FORMAT_METHODS check from
-  // explicitRunRestrictedRefusal -> both rows are admitted and this goes red.
-  it("FORMATTING: the restricted format-write rows are refused for any explicit-run realm", () => {
-    for (const identity of [granted, expired]) {
+  // sheet -- so the restricted formatting rows follow the run to every sheet
+  // it switches to. That IS the formatting grant: admitted while it is live,
+  // refused for a realm whose formatting was not granted or has ended.
+  // SABOTAGE: drop the formatting condition from explicitRunRestrictedRefusal
+  // (refuse always) -> the granted admission goes red; drop the whole check ->
+  // the cells-only / expired refusals go red.
+  it("FORMATTING: the restricted format-write rows follow the formatting grant", () => {
+    for (const [method, args] of formatCalls) {
+      expect(decidePolicy(granted, method, args).admitted, `granted ${method}`).toBe(true);
+    }
+    for (const identity of [cellsOnly, expired]) {
       for (const [method, args] of formatCalls) {
         const decision = decidePolicy(identity, method, args);
-        expect(decision.admitted, `${method} for cells=${identity.explicitRun?.cells}`).toBe(false);
+        expect(decision.admitted, `${method} for ${JSON.stringify(identity.explicitRun)}`).toBe(false);
         if (!decision.admitted) {
           expect(decision.code).toBe("PermissionDenied");
           expect(decision.message).toBe(explicitRunFormatRefusalMessage(method));
         }
       }
     }
-    expect([...EXPLICIT_RUN_REFUSED_FORMAT_METHODS].sort()).toEqual([
+    expect([...EXPLICIT_RUN_RESTRICTED_FORMAT_METHODS].sort()).toEqual([
       "sheet.clearRangeFormat",
       "sheet.setRangeFormat",
     ]);
@@ -359,11 +534,18 @@ describe("decidePolicy: the grant admits cell calls and refuses the rest, loudly
     expect(restrictedNoCap, "a restricted row is unclassified for a granted run").toEqual(
       [...refused, ...admitted].sort(),
     );
+    // An EXPIRED (or formatting-less) grant refuses the whole list; a LIVE
+    // formatting grant gives the two formatting rows back.
     for (const method of refused) {
-      expect(explicitRunRestrictedRefusal(method), method).not.toBeNull();
+      expect(explicitRunRestrictedRefusal(method, expired), method).not.toBeNull();
+      expect(explicitRunRestrictedRefusal(method, cellsOnly), method).not.toBeNull();
+      expect(explicitRunRestrictedRefusal(method, granted) === null, `live ${method}`).toBe(
+        EXPLICIT_RUN_RESTRICTED_FORMAT_METHODS.has(method),
+      );
     }
     for (const method of admitted) {
-      expect(explicitRunRestrictedRefusal(method), method).toBeNull();
+      expect(explicitRunRestrictedRefusal(method, expired), method).toBeNull();
+      expect(explicitRunRestrictedRefusal(method, granted), method).toBeNull();
     }
   });
 
@@ -388,7 +570,19 @@ describe("the handle carries the flag only for a distributed, restricted definit
       { ...base, id: id(), accessLevel: "restricted", provenance: "distributed", packageName: "Sales" },
       { explicitRunCells: true },
     );
-    expect(handle.explicitRun).toEqual({ cells: true });
+    // Formatting only when the admission says so (Rust's formatAccess).
+    expect(handle.explicitRun).toEqual({ cells: true, formatting: false });
+    const withFormatting = buildHandleFromDefinition(
+      { ...base, id: id(), accessLevel: "restricted", provenance: "distributed", packageName: "Sales" },
+      { explicitRunCells: true, explicitRunFormatting: true },
+    );
+    expect(withFormatting.explicitRun).toEqual({ cells: true, formatting: true });
+    // Never formatting without cells.
+    const formattingAlone = buildHandleFromDefinition(
+      { ...base, id: id(), accessLevel: "restricted", provenance: "distributed", packageName: "Sales" },
+      { explicitRunFormatting: true },
+    );
+    expect(formattingAlone.explicitRun).toBeUndefined();
     expect(handle.tier).toBe("restricted");
     expect(handle.origin).toEqual({ kind: "package", name: "Sales" });
   });
@@ -453,26 +647,40 @@ describe("the pre-flight names the calls outside cell access, before anything ru
     expect(ungrantedApiCalls(RECORDED_CELLS_ONLY)).toEqual([]);
   });
 
-  // SABOTAGE: delete the clearRangeCallsBeyondContents line in
-  // ungrantedApiCalls -> a Clear All macro passes the pre-flight.
-  it("a clear is named unless it says applyTo \"contents\" (BUG-0616 #2)", () => {
+  // The owner's 2026-11-04 decision: a recorded macro that formats passes.
+  it("a recorded macro that formats, clears formats and sizes rows passes (owner, 2026-11-04)", () => {
     const withLine = (line: string): string => `${RECORDED_CELLS_ONLY}\n${line}\n`;
-    expect(ungrantedApiCalls(withLine('await api.clearRange(0, 2, 9, 2, { applyTo: "contents" }, 1);'))).toEqual([]);
-    expect(ungrantedApiCalls(withLine("await api.clearRange(0, 2, 9, 2, { applyTo: 'contents' });"))).toEqual([]);
-    expect(ungrantedApiCalls(withLine('await api.clearRange(0, 2, 9, 2, { applyTo: "all" }, 1);'))).toEqual([
-      "api.clearRange",
+    for (const line of [
+      'await api.clearRange(0, 2, 9, 2, { applyTo: "all" }, 1);',
+      "await api.clearRange(0, 2, 9, 2);",
+      'await api.clearRange(0, 0, f(1), 2, { applyTo: "formats" });',
+      "await api.clearRangeFormat(0, 2, 1048575, 2);",
+      'await api.setRangeFormat(0, 0, 4, 4, { bold: true, numberFormat: "0.00" }, 1);',
+      'await api.applyNamedStyle("Good", 0, 0, 1, 1);',
+      "await api.setRowHeights([[0, 4]], 30);",
+      "await api.setColumnWidth(2, 120);",
+    ]) {
+      expect(ungrantedApiCalls(withLine(line)), line).toEqual([]);
+    }
+  });
+
+  // SABOTAGE: delete the callArgumentsMatch line in ungrantedApiCalls -> a
+  // macro that unlocks cells passes the pre-flight.
+  it("a format that names locked or formulaHidden is named (protection)", () => {
+    const withLine = (line: string): string => `${RECORDED_CELLS_ONLY}\n${line}\n`;
+    expect(ungrantedApiCalls(withLine("await api.setRangeFormat(0, 0, 4, 4, { locked: false });"))).toEqual([
+      "api.setRangeFormat",
     ]);
-    expect(ungrantedApiCalls(withLine("await api.clearRange(0, 2, 9, 2);"))).toEqual(["api.clearRange"]);
-    expect(ungrantedApiCalls(withLine('await api.clearRange(0, 0, f(1), 2, { applyTo: "formats" });'))).toEqual([
-      "api.clearRange",
+    expect(ungrantedApiCalls(withLine("await api.setRangeFormat(0, 0, 4, 4, { bold: true, formulaHidden: true }, 1);"))).toEqual([
+      "api.setRangeFormat",
     ]);
   });
 
-  it("formatting and sorting are named, unique and sorted", () => {
+  it("non-formatting calls are named, unique and sorted", () => {
     const src =
       RECORDED_CELLS_ONLY +
-      "\nasync function more(api) { await api.sortRange(0,0,5,1,[]); await api.setRangeFormat(0,0,0,0,{bold:true}); await api.sortRange(1,1,2,2,[]); }\n";
-    expect(ungrantedApiCalls(src)).toEqual(["api.setRangeFormat", "api.sortRange"]);
+      "\nasync function more(api) { await api.sortRange(0,0,5,1,[]); await api.setRangeFormat(0,0,0,0,{bold:true}); await api.sortRange(1,1,2,2,[]); await api.setRowsHidden(0, 1, true); await api.mergeCells(0,0,1,1); }\n";
+    expect(ungrantedApiCalls(src)).toEqual(["api.mergeCells", "api.setRowsHidden", "api.sortRange"]);
   });
 
   it("a commented-out call is ignored", () => {

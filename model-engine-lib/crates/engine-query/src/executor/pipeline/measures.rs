@@ -60,7 +60,11 @@ impl QueryExecutor {
                 if let Some((op, col)) = measure.expression().as_simple_aggregate() {
                     let fact = measure.table().to_lowercase();
                     let col = quote_ident_double(col);
-                    let agg_sql = op.render_sql(&format!("{fact}.{col}"));
+                    // A count answers BLANK, never 0 (DAX).
+                    let agg_sql = engine_core::compute::dax_semantics::measure_aggregate_sql(
+                        &op,
+                        &format!("{fact}.{col}"),
+                    );
                     select_parts.push(format!(
                         "{agg_sql} AS {}",
                         quote_ident_double(measure.name())
@@ -236,7 +240,8 @@ impl QueryExecutor {
             let measure_name = measure.name();
             if let Some((op, col)) = stripped.as_simple_aggregate() {
                 let col_ref = format!("{fact_table}.{}", quote_ident_double(col));
-                let agg_sql = op.render_sql(&col_ref);
+                // A count answers BLANK, never 0 (DAX).
+                let agg_sql = engine_core::compute::dax_semantics::measure_aggregate_sql(&op, &col_ref);
                 main_select.push(format!("{agg_sql} AS {}", quote_ident_double(measure_name)));
             } else {
                 let expr_sql = stripped.to_sql_string()?;

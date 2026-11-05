@@ -414,19 +414,19 @@ fn a_control_appearance_batch_is_one_undo_step_that_restores_every_key() {
         &wb.state,
         &wb.file,
         &[
-            change(a, &[("fill", "#FF0000"), ("containerBorderRadius", "8")]),
+            change(a, &[("fill", "#FF0000"), ("containerShadowBlur", "8")]),
             change(b, &[("containerShadowShow", "true")]),
         ],
     )
     .expect("a valid batch, on a locked page (formatting)");
     assert_eq!(changed, 2);
     assert_eq!(prop(&wb, a, "fill").as_deref(), Some("#FF0000"));
-    assert_eq!(prop(&wb, a, "containerBorderRadius").as_deref(), Some("8"));
+    assert_eq!(prop(&wb, a, "containerShadowBlur").as_deref(), Some("8"));
     assert_eq!(prop(&wb, b, "containerShadowShow").as_deref(), Some("true"));
     assert!(wb.file.is_dirty());
     assert_eq!(undo_depth(&wb), depth + 1, "ONE step for the whole batch");
     assert_eq!(last_label(&wb).as_deref(), Some("Format control"));
-    let stored_type = wb.state.controls.read().unwrap()[&a].properties["containerBorderRadius"].value_type.clone();
+    let stored_type = wb.state.controls.read().unwrap()[&a].properties["containerShadowBlur"].value_type.clone();
     assert_eq!(stored_type, "static");
 
     // Everything already as requested: no effect, no step.
@@ -439,7 +439,7 @@ fn a_control_appearance_batch_is_one_undo_step_that_restores_every_key() {
 
     undo_once(&wb);
     assert_eq!(prop(&wb, a, "fill").as_deref(), Some("#4472C4"), "undo restores the fill");
-    assert_eq!(prop(&wb, a, "containerBorderRadius"), None, "and removes the new container key");
+    assert_eq!(prop(&wb, a, "containerShadowBlur"), None, "and removes the new container key");
     assert_eq!(prop(&wb, b, "containerShadowShow"), None, "on the other control too");
 }
 

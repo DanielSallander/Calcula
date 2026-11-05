@@ -58,6 +58,7 @@ import { resolveCellTarget, targetRefOf } from "@api/cellTarget";
 import { activeCellOf } from "@api/activeCell";
 import { selectionBlocks, type SelectionBlock } from "@api/selectionBlocks";
 import { announceFormattingResult } from "@api/announceFormatting";
+import { shownGeneralTextAt } from "@api/shownCellText";
 import { ownUndoTransaction } from "@api/undoTicket";
 import type { FormattingResult, Selection } from "@api/types";
 
@@ -141,17 +142,28 @@ export async function stepNumberFormatDecimals(
   const results: FormattingResult[] = [];
   let answered = false;
   try {
-    const main = await adjustNumberFormatDecimals(rows, cols, delta, { target });
+    // A General number steps from the decimals its column SHOWS (BUG-0355):
+    // the grid says what that is. Only for the sheet's own cells.
+    const shownText = target ? null : await shownGeneralTextAt(rows[0], cols[0]);
+    const main = await adjustNumberFormatDecimals(rows, cols, delta, shownText ? { target, shownText } : { target });
     answered = true;
     results.push(main);
     // Every returned style carries the SAME format -- the active cell's,
     // stepped. None: Excel changed nothing at the active cell, so nothing
     // changes anywhere.
     const numberFormat = main.styles[0]?.style.numberFormat;
-    if (numberFormat !== undefined) {
-      for (const block of others) {
-        const lists = rowsColsOf(block);
-        results.push(await applyFormatting(lists.rows, lists.cols, { numberFormat }, { target }));
+    if (numberFormat !== undefined && others.length > 0) {
+      if (!target) {
+        // The sheet's other blocks in ONE call (BUG-0394).
+        const [first, ...more] = others.map(rowsColsOf);
+        results.push(
+          await applyFormatting(first.rows, first.cols, { numberFormat }, more.length > 0 ? { target, moreAreas: more } : { target }),
+        );
+      } else {
+        for (const block of others) {
+          const lists = rowsColsOf(block);
+          results.push(await applyFormatting(lists.rows, lists.cols, { numberFormat }, { target }));
+        }
       }
     }
     await tx?.commit();

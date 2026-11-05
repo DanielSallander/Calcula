@@ -159,7 +159,7 @@ export function describeRunRoute(
     ? "restricted object script (it came from an application, so it cannot be " +
       "granted the unlocked tier, and it does not run at all unless you have " +
       "approved that application's code; run from here, it may also read and " +
-      "change cells on any sheet, and nothing more)"
+      "change cells, and how they look, on any sheet, and nothing more)"
     : "unlocked object script";
   return (
     "This macro is written for the OBJECT-SCRIPT runtime (`api.*`), which the " +
@@ -247,20 +247,20 @@ export function describeMacroProvenance(
     // doors that actually mint.
     //
     // EVERY CLAUSE IS A STATEMENT ABOUT THE CODE (explicitRunGrant.ts, host.ts):
-    // a fill copies the styles of the cells it fills from, as a module macro's
-    // fill does (and, like it, repeats no merges and adds no sparklines); the
-    // restricted formatting rows are refused to such a run; and started any
-    // other way it keeps what EVERY restricted realm has -- the sheet on screen,
-    // which the broker admits for any restricted script -- not "nothing".
+    // it may change how cells look (owner, 2026-11-04: EXPLICIT_RUN_FORMAT_METHODS),
+    // never protection or which rows are shown; and started any other way it
+    // keeps what EVERY restricted realm has -- the sheet on screen, which the
+    // broker admits for any restricted script -- not "nothing".
     return (
       `${lead} It does not run unless you have approved this application's code, ` +
       "exactly as it is stored; if you have, it is mounted as a RESTRICTED object " +
       "script (never unlocked) and can use a capability only through that approval. " +
       "When you run it yourself from Developer ▸ Macros ▸ Run, by clicking a button " +
       "that runs it, or from the command line, it may also read and change cells on " +
-      "any sheet -- the same cell access an approved module macro has, where filling a " +
-      "range also copies the formatting of the cells it fills from -- and nothing more: " +
-      "no other formatting, no sheet structure, no files, no other macros or commands. " +
+      "any sheet and change how they look -- fonts, colours, number formats, borders, " +
+      "cell styles and the size of rows and columns -- and nothing more: it cannot lock " +
+      "or unlock cells, hide or show rows, change the sheets' structure, or reach files, " +
+      "other macros or commands. " +
       "Started any other way -- by another script, for example -- it has only what " +
       "every restricted script has: the sheet on screen."
     );

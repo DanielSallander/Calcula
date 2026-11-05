@@ -172,16 +172,31 @@ pub struct MountGateAnswer {
     /// `RunAdmitted`; the always-on run row says the same. The page grants the
     /// access only when this says so (an absent field is no grant).
     pub cell_access: bool,
+    /// ...and it may change how cells look on any sheet as well (the owner,
+    /// 2026-11-04: "Macros should be able to change formatting as well"):
+    /// formatting, never protection, visibility, rules, the style catalogue or
+    /// structure -- the page's closed table (`EXPLICIT_RUN_FORMAT_METHODS`,
+    /// app/src/api/scriptHost/explicitRunGrant.ts). Granted together with
+    /// `cell_access` and never without it ([`EXPLICIT_RUN_GRANTS_FORMATTING`]);
+    /// the page formats only when this says so, and the grant remembers it, so
+    /// the run's report may name formatting only for a run that had it.
+    pub format_access: bool,
     /// The id of that grant, which the page's ONE report of what the run wrote
     /// presents (`explicit_run_audit::audit_explicit_run_writes`, F15). `Some`
     /// exactly when `cell_access`.
     pub grant_id: Option<u64>,
 }
 
+/// Whether a run Rust grants cell access also gets FORMATTING (owner,
+/// 2026-11-04). One switch, so the decision is Rust's and stated once: the
+/// mount gate answers `format_access` from it, the grant ledger records it,
+/// and the report door accepts formatting only from a grant that carried it.
+pub(crate) const EXPLICIT_RUN_GRANTS_FORMATTING: bool = true;
+
 impl MountGateAnswer {
     /// An admission that grants nothing beyond the code's own tier.
     fn admitted(recheck_while_running: bool) -> Self {
-        MountGateAnswer { recheck_while_running, cell_access: false, grant_id: None }
+        MountGateAnswer { recheck_while_running, cell_access: false, format_access: false, grant_id: None }
     }
 }
 
@@ -541,7 +556,7 @@ pub(crate) enum RunAccess<'a> {
     ModuleRuntime { door: RunDoor },
     /// The one-off runner WITH cell access: the door, and the grant whose
     /// writes the page reports once the run settles (F15).
-    CellAccess { door: ExplicitRunDoor, grant_id: u64 },
+    CellAccess { door: ExplicitRunDoor, grant_id: u64, formatting: bool },
     /// The one-off runner WITHOUT cell access, and why -- with the door the
     /// page claimed, when it claimed one Rust could not honour.
     Restricted { why: &'a str, claimed: Option<ExplicitRunDoor> },
@@ -580,15 +595,17 @@ fn record_run(state: &AppState, run: &CodeRun<'_>, button: Option<&ButtonAttribu
             extra.insert("door".into(), Value::from(door_label(*door)));
             format!(" -- you started it from {}", door_phrase(*door))
         }
-        Some(RunAccess::CellAccess { door, grant_id }) => {
+        Some(RunAccess::CellAccess { door, grant_id, formatting }) => {
             let door = RunDoor::from(*door);
             extra.insert("startedBy".into(), Value::from("you"));
             extra.insert("door".into(), Value::from(door_label(door)));
             extra.insert("cellAccess".into(), Value::from(true));
+            extra.insert("formatAccess".into(), Value::from(*formatting));
             extra.insert("grantId".into(), Value::from(*grant_id));
             format!(
-                " -- you started it from {}, so it could read and change cells on any sheet while it ran",
-                door_phrase(door)
+                " -- you started it from {}, so it could read and change cells{} on any sheet while it ran",
+                door_phrase(door),
+                if *formatting { ", and how they look," } else { "" }
             )
         }
         Some(RunAccess::Restricted { why, claimed }) => {
@@ -1237,13 +1254,15 @@ pub(crate) fn mount_run_gate(
                         macro_id: c.claim.macro_id.clone(),
                         door,
                         button: button.clone(),
+                        formatting: EXPLICIT_RUN_GRANTS_FORMATTING,
                     })
                 });
                 match opened {
                     Some(grant_id) => {
                         answer.cell_access = true;
+                        answer.format_access = EXPLICIT_RUN_GRANTS_FORMATTING;
                         answer.grant_id = Some(grant_id);
-                        RunAccess::CellAccess { door, grant_id }
+                        RunAccess::CellAccess { door, grant_id, formatting: EXPLICIT_RUN_GRANTS_FORMATTING }
                     }
                     // A grant that cannot be recorded is not given: its writes
                     // could not be put on the trail.

@@ -25,7 +25,26 @@ const h = vi.hoisted(() => ({
   updateCell: vi.fn(async (row: number, col: number, value: string) => ({
     cells: [{ row, col, display: value, formula: null }],
   })),
-  updateCellsBatch: vi.fn(async () => []),
+  // The backend batch, doubled: it reports each written cell, a formula where
+  // the typed-entry ladder would make one (`=...`, or a leading sign that is
+  // not a number -- core/engine/src/typed_entry.rs).
+  updateCellsBatch: vi.fn(async (updates: Array<{ row: number; col: number; value: string; pasted?: boolean }>) =>
+    updates.map((u) => {
+      const t = u.value.trim();
+      const formula = t.startsWith("=") || (/^[+-]./.test(t) && Number.isNaN(Number(t))) ? (t.startsWith("=") ? t : `=${t}`) : null;
+      return { row: u.row, col: u.col, display: u.value, formula, styleIndex: 0 };
+    }),
+  ),
+  // The backend fill shifter, doubled: it spells the delta it was asked for.
+  shiftFormulasBatch: vi.fn(async (inputs: Array<{ formula: string; rowDelta: number; colDelta: number }>) =>
+    inputs.map((i) => `${i.formula}|${i.rowDelta},${i.colDelta}`),
+  ),
+  // The active cell's value type after its write (get_range_cells_typed).
+  activeType: "number" as string,
+  getRangeCellsTyped: vi.fn(async (row: number, col: number) => [{ row, col, type: h.activeType }]),
+  mergedRegions: [] as Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>,
+  getMergedRegions: vi.fn(async () => h.mergedRegions),
+  filterMode: false,
   alertAsync: vi.fn(async () => {}),
 }));
 
@@ -37,6 +56,9 @@ vi.mock("../../../lib/tauri-api", () => ({
   setActiveSheet: vi.fn(async () => {}),
   getViewportCells: vi.fn(async () => []),
   updateCellsBatch: h.updateCellsBatch,
+  shiftFormulasBatch: h.shiftFormulasBatch,
+  getRangeCellsTyped: h.getRangeCellsTyped,
+  getMergedRegions: h.getMergedRegions,
   beginUndoTransaction: vi.fn(async () => {}),
   commitUndoTransaction: vi.fn(async () => {}),
   cancelUndoTransaction: vi.fn(async () => {}),
@@ -58,6 +80,9 @@ vi.mock("../../../../api/columnAutocomplete", () => ({
 vi.mock("../../../../api/cellTypes", () => ({
   handleCellTypeKeyDown: vi.fn(async () => false),
 }));
+vi.mock("../../../../api/autoFilterService", () => ({
+  isActiveSheetFilterMode: vi.fn(async () => h.filterMode),
+}));
 
 import { useSpreadsheetEditing } from "../useSpreadsheetEditing";
 import { GridProvider, useGridContext } from "../../../state/GridContext";
@@ -69,11 +94,19 @@ import { commitGridCellText } from "../../../lib/selectionOwner";
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
-type Sel = { startRow: number; startCol: number; endRow: number; endCol: number };
+type Sel = {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  additionalRanges?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>;
+};
 
 let handlersRef: ReturnType<typeof useSpreadsheetEditing>["handlers"] | null = null;
 let editorOpen = false;
 let initialSelection: Sel = { startRow: 2, startCol: 1, endRow: 2, endCol: 1 };
+/** Rows / columns the grid shows hidden (any reason), for the next mount. */
+let initialHidden: { rows: number[]; cols: number[] } = { rows: [], cols: [] };
 
 function Harness(): React.ReactElement {
   const { state, dispatch } = useGridContext();
@@ -110,9 +143,15 @@ async function mount(selection: Sel): Promise<void> {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
+  const initial = getInitialState();
+  initial.dimensions = {
+    ...initial.dimensions,
+    hiddenRows: new Set(initialHidden.rows),
+    hiddenCols: new Set(initialHidden.cols),
+  };
   await act(async () => {
     root.render(
-      <GridProvider initialState={getInitialState()}>
+      <GridProvider initialState={initial}>
         <Harness />
       </GridProvider>,
     );
@@ -153,6 +192,13 @@ describe("Ctrl+Enter and Delete over a cell that takes one edit at a time", () =
   beforeEach(() => {
     h.updateCell.mockClear();
     h.updateCellsBatch.mockClear();
+    h.shiftFormulasBatch.mockClear();
+    h.getRangeCellsTyped.mockClear();
+    h.getMergedRegions.mockClear();
+    h.activeType = "number";
+    h.mergedRegions = [];
+    h.filterMode = false;
+    initialHidden = { rows: [], cols: [] };
     h.alertAsync.mockClear();
     handlersRef = null;
     editorOpen = false;
@@ -208,7 +254,140 @@ describe("Ctrl+Enter and Delete over a cell that takes one edit at a time", () =
       await handlersRef!.handleInlineCtrlEnter();
     });
     await settle();
-    expect(h.updateCellsBatch).toHaveBeenCalledTimes(1);
+    // The ACTIVE cell first (its entry decides what every cell gets), then the rest.
+    expect(h.updateCellsBatch).toHaveBeenCalledTimes(2);
+    expect(h.updateCellsBatch.mock.calls[0][0]).toEqual([{ row: 8, col: 3, value: "5" }]);
+  });
+
+  // BUG-0396, Excel measured live 2026-11-04 (lane multiarea probe2): every
+  // block is filled, and a formula moves relative to the active cell.
+  const scattered: Sel = {
+    startRow: 7,
+    startCol: 3,
+    endRow: 7,
+    endCol: 3,
+    additionalRanges: [
+      { startRow: 0, startCol: 6, endRow: 1, endCol: 6 },
+      { startRow: 9, startCol: 4, endRow: 9, endCol: 5 },
+    ],
+  };
+  const writtenCells = () =>
+    h.updateCellsBatch.mock.calls.flatMap((c) => c[0]).map((u) => `${u.row},${u.col}=${u.value}`).sort();
+
+  it("BUG-0396 Ctrl+Enter fills EVERY block of a multi-area selection", async () => {
+    await mount(scattered);
+    await type("5");
+    await act(async () => {
+      await handlersRef!.handleInlineCtrlEnter();
+    });
+    await settle();
+    expect(h.updateCellsBatch).toHaveBeenCalledTimes(2);
+    expect(writtenCells()).toEqual(["0,6=5", "1,6=5", "7,3=5", "9,4=5", "9,5=5"]);
+    expect(h.shiftFormulasBatch, "a constant needs no shift").not.toHaveBeenCalled();
+  });
+
+  it("BUG-0396 a formula is entered relative to the active cell in every block", async () => {
+    await mount(scattered);
+    await type("=");
+    await act(async () => {
+      handlersRef!.handleInlineValueChange("=C8");
+    });
+    await act(async () => {
+      await handlersRef!.handleInlineCtrlEnter();
+    });
+    await settle();
+    expect(h.shiftFormulasBatch).toHaveBeenCalledTimes(1);
+    expect(writtenCells()).toEqual([
+      "0,6==C8|-7,3",
+      "1,6==C8|-6,3",
+      "7,3==C8",
+      "9,4==C8|2,1",
+      "9,5==C8|2,2",
+    ]);
+  });
+
+  it("BUG-0396 a guard refusing ANY block writes no block at all", async () => {
+    // The second block crosses the guarded B3:B5.
+    await mount({ ...scattered, additionalRanges: [{ startRow: 3, startCol: 1, endRow: 3, endCol: 2 }] });
+    await type("5");
+    await act(async () => {
+      await handlersRef!.handleInlineCtrlEnter();
+    });
+    await settle();
+    expect(h.updateCellsBatch).not.toHaveBeenCalled();
+    expect(h.alertAsync).toHaveBeenCalledWith("These cells collect input one cell at a time.");
+    expect(editorOpen).toBe(true);
+  });
+
+  // rev-ui-4 / rev-ui-5, Excel measured live 2026-11-05 (lane uic probe1..4).
+  async function ctrlEnter(sel: Sel, text: string): Promise<void> {
+    await mount(sel);
+    await type(text.slice(0, 1));
+    await act(async () => {
+      handlersRef!.handleInlineValueChange(text);
+    });
+    await act(async () => {
+      await handlersRef!.handleInlineCtrlEnter();
+    });
+    await settle();
+  }
+  const written = () =>
+    h.updateCellsBatch.mock.calls
+      .flatMap((c) => c[0])
+      .map((u) => `${u.row},${u.col}=${u.value}${u.pasted ? " (p)" : ""}`)
+      .sort();
+
+  it("rev-ui-5 a leading + starts a formula, moved for every cell in the spelling typed", async () => {
+    // A1:A2, A1 active: Excel writes A1 =+B1, A2 =+B2.
+    await ctrlEnter({ startRow: 1, startCol: 0, endRow: 0, endCol: 0 }, "+B1");
+    expect(h.updateCellsBatch.mock.calls[0][0], "the active cell first, as typed").toEqual([{ row: 0, col: 0, value: "+B1" }]);
+    expect(h.shiftFormulasBatch).toHaveBeenCalledTimes(1);
+    expect(written()).toEqual(["0,0=+B1", "1,0==+B1|1,0 (p)"]);
+  });
+
+  it("rev-ui-5 the active cell's TEXT is text in every cell (a Text-formatted active cell)", async () => {
+    h.activeType = "text";
+    // The active cell is Text-formatted: the ladder stored the TEXT "=B1".
+    h.updateCellsBatch.mockImplementationOnce(async (updates) =>
+      updates.map((u) => ({ row: u.row, col: u.col, display: u.value, formula: null, styleIndex: 0 })),
+    );
+    await ctrlEnter({ startRow: 1, startCol: 0, endRow: 0, endCol: 0 }, "=B1");
+    expect(h.shiftFormulasBatch).not.toHaveBeenCalled();
+    expect(written()).toEqual(["0,0==B1", "1,0='=B1"]);
+  });
+
+  it("rev-ui-5 a number goes into every cell as the number, Text format or not", async () => {
+    await ctrlEnter({ startRow: 1, startCol: 0, endRow: 0, endCol: 0 }, "5");
+    expect(written()).toEqual(["0,0=5", "1,0=5 (p)"]);
+  });
+
+  it("rev-ui-4 a merged area takes the entry in its top-left cell only", async () => {
+    // A1:C3 with B2:C2 merged: Excel leaves C2 empty. (Here F1:H3 with G2:H2,
+    // clear of the guarded B3:B5.)
+    h.mergedRegions = [{ startRow: 1, startCol: 6, endRow: 1, endCol: 7 }];
+    await ctrlEnter({ startRow: 2, startCol: 7, endRow: 0, endCol: 5 }, "7");
+    expect(h.getMergedRegions).toHaveBeenCalledWith({ startRow: 0, startCol: 5, endRow: 2, endCol: 7 });
+    const cells = written().map((w) => w.split("=")[0]);
+    expect(cells).toContain("1,6");
+    expect(cells).not.toContain("1,7");
+    expect(cells.length).toBe(8);
+  });
+
+  it("rev-ui-4 in filter mode every hidden row and column is skipped", async () => {
+    // G2:I6 (rows 1..5, cols 6..8), row 4 (index 3) and column H hidden.
+    h.filterMode = true;
+    initialHidden = { rows: [3], cols: [7] };
+    await ctrlEnter({ startRow: 5, startCol: 8, endRow: 1, endCol: 6 }, "x");
+    const cells = written().map((w) => w.split("=")[0]);
+    expect(cells.some((c) => c.startsWith("3,")), "no cell of the hidden row").toBe(false);
+    expect(cells.some((c) => c.endsWith(",7")), "no cell of the hidden column").toBe(false);
+    expect(cells.length).toBe(4 * 2);
+  });
+
+  it("rev-ui-4 outside filter mode hidden rows and columns are filled like any other", async () => {
+    initialHidden = { rows: [3], cols: [7] };
+    await ctrlEnter({ startRow: 5, startCol: 8, endRow: 1, endCol: 6 }, "x");
+    expect(written().length).toBe(5 * 3);
   });
 
   it("the grid text committer ENTERS a value as a committed edit (Delete's route)", async () => {

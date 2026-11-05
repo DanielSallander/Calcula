@@ -556,13 +556,14 @@ describe("MacroLibraryDialog provenance", () => {
       /When you run it yourself from Developer ▸ Macros ▸ Run, by clicking a button that runs it, or from the command line/,
     );
     expect(note.textContent).toMatch(/read and change cells on any sheet/);
-    expect(note.textContent).toMatch(/filling a range also copies the formatting of the cells it fills from/);
-    expect(note.textContent).toMatch(/no other formatting, no sheet structure, no files/);
+    // Formatting joined the grant (owner, 2026-11-04); the line drawn is said.
+    expect(note.textContent).toMatch(/and change how they look -- fonts, colours, number formats, borders/);
+    expect(note.textContent).toContain("it cannot lock or unlock cells, hide or show rows, change the sheets' structure");
     expect(note.textContent).toMatch(
       /Started any other way -- by another script, for example -- it has only what every restricted script has: the sheet on screen/,
     );
     const routeNote = container.querySelector("[data-macro-run-route]")!;
-    expect(routeNote.textContent).toMatch(/run from here, it may also read and change cells on any sheet/);
+    expect(routeNote.textContent).toMatch(/run from here, it may also read and change cells, and how they look, on any sheet/);
   });
 });
 

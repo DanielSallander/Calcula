@@ -462,9 +462,11 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
         dependent: "formula.structuredReference (Table1[Col])",
         dependent_kind: None,
         policy: DeletePolicy::Repair,
-        implemented_by: "rewrite_table_refs_to_ranges",
-        note: "Excel freezes the specifier into the absolute rectangle the \
-                table covered, so the VALUES do not move.",
+        implemented_by: "retire_table_core",
+        note: "Convert to Range freezes each reference to the table into the \
+                sheet-qualified absolute rectangle it covered, so the VALUES do \
+                not move; Delete (Excel's ListObject.Delete) clears the cells \
+                and turns each reference into #REF!.",
     },
     DependencyRule {
         owner: ObjectKind::Table,

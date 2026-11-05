@@ -1117,6 +1117,9 @@ pub fn clear_all_comments(
 }
 
 /// Clear comments in a range (Clear Comments and Notes, Clear All).
+///
+/// `more_areas` (BUG-0394): the other blocks of a multi-area selection, in
+/// this same call and ONE undo step (`commands::data::over_clear_areas`).
 #[tauri::command]
 pub fn clear_comments_in_range(
     state: State<AppState>,
@@ -1125,8 +1128,15 @@ pub fn clear_comments_in_range(
     start_col: u32,
     end_row: u32,
     end_col: u32,
+    more_areas: Option<Vec<crate::api_types::ClearArea>>,
 ) -> usize {
-    clear_comments_in_range_impl(&state, &file_state, start_row, start_col, end_row, end_col)
+    crate::commands::data::over_clear_areas(
+        &state,
+        "Clear comments",
+        (start_row, start_col, end_row, end_col),
+        &more_areas.unwrap_or_default(),
+        |r0, c0, r1, c1| clear_comments_in_range_impl(&state, &file_state, r0, c0, r1, c1),
+    )
 }
 
 /// The body of `clear_comments_in_range`, over plain references.

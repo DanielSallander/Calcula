@@ -117,7 +117,7 @@ describe("Delete / Clear Contents with grouped sheets", () => {
     await runClearGesture("clearContents", host(sel(0, 0, 1, 1)));
     expect(writes()).toEqual([
       ["clearRangeOnSheets", [[0, 2], 0, 0, 1, 1, { applyTo: "contents", moreAreas: [] }]],
-      ["clearRange", [0, 0, 1, 1]],
+      ["clearRangeWithOptions", [0, 0, 1, 1, "contents"]],
     ]);
     expect(api.beginUndoTransaction, "the group clear is ONE step").toHaveBeenCalledTimes(1);
     expect(api.commitUndoTransaction).toHaveBeenCalledWith(9);
@@ -133,8 +133,8 @@ describe("Delete / Clear Contents with grouped sheets", () => {
         "clearRangeOnSheets",
         [[0, 2], 5, 5, 5, 5, { applyTo: "contents", moreAreas: [{ startRow: 0, startCol: 0, endRow: 1, endCol: 1 }] }],
       ],
-      ["clearRange", [5, 5, 5, 5]],
-      ["clearRange", [0, 0, 1, 1]],
+      // BUG-0394: the active sheet's blocks in ONE call too.
+      ["clearRangeWithOptions", [5, 5, 5, 5, "contents", undefined, { moreAreas: [{ startRow: 0, startCol: 0, endRow: 1, endCol: 1 }] }]],
     ]);
     expect(api.clearRangeOnSheets).toHaveBeenCalledTimes(1);
     expect(api.beginUndoTransaction).toHaveBeenCalledTimes(1);
@@ -146,7 +146,7 @@ describe("Delete / Clear Contents with grouped sheets", () => {
     api.clearRangeOnSheets.mockRejectedValue("The cell is on a protected sheet.");
     await runClearGesture("clearContents", host(sel(0, 0, 1, 1)));
     expect(dialogs.alertAsync).toHaveBeenCalledWith("The cell is on a protected sheet.");
-    expect(api.clearRange, "the active sheet was cleared past the group's refusal").not.toHaveBeenCalled();
+    expect(api.clearRangeWithOptions, "the active sheet was cleared past the group's refusal").not.toHaveBeenCalled();
     expect(api.cancelUndoTransaction, "the empty step is cancelled").toHaveBeenCalledWith(9);
     expect(api.commitUndoTransaction).not.toHaveBeenCalled();
     expect(emit, "nothing was cleared, so nothing is announced").not.toHaveBeenCalled();
@@ -157,7 +157,7 @@ describe("Delete / Clear Contents with grouped sheets", () => {
   it("the sheet on screen is NOT in the group (reached by the Name Box / Go To): the active sheet alone", async () => {
     setSelectedSheetIndices([1, 2]);
     await runClearGesture("clearContents", host(sel(0, 0, 1, 1)));
-    expect(writes()).toEqual([["clearRange", [0, 0, 1, 1]]]);
+    expect(writes()).toEqual([["clearRangeWithOptions", [0, 0, 1, 1, "contents"]]]);
     await runClearGesture("clearAll", host(sel(0, 0, 1, 1)));
     expect(api.clearRangeOnSheets).not.toHaveBeenCalled();
   });
@@ -165,7 +165,7 @@ describe("Delete / Clear Contents with grouped sheets", () => {
   it("control: no group -> the active sheet alone, its own undo step", async () => {
     clearSheetGrouping();
     await runClearGesture("clearContents", host(sel(0, 0, 1, 1)));
-    expect(writes()).toEqual([["clearRange", [0, 0, 1, 1]]]);
+    expect(writes()).toEqual([["clearRangeWithOptions", [0, 0, 1, 1, "contents"]]]);
     expect(api.beginUndoTransaction).not.toHaveBeenCalled();
   });
 
@@ -179,7 +179,7 @@ describe("Delete / Clear Contents with grouped sheets", () => {
   it("the sheet on screen unknown (no grid): nothing is replicated", async () => {
     grid.activeSheetIndex = null;
     await runClearGesture("clearContents", host(sel(0, 0, 1, 1)));
-    expect(writes()).toEqual([["clearRange", [0, 0, 1, 1]]]);
+    expect(writes()).toEqual([["clearRangeWithOptions", [0, 0, 1, 1, "contents"]]]);
   });
 });
 
@@ -251,9 +251,9 @@ describe("the one-cell writeback edit is the gesture's own (Delete reaches it no
 
   it("no committer: the clear runs, and its refusal names the remedy", async () => {
     writebackCellAt(3, 3);
-    api.clearRange.mockRejectedValue("This cell collects one answer at a time.");
+    api.clearRangeWithOptions.mockRejectedValue("This cell collects one answer at a time.");
     await runClearGesture("clearContents", host(sel(3, 3, 3, 3)));
-    expect(api.clearRange).toHaveBeenCalledTimes(1);
+    expect(api.clearRangeWithOptions).toHaveBeenCalledTimes(1);
     expect(dialogs.alertAsync).toHaveBeenCalledWith("This cell collects one answer at a time.");
   });
 
@@ -263,7 +263,7 @@ describe("the one-cell writeback edit is the gesture's own (Delete reaches it no
     setGridCellTextCommitter(committer);
     await runClearGesture("clearContents", host(sel(3, 3, 4, 4)));
     expect(committer).not.toHaveBeenCalled();
-    expect(api.clearRange).toHaveBeenCalledTimes(1);
+    expect(api.clearRangeWithOptions).toHaveBeenCalledTimes(1);
   });
 
   it("control: Clear Formats on that cell is never entered as an edit", async () => {

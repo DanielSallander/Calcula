@@ -113,6 +113,39 @@ pub struct PivotField {
     /// undo, save and a `.calp`. Written only when true; absent reads false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_synthetic_total: bool,
+
+    /// Sort this field's items by the VALUES of a data field rather than by
+    /// their labels -- Excel's `PivotField.AutoSort(order, "Sum of Amount",
+    /// PivotLine)` and a value cell's Sort Largest to Smallest (BUG-0459).
+    /// The direction is [`Self::sort_order`] (Ascending / Descending; a
+    /// Manual or DataSourceOrder field ignores it). A label sort clears it.
+    /// Absent reads None: an older reader shows the items in label order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_sort: Option<ValueSort>,
+}
+
+/// What a field's items are sorted by when they are sorted by VALUE
+/// ([`PivotField::value_sort`]): Excel's AutoSortField plus AutoSortPivotLine.
+///
+/// Items are ordered, within each parent, by the data field's value at the
+/// item on the given LINE of the OTHER axis (for a row field: one column of
+/// the pivot). An item with no data on that line is the smallest. Equal
+/// values are ordered by label [LIVE Excel 16, D 30 / E 30]: along a column
+/// line ascending reads D, E and descending E, D; along the grand total
+/// descending reads D, E and ascending E, D.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValueSort {
+    /// The data field, by its NAME (`ValueField::name`, Excel's
+    /// `AutoSortField` -- "Sum of Amount"): a name survives the value
+    /// fields being reordered. A name no value field carries sorts nothing.
+    pub value_field: String,
+    /// The line of the other axis the values are read along, as the MEMBER
+    /// KEY (`FieldCache::member_key`) of its item at each level, outermost
+    /// first. Empty: that axis's grand total (also the only line when it has
+    /// no fields). A key no member carries any more leaves the items in
+    /// ascending label order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
 }
 
 impl PivotField {
@@ -131,6 +164,7 @@ impl PivotField {
             sort_by_field_index: None,
             number_format: None,
             is_synthetic_total: false,
+            value_sort: None,
         }
     }
 
@@ -150,6 +184,7 @@ impl PivotField {
             sort_by_field_index: None,
             number_format: None,
             is_synthetic_total: false,
+            value_sort: None,
         }
     }
 }

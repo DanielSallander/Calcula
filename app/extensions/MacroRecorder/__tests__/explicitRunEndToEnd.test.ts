@@ -47,6 +47,8 @@ const h = vi.hoisted(() => ({
   writes: [] as Array<[number, number, string]>,
   /** The clears the realm's api.clearRange reached the backend with (BUG-0616 #2). */
   clears: [] as Array<{ rect: number[]; applyTo: string; sheetIndex: number | undefined }>,
+  /** The formats the realm's api.setRangeFormat reached the backend with (owner, 2026-11-04). */
+  formats: [] as Array<{ rows: number[]; cols: number[]; bold: unknown }>,
   undo: [] as string[],
   /** The Rust button door's answer to a click (`run_control_action`). */
   door: null as unknown,
@@ -133,7 +135,7 @@ vi.mock("@api/backend", async (orig) => ({
       // shown -- the gate's own checks are pinned by its Rust tests.
       if (phase === "runAdmitted" && args?.explicitRun) {
         h.grantSeq += 1;
-        return { recheckWhileRunning: false, cellAccess: true, grantId: h.grantSeq };
+        return { recheckWhileRunning: false, cellAccess: true, formatAccess: true, grantId: h.grantSeq };
       }
       return { recheckWhileRunning: false };
     },
@@ -213,6 +215,12 @@ vi.mock("@api/lib", async (orig) => ({
       updatedCells.push({ row, col, display: "", styleIndex: 0, sheetIndex: sheetIndex ?? null });
     }
     return { count: updatedCells.length, updatedCells };
+  },
+  // A cell FORMAT on the active sheet (owner, 2026-11-04): recorded, as the
+  // backend records it, into the open transaction.
+  applyFormatting: async (rows: number[], cols: number[], params: { bold?: unknown }) => {
+    h.formats.push({ rows, cols, bold: params?.bold });
+    return { cells: [] };
   },
   beginUndoTransaction: async () => h.begin(),
   commitUndoTransaction: async (ticket?: number | null) => h.close(ticket, "commit"),
@@ -375,7 +383,7 @@ const RECORDED_CELLS = generateMacroSource(
   { target: "objectScript", wrapper: "objectScript", name: "Owner B", recordedAt: "T" },
 ).source;
 
-/** The same macro, also making the cell bold -- outside cell access. */
+/** The same macro, also making the cell bold -- formatting (owner, 2026-11-04). */
 const RECORDED_FORMATS = RECORDED_CELLS.replace(
   /(await api\.(?:setCellValue|updateCellsBatch)\([^\n]*\n)/,
   "$1    await api.setRangeFormat(0, 0, 0, 0, { bold: true });\n",
@@ -427,6 +435,7 @@ beforeEach(() => {
   h.toasts.length = 0;
   h.writes.length = 0;
   h.clears.length = 0;
+  h.formats.length = 0;
   h.undo.length = 0;
   h.door = null;
   h.cells.clear();
@@ -880,7 +889,11 @@ describe("a run with cell access may CLEAR cell contents (BUG-0616 #2)", () => {
     expect(h.reports).toEqual([]);
   });
 
-  it("a macro that clears FORMATS too (Clear All) is refused before anything runs, naming the call", async () => {
+  // The owner's 2026-11-04 decision: formatting joins the grant, so a Clear All
+  // (contents AND formats) runs -- it was refused before anything ran.
+  // SABOTAGE: answer no formatAccess from the Rust double -> the broker
+  // refuses the clear and the run is taken back.
+  it("a macro that clears FORMATS too (Clear All) now runs: the clear lands, and the trail names the cells and the formatting", async () => {
     const clearAll: StoredScript = {
       ...CLEARS,
       id: "macro-owner-b-clear-all",
@@ -888,25 +901,52 @@ describe("a run with cell access may CLEAR cell contents (BUG-0616 #2)", () => {
     };
     expect(clearAll.source).toContain('{ applyTo: "all" }');
     h.store.set(clearAll.id, clearAll);
+    h.cells.set("0,0", "X");
     const result = await runFromMacrosDialog(clearAll);
-    expect(result.type).toBe("error");
-    if (result.type === "error") expect(result.message).toContain("api.clearRange");
-    expect(ShimWorker.all).toHaveLength(0);
-    expect(h.clears).toEqual([]);
+    expect(result.type, `${JSON.stringify(result)} toasts: ${JSON.stringify(h.toasts)}`).toBe("success");
+    expect(h.clears).toEqual([{ rect: [0, 0, 1, 0], applyTo: "all", sheetIndex: 1 }]);
+    await vi.waitFor(() => expect(h.reports).toHaveLength(1));
+    expect(h.reports[0]).toMatchObject({
+      completed: true,
+      sheets: [{ sheet: 1, cellsModified: 1 }],
+      formats: [{ sheet: 1, changes: 1, firstRow: 0, lastRow: 1, firstCol: 0, lastCol: 0 }],
+    });
   });
 });
 
 describe("nothing else changes", () => {
-  it("a recorded macro that also FORMATS is refused before anything runs, naming the call", async () => {
+  // The owner's 2026-11-04 decision: a recorded macro that also FORMATS runs
+  // when you start it -- its cell and its bold, in ONE step, on the trail.
+  // SABOTAGE: drop "api.setRangeFormat" from EXPLICIT_RUN_FORMAT_METHODS -> the
+  // pre-flight names it and nothing runs.
+  it("a recorded macro that also FORMATS runs when you start it: cell and bold, one step, on the trail", async () => {
     const result = await runFromMacrosDialog(FORMATS);
-    expect(result.type).toBe("error");
-    if (result.type === "error") {
-      expect(result.message).toContain("api.setRangeFormat");
-      expect(result.message).toContain("Nothing was changed");
-    }
-    expect(ShimWorker.all, "a realm was mounted for a refused run").toHaveLength(0);
-    expect(h.gate).toEqual([]);
+    expect(result.type, `${JSON.stringify(result)} toasts: ${JSON.stringify(h.toasts)}`).toBe("success");
+    expect(h.writes).toEqual([[0, 0, "OWNER-B"]]);
+    expect(h.formats).toEqual([{ rows: [0], cols: [0], bold: true }]);
+    expect(h.undo).toEqual(["begin", "join", "commit"]);
+    await vi.waitFor(() => expect(h.reports).toHaveLength(1));
+    expect(h.reports[0]).toMatchObject({
+      completed: true,
+      sheets: [{ sheet: 0, cellsModified: 1 }],
+      formats: [{ sheet: 0, changes: 1, firstRow: 0, lastRow: 0, firstCol: 0, lastCol: 0 }],
+    });
+  });
+
+  // THE SANDBOX: the same macro started by a SCRIPT gets neither half.
+  it("the same formatting macro started by a SCRIPT formats nothing and changes nothing", async () => {
+    await expect(
+      runObjectScriptOnce({
+        name: "Driver",
+        source: `function setup(context) { return context.api.runMacro("${FORMATS.id}"); }\n`,
+      }),
+    ).rejects.toThrow(NEEDS_CELL_ACCESS);
+    // POSITIVE CONTROL: the macro's realm was mounted -- restricted.
+    expect(ShimWorker.all).toHaveLength(2);
+    expect(ShimWorker.all[1].spec?.explicitRunCells).toBeUndefined();
+    expect(h.formats).toEqual([]);
     expect(h.writes).toEqual([]);
+    expect(h.reports).toEqual([]);
   });
 
   it("an application you have NOT approved: the pass is worth nothing", async () => {

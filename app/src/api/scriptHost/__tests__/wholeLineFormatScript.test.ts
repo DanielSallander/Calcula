@@ -47,6 +47,8 @@ import * as wrappers from "../../../core/lib/tauri-api";
 import { applyRangeFormat, executeClearRange } from "../host";
 import {
   MAX_FORMAT_RECT_CELLS,
+  MAX_RESTRICTED_FORMAT_RECT_CELLS,
+  vFormatRangeRefRestricted,
   isFormatLineRect,
   vClearRange,
   vFormatRangeRef,
@@ -120,11 +122,17 @@ describe("the format / clear rectangle bound (BUG-0616 #1)", () => {
   });
 
   it("the policy rows use the line-aware bound; the READ rows keep 100,000", () => {
-    for (const m of ["api.setRangeFormat", "sheet.setRangeFormat", "api.clearRangeFormat", "sheet.clearRangeFormat", "api.clearRange"]) {
+    for (const m of ["api.setRangeFormat", "api.clearRangeFormat", "api.clearRange"]) {
       expect(ALLOWLIST[m].limits?.maxCells, m).toBe(MAX_FORMAT_RECT_CELLS);
     }
+    // The RESTRICTED rows keep whole lines at any size but bound every other
+    // rectangle at 100,000 (BUG-0659, changed deliberately from 4,000,000:
+    // explicitRunGrant.test.ts pins the bound and its reason).
+    for (const m of ["sheet.setRangeFormat", "sheet.clearRangeFormat"]) {
+      expect(ALLOWLIST[m].limits?.maxCells, m).toBe(MAX_RESTRICTED_FORMAT_RECT_CELLS);
+    }
     expect(ALLOWLIST["api.clearRangeFormat"].validate).toBe(vFormatRangeRef);
-    expect(ALLOWLIST["sheet.clearRangeFormat"].validate).toBe(vFormatRangeRef);
+    expect(ALLOWLIST["sheet.clearRangeFormat"].validate).toBe(vFormatRangeRefRestricted);
     // A read answers cell by cell, so a whole column stays out of reach there.
     expect(decidePolicy(UNLOCKED, "api.getRangeFormat", [0, 2, LAST_ROW, 2]).admitted).toBe(false);
   });

@@ -1019,7 +1019,9 @@ pub(crate) fn write_pivot_to_grid(
             // Determine CellValue and style_index (shared between both grid writes)
             let cell_value = match &pivot_cell.value {
                 pivot_engine::PivotCellValue::Empty => CellValue::Empty,
-                pivot_engine::PivotCellValue::Number(n) => CellValue::Number(*n),
+                // A non-finite value (a model measure's 1/0, -1/0, 0/0) is
+                // #NUM!, as Excel's data-model PivotTable shows it [LIVE].
+                pivot_engine::PivotCellValue::Number(n) => crate::bi::member::grid_number_value(*n),
                 pivot_engine::PivotCellValue::Text(s) => {
                     if s.is_empty() {
                         CellValue::Empty
@@ -1028,7 +1030,11 @@ pub(crate) fn write_pivot_to_grid(
                     }
                 }
                 pivot_engine::PivotCellValue::Boolean(b) => CellValue::Boolean(*b),
-                pivot_engine::PivotCellValue::Error(e) => CellValue::Text(format!("#{}", e)),
+                // An error VALUE, as Excel's PivotTable holds it [LIVE]:
+                // ISERROR is TRUE (it was the text "#DIV/0!").
+                pivot_engine::PivotCellValue::Error(e) => {
+                    CellValue::Error(crate::pivot::utils::pivot_error_value(e))
+                }
             };
 
             // Build full cell style (fill, bold, borders, alignment, indent, number format)
@@ -2090,6 +2096,125 @@ pub fn lookup_pivot_data(
     None
 }
 
+// ============================================================================
+// GETPIVOTDATA in the shared cascade (NEW-getpivotdata-trials)
+// ============================================================================
+//
+// The active-sheet cascade (`commands::data::reevaluate_formula_cell`, through
+// `recalc_after_active_sheet_bulk_rewrite`) evaluated with NO pivot lookup, and
+// GETPIVOTDATA without one answers #REF!. So a Data Table or Goal Seek trial
+// whose input feeds `=GETPIVOTDATA("Sales",$E$3)*H1` re-evaluated it to #REF!
+// at every trial, wrote that, and left it there after the restore. Excel
+// [LIVE, backende/probe1.ps1 G1/G2, automatic]: the table J1:L3 over H1 gives
+// 200 / 300 (and 42 / 43 for `=GETPIVOTDATA(..,"Region","East")+H1`), and
+// `GoalSeek` of H2 to 500 by H1 answers H1 = 5. The cascade now reads the same
+// lookup `recalculate_sheet_values` and an edit's own evaluation read.
+//
+// WHICH STORE: the one a caller scoped on this thread ([`with_cascade_pivots`]:
+// a what-if write scopes its run's), else the app's managed one. Taken only
+// when a formula the cascade reaches mentions GETPIVOTDATA, after the grid
+// guards (the order `update_cell_impl` takes them in), and held to the end of
+// that cascade ([`PivotLookupGuards`]).
+
+thread_local! {
+    /// The pivot store [`with_cascade_pivots`] scoped on this thread, or null.
+    static CASCADE_PIVOTS: std::cell::Cell<*const PivotState> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// Run `f` with `pivots` as the store the shared cascade answers GETPIVOTDATA
+/// from on this thread. The previous scope is put back on every exit path, a
+/// panic included.
+pub(crate) fn with_cascade_pivots<R>(pivots: &PivotState, f: impl FnOnce() -> R) -> R {
+    struct Restore(*const PivotState);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0;
+            CASCADE_PIVOTS.with(|cell| cell.set(previous));
+        }
+    }
+    let _restore = Restore(CASCADE_PIVOTS.with(|cell| cell.replace(pivots as *const PivotState)));
+    f()
+}
+
+/// Run `f` with the pivot store the shared cascade answers GETPIVOTDATA from
+/// (see the section comment), or `None` when there is none (a unit test that
+/// scoped none; no app running).
+pub(crate) fn with_cascade_pivot_store<R>(f: impl FnOnce(Option<&PivotState>) -> R) -> R {
+    let scoped = CASCADE_PIVOTS.with(|cell| cell.get());
+    if !scoped.is_null() {
+        // SAFETY: the pointer is set only by `with_cascade_pivots`, from a
+        // reference that outlives the closure it runs, on THIS thread, and is
+        // put back before that closure's frame is left; `f` sees it for no
+        // longer than this call, and the higher-ranked borrow it is handed
+        // cannot be kept beyond it.
+        return f(Some(unsafe { &*scoped }));
+    }
+    let app = crate::bi::writeback_source::app_handle();
+    let managed = {
+        use tauri::Manager;
+        app.as_ref().and_then(|app| app.try_state::<PivotState>())
+    };
+    f(managed.as_ref().map(|s| s.inner()))
+}
+
+/// The two pivot stores a GETPIVOTDATA lookup reads, held together for one
+/// cascade. Taken after the grid guards; the caller holds neither store.
+pub(crate) struct PivotLookupGuards<'a> {
+    tables: crate::document_effect::ReadGuard<'a, HashMap<PivotId, (PivotDefinition, PivotCache)>>,
+    views: std::sync::MutexGuard<'a, HashMap<PivotId, PivotView>>,
+}
+
+impl<'a> PivotLookupGuards<'a> {
+    pub(crate) fn lock(pivots: &'a PivotState) -> Option<Self> {
+        let tables = pivots.pivot_tables.read().ok()?;
+        let views = pivots.views.lock().ok()?;
+        Some(PivotLookupGuards { tables, views })
+    }
+
+    /// [`lookup_pivot_data`] over the held stores.
+    pub(crate) fn lookup(
+        &self,
+        data_field: &str,
+        pivot_sheet: Option<&str>,
+        pivot_row: u32,
+        pivot_col: u32,
+        pairs: &[(&str, &str)],
+    ) -> Option<f64> {
+        lookup_pivot_data(&self.tables, &self.views, data_field, pivot_sheet, pivot_row, pivot_col, pairs)
+    }
+}
+
+/// A GETPIVOTDATA lookup that takes the pivot stores the FIRST time a
+/// GETPIVOTDATA actually evaluates -- a cascade that reaches none takes
+/// nothing -- and holds them until it is dropped. For a cascade whose caller
+/// holds neither store (the shared entry points); a caller that already holds
+/// them (`update_cell_impl`, the batch, a fill) hands its own lookup instead.
+pub(crate) struct LazyPivotLookup<'a> {
+    pivots: Option<&'a PivotState>,
+    guards: std::cell::OnceCell<Option<PivotLookupGuards<'a>>>,
+}
+
+impl<'a> LazyPivotLookup<'a> {
+    pub(crate) fn new(pivots: Option<&'a PivotState>) -> Self {
+        LazyPivotLookup { pivots, guards: std::cell::OnceCell::new() }
+    }
+
+    /// [`lookup_pivot_data`], the stores taken on the first call.
+    pub(crate) fn lookup(
+        &self,
+        data_field: &str,
+        pivot_sheet: Option<&str>,
+        pivot_row: u32,
+        pivot_col: u32,
+        pairs: &[(&str, &str)],
+    ) -> Option<f64> {
+        self.guards
+            .get_or_init(|| self.pivots.and_then(PivotLookupGuards::lock))
+            .as_ref()?
+            .lookup(data_field, pivot_sheet, pivot_row, pivot_col, pairs)
+    }
+}
+
 /// The GETPIVOTDATA item a group-path entry names: the cache's label, or
 /// `pivot_engine::BLANK_ITEM_LABEL` for the blank member. A cell of the
 /// (blank) row names its member (`VALUE_ID_BLANK`, wave D X1) and the cache
@@ -2385,11 +2510,11 @@ pub(crate) struct PivotRecalcStates<'a> {
 /// user is on Sheet1, or the user on the canvas while Sheet1's
 /// `='Canvas1'!C5` reads it -- left every reader on every other sheet stale.
 ///
-/// GETPIVOTDATA: the active-sheet cascade evaluates with no pivot lookup wired
-/// (`reevaluate_formula_cell` / `recalc_walked_cell` pass none), so every
-/// GETPIVOTDATA it reaches -- on the active sheet AND on any sheet reading it
-/// across a sheet boundary -- comes out of it as #REF!. On that branch the
-/// cascade is therefore followed by `recalc_after_off_sheet_write(&[dest])`,
+/// GETPIVOTDATA: the cascade answers it from this pivot store
+/// (`with_cascade_pivots`, NEW-getpivotdata-trials) -- on the active sheet and
+/// across the cross-sheet walk. It used to evaluate with no pivot lookup, so
+/// every GETPIVOTDATA it reached came out #REF!, and on that branch the
+/// cascade is still followed by `recalc_after_off_sheet_write(&[dest])`,
 /// which re-evaluates the active sheet and every sheet that reads it through
 /// `recalculate_sheet_values`, where the lookup IS wired: the pass ends on the
 /// pivot's numbers. (Running only the active sheet's whole-sheet pass here --
@@ -2426,14 +2551,16 @@ pub(crate) fn recalc_after_pivot_write(
     let active_sheet = *state.active_sheet.read().unwrap();
     if dest_sheet_idx == active_sheet {
         let mut recalculated = Vec::new();
-        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
-            state,
-            states.user_files,
-            states.pane,
-            states.ribbon,
-            &seeds,
-            &mut recalculated,
-        );
+        with_cascade_pivots(pivot_state, || {
+            crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+                state,
+                states.user_files,
+                states.pane,
+                states.ribbon,
+                &seeds,
+                &mut recalculated,
+            )
+        });
         // GETPIVOTDATA repair pass (see above): the active sheet and every
         // sheet reading it, re-evaluated WITH the pivot lookup.
         crate::commands::data::recalc_after_off_sheet_write(
@@ -2591,7 +2718,7 @@ pub(crate) fn recalculate_sheet_formulas(
             Ok(parsed) => {
                 let resolved = if crate::ast_has_named_refs(&parsed) {
                     let mut visited = std::collections::HashSet::new();
-                    crate::resolve_names_in_ast(&parsed, &named_ranges_map, active_sheet, &mut visited)
+                    crate::resolve_names_in_ast_at(&parsed, &named_ranges_map, active_sheet, (row, col), &mut visited)
                 } else {
                     parsed
                 };
@@ -2848,6 +2975,214 @@ mod dest_sheet_tests {
 }
 
 /// BUG-0541: auto-fit measures what is DRAWN, in characters.
+#[cfg(test)]
+mod non_finite_value_tests {
+    use super::*;
+
+    /// NEW-bi-nonfinite-cells: a model measure's `1/0`, `-1/0` and `0/0`
+    /// reach a BI PivotTable's cache as Infinity, -Infinity and NaN. [LIVE]
+    /// Excel 16's data-model PivotTable shows `#NUM!` for each; the writer
+    /// wrote `Number(inf)` into the grid.
+    #[test]
+    fn a_bi_pivot_writes_a_non_finite_value_as_num_error() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{Field, Schema};
+        use std::sync::Arc;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("Region", ArrowDataType::Utf8, true),
+                Field::new("Ratio", ArrowDataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["East", "North", "South", "West"])),
+                Arc::new(Float64Array::from(vec![f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 2.5])),
+            ],
+        )
+        .unwrap();
+        let mut cache = build_cache_from_arrow_batches(identity::EntityId::ZERO, &[batch]).expect("the cache");
+        let mut def = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        def.row_fields.push(pivot_engine::PivotField::new(0, "Region".to_string()));
+        def.value_fields
+            .push(pivot_engine::ValueField::new(1, "Ratio".to_string(), pivot_engine::AggregationType::Sum));
+        let view = safe_calculate_pivot(&def, &mut cache);
+        let mut grid = engine::Grid::new();
+        let mut styles = StyleRegistry::new();
+        write_pivot_to_grid(&mut grid, None, &view, (0, 0), &mut styles, &PivotGridTheme::for_choice(None));
+        let value_of = |label: &str| -> CellValue {
+            let row = (0..=grid.max_row)
+                .find(|r| grid.get_cell(*r, 0).map(|c| c.value == CellValue::Text(label.to_string())).unwrap_or(false))
+                .unwrap_or_else(|| panic!("no row labelled {label}"));
+            grid.get_cell(row, 1).map(|c| c.value.clone()).unwrap_or(CellValue::Empty)
+        };
+        for region in ["East", "North", "South"] {
+            assert_eq!(value_of(region), CellValue::Error(engine::CellError::Num), "{region}");
+        }
+        assert_eq!(value_of("West"), CellValue::Number(2.5));
+        // The grand total over +Inf, -Inf, NaN and 2.5 is NaN: #NUM! too. No
+        // cell of the grid holds a number no Excel cell can hold.
+        assert!(
+            view.cells.iter().flatten().any(|c| c.cell_type == pivot_engine::PivotCellType::GrandTotal
+                && matches!(c.value, pivot_engine::PivotCellValue::Number(n) if n.is_nan())),
+            "fixture: the grand total is NaN"
+        );
+        let non_finite = grid
+            .cells
+            .values()
+            .filter(|c| matches!(c.value, CellValue::Number(n) if !n.is_finite()))
+            .count();
+        assert_eq!(non_finite, 0);
+        let num_errors = grid
+            .cells
+            .values()
+            .filter(|c| c.value == CellValue::Error(engine::CellError::Num))
+            .count();
+        assert_eq!(num_errors, 4, "three regions and the grand total");
+    }
+}
+
+#[cfg(test)]
+mod error_value_cell_tests {
+    use super::*;
+
+    /// NEW-pivot-error-cells. [LIVE] Excel 16 (lane bie probe 1): a
+    /// calculated field `=Amount/0` shows `#DIV/0!` in every value cell, and
+    /// each is an error value -- `ISERROR` TRUE, `ERROR.TYPE` 2. The writer
+    /// put the TEXT "#DIV/0!" in the grid, so `ISERROR` answered FALSE.
+    #[test]
+    fn a_pivot_value_cell_holding_an_error_is_an_error_value_in_the_grid() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{Field, Schema};
+        use std::sync::Arc;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("Region", ArrowDataType::Utf8, true),
+                Field::new("Amount", ArrowDataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["East", "West"])),
+                Arc::new(Float64Array::from(vec![10.0, 5.0])),
+            ],
+        )
+        .unwrap();
+        let mut cache = build_cache_from_arrow_batches(identity::EntityId::ZERO, &[batch]).expect("the cache");
+        let mut def = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        def.row_fields.push(pivot_engine::PivotField::new(0, "Region".to_string()));
+        def.value_fields
+            .push(pivot_engine::ValueField::new(1, "Amount".to_string(), pivot_engine::AggregationType::Sum));
+        def.calculated_fields.push(pivot_engine::CalculatedField {
+            name: "Ratio".to_string(),
+            formula: "Amount/0".to_string(),
+            number_format: None,
+        });
+        let view = safe_calculate_pivot(&def, &mut cache);
+        assert!(
+            view.cells.iter().flatten().any(|c| matches!(&c.value, pivot_engine::PivotCellValue::Error(e) if e == "DIV/0!")),
+            "fixture: the calculated field is DIV/0! in the view"
+        );
+        let mut grid = engine::Grid::new();
+        let mut styles = StyleRegistry::new();
+        write_pivot_to_grid(&mut grid, None, &view, (0, 0), &mut styles, &PivotGridTheme::for_choice(None));
+        let errors = grid
+            .cells
+            .values()
+            .filter(|c| c.value == CellValue::Error(engine::CellError::Div0))
+            .count();
+        // East, West and the grand total.
+        assert_eq!(errors, 3, "every Ratio cell is a #DIV/0! error value");
+        assert!(
+            grid.cells.values().all(|c| !matches!(&c.value, CellValue::Text(t) if t.starts_with('#'))),
+            "no error is written as text"
+        );
+        // ISERROR over one of them, through the formula engine.
+        let row = (0..=grid.max_row)
+            .find(|r| grid.get_cell(*r, 0).map(|c| c.value == CellValue::Text("East".to_string())).unwrap_or(false))
+            .expect("the East row");
+        let ratio_col = (0..=grid.max_col)
+            .find(|c| grid.get_cell(row, *c).map(|cell| matches!(cell.value, CellValue::Error(_))).unwrap_or(false))
+            .expect("East's Ratio cell");
+        let formula = format!("ISERROR({}{})", engine::index_to_col(ratio_col), row + 1);
+        let parsed = parser::parse(&formula).expect("parse");
+        let ast = crate::convert_expr(&parsed);
+        let result = engine::Evaluator::new(&grid).evaluate(&ast);
+        assert_eq!(result.to_cell_value(), CellValue::Boolean(true), "{formula}");
+    }
+
+    /// NEW-getpivotdata-nonfinite: a BI pivot's value cell over a measure's
+    /// 1/0, -1/0 or 0/0 shows #NUM! [LIVE, round D], and GETPIVOTDATA reads
+    /// that cell; it answered the raw infinity. Through the formula engine
+    /// and the same lookup every recalculation route installs.
+    #[test]
+    fn getpivotdata_over_a_non_finite_pivot_value_is_num() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{Field, Schema};
+        use std::sync::Arc;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("Region", ArrowDataType::Utf8, true),
+                Field::new("Ratio", ArrowDataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["East", "North", "South", "West"])),
+                Arc::new(Float64Array::from(vec![f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 2.5])),
+            ],
+        )
+        .unwrap();
+        let id = identity::EntityId::ZERO;
+        let mut cache = build_cache_from_arrow_batches(id, &[batch]).expect("the cache");
+        let mut def = PivotDefinition::new(id, (0, 0), (0, 0));
+        def.row_fields.push(pivot_engine::PivotField::new(0, "Region".to_string()));
+        def.value_fields
+            .push(pivot_engine::ValueField::new(1, "Ratio".to_string(), pivot_engine::AggregationType::Sum));
+        let view = safe_calculate_pivot(&def, &mut cache);
+        let mut tables = HashMap::new();
+        tables.insert(id, (def, cache));
+        let mut views = HashMap::new();
+        views.insert(id, view);
+        let lookup = |field: &str, sheet: Option<&str>, row: u32, col: u32, pairs: &[(&str, &str)]| {
+            lookup_pivot_data(&tables, &views, field, sheet, row, col, pairs)
+        };
+        let grid = engine::Grid::new();
+        let mut evaluator = engine::Evaluator::new(&grid);
+        evaluator.set_pivot_data_fn(&lookup);
+        let answer = |region: &str| {
+            let formula = format!("GETPIVOTDATA(\"Ratio\",A1,\"Region\",\"{region}\")");
+            let parsed = parser::parse(&formula).expect("parse");
+            evaluator.evaluate(&crate::convert_expr(&parsed)).to_cell_value()
+        };
+        for region in ["East", "North", "South"] {
+            assert_eq!(answer(region), CellValue::Error(engine::CellError::Num), "{region}");
+        }
+        assert_eq!(answer("West"), CellValue::Number(2.5), "a finite value still answers");
+    }
+
+    /// Both spellings of a pivot error code -- a calculated field's bare code
+    /// and a source cell's variant name -- name the right error, and the wire
+    /// shows its Excel literal.
+    #[test]
+    fn a_pivot_error_code_maps_to_its_error_and_its_excel_literal() {
+        use crate::pivot::utils::{pivot_cell_to_data, pivot_error_value};
+        use engine::CellError;
+        for (code, error) in [
+            ("DIV/0!", CellError::Div0),
+            ("#DIV/0!", CellError::Div0),
+            ("NUM!", CellError::Num),
+            ("VALUE!", CellError::Value),
+            ("N/A", CellError::NA),
+            ("Div0", CellError::Div0),
+            ("NA", CellError::NA),
+            ("Ref", CellError::Ref),
+            ("Name", CellError::Name),
+            ("something else", CellError::Value),
+        ] {
+            assert_eq!(pivot_error_value(code), error, "{code}");
+            let mut cell = pivot_engine::PivotViewCell::data(0.0);
+            cell.value = pivot_engine::PivotCellValue::Error(code.to_string());
+            let json = serde_json::to_value(pivot_cell_to_data(&cell, &engine::LocaleSettings::invariant())).unwrap();
+            assert_eq!(json["value"], serde_json::json!(error.as_literal()), "{code} on the wire");
+        }
+    }
+}
+
 #[cfg(test)]
 mod auto_fit_len_tests {
     use super::auto_fit_text_len;

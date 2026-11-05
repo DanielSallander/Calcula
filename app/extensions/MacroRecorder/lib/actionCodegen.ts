@@ -1121,6 +1121,20 @@ function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
       );
       return;
 
+    // Home > Insert Cells... / Delete Cells... (BUG-0358): VBA's Range.Insert /
+    // Range.Delete with a shift. The person's answer to "unmerge?" travels.
+    case "insertCells":
+    case "deleteCells": {
+      const call = event.kind === "insertCells" ? "insertCells" : "deleteCells";
+      const options = event.unmergeCutMerges ? ", { unmergeCutMerges: true }" : "";
+      emitObjectScriptOnly(
+        ctx,
+        `await api.${call}(${event.startRow}, ${event.startCol}, ${event.endRow}, ${event.endCol}, ${jsString(event.shift)}${options}); // ${a1Range(event.startRow, event.startCol, event.endRow, event.endCol)}`,
+        `${event.kind === "insertCells" ? "insert" : "delete"} cells ${a1Range(event.startRow, event.startCol, event.endRow, event.endCol)} (shift ${event.shift})`,
+      );
+      return;
+    }
+
     // A merge the caller addressed to ANOTHER sheet (a script's off-sheet
     // merge) replays there: `api.mergeCells` / `api.unmergeCells` take the
     // sheet as their last argument, and the active sheet never moves.

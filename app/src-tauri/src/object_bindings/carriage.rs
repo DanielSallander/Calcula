@@ -30,6 +30,10 @@
 //      ones it carries now -- and then lands the new version's rows, so a
 //      binding the publisher removed in v2 stops binding. Bindings of the
 //      subscriber's own objects are never touched.
+//   4. DEAD CONTAINER KEYS (BUG-0491). A control's binding of a `container*`
+//      key its type does not paint is not installed, exactly as a `.cala` load
+//      skips it (`restore_bindings_from_disk`) and the control's own pull drops
+//      the literal (`controls::drop_dead_container_keys`).
 //
 // The legacy-spelling migration (`migrate::migrate_legacy_formulas`) runs after
 // the landing with the pull's own effect: an application published before
@@ -74,6 +78,9 @@ pub(crate) struct LandedBindings {
     pub removed: usize,
     /// Rows the pull carried whose object did not land here.
     pub not_landed: usize,
+    /// Rows of a landed control binding a `container*` key that control does
+    /// not paint (BUG-0491) -- not installed, as on a `.cala` load.
+    pub dead_container: usize,
 }
 
 impl PulledBindings {
@@ -270,6 +277,27 @@ pub(crate) fn land_pulled_bindings(
         .map(|(object, _)| object)
         .collect();
 
+    // A binding of a container key its control does not paint (BUG-0491) does
+    // not land: the binding's `set` refuses one, the control's own pull dropped
+    // the literal (`materialize_saved_controls` -> `drop_dead_container_keys`),
+    // and a `.cala` load skips it (`restore_bindings_from_disk`) -- so a
+    // package cannot carry one in either. Judged here, after the controls have
+    // landed and BEFORE the (leaf) binding store is taken: the check reads the
+    // controls store.
+    let dead_rows: HashSet<usize> = pulled
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| match entry_from_saved(row) {
+            Some((key, _)) => {
+                landed.contains(&key.object)
+                    && crate::controls::refuse_dead_container_binding(stores.state, &key.object, &key.path).is_err()
+            }
+            None => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+
     let mut outcome = LandedBindings::default();
     {
         let mut store = match stores.state.object_bindings.write(effect) {
@@ -284,7 +312,11 @@ pub(crate) fn land_pulled_bindings(
             .bindings
             .retain(|key, _| !previously_owned.contains(&key.object) && !landed.contains(&key.object));
         outcome.removed = before - store.bindings.len();
-        for row in &pulled.rows {
+        for (i, row) in pulled.rows.iter().enumerate() {
+            if dead_rows.contains(&i) {
+                outcome.dead_container += 1;
+                continue;
+            }
             match entry_from_saved(row) {
                 Some((key, binding)) if landed.contains(&key.object) => {
                     store.bindings.insert(key, binding);
@@ -299,6 +331,13 @@ pub(crate) fn land_pulled_bindings(
     }
     if outcome.removed > 0 || outcome.installed > 0 {
         super::announce_reload();
+    }
+    if outcome.dead_container > 0 {
+        crate::log_info!(
+            "BINDINGS",
+            "{} pulled binding(s) of a container key their control does not paint were not installed",
+            outcome.dead_container
+        );
     }
     if outcome.not_landed > 0 {
         crate::log_info!(

@@ -121,7 +121,9 @@ fn a_defined_name_whose_sheet_is_deleted_reports_ref() {
 
     // NOT silently left pointing at a sheet that no longer exists -- which,
     // before the evaluator stopped falling back, read the local sheet instead.
-    assert_eq!(refers_to(&state, "Sales"), "=#REF!");
+    // Excel [LIVE, 2026-11-05, sheetspill/probe1.ps1] keeps the cell part:
+    // `=#REF!$A$1:$A$10`, never the bare error.
+    assert_eq!(refers_to(&state, "Sales"), "=#REF!$A$1:$A$10");
     // ...and a name pointing at a sheet the delete did not touch keeps its own
     // spelling. See the rename test above for why this is no longer `SHEET3`.
     assert_eq!(

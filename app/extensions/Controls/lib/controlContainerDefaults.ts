@@ -34,6 +34,7 @@ import {
   applyVisualContainerPatch,
   containerFieldPatch,
   controlContainerKey,
+  controlPaintsContainerField,
   isSafeVisualColor,
   type ContainerFieldId,
   type ResolvedVisualContainer,
@@ -243,6 +244,12 @@ export function controlFieldOffered(c: ContainerCapabilities, id: ContainerField
     case "divider":
       return c.divider;
     case "spacing":
+      // A distance shows only beside the band it follows (ObjectPane
+      // formatValues.fieldOffered's rule): a picture and a navigator have no
+      // subtitle and no divider, so no spacing below either (BUG-0491).
+      if (id === "spacing.belowTitle") return c.title;
+      if (id === "spacing.belowSubtitle") return c.subtitle;
+      if (id === "spacing.belowDivider") return c.divider;
       return c.title || c.subtitle || c.divider;
     case "background":
       return c.background && (id !== "background.transparency" || c.backgroundTransparency);
@@ -318,6 +325,10 @@ export function readControlContainer(
   const keyType = keyTypeOf(kind);
   for (const id of VISUAL_CONTAINER_FIELD_IDS) {
     if (isPaintField(kind, id)) continue;
+    // ONLY the keys this kind paints (BUG-0491, @api CONTROL_PAINTED_CONTAINER_FIELDS
+    // -- the list Rust's doors accept): a dead key a document still carried
+    // (a button's title, a shape's corner radius) never reaches the painter.
+    if (!controlPaintsContainerField(keyType, id)) continue;
     const key = controlContainerKey(keyType, id);
     if (!key) continue;
     set(id, parseFlatValue(id, props[key]));
@@ -395,6 +406,8 @@ export function controlContainerWrites(
   for (const id of VISUAL_CONTAINER_FIELD_IDS) {
     const { touched, value } = patchValue(patch, id);
     if (!touched || isPaintField(kind, id)) continue;
+    // Never a key the kind does not paint: Rust refuses it (BUG-0491).
+    if (!controlPaintsContainerField(keyType, id)) continue;
     const key = controlContainerKey(keyType, id);
     if (!key) continue;
     writes.set(key, flatValueOf(value));

@@ -43,6 +43,7 @@ vi.mock("@api/gridOverlays", () => ({
 
 import { CreateTableDialog } from "../CreateTableDialog";
 import { createTableAsync } from "../../lib/tableStore";
+import { findHardcodedColours } from "@api/layout";
 
 const CREATED = {
   id: "t9",
@@ -138,5 +139,19 @@ describe("Create Table dialog", () => {
     act(() => okButton().click());
     await flush();
     expect(h.createTable.mock.calls[0][0]).not.toHaveProperty("styleName");
+  });
+});
+
+describe("Create Table paints with theme tokens only (BUG-0376)", () => {
+  it("no hard-coded colour in the dialog, its refusal line included (it was always dark)", async () => {
+    h.createTable.mockResolvedValue({ success: false, error: "The range overlaps a table" });
+    act(() => {
+      root.render(<CreateTableDialog isOpen onClose={vi.fn()} />);
+    });
+    await flush();
+    act(() => okButton().click());
+    await flush();
+    expect(document.body.textContent).toContain("overlap");
+    expect(findHardcodedColours(document.body)).toEqual([]);
   });
 });

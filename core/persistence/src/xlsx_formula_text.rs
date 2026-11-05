@@ -28,9 +28,11 @@
 //! * A call to a named LAMBDA is the call the user wrote (`Double(D4)`): the
 //!   `__INVOKE__` marker is Calcula's own and no other reader knows it.
 //!
-//! * An INLINE LAMBDA call is the call the user wrote too: Calcula stores
-//!   `=LAMBDA(x,x+1)(2)` as `__INVOKE__(LAMBDA(x,x+1),2)`, and [LIVE] Excel 16
-//!   showed `#NAME?` for that text; its own file reads
+//! * An INLINE LAMBDA call is the call the user wrote too: Calcula stored
+//!   `=LAMBDA(x,x+1)(2)` as `__INVOKE__(LAMBDA(x,x+1),2)` until lane formc
+//!   (2026-11-05; it now renders `LAMBDA(x,x+1)(2)`, and an older file still
+//!   holds the marker), and [LIVE] Excel 16 showed `#NAME?` for that text; its
+//!   own file reads
 //!   `_xlfn.LAMBDA(_xlpm.x,_xlpm.x+1)(2)`.
 //! * A cell-shaped LET / LAMBDA name (`A1`, `E5`, `SUM2`, `LOG10`) is a
 //!   parameter like any other ([LIVE] `_xlfn.LET(_xlpm.A1,5,_xlpm.A1+1)`), and
@@ -62,22 +64,25 @@
 //!   reference's column name is escaped `'#` ([LIVE] all Excel 16's own; it
 //!   REFUSED the trim, spill and unescaped `#` texts and read `Table1[@Col]`
 //!   from a file as `#REF!`).
-//! * A formula Excel cannot hold at all -- a LET / LAMBDA parameter named
-//!   like a built-in and called with an arity the built-in refuses
-//!   ([`Unwritable`]) -- is written as its cell's value alone, and the loss
-//!   reported (`XlsxExportLosses::formulas`).
+//! * A bare function name used as a value (an eta-reduced LAMBDA,
+//!   `MAP(A1:A3,ABS)`) is `_xleta.ABS` ([`is_excel_function_value`]).
+//! * A formula Excel reads in its R1C1 fallback -- one that declares a
+//!   cell-shaped name or uses a bare `C` / `R` -- spells every other cell as
+//!   that reading means it ([`mark_r1c1_fallback`]).
+//! * A formula Excel cannot hold at all -- a built-in called with an arity
+//!   Excel refuses, a LET / LAMBDA declaring one name twice ([`Unwritable`])
+//!   -- is written as its cell's value alone, and the loss reported
+//!   (`XlsxExportLosses::formulas`).
 //!
 //! [`calcula_formula_text`] is the reader's inverse: each of those spellings
 //! back to Calcula's typed syntax, then the prefixes stripped.
 //!
-//! The future-function prefix (`_xlfn.`) of a CELL formula is the library's
-//! (`rust_xlsxwriter::Formula::new`); a DEFINED NAME's formula gets none from
-//! the library, so [`escape_defined_name_formulas`] borrows the library's own
-//! escaping for it ([LIVE] Excel 16 saves a name `=LAMBDA(n,n+1)` as
-//! `_xlfn.LAMBDA(_xlpm.n,_xlpm.n+1)` and `=XLOOKUP(..)` as `_xlfn.XLOOKUP(..)`).
-//! The library's table has no `_TRO_*`, and it copies any text that already
-//! holds `_xlfn.` unescaped, so a formula with a trim reference is escaped
-//! through the same borrowed route first ([`library_formula`]).
+//! The future-function prefix (`_xlfn.`, `_xlfn._xlws.`) is Calcula's own
+//! ([`escape_future_functions`]), for a cell's formula and a DEFINED NAME's
+//! alike ([LIVE] Excel 16 saves a name `=LAMBDA(n,n+1)` as
+//! `_xlfn.LAMBDA(_xlpm.n,_xlpm.n+1)`): rust_xlsxwriter's table lacks the
+//! newer functions and the trim operators, and the library copies a text
+//! that holds `_xlfn.` anywhere, inside a string too, unescaped.
 
 use crate::PersistenceError;
 
@@ -85,6 +90,11 @@ use crate::PersistenceError;
 #[cfg(test)]
 #[path = "xlsx_formula_text_live_table.rs"]
 mod live_table;
+
+/// Every built-in's call, at the argument counts live Excel typed and refused.
+#[cfg(test)]
+#[path = "xlsx_formula_text_live_arity.rs"]
+mod live_arity;
 
 /// The prefix Excel gives a LAMBDA / LET parameter name in a file.
 const PARAMETER_PREFIX: &str = "_xlpm.";
@@ -95,6 +105,10 @@ const OPTIONAL_PREFIX: &str = "_xlop.";
 /// The prefix Excel gives a plain cell in a range whose other half is a
 /// cell-shaped parameter.
 const CELL_NAME_PREFIX: &str = "_xlnm.";
+
+/// The prefix Excel gives a bare function name used as a value (an
+/// eta-reduced LAMBDA, `MAP(A1:A3,ABS)`).
+const FUNCTION_VALUE_PREFIX: &str = "_xleta.";
 
 /// Excel's file functions for the trim-reference operator, by which side is
 /// trimmed: (name, leading dot, trailing dot).
@@ -108,10 +122,147 @@ const TRIM_OPERATORS: [(&str, bool, bool); 3] =
 /// doc). `anchor` is the cell the formula sits in, 0-based `(row, col)`, for a
 /// bare `C` / `R`; a defined name passes `None`.
 pub(crate) fn excel_formula_text(formula: &str, anchor: Option<(u32, u32)>) -> String {
+    excel_formula_text_with_names(formula, anchor, &DefinedNames::default())
+}
+
+/// [`excel_formula_text`] in a workbook with these defined names: a bare
+/// name that is one of them is the name, never a function value ([LIVE]
+/// Excel 16 saves `=LET(Rate,Rate*2,Rate)`, `Rate` a defined name, with the
+/// value `Rate*2` -- RATE is also a function, `_xleta.RATE` is no name).
+pub(crate) fn excel_formula_text_with_names(formula: &str, anchor: Option<(u32, u32)>, names: &DefinedNames) -> String {
     let clean = formula.strip_prefix('=').unwrap_or(formula);
     let collapsed = engine::ast_render::collapse_formula_text(clean);
     let collapsed = collapsed.strip_prefix('=').unwrap_or(&collapsed);
-    file_text(collapsed, anchor).0
+    file_text(collapsed, anchor, names).0
+}
+
+/// A DEFINED NAME's formula as a file's `<definedName>` carries it (before the
+/// future-function escaping): [`excel_formula_text`] with every reference
+/// that names no sheet made the using sheet's own (`!A1`). [LIVE] Excel 16
+/// refused to open a workbook whose name read `A1`, or
+/// `_xlfn.LAMBDA(_xlpm.x,SUM(A1:A5)*_xlpm.x)`, and opened `!$A$1` (= 1 in J2)
+/// and `_xlfn.LAMBDA(_xlpm.x,SUM(!$A$1:$A$5)*_xlpm.x)` (`=Nm(2)` = 30); `!A1`,
+/// relative, it read from the using cell.
+///
+/// A RELATIVE PART STAYS RELATIVE (NEW-relative-name-anchor). A name's text is
+/// relative to A1 in Calcula as in Excel's file, read from the cell that uses
+/// it (`resolve_names_in_ast_at` in the host; [LIVE, lane formd] Excel saves
+/// `Names.Add("rel","=Sheet1!A1")` as `<definedName name="rel">Sheet1!A1`, and
+/// `=ROW(rel)*1000+COLUMN(rel)` in J11 is 11010). This made every reference
+/// absolute while Calcula read a name's `A1` as cell A1 from every cell, so
+/// the file now keeps the `$` exactly as the name has it.
+pub(crate) fn excel_name_formula_text(formula: &str, names: &DefinedNames) -> String {
+    let clean = formula.strip_prefix('=').unwrap_or(formula);
+    let collapsed = engine::ast_render::collapse_formula_text(clean);
+    let collapsed = collapsed.strip_prefix('=').unwrap_or(&collapsed);
+    let tokens = tokenize(collapsed);
+    let mut edits = vec![Edit::default(); tokens.len()];
+    let mut scan = Scan { anchor: None, r1c1_fallback: false, refused: None };
+    mark_parameters(collapsed, &tokens, 0, tokens.len(), &[], &mut scan, &mut edits);
+    mark_r1c1_fallback(collapsed, &tokens, &mut scan, &mut edits);
+    mark_function_values(collapsed, &tokens, names, &mut edits);
+    qualify_sheetless_references(collapsed, &tokens, &mut edits);
+    operator_edits(collapsed, &tokens, &mut edits);
+    deleted_sheet_references(collapsed, &tokens, &mut edits);
+    apply_edits(collapsed, &tokens, &edits)
+}
+
+/// Every reference in a defined name's formula that names no sheet, as the
+/// using sheet's own (see [`excel_name_formula_text`]): a cell (`!A1`), a
+/// range's first half (`!A1:A5`), a bare column range (`!A:C`) and a row range
+/// (`!1:3`), each `$` exactly as the name has it -- a relative part is relative
+/// to the cell that uses the name, in Calcula as in Excel. A reference behind
+/// a sheet, a range's second half and a parameter (already edited) are left
+/// alone.
+fn qualify_sheetless_references(formula: &str, tokens: &[Token], edits: &mut [Edit]) {
+    let kind = |i: usize| tokens.get(i).map(|t| t.kind);
+    let untouched = |i: usize, edits: &[Edit]| edits.get(i).is_some_and(|e| e.replace.is_none());
+    let digits = |i: usize| kind(i) == Some(Kind::Number) && text(formula, &tokens[i]).chars().all(|c| c.is_ascii_digit());
+    let mut at = 0;
+    while at < tokens.len() {
+        let previous = at.checked_sub(1).and_then(kind);
+        // A range's second half (`A1:A5`, a trim's `A1:.A5`) and a reference
+        // behind a sheet (`Sheet1!A1`) need no sheet of their own.
+        let second_half = previous == Some(Kind::Punct(':'))
+            || (at >= 2 && is_other(formula, tokens, at - 1, ".") && kind(at - 2) == Some(Kind::Punct(':')));
+        if previous == Some(Kind::Punct('!')) || second_half {
+            at += 1;
+            continue;
+        }
+        let spelled = text(formula, &tokens[at]);
+        match tokens[at].kind {
+            Kind::Reference if untouched(at, edits) => {
+                edits[at].replace = Some(format!("!{}", spelled));
+                if kind(at + 1) == Some(Kind::Punct(':')) && kind(at + 2) == Some(Kind::Reference) && untouched(at + 2, edits) {
+                    at += 3;
+                    continue;
+                }
+            }
+            Kind::Name
+                if untouched(at, edits)
+                    && kind(at + 1) == Some(Kind::Punct(':'))
+                    && kind(at + 2) == Some(Kind::Name)
+                    && untouched(at + 2, edits)
+                    && !matches!(kind(at + 3), Some(Kind::Punct('!')) | Some(Kind::Punct('(')))
+                    && is_column_name(spelled)
+                    && is_column_name(text(formula, &tokens[at + 2])) =>
+            {
+                edits[at].replace = Some(format!("!{}", spelled));
+                at += 3;
+                continue;
+            }
+            Kind::Number if digits(at) && kind(at + 1) == Some(Kind::Punct(':')) && digits(at + 2) => {
+                edits[at].replace = Some(format!("!{}", spelled));
+                at += 3;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+}
+
+/// A workbook's defined names, compared as Excel does (ignoring case), and
+/// which of them are LAMBDAs.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DefinedNames {
+    names: std::collections::HashSet<String>,
+    lambdas: std::collections::HashSet<String>,
+}
+
+impl DefinedNames {
+    pub(crate) fn of(workbook: &crate::Workbook) -> Self {
+        let lambda = |refers_to: &str| {
+            let body = refers_to.trim_start_matches('=').trim_start();
+            strip_prefix_ci(body, "_xlfn.").unwrap_or(body).get(..7).is_some_and(|head| head.eq_ignore_ascii_case("LAMBDA("))
+        };
+        DefinedNames {
+            names: workbook.named_ranges.iter().map(|nr| nr.name.to_lowercase()).collect(),
+            lambdas: workbook.named_ranges.iter().filter(|nr| lambda(&nr.refers_to)).map(|nr| nr.name.to_lowercase()).collect(),
+        }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        !self.names.is_empty() && self.names.contains(&name.to_lowercase())
+    }
+
+    /// Whether a FILE text ([`excel_formula_text_with_names`]) calls one of
+    /// the named LAMBDAs: a name before `(` that is no parameter (a
+    /// parameter is `_xlpm.` there) and names no sheet. [LIVE] Excel 16
+    /// saves such a call as a dynamic formula (`<c cm="1"><f t="array"
+    /// ref="A1">AddOne(4)</f>`) and opens a plain one as `=@Opt(1)`.
+    pub(crate) fn calls_lambda(&self, file_text: &str) -> bool {
+        if self.lambdas.is_empty() {
+            return false;
+        }
+        let tokens = tokenize(file_text);
+        (0..tokens.len()).any(|at| {
+            tokens[at].kind == Kind::Name
+                && tokens.get(at + 1).map(|t| t.kind) == Some(Kind::Punct('('))
+                && (at == 0 || tokens[at - 1].kind != Kind::Punct('!'))
+                && self.lambdas.contains(&text(file_text, &tokens[at]).to_lowercase())
+        })
+    }
 }
 
 /// One token's class: the classes Calcula's own lexer (`parser::lexer`)
@@ -569,26 +720,35 @@ fn binder(name: &str) -> Option<&'static str> {
     }
 }
 
-/// What the scan learns beside the edits: the cell the formula sits in, the
-/// cell-shaped names the formula declares anywhere, and why Excel could not
-/// hold the formula at all, if it cannot.
+/// What the scan learns beside the edits: the cell the formula sits in,
+/// whether Excel reads the formula in its R1C1 fallback, and why Excel could
+/// not hold the formula at all, if it cannot.
 struct Scan {
     anchor: Option<(u32, u32)>,
-    /// Every cell-shaped LET / LAMBDA name the formula declares (`E5`), in
-    /// scope or not: [LIVE] Excel 16 writes a plain cell of that spelling
-    /// outside the name's scope `_xlnm.` (see [`mark_cell_names`]).
-    declared_cells: Vec<String>,
+    /// The formula declares a cell-shaped LET / LAMBDA name (`E5`, `[A1]`)
+    /// or uses an R1C1-only name (`C`, `R`, `RC`, `R1C1`) that is no
+    /// parameter. Excel cannot read such a formula in A1 notation and reads
+    /// it in R1C1 instead, where every other cell is a NAME (see
+    /// [`mark_r1c1_fallback`]).
+    r1c1_fallback: bool,
     refused: Option<Unwritable>,
 }
 
 /// Why a formula has no text an .xlsx file can carry for Excel to open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unwritable {
-    /// A LET / LAMBDA parameter named like a built-in function, called with a
-    /// number of arguments the built-in refuses (`LET(abs,LAMBDA(x,y,x+y),
-    /// abs(1,2))`). [LIVE] Excel 16 reads a function-named call as the
-    /// built-in, refuses to TYPE these, and refused every file holding one.
+    /// A built-in function called with a number of arguments Excel refuses
+    /// (`ABS(1,2)`, `ROUND(1)`, `IF()`, `IFS(1,2,3)`, `SUMIFS(A1:A5,B1:B5)`),
+    /// a LET / LAMBDA parameter named like one and called so
+    /// (`LET(abs,LAMBDA(x,y,x+y),abs(1,2))` -- Excel reads a function-named
+    /// call as the built-in), or a LET / LAMBDA with no room for its
+    /// calculation (`LET(x)`, `LAMBDA()`). [LIVE] Excel 16 refuses to TYPE
+    /// each, and refused every file holding one ([`excel_refuses_arity`]).
     BuiltinArity,
+    /// A LET or LAMBDA that declares one name twice, in any case
+    /// (`LET(x,1,X,2,x)`, `LAMBDA(x,[x],x)`). [LIVE] Excel 16 refuses to TYPE
+    /// it and refused every file holding one.
+    DuplicateName,
     /// A bare `C` / `R` or another R1C1-shaped name (`RC`, `R1C1`,
     /// `RC[-1]`) in a formula that is in no cell (a defined name): Excel
     /// reads it as relative to a cell, and a name has none.
@@ -609,51 +769,98 @@ fn declare(formula: &str, tokens: &[Token], (p, how): (usize, Declared), scan: &
         },
     };
     edits[p].replace = Some(format!("{}{}", prefix, spelling));
-    if how == Declared::Cell {
-        scan.declared_cells.push(spelling.to_string());
+    if how == Declared::Cell || (how == Declared::Optional && is_cell_spelling(spelling)) {
+        scan.r1c1_fallback = true;
     }
     spelling.to_string()
 }
 
-/// The arity a built-in function accepts, `(fewest, most)` (`None`: no
-/// limit), from Calcula's own catalog -- its syntax strings, the single
-/// source of truth the function dialog reads (`SUM(number1, [number2], ...)`
-/// is one or more, `ROUND(number, num_digits)` exactly two, `PI()` none).
-fn builtin_arity(name: &str) -> Option<(usize, Option<usize>)> {
-    static TABLE: std::sync::OnceLock<std::collections::HashMap<String, (usize, Option<usize>)>> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        parser::BuiltinFunction::all_catalog_entries()
-            .into_iter()
-            .filter(|meta| !meta.is_alias)
-            .filter_map(|meta| Some((meta.name.to_ascii_uppercase(), syntax_arity(meta.syntax)?)))
-            .collect()
-    });
-    table.get(&name.to_ascii_uppercase()).copied()
+/// Whether `spelling` alone is one plain cell reference (`A1`, `XFD1048576`).
+fn is_cell_spelling(spelling: &str) -> bool {
+    let inner = tokenize(spelling);
+    inner.len() == 1 && inner[0].kind == Kind::Reference && is_cell_shaped(spelling)
 }
 
-/// `(fewest, most)` arguments of a catalog syntax string (see [`builtin_arity`]).
-fn syntax_arity(syntax: &str) -> Option<(usize, Option<usize>)> {
-    let inner = syntax.get(syntax.find('(')? + 1..syntax.rfind(')')?)?.trim();
-    if inner.is_empty() {
-        return Some((0, Some(0)));
+/// Record that one LET / LAMBDA declares `spelling`; a second declaration of
+/// it in that one call (Excel ignores case) is a formula Excel cannot hold
+/// ([`Unwritable::DuplicateName`]).
+fn note_declared(declared: &mut Vec<String>, spelling: &str, scan: &mut Scan) {
+    if declared.iter().any(|d| same_name(d, spelling)) {
+        scan.refused = scan.refused.or(Some(Unwritable::DuplicateName));
     }
-    let mut pieces = Vec::new();
-    let (mut depth, mut start) = (0usize, 0usize);
-    for (at, c) in inner.char_indices() {
-        match c {
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                pieces.push(inner[start..at].trim());
-                start = at + 1;
-            }
-            _ => {}
-        }
+    declared.push(spelling.to_string());
+}
+
+/// Calcula's own functions, which Excel does not have: [LIVE] Excel 16 types
+/// a call to each with any number of arguments (and shows `#NAME?`), so no
+/// arity of theirs makes a file Excel cannot open, and a bare one is no
+/// function value to Excel (`LET(f,LPAD,1)` is saved `LPAD`, never `_xleta.`).
+/// (`CHISQDIST` and `POISSONDIST` were built-ins here until lane legacystats,
+/// 2026-11-05: Excel has neither [LIVE: #NAME?], so they are no longer
+/// Calcula's either -- a call to one is an unknown name, as in Excel.)
+/// `AVG`, `CEIL`, `FACTORIAL` and `POW` were hidden aliases stored as
+/// AVERAGE / CEILING / FACT / POWER until lane formc (2026-11-05); they are
+/// Calcula's own functions now, kept under the name typed, and Excel has none
+/// of them ([LIVE] `=AVG(1,2)` #NAME?), so a file carries them as written.
+const CALCULA_ONLY_FUNCTIONS: [&str; 30] = [
+    "APPEND", "AVG", "CEIL", "COLLECT", "CONTAINS", "DICT", "EURO", "FACTORIAL", "FILEEXISTS", "FILELINES",
+    "FILEREAD", "FLATTEN", "GATHER", "GATHER.AT", "GATHER.COUNT", "GATHER.FROM", "GATHER.SUBMITTERS",
+    "GET.CELL.FILLCOLOR", "GET.COLUMN.WIDTH", "GET.CONTROLVALUE", "GET.ROW.HEIGHT", "ISDICT", "ISLIST", "KEYS",
+    "LPAD", "MERGE", "POW", "RPAD", "VALUES", "XLOOKUPS",
+];
+
+/// Whether Excel refuses a call to the built-in `name` with `given`
+/// arguments. [LIVE] Excel 16 (xlsxfmt probes 1-2: every Calcula built-in
+/// typed with A1 arguments at its catalog's fewest - 1, fewest, most and
+/// most + 1, a variadic one up to fewest + 3) refuses exactly what the
+/// catalog's syntax string allows not, except where the syntax string cannot
+/// say Excel's rule: the pair rules (`SUMIFS` takes 3, 5, 7 ..., `COUNTIFS`
+/// and `IFS` 2, 4, 6 ..., `SORTBY` 2, 3, 5, 7 ..., `GETPIVOTDATA` 2, 3, 4, 6,
+/// 8 ...) and catalog entries narrower than Excel (`GCD(4)`, `MAP` over three
+/// arrays, `BYROW(A1:C2)`, `INDEX`'s area number, `GROUPBY`'s 8th and
+/// `PIVOTBY`'s 11th argument). A function Calcula's catalog has no syntax
+/// for, or one Excel does not have, is never refused.
+fn excel_refuses_arity(name: &str, given: usize) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if CALCULA_ONLY_FUNCTIONS.contains(&upper.as_str()) {
+        return false;
     }
-    pieces.push(inner[start..].trim());
-    let fewest = pieces.iter().filter(|p| !p.starts_with('[') && !p.contains("...")).count();
-    let most = (!pieces.iter().any(|p| p.contains("..."))).then_some(pieces.len());
-    Some((fewest, most))
+    let odd = given % 2 == 1;
+    let accepted = match upper.as_str() {
+        "SUMIFS" | "AVERAGEIFS" | "MINIFS" | "MAXIFS" => given >= 3 && odd,
+        "COUNTIFS" | "IFS" => given >= 2 && !odd,
+        "SORTBY" => given == 2 || (given >= 3 && odd),
+        "GETPIVOTDATA" => given >= 2 && (given == 3 || !odd),
+        "GCD" | "LCM" => given >= 1,
+        "MAP" => given >= 2,
+        "BYROW" | "BYCOL" => (1..=2).contains(&given),
+        "INDEX" => (2..=4).contains(&given),
+        "GROUPBY" => (3..=8).contains(&given),
+        "PIVOTBY" => (4..=11).contains(&given),
+        _ => parser::builtin_arity(&upper).map_or(true, |(fewest, most)| given >= fewest && most.map_or(true, |most| given <= most)),
+    };
+    !accepted
+}
+
+/// Whether a bare `name` (no call) is one of Excel's functions used as a
+/// value, which a file spells `_xleta.NAME`: [LIVE] Excel 16 saves
+/// `=SUM(MAP(A1:A3,ABS))` as `SUM(_xlfn.MAP(A1:A3,_xleta.ABS))`,
+/// `=LET(f,SEQUENCE,f(2))` as `.._xleta.SEQUENCE..` (no `_xlfn.`),
+/// `=ROWS(GROUPBY(A1:A5,B1:B5,SUM))` as `.._xleta.SUM))`; without it the file
+/// shows `#VALUE!` / `#NAME?` where Excel's own gives the number. A defined
+/// name (`Dbl`) and a function Excel does not have (`LPAD`) stay names.
+fn is_excel_function_value(name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        parser::BuiltinFunction::all_catalog_entries()
+            .into_iter()
+            .filter(|meta| !meta.is_alias && !CALCULA_ONLY_FUNCTIONS.contains(&meta.name))
+            .map(|meta| meta.name.to_ascii_uppercase())
+            .chain(FUTURE_FUNCTIONS.iter().chain(WORKSHEET_FUNCTIONS.iter()).map(|n| n.to_string()))
+            .filter(|n| n != "TRUE" && n != "FALSE")
+            .collect()
+    });
+    names.contains(&name.to_ascii_uppercase())
 }
 
 /// Excel's A1 text, for the cell at `anchor`, of an R1C1-shaped name: `R` /
@@ -714,6 +921,7 @@ fn write_r1c1(shape: &str, first: usize, tokens_used: usize, scan: &mut Scan, ed
     if !is_r1c1_shape(shape) {
         return false;
     }
+    scan.r1c1_fallback = true;
     match scan.anchor.and_then(|anchor| r1c1_reference(shape, anchor)) {
         Some(a1) => {
             edits[first].replace = Some(a1);
@@ -769,7 +977,10 @@ fn mark_cell_range(formula: &str, tokens: &[Token], at: usize, end: usize, scope
 /// saves `=SUM(A:.C)` in J33 as `SUM(_xlfn._TRO_TRAILING(A:C))` (= 1665),
 /// `=SUM(B:.R)` as `_TRO_TRAILING(B:R)` and `=SUM(C.:C)` as
 /// `_TRO_LEADING(C:C)`; it refuses to TYPE one beside a parameter of the
-/// first half's name (`=LET(a,1,SUM(A:.C)+a)`).
+/// first half's name (`=LET(a,1,SUM(A:.C)+a)`). Either half may carry a `$`
+/// (the `$` before the first half is a token of its own, before `at`):
+/// [LIVE] Excel 16 saves `=SUM(A:.$C)` as `SUM(_xlfn._TRO_TRAILING(A:$C))`
+/// and `=LET(c,1,SUM(A:.$C)+c)` with the `C` a column, never the parameter.
 fn dotted_column_range(formula: &str, tokens: &[Token], at: usize, end: usize) -> Option<usize> {
     let name_at = |i: usize| (i < end && tokens[i].kind == Kind::Name).then(|| text(formula, &tokens[i]));
     let dot_at = |i: usize| i < end && is_other(formula, tokens, i, ".");
@@ -785,6 +996,9 @@ fn dotted_column_range(formula: &str, tokens: &[Token], at: usize, end: usize) -
     i += 1;
     let trail = dot_at(i);
     if trail {
+        i += 1;
+    }
+    if i < end && is_other(formula, tokens, i, "$") {
         i += 1;
     }
     let second = name_at(i)?;
@@ -863,11 +1077,17 @@ fn mark_parameters(formula: &str, tokens: &[Token], start: usize, end: usize, sc
                     // LAMBDA(p1, p2, ..., body): every argument but the last is
                     // a parameter, a `[y]` an optional one.
                     let mut inner: Vec<String> = scope.to_vec();
+                    let mut declared_here = Vec::new();
+                    // [LIVE] Excel 16 refuses `=LAMBDA()`, and every file holding one.
+                    if args.is_empty() {
+                        scan.refused = scan.refused.or(Some(Unwritable::BuiltinArity));
+                    }
                     if let Some((&body, params)) = args.split_last() {
                         for &param in params {
                             match declaration(formula, tokens, param, true) {
                                 Some(declared) => {
                                     let spelling = declare(formula, tokens, declared, scan, edits);
+                                    note_declared(&mut declared_here, &spelling, scan);
                                     inner.push(spelling);
                                 }
                                 None => mark_parameters(formula, tokens, param.0, param.1, scope, scan, edits),
@@ -885,10 +1105,20 @@ fn mark_parameters(formula: &str, tokens: &[Token], start: usize, end: usize, sc
                     let mut inner: Vec<String> = scope.to_vec();
                     let last = args.len().saturating_sub(1);
                     let mut pending: Option<String> = None;
+                    let mut declared_here = Vec::new();
+                    // [LIVE] Excel 16 refuses `=LET(x)` and refused the file
+                    // holding one; `LET(x,1)` it refuses to type but opens.
+                    if args.len() < 2 {
+                        scan.refused = scan.refused.or(Some(Unwritable::BuiltinArity));
+                    }
                     for (index, &arg) in args.iter().enumerate() {
                         let declared = if index % 2 == 0 && index < last { declaration(formula, tokens, arg, false) } else { None };
                         match declared {
-                            Some(declared) => pending = Some(declare(formula, tokens, declared, scan, edits)),
+                            Some(declared) => {
+                                let spelling = declare(formula, tokens, declared, scan, edits);
+                                note_declared(&mut declared_here, &spelling, scan);
+                                pending = Some(spelling);
+                            }
                             None => {
                                 mark_parameters(formula, tokens, arg.0, arg.1, &inner, scan, edits);
                                 if index % 2 == 1 {
@@ -905,20 +1135,16 @@ fn mark_parameters(formula: &str, tokens: &[Token], start: usize, end: usize, sc
                     // [LIVE] Excel 16 saves `=LET(sum,3,SUM(sum,1))` as
                     // `SUM(_xlpm.sum,1)`, and Calcula's parser reads it so too
                     // (`BuiltinFunction::from_name`, a parameter call is `Custom`).
-                    // Called with an arity the built-in refuses, it is no formula
-                    // Excel can hold ([`Unwritable::BuiltinArity`]).
+                    // A built-in called with an arity Excel refuses -- beside a
+                    // parameter of its name or not -- is no formula Excel can
+                    // hold ([`Unwritable::BuiltinArity`]).
                     let builtin = !matches!(parser::BuiltinFunction::from_name(name), parser::BuiltinFunction::Custom(_));
                     match lookup(scope, name) {
                         Some(p) if !builtin => edits[at].replace = Some(parameter(p)),
-                        Some(_) => {
-                            let given = args.len();
-                            let refused = builtin_arity(name)
-                                .is_some_and(|(fewest, most)| given < fewest || most.is_some_and(|most| given > most));
-                            if refused {
-                                scan.refused = scan.refused.or(Some(Unwritable::BuiltinArity));
-                            }
+                        _ if builtin && excel_refuses_arity(name, args.len()) => {
+                            scan.refused = scan.refused.or(Some(Unwritable::BuiltinArity));
                         }
-                        None => {}
+                        _ => {}
                     }
                     mark_parameters(formula, tokens, open + 1, close, scope, scan, edits);
                 }
@@ -972,31 +1198,120 @@ fn mark_parameters(formula: &str, tokens: &[Token], start: usize, end: usize, sc
     }
 }
 
-/// A plain cell spelled like a cell-shaped LET / LAMBDA name the formula
-/// declares, where that name is not in scope -- its own value, outside the
-/// call, behind a sheet -- is written `_xlnm.`, as is a plain cell beside it
-/// in a range. [LIVE] Excel 16 saves `=LET(E5,E5+1,E5)` as
-/// `_xlfn.LET(_xlpm.E5,_xlnm.E5+1,_xlpm.E5)`, `=LET(A1,SUM(A1:A3),A1)` as
-/// `SUM(_xlnm.A1:_xlnm.A3)`, `=LAMBDA(A1,A1*2)(A1+1)` as `..(_xlnm.A1+1)`
-/// and `=LET(A1,1,SUM(Sheet1!A1)+A1)` as `SUM(Sheet1!_xlnm.A1)` (each shows
-/// #NAME? in Excel itself).
-fn mark_cell_names(formula: &str, tokens: &[Token], declared: &[String], edits: &mut [Edit]) {
-    if declared.is_empty() {
+/// Excel's R1C1 fallback. A formula that declares a cell-shaped LET / LAMBDA
+/// name, or uses an R1C1-only name that is no parameter, cannot be read in
+/// A1 notation, so Excel reads it in R1C1 -- the WHOLE formula, not only the
+/// name's scope -- and a file spells what that reading means ([LIVE] Excel
+/// 16, rev18x pass 2 and xlsxfmt probes 1-2; each shows #NAME? or #SPILL! in
+/// Excel itself):
+///
+/// * a plain cell is a NAME, written `_xlnm.`: `=LET(E5,E5+1,E5)` is saved
+///   `_xlfn.LET(_xlpm.E5,_xlnm.E5+1,_xlpm.E5)`, `=LAMBDA(A1,A1)(B1)`
+///   `..(_xlnm.B1)`, `=LET(A1,1,B1+A1)` `_xlnm.B1+_xlpm.A1`, `=C+A1`
+///   `J:J+_xlnm.A1`, behind a sheet too (`Sheet2!_xlnm.B1`,
+///   `Sheet1:Sheet2!_xlnm.B1`, `SUM(Sheet1!_xlnm.A1:_xlnm.A3)`);
+/// * a cell R1C1 can read is R1C1's, for the cell the formula sits in:
+///   `=LET(A1,1,A1+C2)` is saved `_xlpm.A1+$B:$B`, `R2` `$2:$2`, `R1C1`
+///   `$A$1`, `RC1` in J1835 `$A1835`, `B1 C1` `_xlnm.B1 $A:$A`;
+/// * a bare column range of two names keeps its second half a name, in
+///   parentheses: `SUM(A:A)` is saved `SUM(A:(A))`, `Sheet2!A:A`
+///   `Sheet2!A:(A)`, `SUM(A:B)` `SUM(A:(B))`; one of R1C1's own names is
+///   R1C1's (`SUM(A:C)` -> `SUM(A:J:J)`, `SUM(C:C)` -> `SUM(J:J)`).
+///
+/// A `$` reference, a row range or a trim reference in such a formula Excel
+/// refuses to TYPE; Calcula's text for it is left as it is (the file opens).
+fn mark_r1c1_fallback(formula: &str, tokens: &[Token], scan: &mut Scan, edits: &mut [Edit]) {
+    if !scan.r1c1_fallback {
         return;
     }
-    let plain_cell = |i: usize, edits: &[Edit]| {
-        tokens.get(i).is_some_and(|t| t.kind == Kind::Reference && is_cell_shaped(text(formula, t))) && edits[i].replace.is_none()
-    };
+    let kind = |i: usize| tokens.get(i).map(|t| t.kind);
+    let untouched = |i: usize, edits: &[Edit]| edits.get(i).is_some_and(|e| e.replace.is_none());
+    let mut at = 0;
+    while at < tokens.len() {
+        let spelled = text(formula, &tokens[at]);
+        match tokens[at].kind {
+            Kind::Reference if untouched(at, edits) => {
+                if is_cell_shaped(spelled) {
+                    if !write_r1c1(spelled, at, 1, scan, edits) {
+                        edits[at].replace = Some(format!("{}{}", CELL_NAME_PREFIX, spelled));
+                    }
+                } else if let Some((first, second)) = spelled.split_once(':').filter(|_| !spelled.contains('$')) {
+                    // A column range behind a sheet (`Sheet2!A:A`).
+                    if is_column_name(first) && is_column_name(second) {
+                        edits[at].replace = Some(format!("{}:({})", first, second));
+                    }
+                }
+            }
+            Kind::Name
+                if untouched(at, edits)
+                    && kind(at + 1) == Some(Kind::Punct(':'))
+                    && kind(at + 2) == Some(Kind::Name)
+                    && untouched(at + 2, edits)
+                    && !matches!(kind(at + 3), Some(Kind::Punct('!')) | Some(Kind::Punct('(')) | Some(Kind::Bracket))
+                    && at.checked_sub(1).map(|p| tokens[p].kind) != Some(Kind::Punct(':'))
+                    && is_column_name(spelled)
+                    && is_column_name(text(formula, &tokens[at + 2])) =>
+            {
+                let second = text(formula, &tokens[at + 2]);
+                let anchor = scan.anchor;
+                let whole = |shape: &str| anchor.and_then(|anchor| r1c1_reference(shape, anchor));
+                match (is_r1c1_shape(spelled), is_r1c1_shape(second)) {
+                    (true, true) => {
+                        // R1C1's range of whole columns / rows: `C:C` -> `J:J`.
+                        match (whole(spelled), whole(second)) {
+                            (Some(a), Some(b)) if a.contains(':') && b.contains(':') => {
+                                let start = a.split(':').next().unwrap_or_default().to_string();
+                                let end = b.rsplit(':').next().unwrap_or_default().to_string();
+                                edits[at].replace = Some(format!("{}:{}", start, end));
+                                edits[at + 1].replace = Some(String::new());
+                                edits[at + 2].replace = Some(String::new());
+                            }
+                            _ => {
+                                write_r1c1(spelled, at, 1, scan, edits);
+                                write_r1c1(second, at + 2, 1, scan, edits);
+                            }
+                        }
+                    }
+                    (first_r1c1, true) => {
+                        if first_r1c1 {
+                            write_r1c1(spelled, at, 1, scan, edits);
+                        }
+                        write_r1c1(second, at + 2, 1, scan, edits);
+                    }
+                    (true, false) => {
+                        write_r1c1(spelled, at, 1, scan, edits);
+                        edits[at + 2].replace = Some(format!("({})", second));
+                    }
+                    (false, false) => edits[at + 2].replace = Some(format!("({})", second)),
+                }
+                at += 3;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+}
+
+/// Every bare name that is one of Excel's functions used as a value -- an
+/// argument (`MAP(A1:A3,ABS)`), a LET value, an operand -- written
+/// `_xleta.NAME` ([`is_excel_function_value`]). A parameter (already
+/// `_xlpm.`), a call, a sheet, a table and a range's half are none.
+fn mark_function_values(formula: &str, tokens: &[Token], names: &DefinedNames, edits: &mut [Edit]) {
+    let kind = |i: usize| tokens.get(i).map(|t| t.kind);
     for at in 0..tokens.len() {
-        if !plain_cell(at, edits) || !declared.iter().any(|d| same_name(d, text(formula, &tokens[at]))) {
+        if tokens[at].kind != Kind::Name || edits[at].replace.is_some() {
             continue;
         }
-        edits[at].replace = Some(format!("{}{}", CELL_NAME_PREFIX, text(formula, &tokens[at])));
-        let colon = |i: usize| tokens.get(i).is_some_and(|t| t.kind == Kind::Punct(':'));
-        for other in [at.checked_sub(2).filter(|&p| colon(p + 1)), colon(at + 1).then_some(at + 2)].into_iter().flatten() {
-            if plain_cell(other, edits) {
-                edits[other].replace = Some(format!("{}{}", CELL_NAME_PREFIX, text(formula, &tokens[other])));
-            }
+        let previous = at.checked_sub(1).and_then(kind);
+        if matches!(kind(at + 1), Some(Kind::Punct('(')) | Some(Kind::Punct('!')) | Some(Kind::Punct(':')) | Some(Kind::Bracket))
+            || matches!(previous, Some(Kind::Punct('!')) | Some(Kind::Punct(':')))
+        {
+            continue;
+        }
+        let spelled = text(formula, &tokens[at]);
+        if is_excel_function_value(spelled) && !names.contains(spelled) {
+            edits[at].replace = Some(format!("{}{}", FUNCTION_VALUE_PREFIX, spelled));
         }
     }
 }
@@ -1179,12 +1494,23 @@ fn operator_edits(formula: &str, tokens: &[Token], edits: &mut [Edit]) {
                     continue;
                 }
                 let Some(left_end) = (if lead { at.checked_sub(2) } else { at.checked_sub(1) }) else { continue };
-                let right = if trail { at + 2 } else { at + 1 };
+                let mut right = if trail { at + 2 } else { at + 1 };
+                // A column's `$` is a token of its own beside a trim dot
+                // (`A:.$C`, `$A:.C`); the reference starts at it ([LIVE]
+                // `_xlfn._TRO_TRAILING($A:$C)`, never `$_xlfn._TRO_..`).
+                if is_other(formula, tokens, right, "$") && tokens.get(right + 1).is_some_and(|t| t.kind == Kind::Name) {
+                    right += 1;
+                }
                 if !is_range_half(tokens, left_end) || !is_range_half(tokens, right) {
                     continue;
                 }
                 let Some(&(name, _, _)) = TRIM_OPERATORS.iter().find(|&&(_, l, t)| l == lead && t == trail) else { continue };
-                let start = reference_start(tokens, left_end);
+                let first = if left_end >= 1 && tokens[left_end].kind == Kind::Name && is_other(formula, tokens, left_end - 1, "$") {
+                    left_end - 1
+                } else {
+                    left_end
+                };
+                let start = reference_start(tokens, first);
                 edits[start].before.push_str(name);
                 edits[start].before.push('(');
                 if lead {
@@ -1326,14 +1652,64 @@ fn escape_structured_item(inner: &str) -> String {
 
 /// A formula's text in the spelling an .xlsx file carries (before the
 /// future-function escaping; see the module doc).
-fn file_text(formula: &str, anchor: Option<(u32, u32)>) -> (String, Option<Unwritable>) {
+fn file_text(formula: &str, anchor: Option<(u32, u32)>, names: &DefinedNames) -> (String, Option<Unwritable>) {
     let tokens = tokenize(formula);
     let mut edits = vec![Edit::default(); tokens.len()];
-    let mut scan = Scan { anchor, declared_cells: Vec::new(), refused: None };
+    let mut scan = Scan { anchor, r1c1_fallback: false, refused: None };
     mark_parameters(formula, &tokens, 0, tokens.len(), &[], &mut scan, &mut edits);
-    mark_cell_names(formula, &tokens, &scan.declared_cells, &mut edits);
+    mark_r1c1_fallback(formula, &tokens, &mut scan, &mut edits);
+    mark_function_values(formula, &tokens, names, &mut edits);
     operator_edits(formula, &tokens, &mut edits);
+    deleted_sheet_references(formula, &tokens, &mut edits);
     (apply_edits(formula, &tokens, &edits), scan.refused)
+}
+
+/// A reference whose SHEET WAS DELETED as a file carries it: `#REF!` alone.
+///
+/// Calcula keeps such a reference as Excel shows it, the cell part behind
+/// `#REF!` (`=#REF!A1`, `parser::ast::REF_ERROR_SHEET`), and so does Excel in
+/// memory -- but [LIVE, Excel 16, 2026-11-05, sheetspill/probe1.ps1] its saved
+/// file reads `<f>#REF!</f>` for `=#REF!A1`, `SUM(#REF!)+1` for
+/// `=SUM(#REF!A1:A3)+1`, `SUM(#REF!)` for `=SUM(#REF!A:A)` and
+/// `=SUM(#REF!1:1)`, `INDEX(#REF!,1,1)`, `SUM(#REF!,#REF!)`, `#REF! #REF!`
+/// for an intersection of two, and `SUM(_xlfn.ANCHORARRAY(#REF!))` for
+/// `=SUM(#REF!D1#)`; a defined name `=#REF!$A$1:$A$3` is `#REF!`, a rule
+/// `=A1>#REF!$B$1` `A1&gt;#REF!`. So the reference text right behind a `#REF!`
+/// literal -- the tokens touching it, a cell, a column range, a row range
+/// (`1:1`, `$1:$1`), each half of a range -- is dropped, and anything an
+/// earlier pass put in front of that text (the spill operator's
+/// `ANCHORARRAY(`) moves in front of the `#REF!`. Runs LAST, over every other
+/// pass's edits.
+fn deleted_sheet_references(formula: &str, tokens: &[Token], edits: &mut [Edit]) {
+    let mut at = 0;
+    while at < tokens.len() {
+        let token = tokens[at];
+        if token.kind != Kind::ErrorLiteral || !text(formula, &token).eq_ignore_ascii_case("#REF!") {
+            at += 1;
+            continue;
+        }
+        let mut end = at + 1;
+        let mut reach = token.end;
+        while let Some(next) = tokens.get(end) {
+            let part = next.start == reach
+                && match next.kind {
+                    Kind::Reference | Kind::Number | Kind::Punct(':') => true,
+                    Kind::Other => text(formula, next) == "$",
+                    _ => false,
+                };
+            if !part {
+                break;
+            }
+            reach = next.end;
+            end += 1;
+        }
+        for i in at + 1..end {
+            let moved = std::mem::take(&mut edits[i].before);
+            edits[at].before.insert_str(0, &moved);
+            edits[i].replace = Some(String::new());
+        }
+        at = end.max(at + 1);
+    }
 }
 
 /// Why Excel could not open a file holding `formula` (see [`Unwritable`]),
@@ -1343,7 +1719,7 @@ fn file_text(formula: &str, anchor: Option<(u32, u32)>) -> (String, Option<Unwri
 pub(crate) fn unwritable_reason(formula: &str, anchor: Option<(u32, u32)>) -> Option<Unwritable> {
     let clean = formula.strip_prefix('=').unwrap_or(formula);
     let collapsed = engine::ast_render::collapse_formula_text(clean);
-    file_text(collapsed.strip_prefix('=').unwrap_or(&collapsed), anchor).1
+    file_text(collapsed.strip_prefix('=').unwrap_or(&collapsed), anchor, &DefinedNames::default()).1
 }
 
 /// Prefix every LAMBDA / LET parameter name in `formula` with `_xlpm.`, as
@@ -1352,7 +1728,7 @@ pub(crate) fn unwritable_reason(formula: &str, anchor: Option<(u32, u32)>) -> Op
 /// carrying the prefix keeps one.
 #[cfg(test)]
 pub(crate) fn with_parameter_prefixes(formula: &str) -> String {
-    file_text(formula, None).0
+    file_text(formula, None, &DefinedNames::default()).0
 }
 
 /// The trim-operator call (`_TRO_ALL(`) at token `at`, if one is there.
@@ -1366,29 +1742,92 @@ fn trim_operator_at(formula: &str, tokens: &[Token], at: usize) -> Option<(&'sta
     TRIM_OPERATORS.iter().copied().find(|&(name, _, _)| bare.eq_ignore_ascii_case(name))
 }
 
-/// Whether a file text calls a trim operator the library cannot escape.
-fn has_trim_operator(text_: &str) -> bool {
-    if !text_.contains("_TRO_") {
-        return false;
+/// The functions a file calls `_xlfn.NAME(`: every function newer than Excel
+/// 2007. This is rust_xlsxwriter 0.79.4's own table (`formula.rs`,
+/// `future_functions`, its `_xlws.` three apart in [`WORKSHEET_FUNCTIONS`])
+/// plus the functions newer than it that [LIVE] Excel 16 prefixes (xlsxfmt
+/// probes 1 and 3: ENCODEURL, GROUPBY, PIVOTBY, TRIMRANGE, PERCENTOF,
+/// REGEXEXTRACT / REPLACE / TEST, STOCKHISTORY, TRANSLATE, DETECTLANGUAGE).
+/// `the_future_function_table_holds_the_librarys_and_excels` pins it against
+/// the library's and Calcula's catalog. Sorted (binary search).
+const FUTURE_FUNCTIONS: &[&str] = &[
+    "ACOT", "ACOTH", "AGGREGATE", "ANCHORARRAY", "ARABIC", "ARRAYTOTEXT", "BASE", "BETA.DIST", "BETA.INV",
+    "BINOM.DIST", "BINOM.DIST.RANGE", "BINOM.INV", "BITAND", "BITLSHIFT", "BITOR", "BITRSHIFT", "BITXOR",
+    "BYCOL", "BYROW", "CEILING.MATH", "CEILING.PRECISE", "CHISQ.DIST", "CHISQ.DIST.RT", "CHISQ.INV",
+    "CHISQ.INV.RT", "CHISQ.TEST", "CHOOSECOLS", "CHOOSEROWS", "COMBINA", "CONCAT", "CONFIDENCE.NORM",
+    "CONFIDENCE.T", "COT", "COTH", "COVARIANCE.P", "COVARIANCE.S", "CSC", "CSCH", "DAYS", "DECIMAL",
+    "DETECTLANGUAGE", "DROP", "ENCODEURL", "ERF.PRECISE", "ERFC.PRECISE", "EXPAND", "EXPON.DIST", "F.DIST",
+    "F.DIST.RT", "F.INV", "F.INV.RT", "F.TEST", "FIELDVALUE", "FILTERXML", "FLOOR.MATH", "FLOOR.PRECISE",
+    "FORECAST.ETS", "FORECAST.ETS.CONFINT", "FORECAST.ETS.SEASONALITY", "FORECAST.ETS.STAT", "FORECAST.LINEAR",
+    "FORMULATEXT", "GAMMA", "GAMMA.DIST", "GAMMA.INV", "GAMMALN.PRECISE", "GAUSS", "GROUPBY", "HSTACK",
+    "HYPGEOM.DIST", "IFNA", "IFS", "IMAGE", "IMCOSH", "IMCOT", "IMCSC", "IMCSCH", "IMSEC", "IMSECH", "IMSINH",
+    "IMTAN", "ISFORMULA", "ISOMITTED", "ISOWEEKNUM", "LAMBDA", "LET", "LOGNORM.DIST", "LOGNORM.INV",
+    "MAKEARRAY", "MAP", "MAXIFS", "MINIFS", "MODE.MULT", "MODE.SNGL", "MUNIT", "NEGBINOM.DIST", "NORM.DIST",
+    "NORM.INV", "NORM.S.DIST", "NORM.S.INV", "NUMBERVALUE", "PDURATION", "PERCENTILE.EXC", "PERCENTILE.INC",
+    "PERCENTOF", "PERCENTRANK.EXC", "PERCENTRANK.INC", "PERMUTATIONA", "PHI", "PIVOTBY", "POISSON.DIST",
+    "PQSOURCE", "PYTHON_STR", "PYTHON_TYPE", "PYTHON_TYPENAME", "QUARTILE.EXC", "QUARTILE.INC", "QUERYSTRING",
+    "RANDARRAY", "RANK.AVG", "RANK.EQ", "REDUCE", "REGEXEXTRACT", "REGEXREPLACE", "REGEXTEST", "RRI", "SCAN",
+    "SEC", "SECH", "SEQUENCE", "SHEET", "SHEETS", "SINGLE", "SKEW.P", "SORTBY", "STDEV.P", "STDEV.S",
+    "STOCKHISTORY", "SWITCH", "T.DIST", "T.DIST.2T", "T.DIST.RT", "T.INV", "T.INV.2T", "T.TEST", "TAKE",
+    "TEXTAFTER", "TEXTBEFORE", "TEXTJOIN", "TEXTSPLIT", "TOCOL", "TOROW", "TRANSLATE", "TRIMRANGE", "UNICHAR",
+    "UNICODE", "UNIQUE", "VALUETOTEXT", "VAR.P", "VAR.S", "VSTACK", "WEBSERVICE", "WEIBULL.DIST", "WRAPCOLS",
+    "WRAPROWS", "XLOOKUP", "XMATCH", "XOR", "Z.TEST",
+];
+
+/// The worksheet-only dynamic-array functions, which a file calls
+/// `_xlfn._xlws.NAME(` ([LIVE] `_xlfn._xlws.FILTER`, `_xlfn._xlws.SORT`).
+const WORKSHEET_FUNCTIONS: [&str; 3] = ["FILTER", "PY", "SORT"];
+
+/// The prefix a file gives a call to `name` (`_xlfn.`, `_xlfn._xlws.`), or
+/// `None`. A name that already carries one of Excel's prefixes (`_xlfn.LET`,
+/// `_xlpm.f`, a file's own text written again) gets none.
+fn future_function_prefix(name: &str) -> Option<&'static str> {
+    if strip_prefix_ci(name, "_xl").is_some_and(|rest| rest.contains('.')) {
+        return None;
     }
-    let tokens = tokenize(text_);
-    (0..tokens.len()).any(|at| trim_operator_at(text_, &tokens, at).is_some())
+    if TRIM_OPERATORS.iter().any(|&(trim, _, _)| name.eq_ignore_ascii_case(trim)) {
+        return Some("_xlfn.");
+    }
+    let upper = name.to_ascii_uppercase();
+    if WORKSHEET_FUNCTIONS.contains(&upper.as_str()) {
+        return Some("_xlfn._xlws.");
+    }
+    FUTURE_FUNCTIONS.binary_search(&upper.as_str()).is_ok().then_some("_xlfn.")
 }
 
-/// `_xlfn.` on every trim operator of an escaped text ([LIVE] Excel 16:
-/// `SUM(_xlfn._TRO_TRAILING(A1:A5))`).
-fn prefix_trim_operators(escaped: &str) -> String {
-    if !has_trim_operator(escaped) {
-        return escaped.to_string();
-    }
-    let tokens = tokenize(escaped);
+/// A file text with Excel's future-function prefix on every call that needs
+/// one ([`FUTURE_FUNCTIONS`]), the trim operators included ([LIVE]
+/// `SUM(_xlfn._TRO_TRAILING(A1:A5))`). Token-aware, so a string literal, a
+/// quoted sheet, a structured reference and a sheet-qualified name are left
+/// alone: `="_xlfn."&SEQUENCE(2)` is saved `"_xlfn."&_xlfn.SEQUENCE(2)`.
+///
+/// It is done here, not left to `rust_xlsxwriter::Formula::new`, because the
+/// library copies a text UNESCAPED whenever `_xlfn.` occurs in it anywhere
+/// (`formula.rs`, 0.79.4) -- a string literal holding the five characters
+/// left every future function in the formula without its prefix (BUG-0651)
+/// -- and its table lacks the newer functions. The library then finds the
+/// text already escaped and copies it.
+pub(crate) fn escape_future_functions(file_text: &str) -> String {
+    let tokens = tokenize(file_text);
     let mut edits = vec![Edit::default(); tokens.len()];
-    for (at, edit) in edits.iter_mut().enumerate() {
-        if let Some((name, _, _)) = trim_operator_at(escaped, &tokens, at) {
-            edit.replace = Some(format!("_xlfn.{}", name));
+    let mut changed = false;
+    for at in 0..tokens.len() {
+        if tokens[at].kind != Kind::Name || tokens.get(at + 1).map(|t| t.kind) != Some(Kind::Punct('(')) {
+            continue;
+        }
+        if at > 0 && tokens[at - 1].kind == Kind::Punct('!') {
+            continue;
+        }
+        if let Some(prefix) = future_function_prefix(text(file_text, &tokens[at])) {
+            edits[at].before.push_str(prefix);
+            changed = true;
         }
     }
-    apply_edits(escaped, &tokens, &edits)
+    if changed {
+        apply_edits(file_text, &tokens, &edits)
+    } else {
+        file_text.to_string()
+    }
 }
 
 /// A file's formula text in Calcula's typed syntax, the inverse of
@@ -1398,8 +1837,16 @@ fn prefix_trim_operators(escaped: &str) -> String {
 /// `[[#This Row],[Col]]` -> `[@Col]`; then the `_xlfn.` / `_xlpm.` prefixes
 /// stripped ([`crate::xlsx_reader::strip_future_function_prefixes`]). An
 /// argument that is no shape the typed operator can hold keeps the function
-/// spelling.
+/// spelling. For a formula in no cell (a defined name); a cell's is
+/// [`calcula_cell_formula_text`].
 pub(crate) fn calcula_formula_text(file: &str) -> String {
+    calcula_cell_formula_text(file, None)
+}
+
+/// [`calcula_formula_text`] for the cell at 0-based `anchor` (`(row, col)`),
+/// which also turns a parameter's range to the cell's own column or row
+/// (`_xlpm.a:J:J` in column J) back into R1C1's `a:C`.
+pub(crate) fn calcula_cell_formula_text(file: &str, anchor: Option<(u32, u32)>) -> String {
     let tokens = tokenize(file);
     let mut edits = vec![Edit::default(); tokens.len()];
     let kind = |i: usize| tokens.get(i).map(|t| t.kind);
@@ -1441,21 +1888,52 @@ pub(crate) fn calcula_formula_text(file: &str) -> String {
                             _ => {}
                         }
                     }
+                    let dotted = match (lead, trail) {
+                        (true, true) => ".:.",
+                        (true, false) => ".:",
+                        _ => ":.",
+                    };
+                    // A column range with a `$` or behind a sheet is ONE
+                    // reference token (`A:$C`, `Sheet2!A:C`): its own colon.
+                    // [LIVE] Excel 16 saves `=SUM(A:.$C)` as
+                    // `SUM(_xlfn._TRO_TRAILING(A:$C))`, `=SUM(Sheet2!A:.C)` as
+                    // `.._TRO_TRAILING(Sheet2!A:C)`.
+                    let last = close - 1;
+                    let whole_range = (colon.is_none()
+                        && close > open + 1
+                        && kind(last) == Some(Kind::Reference)
+                        && reference_start(&tokens, last) == open + 1)
+                        .then(|| text(file, &tokens[last]))
+                        .and_then(|range| range.split_once(':'));
                     if let Some(colon) = colon {
                         edits[at].replace = Some(String::new());
                         edits[open].replace = Some(String::new());
                         edits[close].replace = Some(String::new());
-                        let dotted = match (lead, trail) {
-                            (true, true) => ".:.",
-                            (true, false) => ".:",
-                            _ => ":.",
-                        };
                         edits[colon].replace = Some(dotted.to_string());
+                    } else if let Some((first, second)) = whole_range {
+                        edits[at].replace = Some(String::new());
+                        edits[open].replace = Some(String::new());
+                        edits[close].replace = Some(String::new());
+                        edits[last].replace = Some(format!("{}{}{}", first, dotted, second));
                     }
                 } else if bare.eq_ignore_ascii_case("ANCHORARRAY") {
-                    // Calcula's spill operator follows a cell, sheet included.
+                    // Calcula's spill operator follows a cell, sheet included,
+                    // or a LET / LAMBDA name ([LIVE] Excel 16 saves
+                    // `=LET(A1,SEQUENCE(3),SUM(A1#))` as
+                    // `.._xlfn.ANCHORARRAY(_xlpm.A1)..` and
+                    // `=LET(x,SEQUENCE(3),SUM(x#))` as `..ANCHORARRAY(_xlpm.x)..`).
                     let last = close - 1;
-                    if close > open + 1 && kind(last) == Some(Kind::Reference) && reference_start(&tokens, last) == open + 1 {
+                    let cell_name = close == open + 2
+                        && kind(last) == Some(Kind::Name)
+                        && (strip_prefix_ci(text(file, &tokens[last]), PARAMETER_PREFIX).is_some()
+                            || strip_prefix_ci(text(file, &tokens[last]), CELL_NAME_PREFIX).is_some_and(is_cell_spelling));
+                    if cell_name {
+                        let name = text(file, &tokens[last]);
+                        edits[at].replace = Some(String::new());
+                        edits[open].replace = Some(String::new());
+                        edits[last].replace = Some(name[PARAMETER_PREFIX.len()..].to_string());
+                        edits[close].replace = Some("#".to_string());
+                    } else if close > open + 1 && kind(last) == Some(Kind::Reference) && reference_start(&tokens, last) == open + 1 {
                         edits[at].replace = Some(String::new());
                         edits[open].replace = Some(String::new());
                         edits[close].replace = Some("#".to_string());
@@ -1476,6 +1954,47 @@ pub(crate) fn calcula_formula_text(file: &str) -> String {
             Kind::Bracket => {
                 if let Some(short) = this_row_short_form(spelled) {
                     edits[at].replace = Some(short);
+                }
+            }
+            // A defined name's reference to the using sheet (`!$A$1`,
+            // `excel_name_formula_text`) is Calcula's sheetless `$A$1`.
+            Kind::Punct('!')
+                if !matches!(
+                    at.checked_sub(1).and_then(kind),
+                    Some(Kind::Name) | Some(Kind::QuotedSheet) | Some(Kind::Bracket) | Some(Kind::Reference) | Some(Kind::Number)
+                ) =>
+            {
+                edits[at].replace = Some(String::new());
+            }
+            Kind::Punct(':') if at > 0 && kind(at - 1) == Some(Kind::Name) => {
+                // R1C1's fallback keeps a range's second half a name in
+                // parentheses (`SUM(A:(B))`, `mark_r1c1_fallback`).
+                let column = |i: usize| kind(i) == Some(Kind::Name) && is_column_name(text(file, &tokens[i]));
+                if column(at - 1) && kind(at + 1) == Some(Kind::Punct('(')) && column(at + 2) && kind(at + 3) == Some(Kind::Punct(')')) {
+                    edits[at + 1].replace = Some(String::new());
+                    edits[at + 3].replace = Some(String::new());
+                }
+                // A parameter's range to the cell's own column or row, which
+                // a file holds as `J:J` / `9:9` for R1C1's `C` / `R` ([LIVE]
+                // Excel 16 saves `=LET(a,1,SUM(A:C)+a)` in J2 as
+                // `SUM(_xlpm.a:J:J)`): Calcula's `a:C`, which it can hold
+                // (`a:J:J` it cannot).
+                let parameter_half = strip_prefix_ci(text(file, &tokens[at - 1]), PARAMETER_PREFIX).is_some();
+                let same = |i: usize, j: usize| text(file, &tokens[i]).eq_ignore_ascii_case(text(file, &tokens[j]));
+                if let Some((row, col)) = anchor.filter(|_| parameter_half && kind(at + 2) == Some(Kind::Punct(':')) && same(at + 1, at + 3)) {
+                    let half = text(file, &tokens[at + 1]);
+                    let this = if kind(at + 1) == Some(Kind::Name) && half.eq_ignore_ascii_case(&column_letters(col)) {
+                        Some("C")
+                    } else if kind(at + 1) == Some(Kind::Number) && half == (row + 1).to_string() {
+                        Some("R")
+                    } else {
+                        None
+                    };
+                    if let Some(this) = this {
+                        edits[at + 1].replace = Some(this.to_string());
+                        edits[at + 2].replace = Some(String::new());
+                        edits[at + 3].replace = Some(String::new());
+                    }
                 }
             }
             _ => {}
@@ -1514,18 +2033,10 @@ fn this_row_short_form(bracket: &str) -> Option<String> {
 /// `<definedName name="Months">{1,2,3}</definedName>`), so the brace the
 /// library strips is given to it to strip: one more at each end that has one.
 ///
-/// A text with a trim operator is escaped through the borrowed route first
-/// ([`escape_defined_name_formulas`]), which adds the `_xlfn.` the library's
-/// table lacks; the library then copies the already-escaped text.
+/// The text's future functions are escaped first, by Calcula
+/// ([`escape_future_functions`]); the library then copies the escaped text.
 pub(crate) fn library_formula(text: &str) -> rust_xlsxwriter::Formula {
-    if has_trim_operator(text) {
-        if let Ok(mut escaped) = escape_defined_name_formulas(&[text.to_string()]) {
-            if let Some(escaped) = escaped.pop() {
-                return guarded_formula(&escaped);
-            }
-        }
-    }
-    guarded_formula(text)
+    guarded_formula(&escape_future_functions(text))
 }
 
 /// `rust_xlsxwriter::Formula::new` with the text's own braces kept (see
@@ -1543,27 +2054,25 @@ fn guarded_formula(text: &str) -> rust_xlsxwriter::Formula {
 }
 
 /// Each defined name's formula with Excel's `_xlfn.` future-function prefixes,
-/// which `Workbook::define_name` does not add (a CELL formula gets them from
-/// `rust_xlsxwriter::Formula::new`). The library keeps its escaping private, so
-/// it is borrowed: every formula that calls something is written into a
-/// scratch worksheet, one per row, and read back from the `<f>` the library
-/// wrote -- the library's own function table, which can never drift from the
-/// cells' one. A formula with no call (a range, a constant, an array constant)
-/// needs no prefix and is returned as it is; one with a call keeps its braces
-/// ([`library_formula`]). A trim operator, which the table lacks, gets its
-/// `_xlfn.` afterwards ([`prefix_trim_operators`]).
-///
-/// `formulas` are the texts [`excel_formula_text`] gives (no leading `=`).
+/// which `Workbook::define_name` does not add ([LIVE] Excel 16 saves a name
+/// `=LAMBDA(n,n+1)` as `_xlfn.LAMBDA(_xlpm.n,_xlpm.n+1)`): the same escaping
+/// as a cell's ([`escape_future_functions`]). `formulas` are the texts
+/// [`excel_formula_text`] gives (no leading `=`).
 pub(crate) fn escape_defined_name_formulas(formulas: &[String]) -> Result<Vec<String>, PersistenceError> {
+    Ok(formulas.iter().map(|text| escape_future_functions(text)).collect())
+}
+
+/// What rust_xlsxwriter's OWN escaping makes of each text (a scratch
+/// worksheet, one per row, read back from the `<f>` the library wrote): the
+/// oracle the future-function table is pinned against.
+#[cfg(test)]
+pub(crate) fn library_escaping(formulas: &[String]) -> Result<Vec<String>, PersistenceError> {
     use std::io::Read;
-    // Only a call can need a prefix. (A `(` inside a string or a quoted sheet
-    // name merely sends the formula through the escaping, which leaves both
-    // alone.)
     let needs_escaping: Vec<usize> = (0..formulas.len()).filter(|&i| formulas[i].contains('(')).collect();
     if needs_escaping.is_empty() {
         return Ok(formulas.to_vec());
     }
-    let bad = |what: String| PersistenceError::InvalidFormat(format!("xlsx defined-name escaping: {}", what));
+    let bad = |what: String| PersistenceError::InvalidFormat(format!("xlsx library escaping: {}", what));
     let mut scratch = rust_xlsxwriter::Workbook::new();
     let sheet = scratch.add_worksheet();
     for (row, &index) in needs_escaping.iter().enumerate() {
@@ -1590,7 +2099,7 @@ pub(crate) fn escape_defined_name_formulas(formulas: &[String]) -> Result<Vec<St
         let open_end = after.find('>').ok_or_else(|| bad("unclosed <f>".to_string()))?;
         let body = &after[open_end + 1..];
         let close = body.find("</f>").ok_or_else(|| bad("unclosed <f>".to_string()))?;
-        escaped.push(prefix_trim_operators(&unescape_xml_text(&body[..close])));
+        escaped.push(unescape_xml_text(&body[..close]));
         rest = &body[close..];
     }
     if escaped.len() != needs_escaping.len() {
@@ -1604,6 +2113,7 @@ pub(crate) fn escape_defined_name_formulas(formulas: &[String]) -> Result<Vec<St
 }
 
 /// XML character data back to text (the five predefined entities).
+#[cfg(test)]
 fn unescape_xml_text(s: &str) -> String {
     s.replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -1910,12 +2420,169 @@ mod tests {
         }
     }
 
+    /// The future-function table is rust_xlsxwriter's own plus the functions
+    /// [LIVE] Excel 16 prefixes that the library lacks (xlsxfmt probes 1 and
+    /// 3): for every Calcula built-in and every table entry, Calcula's
+    /// escaping is the library's, except exactly those newer functions.
+    /// SABOTAGE (xlsxfmt-table): drop "SEQUENCE" from FUTURE_FUNCTIONS --
+    /// fails here, and the live tables' SEQUENCE rows.
+    #[test]
+    fn the_future_function_table_holds_the_librarys_and_excels() {
+        assert!(FUTURE_FUNCTIONS.windows(2).all(|w| w[0] < w[1]), "FUTURE_FUNCTIONS is not sorted");
+        // The newer functions, and three the library's table lists but its
+        // own scan can never match (a function name to it holds no `_`).
+        let newer = [
+            "DETECTLANGUAGE", "ENCODEURL", "GROUPBY", "PERCENTOF", "PIVOTBY", "REGEXEXTRACT", "REGEXREPLACE", "REGEXTEST",
+            "STOCKHISTORY", "TRANSLATE", "TRIMRANGE", "PYTHON_STR", "PYTHON_TYPE", "PYTHON_TYPENAME",
+        ];
+        let mut names: Vec<String> = parser::BuiltinFunction::all_catalog_entries()
+            .into_iter()
+            .filter(|meta| !meta.is_alias)
+            .map(|meta| meta.name.to_string())
+            .collect();
+        names.extend(FUTURE_FUNCTIONS.iter().chain(WORKSHEET_FUNCTIONS.iter()).map(|n| n.to_string()));
+        let calls: Vec<String> = names.iter().map(|n| format!("{}(1)", n)).collect();
+        let library = library_escaping(&calls).unwrap();
+        let mut wrong = Vec::new();
+        for ((name, call), library) in names.iter().zip(&calls).zip(&library) {
+            let ours = escape_future_functions(call);
+            let expected = if newer.contains(&name.as_str()) { format!("_xlfn.{}", call) } else { library.clone() };
+            if ours != expected {
+                wrong.push(format!("  {}: Calcula {} / library {}", name, ours, library));
+            }
+        }
+        assert!(wrong.is_empty(), "ESCAPING DRIFTED FROM THE LIBRARY'S:\n{}", wrong.join("\n"));
+    }
+
+    /// BUG-0651: the library copies a text holding `_xlfn.` anywhere -- a
+    /// string literal too -- unescaped, so `="_xlfn."&SEQUENCE(2)` lost
+    /// SEQUENCE's prefix. [LIVE] Excel 16 saves `"_xlfn."&_xlfn.SEQUENCE(2)`.
+    /// Nothing in a string, a quoted sheet, a structured reference or a
+    /// sheet-qualified name is escaped, nor a name already carrying a prefix.
+    /// SABOTAGE (xlsxfmt-strlit): `escape_future_functions` returns its text
+    /// unchanged when it contains `_xlfn.` -- fails at the first row.
+    #[test]
+    fn a_string_holding_the_prefix_leaves_every_future_function_escaped() {
+        for (text, escaped) in [
+            ("\"_xlfn.\"&SEQUENCE(2)", "\"_xlfn.\"&_xlfn.SEQUENCE(2)"),
+            ("\"_xlfn.\"&TEXTJOIN(\",\",TRUE,A1:A3)", "\"_xlfn.\"&_xlfn.TEXTJOIN(\",\",TRUE,A1:A3)"),
+            ("_xlfn.SEQUENCE(2)+SEQUENCE(3)", "_xlfn.SEQUENCE(2)+_xlfn.SEQUENCE(3)"),
+            ("\"SEQUENCE(2)\"&'SEQUENCE(1)'!A1", "\"SEQUENCE(2)\"&'SEQUENCE(1)'!A1"),
+            ("FILTER(A1:A3,A1:A3>1)", "_xlfn._xlws.FILTER(A1:A3,A1:A3>1)"),
+            ("SUM(_TRO_TRAILING(A1:A5))", "SUM(_xlfn._TRO_TRAILING(A1:A5))"),
+            ("_xlfn.LAMBDA(_xlpm.f,_xlpm.f(2))(SEQUENCE)", "_xlfn.LAMBDA(_xlpm.f,_xlpm.f(2))(SEQUENCE)"),
+        ] {
+            assert_eq!(escape_future_functions(text), escaped, "for {}", text);
+        }
+        let mut scratch = rust_xlsxwriter::Workbook::new();
+        let sheet = scratch.add_worksheet();
+        sheet.write_formula(0, 0, library_formula("\"_xlfn.\"&SEQUENCE(2)")).unwrap();
+        let bytes = scratch.save_to_buffer().unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml).unwrap();
+        assert!(xml.contains("&quot;_xlfn.&quot;&amp;_xlfn.SEQUENCE(2)") || xml.contains("\"_xlfn.\"&amp;_xlfn.SEQUENCE(2)"), "{}", xml);
+    }
+
+    /// A defined name's sheetless reference is the using sheet's
+    /// (`excel_name_formula_text`), with its `$` exactly as the name has it;
+    /// one behind a sheet is left alone, and a parameter is none. [LIVE] Excel
+    /// 16 refused a workbook with a name `A1`, opened `!$A$1` and
+    /// `_xlfn.LAMBDA(_xlpm.x,SUM(!$A$1:$A$5)*_xlpm.x)`, and read `!A1` from
+    /// the using cell; [LIVE, lane formd] it saves a relative name
+    /// `=Sheet1!A1` as `Sheet1!A1`. The reader turns `!A1` back into `A1`.
+    ///
+    /// A RELATIVE PART STAYS RELATIVE (NEW-relative-name-anchor): this pinned
+    /// `Sheet1!$A$1:$B$2` for `=Sheet1!A1:B2` -- an absolute file text -- while
+    /// Calcula read a name's `A1` as cell A1 from every cell; a name now means
+    /// the using cell, as Excel's does.
+    /// SABOTAGE (xlsxfmt-names): skip `qualify_sheetless_references`.
+    #[test]
+    fn a_defined_names_sheetless_reference_is_the_using_sheets() {
+        let none = DefinedNames::default();
+        for (name, file) in [
+            ("=A1", "!A1"),
+            ("=$A$1", "!$A$1"),
+            ("=LAMBDA(x,SUM(A1:A5)*x)", "LAMBDA(_xlpm.x,SUM(!A1:A5)*_xlpm.x)"),
+            ("=Sheet1!A1:B2", "Sheet1!A1:B2"),
+            ("=Sheet1!$A1", "Sheet1!$A1"),
+            ("=Sheet1!$A$5", "Sheet1!$A$5"),
+            ("=SUM(A:C)+SUM(1:3)", "SUM(!A:C)+SUM(!1:3)"),
+            ("=LAMBDA(x,ROWS(A1#)*x)", "LAMBDA(_xlpm.x,ROWS(ANCHORARRAY(!A1))*_xlpm.x)"),
+            ("=LAMBDA(x,SUM(A1:.A5)*x)", "LAMBDA(_xlpm.x,SUM(_TRO_TRAILING(!A1:A5))*_xlpm.x)"),
+            ("=LET(a1x,1,a1x+B2)", "LET(_xlpm.a1x,1,_xlpm.a1x+!B2)"),
+            ("=LAMBDA(n,n+1)", "LAMBDA(_xlpm.n,_xlpm.n+1)"),
+            ("={1,2,3}", "{1,2,3}"),
+        ] {
+            assert_eq!(excel_name_formula_text(name, &none), file, "for {}", name);
+        }
+        assert_eq!(calcula_formula_text("!$A$1"), "$A$1");
+        assert_eq!(calcula_formula_text("!A1"), "A1");
+        assert_eq!(calcula_formula_text("_xlfn.LAMBDA(_xlpm.x,SUM(!$A$1:$A$5)*_xlpm.x)"), "LAMBDA(x,SUM($A$1:$A$5)*x)");
+        assert_eq!(calcula_formula_text("Sheet1!$A$1+'My Sheet'!B2"), "Sheet1!$A$1+'My Sheet'!B2");
+    }
+
+    /// The reader's inverses round the parameter and trim shapes a file
+    /// carries (BUG-0645): a trim whose second half is a parameter
+    /// (`_TRO_TRAILING(A1:_xlpm.A5)` -> `A1:.A5`, the `_xlpm.` after the trim
+    /// dot stripped), a column range with a `$` or a sheet (one reference
+    /// token), a spill of a parameter, a bare function value, R1C1's
+    /// parenthesised range half, and a parameter's range to the cell's own
+    /// column (`_xlpm.a:J:J` in J2 -> `a:C`; in K2 it stays).
+    /// SABOTAGE (xlsxfmt-trimdot): drop the `after_trim_dot` boundary in
+    /// `strip_future_function_prefixes` -- fails at the first row.
+    #[test]
+    fn the_reader_reads_the_parameter_and_trim_shapes_a_file_carries() {
+        for (file, calcula) in [
+            ("SUM(_xlfn._TRO_TRAILING(A1:_xlpm.A5))", "SUM(A1:.A5)"),
+            ("SUM(_xlfn._TRO_ALL(_xlpm.A1:A5))", "SUM(A1.:.A5)"),
+            ("SUM(_xlfn._TRO_TRAILING(A:$C))", "SUM(A:.$C)"),
+            ("SUM(_xlfn._TRO_LEADING($A:$C))", "SUM($A.:$C)"),
+            ("SUM(_xlfn._TRO_TRAILING(Sheet2!$A:$C))", "SUM(Sheet2!$A:.$C)"),
+            ("SUM(_xlfn._TRO_TRAILING('My Sheet'!A:$B))", "SUM('My Sheet'!A:.$B)"),
+            ("_xlfn.LET(_xlpm.x,_xlfn.SEQUENCE(3),SUM(_xlfn.ANCHORARRAY(_xlpm.x)))", "LET(x,SEQUENCE(3),SUM(x#))"),
+            ("_xlfn.LET(_xlpm.A1,1,_xlfn.ANCHORARRAY(_xlnm.B1))", "LET(A1,1,B1#)"),
+            ("SUM(_xlfn.MAP(A1:A3,_xleta.ABS))", "SUM(MAP(A1:A3,ABS))"),
+            ("_xlfn.LET(_xlpm.A1,1,_xlpm.A1+SUM(A:(B)))", "LET(A1,1,A1+SUM(A:B))"),
+        ] {
+            assert_eq!(calcula_formula_text(file), calcula, "for {}", file);
+        }
+        let in_j2 = "_xlfn.LET(_xlpm.a,1,SUM(_xlpm.a:J:J)+_xlpm.a)";
+        assert_eq!(calcula_cell_formula_text(in_j2, Some((1, 9))), "LET(a,1,SUM(a:C)+a)");
+        assert_eq!(calcula_cell_formula_text(in_j2, Some((1, 10))), "LET(a,1,SUM(a:J:J)+a)");
+        assert_eq!(calcula_cell_formula_text("_xlfn.LET(_xlpm.a,1,SUM(_xlpm.a:9:9))", Some((8, 0))), "LET(a,1,SUM(a:R))");
+    }
+
     /// A call to a named LAMBDA leaves as the call the user wrote, never as
     /// Calcula's internal `__INVOKE__` marker.
     #[test]
     fn a_named_lambda_call_is_exported_as_the_users_call() {
         assert_eq!(excel_formula_text("=__INVOKE__(\"Double\",LAMBDA(x,x*2),D4)", None), "Double(D4)");
         assert_eq!(excel_formula_text("=SUM(A1:A3)", None), "SUM(A1:A3)");
+    }
+
+    /// Calcula's own short spellings are Calcula-only functions (lane formc):
+    /// written as the cell holds them, never as Excel's AVERAGE / CEILING /
+    /// POWER / FACT, never a function value (`_xleta.`), never an arity Excel
+    /// refuses -- [LIVE] Excel 16 shows `=AVG(1,2)`, `=CEIL(1.5)`, `=POW(2,3)`
+    /// and `=FACTORIAL(3)` as typed, each #NAME?.
+    #[test]
+    fn calculas_short_spellings_are_exported_as_calcula_only_functions() {
+        for (stored, file) in [
+            ("=AVG(1,2)", "AVG(1,2)"),
+            ("=CEIL(1.5)", "CEIL(1.5)"),
+            ("=POW(2,3)", "POW(2,3)"),
+            ("=FACTORIAL(3)", "FACTORIAL(3)"),
+            ("=LET(F,POW,1)", "LET(_xlpm.F,POW,1)"),
+        ] {
+            let cell = engine::Cell::new_formula(stored.to_string());
+            let text = format!("={}", cell.formula_string_raw().expect("a formula"));
+            assert_eq!(text, stored, "the cell keeps the name typed");
+            assert_eq!(excel_formula_text(&text, None), file, "{}", stored);
+        }
+        for name in ["AVG", "CEIL", "POW", "FACTORIAL"] {
+            assert!(!excel_refuses_arity(name, 9), "{} is Calcula's: no arity of it is refused", name);
+        }
     }
 
     /// [LIVE] Excel 16 saves a defined name `=LAMBDA(n,n+1)` as
@@ -1945,5 +2612,31 @@ mod tests {
                 "_xlfn.XLOOKUP(2,{1,2},{10,20})+{1,2}".to_string(),
             ]
         );
+    }
+
+    /// A reference whose sheet was deleted is `#REF!` alone in the file, as
+    /// Excel 16 saved it [LIVE, 2026-11-05, sheetspill/probe1.ps1, sheet1.xml
+    /// and workbook.xml verbatim]; Calcula keeps the cell part in memory.
+    #[test]
+    fn a_reference_to_a_deleted_sheet_is_ref_alone_in_the_file() {
+        for (calcula, excel) in [
+            ("=#REF!A1", "#REF!"),
+            ("=SUM(#REF!A1:A3)+1", "SUM(#REF!)+1"),
+            ("=#REF!$A$1+Sheet3!A1", "#REF!+Sheet3!A1"),
+            ("=SUM(#REF!A:A)", "SUM(#REF!)"),
+            ("=SUM(#REF!1:1)", "SUM(#REF!)"),
+            ("=SUM(#REF!D1#)", "SUM(ANCHORARRAY(#REF!))"),
+            ("=INDEX(#REF!A1:B2,1,1)", "INDEX(#REF!,1,1)"),
+            ("=SUM(#REF!A1,#REF!A2)", "SUM(#REF!,#REF!)"),
+            ("=ISREF(#REF!A1)", "ISREF(#REF!)"),
+            ("=A1>#REF!$B$1", "A1>#REF!"),
+            // The literal on its own, and a sheet CALLED `#REF!`, are untouched.
+            ("=IF(A1,#REF!,1)", "IF(A1,#REF!,1)"),
+            ("='#REF!'!A1", "'#REF!'!A1"),
+        ] {
+            assert_eq!(excel_formula_text(calcula, Some((0, 2))), excel, "for {}", calcula);
+        }
+        // A defined name reading the deleted sheet: `<definedName>#REF!`.
+        assert_eq!(excel_name_formula_text("=#REF!$A$1:$A$3", &DefinedNames::default()), "#REF!");
     }
 }

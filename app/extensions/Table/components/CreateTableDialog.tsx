@@ -1,7 +1,9 @@
 //! FILENAME: app/extensions/Table/components/CreateTableDialog.tsx
 // PURPOSE: Insert Table dialog component.
 // CONTEXT: Simplified dialog for creating a table from a data range.
-//          Follows the same pattern and styling as CreatePivotDialog.
+//          Follows the same pattern as CreatePivotDialog; its colours are theme
+//          tokens (_shared/lib/dialogTheme.ts, BUG-0376), not that dialog's
+//          hard-coded dark palette.
 //          Opened by Insert > Table... (no data) and by Home > Format as Table
 //          outside a table, with `{ styleName }` -- the style the new table is
 //          born in. The dialog used to accept `data` and never read it.
@@ -18,6 +20,7 @@ import { useDialogWindow } from "@api/dialogWindow";
 import { emitAppEvent } from "@api/events";
 import { createTableAsync } from "../lib/tableStore";
 import { TableEvents } from "../lib/tableEvents";
+import { DIALOG_THEME as DT } from "../../_shared/lib/dialogTheme";
 
 // ============================================================================
 // Utility Functions
@@ -341,7 +344,8 @@ export function CreateTableDialog({
 }
 
 // ============================================================================
-// Styles (matches CreatePivotDialog dark theme)
+// Styles: theme tokens, so the dialog follows the light and dark skins
+// (BUG-0376 -- it was hard-coded dark, and wrong in the light theme).
 // ============================================================================
 
 const styles: Record<string, React.CSSProperties> = {
@@ -351,17 +355,17 @@ const styles: Record<string, React.CSSProperties> = {
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    backgroundColor: DT.overlay,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     zIndex: 10000,
   },
   dialog: {
-    backgroundColor: "#2d2d2d",
+    backgroundColor: DT.bg,
     borderRadius: "8px",
-    border: "1px solid #454545",
-    boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
+    border: `1px solid ${DT.border}`,
+    boxShadow: DT.shadow,
     width: "420px",
     maxWidth: "90vw",
     maxHeight: "90vh",
@@ -373,18 +377,18 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     justifyContent: "space-between",
     padding: "16px 20px",
-    borderBottom: "1px solid #454545",
+    borderBottom: `1px solid ${DT.divider}`,
   },
   title: {
     margin: 0,
     fontSize: "16px",
     fontWeight: 600,
-    color: "#ffffff",
+    color: DT.title,
   },
   closeButton: {
     background: "transparent",
     border: "none",
-    color: "#888888",
+    color: DT.textSecondary,
     fontSize: "18px",
     cursor: "pointer",
     padding: "4px 8px",
@@ -402,24 +406,24 @@ const styles: Record<string, React.CSSProperties> = {
     display: "block",
     fontSize: "13px",
     fontWeight: 500,
-    color: "#cccccc",
+    color: DT.text,
     marginBottom: "8px",
   },
   input: {
     width: "100%",
     padding: "8px 12px",
     fontSize: "13px",
-    backgroundColor: "#1e1e1e",
-    border: "1px solid #454545",
+    backgroundColor: DT.inputBg,
+    border: `1px solid ${DT.inputBorder}`,
     borderRadius: "4px",
-    color: "#ffffff",
+    color: DT.inputText,
     outline: "none",
     boxSizing: "border-box" as const,
   },
   hint: {
     display: "block",
     fontSize: "11px",
-    color: "#888888",
+    color: DT.textSecondary,
     marginTop: "4px",
   },
   checkboxGroup: {
@@ -430,7 +434,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     gap: "8px",
     fontSize: "13px",
-    color: "#cccccc",
+    color: DT.text,
     cursor: "pointer",
   },
   checkbox: {
@@ -439,10 +443,10 @@ const styles: Record<string, React.CSSProperties> = {
   },
   error: {
     padding: "10px 12px",
-    backgroundColor: "rgba(220, 53, 69, 0.15)",
-    border: "1px solid #dc3545",
+    backgroundColor: DT.errorBg,
+    border: `1px solid ${DT.errorFg}`,
     borderRadius: "4px",
-    color: "#ff6b6b",
+    color: DT.errorFg,
     fontSize: "13px",
   },
   footer: {
@@ -450,24 +454,24 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "flex-end",
     gap: "8px",
     padding: "16px 20px",
-    borderTop: "1px solid #454545",
+    borderTop: `1px solid ${DT.divider}`,
   },
   cancelButton: {
     padding: "8px 16px",
     fontSize: "13px",
-    backgroundColor: "transparent",
-    border: "1px solid #454545",
+    backgroundColor: DT.buttonBg,
+    border: `1px solid ${DT.buttonBorder}`,
     borderRadius: "4px",
-    color: "#cccccc",
+    color: DT.buttonText,
     cursor: "pointer",
   },
   okButton: {
     padding: "8px 20px",
     fontSize: "13px",
-    backgroundColor: "#0e639c",
-    border: "1px solid #0e639c",
+    backgroundColor: DT.primaryBg,
+    border: `1px solid ${DT.primaryBg}`,
     borderRadius: "4px",
-    color: "#ffffff",
+    color: DT.primaryText,
     cursor: "pointer",
     fontWeight: 500,
   },

@@ -252,7 +252,22 @@ pub fn restore_bindings_from_disk(
     state: &AppState,
     rows: &[::persistence::SavedObjectBinding],
 ) -> Result<usize, String> {
-    let restored = BindingStore::from_snapshot(&BindingStoreSnapshot { rows: rows.to_vec() });
+    let mut restored = BindingStore::from_snapshot(&BindingStoreSnapshot { rows: rows.to_vec() });
+    // A binding of a container key its control does not paint (BUG-0491) is
+    // not installed: the binding's `set` refuses one, and the control's own
+    // load dropped the literal. The controls store is loaded first and read
+    // (and released) per row here, before this store is taken.
+    let before = restored.bindings.len();
+    restored
+        .bindings
+        .retain(|key, _| crate::controls::refuse_dead_container_binding(state, &key.object, &key.path).is_ok());
+    if restored.bindings.len() < before {
+        crate::log_info!(
+            "BINDINGS",
+            "{} binding(s) of a container key their control does not paint were not loaded",
+            before - restored.bindings.len()
+        );
+    }
     let count = restored.bindings.len();
     let load = crate::document_effect::DocumentEffect::deliberately_clean(
         crate::document_effect::CleanReason::LoadingFromDisk,

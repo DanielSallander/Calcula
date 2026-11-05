@@ -2,12 +2,13 @@
 //! SQL-generating entry point.
 
 use crate::compute::aggregate::AggregateOp;
+use crate::compute::dax_semantics;
 use crate::compute::expression::{Expression, FilterPredicate, ScalarFunction};
 use crate::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use crate::error::{EngineError, EngineResult};
 
 use super::dialect::udf_call_unsupported;
-use super::{Dialect, KeepRendering, SqlRenderer};
+use super::{Dialect, KeepRendering, Semantics, SqlRenderer};
 
 impl<D: Dialect> SqlRenderer<'_, D> {
     pub(super) fn render_plain(&self, expr: &Expression) -> EngineResult<String> {
@@ -49,6 +50,9 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                         .to_string(),
                 ));
             }
+            // A DAX division by zero folds to +/-Infinity or NaN (a GVAR
+            // `a / 0`), which `{v}` would spell as a bare `inf` identifier.
+            Expression::LiteralFloat(v) if !v.is_finite() => self.dialect.non_finite_float(*v),
             Expression::LiteralFloat(v) => format!("{v}"),
             Expression::LiteralInt(v) => format!("{v}"),
             // Date32 day count → a date-typed literal. The spelling is
@@ -64,21 +68,44 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             }
             Expression::LiteralString(s) => sql_quote_literal(s),
             Expression::Blank => "NULL".to_string(),
-            Expression::BinaryOp { left, op, right } => {
-                format!(
-                    "({} {} {})",
-                    self.render_plain(left)?,
-                    op.as_sql(),
-                    self.render_plain(right)?
-                )
+            // DAX BLANK arithmetic (`BLANK + 5 = 5`, `x / 0 = Infinity`, ...):
+            // see `compute::dax_semantics`.
+            Expression::BinaryOp { .. } => {
+                self.render_arithmetic(expr, &mut |e| self.render_plain(e))?
             }
+            // A DAX count of nothing is BLANK (`NULLIF(count, 0)`); DAX's
+            // DISTINCTCOUNT counts BLANK as a value.
             Expression::Aggregate { operation, operand } => {
                 self.render_aggregate_node(operation, operand)?
             }
             Expression::Keep { .. } => self.render_keep(expr)?,
+            // In KEEP-as-CASE-WHEN mode (source pushdown) these context
+            // operations cannot travel with the SQL: rendering the inner
+            // expression would silently drop the CLEAR / RESET / ... The
+            // pushdown planner keeps such measures local
+            // (`has_unpushable_ops`); the connector renders a CLEAR it can
+            // reach as a window before delegating here. Fail closed.
+            Expression::Clear { .. }
+            | Expression::Reset { .. }
+            | Expression::ClearInner { .. }
+            | Expression::ClearOuter { .. }
+            | Expression::ResetInner { .. }
+            | Expression::ResetOuter { .. }
+            | Expression::Traverse { .. }
+            | Expression::Using { .. }
+            | Expression::UseRelationship { .. }
+            | Expression::KeepIn { .. }
+            | Expression::ClearExcept { .. }
+                if self.keep == KeepRendering::CaseWhen =>
+            {
+                return Err(EngineError::InvalidExpression(format!(
+                    "a context operation cannot be rendered inside source SQL here (it would be \
+                     silently dropped); the measure must be evaluated locally: {expr:?}"
+                )));
+            }
             // Context manipulation nodes render as their inner expression's
-            // SQL. Context operations are resolved by the ContextResolver (or
-            // excluded by the pushdown planner) before SQL generation.
+            // SQL. Context operations are resolved by the ContextResolver
+            // before local SQL generation.
             Expression::Clear { expr, .. }
             | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
@@ -112,12 +139,14 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 format!("({} IS NULL)", self.render_plain(inner)?)
             }
             Expression::Comparison { left, op, right } => {
-                format!(
-                    "({} {} {})",
-                    self.render_plain(left)?,
-                    op.as_sql(),
-                    self.render_plain(right)?
-                )
+                let (mut l, mut r) = (self.render_plain(left)?, self.render_plain(right)?);
+                // DAX compares a BLANK as 0 / "" / FALSE against a literal of
+                // that type (`COUNTROWS(t) = 0` is TRUE over an empty table).
+                if self.semantics == Semantics::Dax {
+                    l = dax_semantics::comparison_operand(l, left, right);
+                    r = dax_semantics::comparison_operand(r, right, left);
+                }
+                format!("({l} {} {r})", op.as_sql())
             }
             Expression::And(left, right) => {
                 format!(
@@ -148,7 +177,7 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             } => {
                 format!(
                     "CASE WHEN {} THEN {} ELSE {} END",
-                    self.render_plain(condition)?,
+                    self.case_cond_of(condition, &self.render_plain(condition)?),
                     self.render_plain(then_expr)?,
                     self.render_plain(else_expr)?
                 )
@@ -158,7 +187,23 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 cases,
                 default,
             } => {
-                let mut sql = format!("CASE {}", self.render_plain(expr)?);
+                let mut subject = self.render_plain(expr)?;
+                // SWITCH compares with `=`: a BLANK subject matches DAX's
+                // conversion for the case values' type when they all share
+                // one (`SWITCH(COUNTROWS(t), 0, ...)` matches over no rows).
+                if self.semantics == Semantics::Dax {
+                    if let Some((first, _)) = cases.first() {
+                        let zero = dax_semantics::blank_compares_as(first);
+                        if zero.is_some()
+                            && cases
+                                .iter()
+                                .all(|(v, _)| dax_semantics::blank_compares_as(v) == zero)
+                        {
+                            subject = dax_semantics::comparison_operand(subject, expr, first);
+                        }
+                    }
+                }
+                let mut sql = format!("CASE {subject}");
                 for (val, result) in cases {
                     sql.push_str(&format!(
                         " WHEN {} THEN {}",
@@ -250,7 +295,7 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 operand,
                 percentile,
             } => {
-                let op_sql = self.render_plain(operand)?;
+                let op_sql = self.keep_scoped(self.render_plain(operand)?);
                 let k_sql = self.render_plain(percentile)?;
                 self.dialect.percentile(&k_sql, &op_sql)?
             }
@@ -261,10 +306,11 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                     .materialized_placeholder("/* QUERY: must be materialized */", expr)?
             }
             Expression::HasOneValue { column } => {
-                format!("(COUNT(DISTINCT {}) = 1)", self.render_plain(column)?)
+                let col_sql = self.keep_scoped(self.render_plain(column)?);
+                format!("(COUNT(DISTINCT {col_sql}) = 1)")
             }
             Expression::SelectedValue { column, alternate } => {
-                let col_sql = self.render_plain(column)?;
+                let col_sql = self.keep_scoped(self.render_plain(column)?);
                 let alt = match alternate {
                     Some(a) => self.render_plain(a)?,
                     None => "NULL".to_string(),
@@ -274,8 +320,8 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 )
             }
             Expression::FirstValue { column, order_by } => {
-                let column_sql = self.render_plain(column)?;
-                let order_sql = self.render_plain(order_by)?;
+                let column_sql = self.keep_scoped(self.render_plain(column)?);
+                let order_sql = self.keep_scoped(self.render_plain(order_by)?);
                 self.dialect.first_value(&column_sql, &order_sql)?
             }
             Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
@@ -339,26 +385,27 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 )
             }
             Expression::CountIf { condition } => {
-                format!(
-                    "SUM(CASE WHEN {} THEN 1 ELSE 0 END)",
-                    self.render_plain(condition)?
-                )
+                let row = format!(
+                    "CASE WHEN {} THEN 1 ELSE 0 END",
+                    self.case_cond_of(condition, &self.render_plain(condition)?)
+                );
+                format!("SUM({})", self.keep_scoped(row))
             }
             Expression::ListAgg { column, delimiter } => {
                 format!(
                     "STRING_AGG({}, {})",
-                    self.render_plain(column)?,
+                    self.keep_scoped(self.render_plain(column)?),
                     self.render_plain(delimiter)?
                 )
             }
             Expression::MaxBy { value, sort_by } => {
-                let v = self.render_plain(value)?;
-                let s = self.render_plain(sort_by)?;
+                let v = self.keep_scoped(self.render_plain(value)?);
+                let s = self.keep_scoped(self.render_plain(sort_by)?);
                 self.dialect.max_by(&v, &s)?
             }
             Expression::MinBy { value, sort_by } => {
-                let v = self.render_plain(value)?;
-                let s = self.render_plain(sort_by)?;
+                let v = self.keep_scoped(self.render_plain(value)?);
+                let s = self.keep_scoped(self.render_plain(sort_by)?);
                 self.dialect.min_by(&v, &s)?
             }
             Expression::Call { name, args } => {
@@ -383,58 +430,49 @@ impl<D: Dialect> SqlRenderer<'_, D> {
         })
     }
 
-    /// Render an aggregate node, handling `COUNT(*)` (whose bare table
-    /// reference operand is not renderable) and — in KEEP-as-CASE-WHEN mode —
-    /// a KEEP nested directly in the aggregate operand.
+    /// Render an aggregate node: `COUNT(*)` ignores its operand (COUNTROWS
+    /// carries a bare table reference, which is not renderable), a DAX
+    /// `DISTINCTCOUNT` counts BLANK as a value, and a DAX count of nothing is
+    /// BLANK. In KEEP-as-CASE-WHEN mode the enclosing KEEPs' condition is
+    /// applied as conditional aggregation, and a KEEP nested directly in the
+    /// operand (`COUNTROWS(KEEP(t, ...))`, `SUM(KEEP(x, ...))`) joins it.
+    ///
+    /// `COUNTROWS` under a KEEP renders `SUM(CASE WHEN c THEN 1 END)`: the
+    /// count of the rows the KEEP keeps, `NULL` (BLANK, as DAX's COUNTROWS of
+    /// no rows) when none is kept. It rendered a plain `COUNT(*)` here before
+    /// the open-ledger round D, so a pushed filtered count counted EVERY row.
     fn render_aggregate_node(
         &self,
         operation: &AggregateOp,
         operand: &Expression,
     ) -> EngineResult<String> {
-        if self.keep == KeepRendering::CaseWhen {
-            if let Expression::Keep {
-                expr: inner,
-                filters,
-                variables,
-                conditions,
-                in_predicates,
-            } = operand
-            {
-                if variables.is_empty() && conditions.is_empty() && in_predicates.is_empty() {
-                    let condition = self.keep_condition(filters)?;
-                    // COUNTROWS carries a bare table reference operand. The
-                    // legacy PostgreSQL pushdown rendered it as a plain
-                    // COUNT(*) (the CASE WHEN condition does not apply);
-                    // preserved byte-for-byte for pushdown compatibility.
-                    if matches!(operation, AggregateOp::CountRows) {
-                        return self.dialect.render_aggregate(operation, "");
-                    }
-                    let inner_sql = self.render_plain(inner)?;
-                    let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
-                    return self.dialect.render_aggregate(operation, &case_expr);
-                }
-            }
+        if self.keep == KeepRendering::CaseWhen && matches!(operand, Expression::Keep { .. }) {
+            return self.with_keep_scope(operand, &mut |inner| {
+                self.render_aggregate_node(operation, inner)
+            });
         }
-        match operation {
-            // COUNT(*) — handled before rendering the operand: COUNTROWS
-            // carries a bare table reference, which is not renderable.
-            AggregateOp::CountRows => self.dialect.render_aggregate(operation, ""),
-            _ => self
-                .dialect
-                .render_aggregate(operation, &self.render_plain(operand)?),
+        let operand_sql = if matches!(operation, AggregateOp::CountRows) {
+            String::new()
+        } else {
+            self.render_plain(operand)?
+        };
+        match self.active_keep_condition() {
+            Some(condition) => {
+                let sql =
+                    self.dialect
+                        .render_aggregate_case_when(operation, &condition, &operand_sql)?;
+                Ok(self.measure_aggregate_case_when(operation, sql, &condition, &operand_sql))
+            }
+            None => {
+                let sql = self.dialect.render_aggregate(operation, &operand_sql)?;
+                Ok(self.measure_aggregate(operation, sql, &operand_sql))
+            }
         }
     }
 
     /// Render a bare `Keep` node according to the configured [`KeepRendering`].
     fn render_keep(&self, expr: &Expression) -> EngineResult<String> {
-        let Expression::Keep {
-            expr: inner,
-            filters,
-            variables,
-            conditions,
-            in_predicates,
-        } = expr
-        else {
+        let Expression::Keep { expr: inner, .. } = expr else {
             return Err(EngineError::InvalidExpression(
                 "render_keep called on a non-Keep expression".to_string(),
             ));
@@ -442,16 +480,53 @@ impl<D: Dialect> SqlRenderer<'_, D> {
         match self.keep {
             KeepRendering::PassThrough => self.render_plain(inner),
             KeepRendering::CaseWhen => {
-                // KEEP with variables, expression conditions, or IN predicates
-                // requires local context resolution; the pushdown planner
-                // never pushes those, so render the inner expression.
-                if !variables.is_empty() || !conditions.is_empty() || !in_predicates.is_empty() {
-                    return self.render_plain(inner);
-                }
-                let condition = self.keep_condition(filters)?;
-                self.render_keep_case_when(inner, &condition)
+                self.with_keep_scope(expr, &mut |inner| self.render_plain(inner))
             }
         }
+    }
+
+    /// Render a KEEP's inner expression through `render` with the KEEP's
+    /// condition added to the scope every aggregate beneath it takes
+    /// ([`SqlRenderer::active_keep_condition`]).
+    ///
+    /// A KEEP with variables, expression conditions or IN predicates needs
+    /// local context resolution and has no source-SQL form; the pushdown
+    /// planner never pushes one (`has_unpushable_ops`). It is an `Err` here
+    /// rather than its inner expression, which would answer the UNFILTERED
+    /// value. A KEEP with no predicate at all keeps every row: no scope.
+    fn with_keep_scope(
+        &self,
+        keep: &Expression,
+        render: &mut dyn FnMut(&Expression) -> EngineResult<String>,
+    ) -> EngineResult<String> {
+        let Expression::Keep {
+            expr: inner,
+            filters,
+            variables,
+            conditions,
+            in_predicates,
+        } = keep
+        else {
+            return Err(EngineError::InvalidExpression(
+                "with_keep_scope called on a non-Keep expression".to_string(),
+            ));
+        };
+        if !variables.is_empty() || !conditions.is_empty() || !in_predicates.is_empty() {
+            return Err(EngineError::InvalidExpression(
+                "a KEEP with table variables, expression conditions or IN predicates cannot \
+                 be rendered as source SQL (it needs local context resolution); the measure \
+                 must be evaluated locally"
+                    .to_string(),
+            ));
+        }
+        if filters.is_empty() {
+            return render(inner);
+        }
+        let condition = self.keep_condition(filters)?;
+        self.keep_scope.borrow_mut().push(condition);
+        let out = render(inner);
+        self.keep_scope.borrow_mut().pop();
+        out
     }
 
     /// Build the `CASE WHEN` condition for simple KEEP filter predicates:
@@ -470,46 +545,6 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             })
             .collect::<EngineResult<Vec<String>>>()?;
         Ok(parts.join(" AND "))
-    }
-
-    /// Wrap the aggregates of a KEEP inner expression in `CASE WHEN`.
-    ///
-    /// Recurses through arithmetic and safe division so the condition is
-    /// applied to each leaf aggregate independently; everything else falls
-    /// back to plain rendering.
-    fn render_keep_case_when(&self, expr: &Expression, condition: &str) -> EngineResult<String> {
-        Ok(match expr {
-            Expression::Aggregate { operation, operand } => {
-                // See render_aggregate_node for the COUNTROWS rationale.
-                if matches!(operation, AggregateOp::CountRows) {
-                    self.dialect.render_aggregate(operation, "")?
-                } else {
-                    let inner_sql = self.render_plain(operand)?;
-                    let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
-                    self.dialect.render_aggregate(operation, &case_expr)?
-                }
-            }
-            Expression::BinaryOp { left, op, right } => {
-                let l = self.render_keep_case_when(left, condition)?;
-                let r = self.render_keep_case_when(right, condition)?;
-                format!("({l} {} {r})", op.as_sql())
-            }
-            Expression::SafeDivide {
-                numerator,
-                denominator,
-                alternate,
-            } => {
-                let n = self.render_keep_case_when(numerator, condition)?;
-                let d = self.render_keep_case_when(denominator, condition)?;
-                let alt = match alternate {
-                    Some(a) => self.render_plain(a)?,
-                    None => "NULL".to_string(),
-                };
-                let cast = self.dialect.divide_cast();
-                format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS {cast}) / {d} END")
-            }
-            _ => self.render_plain(expr)?,
-        })
     }
 
     /// Render a scalar function call with pre-rendered arguments, delegating the

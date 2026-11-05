@@ -360,6 +360,44 @@ pub struct CellUpdateInput {
     /// onto an unlocked cell of a protected sheet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved: Option<MovedFrom>,
+    /// Set, this write PASTES the named SOURCE cell as that cell holds it at
+    /// the write (BUG-0657): the batch reads the source under its own held grid
+    /// guards, BEFORE any of its writes, and writes the source's formula
+    /// shifted by (this cell - the source cell) the way Copy + Paste shifts it,
+    /// or -- with `values_only`, or when the source holds no formula -- its
+    /// stored value, as a PASTE (`pasted`, invariant). `value` is then only the
+    /// fallback for a source this rule cannot vouch for (a collection value, a
+    /// `TABLE(..)` formula, a source sheet or object that does not resolve).
+    /// Excel pastes what the source holds at the paste; a frontend re-read
+    /// before the write can be stale under a writer that never stops (an
+    /// animation, a fast scheduled job). Absent: `value` is written, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PasteSource>,
+}
+
+/// The source cell of a pasted write (`CellUpdateInput::source`): the sheet by
+/// INDEX (read under the batch's held grid guards), the cell, and -- with
+/// `target` -- a cell of that OBJECT instead (a floating grid's own cell, in
+/// its coordinates; `sheet_index` is then not used).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteSource {
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<CellTargetRef>,
+    /// Paste the source's VALUE (a formula's current result), never its
+    /// formula -- Paste Values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values_only: Option<bool>,
+    /// The write MOVES the source cell (Cut + Paste, a drag move): its formula
+    /// is written as the source holds it, UNSHIFTED -- the move's relocation
+    /// re-points the references into the moved block, as Excel's move keeps
+    /// every other reference. Absent: shifted by (this cell - the source), as
+    /// Copy + Paste shifts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unshifted: Option<bool>,
 }
 
 /// The source cell of a moved write (`CellUpdateInput::moved`): the sheet by
@@ -382,11 +420,9 @@ impl CellUpdateInput {
         self.pasted.unwrap_or(false)
     }
 
-    /// Whether this write CLAIMS to land a moved cell (see `moved`). A claim
-    /// only: the batch honours it once the source is shown to hold the style.
-    pub fn is_move(&self) -> bool {
-        self.moved.is_some()
-    }
+    // No `is_move()`: `moved` is a CLAIM, and a writer that decided on the
+    // bare claim let a forged one land a style on a protected host (BUG-0654).
+    // Every writer asks `commands::data::honoured_move_claims` instead.
 }
 
 /// A single border side (top, right, bottom, or left).
@@ -802,6 +838,19 @@ pub struct FormattingParams {
     pub formula_hidden: Option<bool>,
 }
 
+/// One further block of a multi-area formatting (BUG-0394): `apply_formatting`'s
+/// `more_areas`, the other Ctrl+click / Go To Special blocks formatted by the
+/// same call, as the rows and columns `FormattingParams` takes (a plain list or
+/// an `IndexRun`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormattingArea {
+    #[serde(deserialize_with = "deserialize_index_list")]
+    pub rows: Vec<u32>,
+    #[serde(deserialize_with = "deserialize_index_list")]
+    pub cols: Vec<u32>,
+}
+
 /// Result from apply_formatting that includes both updated cells and new styles.
 /// This allows the frontend to update its style cache in a single round-trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1003,23 +1052,16 @@ impl StructuralDelta {
 pub struct MergeOptions {
     /// Excel's Merge Across: one merged region per ROW of the range.
     pub across: bool,
-    /// Merged regions wholly inside the range are dissolved and re-merged into
-    /// the new region(s) instead of refusing. A region that only PARTLY
-    /// overlaps the range is still refused.
-    pub absorb: bool,
-    /// Excel's value rule: a planned region whose top-left cell holds no
-    /// content takes the first cell in reading order (row by row, left to
-    /// right) that does -- value, formula and style move as they are.
-    pub keep_first_value: bool,
     /// Run every gate and report the plan; change nothing, record nothing,
     /// leave the document clean.
     pub probe: bool,
 }
 
 /// One cell `merge_cells` MOVED into a merge's top-left cell (Excel's value
-/// rule, `MergeOptions::keep_first_value`). The caller re-points references
-/// from `from` to `to` (`relocate_cell_references`) so formulas that read the
-/// moved value keep reading it, as Excel's do.
+/// rule, applied by EVERY merge: a region whose top-left cell holds nothing
+/// takes the first cell in reading order that does). On a sheet the backend
+/// re-points references from `from` to `to` itself (`relocate_cell_references`),
+/// so formulas that read the moved value keep reading it, as Excel's do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MovedCell {
@@ -1047,7 +1089,7 @@ pub struct MergeResult {
     /// each of those discards values, which is what Excel warns about.
     #[serde(default)]
     pub lossy_regions: u32,
-    /// Cells moved into a merge's top-left cell (`keep_first_value`).
+    /// Cells moved into a merge's top-left cell (Excel's value rule).
     #[serde(default)]
     pub moved_cells: Vec<MovedCell>,
 }
@@ -2722,8 +2764,7 @@ pub struct MemberRef {
 }
 
 impl MemberRef {
-    /// A member whose label is its key (a table-source slicer's display text,
-    /// a calculation-group item name).
+    /// A member whose label is its key (a calculation-group item name).
     pub fn verbatim(text: impl Into<String>) -> Self {
         let key = text.into();
         MemberRef { label: key.clone(), key }

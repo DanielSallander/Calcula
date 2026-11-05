@@ -408,9 +408,10 @@ fn infer_aggregate_type(
         | Expression::UseRelationship { expr, .. } => infer_aggregate_type(expr, find_column),
 
         Expression::Aggregate { operation, operand } => match operation {
-            AggregateOp::Count | AggregateOp::DistinctCount | AggregateOp::CountRows => {
-                DataType::Int64
-            }
+            AggregateOp::Count
+            | AggregateOp::DistinctCount
+            | AggregateOp::DistinctCountNoBlank
+            | AggregateOp::CountRows => DataType::Int64,
             AggregateOp::Average
             | AggregateOp::Median
             | AggregateOp::StdevSample

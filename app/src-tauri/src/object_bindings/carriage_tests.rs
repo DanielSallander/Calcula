@@ -706,3 +706,38 @@ fn the_push_carrier_collects_bindings_before_the_rename_is_undone() {
         .expect("the assembly restores the published names");
     assert!(collect < restore, "the bindings must be on the carrier before the published names are restored");
 }
+
+/// BUG-0491 ON THE PULL: a binding of a `container*` key its control does not
+/// paint -- a button's `containerTitleText`, whose caption is `text` -- is
+/// refused by the binding's `set` and skipped by a `.cala` load
+/// (`restore_bindings_from_disk`), and the control's own pull drops the
+/// literal (`drop_dead_container_keys`). The bindings pull installed it
+/// anyway, on a subscribe and on every refresh. It does not land now; the
+/// painted key's binding beside it does.
+///
+/// SABOTAGE: make the `dead_rows` filter in `land_pulled_bindings` keep no row
+/// -- fails at "DEAD KEY LANDED".
+#[test]
+fn a_pulled_binding_of_a_key_its_control_does_not_paint_is_not_installed() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut app = App::new();
+    app.wb.object_bindings.push(row("control", "app-btn", "/properties/containerTitleText", "=Data!A1"));
+    app.publish(&dir, prof.path(), (1, 0, 0), None);
+
+    let h = Harness::new();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    let dead = key(ObjectBindingKind::Control, "app-btn", "/properties/containerTitleText");
+    let b = h.bindings();
+    assert!(!b.contains_key(&dead), "DEAD KEY LANDED: a subscribe installed a binding nothing paints: {b:#?}");
+    assert!(
+        b.contains_key(&key(ObjectBindingKind::Control, "app-btn", "/properties/text")),
+        "control: the caption's binding lands: {b:#?}"
+    );
+
+    app.publish(&dir, prof.path(), (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(subscribe_pull(&dir, prof.path()));
+    let b = h.bindings();
+    assert!(!b.contains_key(&dead), "DEAD KEY LANDED: a refresh installed it: {b:#?}");
+    assert!(b.contains_key(&key(ObjectBindingKind::Control, "app-btn", "/properties/text")));
+}

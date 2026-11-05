@@ -2479,11 +2479,19 @@ fn push_not_recorded_warning(package_name: &str, version: &str) -> String {
 /// New replaced that workbook mid-push (`epoch` moved, rev13A), the row has
 /// no workbook to go to: the one on screen never pushed, and a row in ITS
 /// trail would be saved into it as if it had (calpref2; round 15 wrote it
-/// there flagged `pushedFromReplacedWorkbook`). It goes to this SESSION's log
-/// instead, with every field the row would have carried, beside the push's
-/// own `CALP_PUSH_DOCUMENT_REPLACED` warning to the user and the workspace's
+/// there flagged `pushedFromReplacedWorkbook`). It goes to THIS COMPUTER's
+/// append-only trail instead ([`crate::machine_audit`],
+/// `%LOCALAPPDATA%\Calcula\collaboration-audit.jsonl`, BUG-0653), with every
+/// field the row would have carried plus `reason: documentReplaced` -- durable
+/// across a restart and shown by the audit viewer under "This computer" --
+/// and to the session log, beside the push's own
+/// `CALP_PUSH_DOCUMENT_REPLACED` warning to the user and the workspace's
 /// signed version list, which records the version itself. Returns whether the
 /// row reached the workbook's trail.
+///
+/// Every egress door that audits a push goes through here: `calp_publish`
+/// and the model-only `calp_publish_model` (which wrote its row straight into
+/// whatever workbook was on screen until BUG-0653).
 ///
 /// The epoch is asked with the document PINNED
 /// ([`crate::persistence::FileState::with_document_pinned`]), so an open
@@ -2506,13 +2514,31 @@ pub(crate) fn record_push_audit_row(
         }
     });
     if recorded.is_none() {
+        // The durable home: this computer's trail. Written holding no lock
+        // (the pin above is released), and never failing the push it records.
+        let mut machine_extra = session_copy.clone();
+        machine_extra.insert(
+            "reason".to_string(),
+            serde_json::Value::String(crate::machine_audit::REASON_DOCUMENT_REPLACED.to_string()),
+        );
+        crate::machine_audit::record(
+            &calcula_profile_dir(),
+            &calp::audit::AuditEntry {
+                timestamp: now.to_string(),
+                event: calp::audit::AuditEvent::Published,
+                description: description.to_string(),
+                user: user.to_string(),
+                extra: machine_extra,
+            },
+        );
         let mut fields: Vec<String> =
             session_copy.iter().map(|(k, v)| format!("{k}={v}")).collect();
         fields.sort();
         crate::log_warn!(
             "CALP",
             "AUDIT (session): {} by {} at {} -- the workbook that pushed was replaced by File > Open / New \
-             before the push finished, so no workbook's trail holds this row [{}]",
+             before the push finished, so no workbook's trail holds this row; this computer's \
+             collaboration trail does [{}]",
             description,
             user,
             now,
@@ -3411,10 +3437,15 @@ pub struct PublishModelParams {
 pub fn calp_publish_model(
     state: State<AppState>,
     bi_state: State<BiState>,
+    file_state: State<'_, crate::persistence::FileState>,
     params: PublishModelParams,
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook this publish is FROM, read before anything of it is
+    // captured: the audit row goes to its trail only if it is still the one
+    // open when the publish lands (`record_push_audit_row`, BUG-0653).
+    let document_epoch = file_state.settled_document_epoch();
     let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
     let version = SemVer::parse(&params.version).map_err(|e| e.to_string())?;
@@ -3533,20 +3564,26 @@ pub fn calp_publish_model(
         &result.package_name,
     );
 
-    // Audit (B4)
+    // Audit (B4): into this workbook's trail while it is still the one that
+    // published, else into this computer's trail (BUG-0653).
     {
         let user = audit_user(&state);
-        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
-            audit.record(
-                calp::audit::AuditEvent::Published,
-                &format!(
-                    "Published model '{}' as dataset application {} v{}",
-                    model_name, result.package_name, result.version
-                ),
-                &user,
-                &now,
-            );
-        }
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("package".to_string(), serde_json::Value::String(result.package_name.clone()));
+        extra.insert("version".to_string(), serde_json::Value::String(result.version.clone()));
+        extra.insert("registry".to_string(), serde_json::Value::String(params.registry_path.clone()));
+        record_push_audit_row(
+            &state,
+            &file_state,
+            document_epoch,
+            &format!(
+                "Published model '{}' as dataset application {} v{}",
+                model_name, result.package_name, result.version
+            ),
+            &user,
+            &now,
+            extra,
+        );
     }
 
     let report = PublishReport {
@@ -4188,6 +4225,36 @@ fn materialize_distributed_scripts(
 // Defined once, beside the push filter that splits the record per function.
 use crate::calp_push_scope::CUSTOM_FUNCTIONS_LIB_ID;
 
+/// A PULLED VERSION'S NAMES, judged by the rule the subscriber's own UI applies
+/// (`calp::publish::published_name_problem`, over `identity::is_valid_defined_name`
+/// -- the rule `NamedRange::is_valid_name` and the table commands delegate to):
+/// a defined name or table name that reads as a reference (`R1C1`, `C`, `Q1`),
+/// a table and a name sharing one name, two tables sharing one. The publish
+/// door refuses all of these too, so a version carrying one was signed by a
+/// build without that gate, or assembled by hand.
+///
+/// REFUSED WHOLE, NOT REPAIRED. Renaming the item here would break the
+/// application's own formulas that name it and hide the fact that it shipped;
+/// skipping it would leave those formulas reading `#NAME?`. Nothing was
+/// imported, and the sentence names the item and the remedy. Asked by every
+/// door before its effect (subscribe, checkout, refresh) and again by the
+/// shared materializers before their first write.
+pub(crate) fn refuse_invalid_pulled_names(
+    package_name: &str,
+    named_ranges: &[calp::manifest::PublishedNamedRange],
+    tables: &[persistence::SavedTable],
+) -> Result<(), String> {
+    match calp::publish::published_name_problem(named_ranges, tables.iter().map(|t| t.name.as_str())) {
+        None => Ok(()),
+        Some(problem) => Err(format!(
+            "CALP_INVALID_NAME: The application '{}' cannot be opened here: {} Nothing was \
+             imported. Ask the publisher to rename it and push a new version; renaming it here \
+             instead would break the application's own formulas that name it.",
+            package_name, problem
+        )),
+    }
+}
+
 /// Refuse a published module or notebook that claims an id in the HOST's
 /// reserved `__calcula_` namespace.
 ///
@@ -4796,6 +4863,12 @@ fn materialize_pulled_tables(
         return Ok(0);
     }
     let mut materialized = 0usize;
+    // The DEFINED NAMES this workbook holds, copied out BEFORE the table
+    // guards: names and tables share one namespace (the table commands refuse
+    // a table named like a defined name, `tables::name_collides_with_defined_name`),
+    // and the crate-wide order is named_ranges -> tables -> table_names.
+    let defined_name_keys: std::collections::HashSet<String> =
+        state.named_ranges.read().map_err(|e| e.to_string())?.keys().cloned().collect();
     let mut tables = state.tables.write(&effect).map_err(|e| e.to_string())?;
     let mut table_names = state.table_names.write(&effect).map_err(|e| e.to_string())?;
     for saved in saved_tables {
@@ -4805,6 +4878,16 @@ fn materialize_pulled_tables(
         let name_key = crate::tables::table_name_key(&saved.name);
         if table_names.contains_key(&name_key) {
             continue; // don't clobber a table the subscriber already has
+        }
+        if defined_name_keys.contains(&name_key) {
+            // ...nor shadow a defined name the subscriber already has: the
+            // same additive rule, across the one namespace the two share.
+            crate::log_warn!(
+                "CALP",
+                "pulled table '{}' not added: this workbook already has a defined name with that name",
+                saved.name
+            );
+            continue;
         }
         if tables.values().any(|m| m.contains_key(&saved.id)) {
             continue;
@@ -7536,6 +7619,9 @@ pub fn calp_pull(
         &std::collections::HashSet::new(),
         &current_data_source_claims(&state)?,
     )?;
+    // ...nor names the subscriber's own UI would refuse (`R1C1`, a table and a
+    // name sharing one). Before the effect.
+    refuse_invalid_pulled_names(&result.package_name, &result.named_ranges, &result.tables)?;
 
     // ONE EFFECT, constructed after every refusal that precedes a write.
     //
@@ -7643,6 +7729,8 @@ pub(crate) fn materialize_pull_result(
         &std::collections::HashSet::new(),
         &current_data_source_claims(state)?,
     )?;
+    // ...and the inner door for the names the subscriber's own UI would refuse.
+    refuse_invalid_pulled_names(&result.package_name, &result.named_ranges, &result.tables)?;
     // S5 phase 2: capture the origin/trust outcome before `result` is consumed.
     let publisher_name = result.publisher_name.clone();
     // EXHAUSTIVE on purpose: a new TrustStatus must not reach the frontend
@@ -8039,10 +8127,24 @@ pub(crate) fn materialize_pull_result(
     // PublishedNamedRange.sheet_id is the APPLICATION id, mapped to the local index.
     if !result.named_ranges.is_empty() {
         let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
+        // Under `named_ranges` (the crate-wide order is named_ranges -> tables
+        // -> table_names): names and tables share one namespace.
+        let table_names = state.table_names.read().map_err(|e| e.to_string())?;
         for nr in &result.named_ranges {
             let key = crate::name_resolution::name_key(&nr.name);
             if names.contains_key(&key) {
                 continue; // don't clobber a name the subscriber already defined
+            }
+            if table_names.contains_key(&key) {
+                // ...nor shadow a table this workbook has: the same additive
+                // rule across the namespace the two share (the package's own
+                // tables cannot collide -- `refuse_invalid_pulled_names`).
+                crate::log_warn!(
+                    "CALP",
+                    "pulled name '{}' not added: this workbook already has a table with that name",
+                    nr.name
+                );
+                continue;
             }
             sub_objects.push(sub_object("namedRange", key.clone(), nr.name.clone()));
             names.insert(
@@ -9187,6 +9289,9 @@ pub fn calp_checkout(
         &result.notebooks,
         &result.object_scripts,
     )?;
+    // ...nor a name the author's own UI would refuse -- the next push would
+    // republish it.
+    refuse_invalid_pulled_names(&params.package_name, &result.named_ranges, &result.tables)?;
 
     // ...and nothing of the application may share an identity with something
     // the workbook already holds (BUG-0264). Additive checkout used to keep the
@@ -9829,6 +9934,9 @@ pub fn calp_hold_back_cells(
         held as u32,
         "calpHoldBack",
         &format!("{}@{}", params.package_name, base_version),
+        // The base version's own cells laid back over this workbook: its pivot
+        // output may differ from this one's inside a pivot region.
+        crate::commands::data::RegionGate::VersionOverlay,
     );
 
     // ALWAYS close it, on both paths, and take the id the push stamps. An empty
@@ -11412,12 +11520,23 @@ pub(crate) fn override_display_for_test(value: &engine::CellValue) -> String {
 }
 
 /// Canonical OverrideValue for an engine cell (None = absent/cleared cell).
+///
+/// THE FORMULA IS THE SAVED TEXT, COLLAPSED -- `collapse_formula_text` over
+/// `formula_string_raw()`, exactly what `override_value_from_saved` makes of
+/// the persisted `SavedCell.formula` (which IS `formula_string_raw()`). So the
+/// live side and the upstream side are one spelling BY CONSTRUCTION. It was
+/// `formula_string()`, the formula BAR's rendering, which is not a comparison
+/// form: it quotes a name spelled like a cell that nothing binds
+/// (`='D1'+LET(A1,5,A1)`, display only -- the saved and collapsed texts keep
+/// it bare), so such a cell's live text never equalled its baseline and every
+/// override record, export and conflict carried a spelling the upstream side
+/// never has (NEW-override-quoted-render).
 fn override_value_from_cell(cell: Option<&engine::Cell>) -> calp::OverrideValue {
     match cell {
         None => calp::OverrideValue::Empty,
         Some(c) => {
-            if let Some(formula) = c.formula_string() {
-                calp::OverrideValue::Formula { formula }
+            if let Some(raw) = c.formula_string_raw() {
+                calp::OverrideValue::Formula { formula: engine::ast_render::collapse_formula_text(&raw) }
             } else if matches!(c.value, engine::CellValue::Empty) {
                 calp::OverrideValue::Empty
             } else {
@@ -11438,6 +11557,67 @@ fn override_value_from_cell(cell: Option<&engine::Cell>) -> calp::OverrideValue 
 /// One predicate in one crate is what lets the preview and the apply agree.
 pub(crate) fn override_value_from_saved(cell: Option<&persistence::SavedCell>) -> calp::OverrideValue {
     calp::overrides::override_value_from_saved(cell)
+}
+
+/// NEW-override-quoted-render: the live side of the override comparison and
+/// the upstream side are ONE spelling, byte for byte.
+#[cfg(test)]
+mod override_spelling_tests {
+    use super::{override_value_from_cell, override_value_from_saved};
+
+    fn live(text: &str) -> engine::Cell {
+        let cell = engine::Cell::new_formula(text.to_string());
+        assert!(cell.ast.is_some(), "fixture parses: {text}");
+        cell
+    }
+
+    /// A cell whose formula reads a name spelled like a cell (`=D1+LET(A1,5,A1)`:
+    /// a formula that declares one reads every plain cell spelling as a name)
+    /// is shown `='D1'+LET(A1,5,A1)` in the formula bar since round C, and
+    /// saved bare. The override layer recorded the formula BAR's text, so the
+    /// live record never equalled the upstream one the same cell produces from
+    /// the saved payload -- the same for every formula, quoted name or not, is
+    /// what this pins.
+    ///
+    /// SABOTAGE: record `c.formula_string()` in `override_value_from_cell` again.
+    #[test]
+    fn a_live_cell_and_its_saved_payload_record_one_override_text() {
+        let quoted = live("=D1+LET(A1,5,A1)");
+        assert!(
+            quoted.formula_string().is_some_and(|f| f.contains("'D1'")),
+            "precondition: the formula bar quotes the unbound name: {:?}",
+            quoted.formula_string()
+        );
+        for text in [
+            "=D1+LET(A1,5,A1)",
+            "=LET(A1,5,A1+D1)",
+            "=LAMBDA(x,x*2)(5)",
+            "=SUM(Data!A1:A3)*2",
+            "=#REF!A1+1",
+            "=A1&\"x\"",
+        ] {
+            let cell = live(text);
+            let saved = persistence::SavedCell::from_cell(&cell);
+            assert_eq!(
+                override_value_from_cell(Some(&cell)),
+                override_value_from_saved(Some(&saved)),
+                "{text}: the live override text and the upstream one differ"
+            );
+        }
+    }
+
+    /// The same predicate still sees a REAL edit, and a subscriber who types
+    /// the baseline back restores it.
+    #[test]
+    fn a_real_edit_of_a_cell_shaped_name_formula_is_still_an_override() {
+        let baseline = override_value_from_saved(Some(&persistence::SavedCell::from_cell(&live("=D1+LET(A1,5,A1)"))));
+        let edited = override_value_from_cell(Some(&live("=D1+LET(A1,6,A1)")));
+        assert_ne!(edited, baseline);
+        assert!(!edited.same_as(&baseline), "an edit is a change");
+        let typed_back = override_value_from_cell(Some(&live("=D1+LET(A1,5,A1)")));
+        assert_eq!(typed_back, baseline, "typing the baseline back is the baseline, byte for byte");
+        assert_eq!(override_value_from_cell(None), calp::OverrideValue::Empty);
+    }
 }
 
 /// Record consumer-side overrides for committed edits on a subscribed sheet.
@@ -12141,6 +12321,12 @@ pub(crate) fn prepare_refresh_payloads(
             &payload.pull_result.notebooks,
             &payload.pull_result.object_scripts,
         )?;
+        // ...nor bring a name the subscriber's own UI would refuse.
+        refuse_invalid_pulled_names(
+            &payload.pull_result.package_name,
+            &payload.pull_result.named_ranges,
+            &payload.pull_result.tables,
+        )?;
     }
     Ok(by_payload)
 }
@@ -12172,6 +12358,15 @@ pub(crate) fn apply_refresh_payloads(
     now: &str,
     window: Option<&tauri::Window>,
 ) -> Result<calp::refresh::RefreshResult, String> {
+    // THE INNER DOOR for names the subscriber's own UI would refuse, before
+    // the first write (`prepare_refresh_payloads` asks it before the effect).
+    for payload in &payloads {
+        refuse_invalid_pulled_names(
+            &payload.pull_result.package_name,
+            &payload.pull_result.named_ranges,
+            &payload.pull_result.tables,
+        )?;
+    }
     // THE APPLICATIONS' BOUND OBJECTS AS THEY ARE NOW, before anything below
     // replaces them: each payload's bindings are REPLACED, not merged, at the
     // end (`land_pulled_bindings`), so a binding the publisher removed -- or one
@@ -12435,6 +12630,9 @@ pub(crate) fn apply_refresh_payloads(
         // on every other sheet resolves to. Only applied names are ledgered.
         if payloads.iter().any(|p| !p.pull_result.named_ranges.is_empty()) {
             let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
+            // Names and tables share one namespace; read under `named_ranges`
+            // (order named_ranges -> tables -> table_names).
+            let table_names = state.table_names.read().map_err(|e| e.to_string())?;
             for ((payload, pkg_to_index), detached) in
                 payloads.iter().zip(pkg_maps.iter()).zip(detached_by_payload.iter())
             {
@@ -12457,6 +12655,18 @@ pub(crate) fn apply_refresh_payloads(
                         },
                     };
                     let key = crate::name_resolution::name_key(&nr.name);
+                    if table_names.contains_key(&key) {
+                        // A table holds the name (the subscriber's own, or one
+                        // of the application's an earlier version shipped).
+                        // Upserting it would put a name and a table under one
+                        // name, which no door of this workbook allows.
+                        crate::log_warn!(
+                            "CALP",
+                            "refresh: name '{}' not applied -- this workbook has a table with that name",
+                            nr.name
+                        );
+                        continue;
+                    }
                     names.insert(
                         key.clone(),
                         crate::named_ranges::NamedRange {
@@ -14977,6 +15187,9 @@ pub(crate) fn dev_subscribe_inner(
 
     let mut result = calp::dev_mode::pull_dev(source, &params.sheet_names)
         .map_err(|e| e.to_string())?;
+    // The table names the subscriber's own UI would refuse, before the effect
+    // (a dev pull materializes no defined names).
+    refuse_invalid_pulled_names(&source.display().to_string(), &[], &result.tables)?;
 
     // A dev subscribe materializes application sheets, tables and controls into THIS
     // workbook and records the subscription -- all persisted, and nothing resets
@@ -15409,6 +15622,9 @@ pub(crate) fn dev_refresh_inner(
 
     let mut result = calp::dev_mode::pull_dev(source, &sheet_names)
         .map_err(|e| e.to_string())?;
+    // The table names the subscriber's own UI would refuse, before the effect
+    // (a dev pull materializes no defined names).
+    refuse_invalid_pulled_names(&source.display().to_string(), &[], &result.tables)?;
 
     // Re-materializes the dev source over this workbook: same reasoning as
     // `calp_dev_subscribe`, and AFTER every step that can refuse (no dev
@@ -15749,15 +15965,30 @@ pub fn calp_merge_cell_ids(
 // Phase 7: Audit Log Commands
 // ============================================================================
 
-/// Return the full audit log for the current workbook.
+/// Return the full audit log for the current workbook -- and, with
+/// `include_machine`, THIS COMPUTER's trail of rows that belong to no open
+/// workbook ([`crate::machine_audit`], BUG-0653: a push whose workbook was
+/// replaced mid-push) as `machine`. An option on this command rather than a
+/// command of its own: the viewer asks both at once, and the workbook half is
+/// unchanged for every other caller.
 #[tauri::command]
 pub fn calp_get_audit_log(
     state: State<AppState>,
     window: tauri::Window,
-) -> Result<calp::audit::AuditLog, String> {
+    include_machine: Option<bool>,
+) -> Result<crate::machine_audit::AuditLogView, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let log = state.audit_log.read().map_err(|e| e.to_string())?;
-    Ok(log.clone())
+    audit_log_view(&state, include_machine.unwrap_or(false))
+}
+
+/// The body of [`calp_get_audit_log`], over plain references.
+pub(crate) fn audit_log_view(
+    state: &AppState,
+    include_machine: bool,
+) -> Result<crate::machine_audit::AuditLogView, String> {
+    let log = state.audit_log.read().map_err(|e| e.to_string())?.clone();
+    let machine = include_machine.then(|| crate::machine_audit::read_trail(&calcula_profile_dir()));
+    Ok(crate::machine_audit::AuditLogView { log, machine })
 }
 
 /// Enable or disable audit logging and set the maximum number of entries.
@@ -24795,6 +25026,7 @@ fn load_embedded_data_sources(
         let base_model = model.clone();
         // Create the BI engine (no database connection yet)
         let mut engine = bi_engine::Engine::new(model);
+        crate::bi::commands::apply_app_format_culture(&mut engine);
         engine.set_auto_tier_config(bi_engine::AutoTierConfig {
             enabled: true,
             max_rows: 100_000,
@@ -27250,6 +27482,7 @@ pub async fn calp_refresh_data(
 
         // Create a temporary engine for this refresh
         let mut engine = bi_engine::Engine::new(model);
+        crate::bi::commands::apply_app_format_culture(&mut engine);
         engine.set_auto_tier_config(bi_engine::AutoTierConfig {
             enabled: true,
             max_rows: 100_000,

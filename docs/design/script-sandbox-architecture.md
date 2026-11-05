@@ -466,7 +466,7 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.createChart":       { tier: "unlocked", class: "mutate", validate: vCreateChart, desc: "Add a new chart to a sheet" },
   "api.deleteChart":       { tier: "unlocked", class: "mutate", validate: vObjectId,    desc: "Delete a chart" },
   "api.createTable":       { tier: "unlocked", class: "mutate", validate: vCreateTable, desc: "Turn a block of cells into a table (with filter buttons and a header row)" },
-  "api.deleteTable":       { tier: "unlocked", class: "mutate", validate: vObjectId,    desc: "Delete a table (the cells and their values are kept)" },
+  "api.deleteTable":       { tier: "unlocked", class: "mutate", validate: vObjectId,    desc: "Delete a table (its cells are cleared, and formulas that use the table show #REF!)" },
   "api.createNamedRange":  { tier: "unlocked", class: "mutate", validate: vCreateNamedRange, desc: "Create a named range (a name that formulas can use for a block of cells)" },
   "api.deleteNamedRange":  { tier: "unlocked", class: "mutate", validate: vNamedRangeName,   desc: "Delete a named range (formulas using the name will break)" },
   "api.createPivot":       { tier: "unlocked", class: "mutate", validate: vCreatePivot, desc: "Create a pivot table over a block of cells and lay out its fields" },

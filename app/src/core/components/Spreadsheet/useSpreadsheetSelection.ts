@@ -1625,9 +1625,10 @@ export function useSpreadsheetSelection({
    * Special > Constants (one area per run of matches) Ctrl+B bolded the first
    * area and left the rest -- where it had bolded the bounding box before Go To
    * Special learned to select exact areas (review, 2026-10-04). Several blocks
-   * are ONE undo step (an owned transaction, as the clear gestures do); a
-   * refusal on a later block commits what landed, so one Ctrl+Z restores it,
-   * and every refusal is SHOWN (it was logged only). Then "grid:refresh", so
+   * are ONE undo step: on the sheet ONE backend call with the other blocks as
+   * `moreAreas` (BUG-0394); in an object's cells an owned transaction, where a
+   * refusal on a later block commits what landed, so one Ctrl+Z restores it.
+   * Every refusal is SHOWN (it was logged only). Then "grid:refresh", so
    * the ribbon's pressed Bold re-reads after the keyboard changed it.
    */
   const applyFormattingToSelection = useCallback(async (formatting: FormattingOptions, target?: CellTarget) => {
@@ -1639,18 +1640,30 @@ export function useSpreadsheetSelection({
 
     let tx: OwnedUndoTransaction | null = null;
     let landed = 0;
+    const spans = blocks.map((b) => {
+      const rows: number[] = [];
+      const cols: number[] = [];
+      for (let r = b.startRow; r <= b.endRow; r++) rows.push(r);
+      for (let c = b.startCol; c <= b.endCol; c++) cols.push(c);
+      return { rows, cols };
+    });
     try {
-      if (blocks.length > 1) {
-        tx = ownUndoTransaction(await beginUndoTransaction("Format Cells"), UNDO_CLOSES);
-      }
-      for (const b of blocks) {
-        const rows: number[] = [];
-        const cols: number[] = [];
-        for (let r = b.startRow; r <= b.endRow; r++) rows.push(r);
-        for (let c = b.startCol; c <= b.endCol; c++) cols.push(c);
-        if (owned) await applyFormatting(rows, cols, formatting, { target: owned.ref });
-        else await applyFormatting(rows, cols, formatting);
+      if (!owned) {
+        // The sheet's blocks: ONE call, the others as `moreAreas` -- one undo
+        // step the backend opens itself (BUG-0394: one call per block, 10,000
+        // after Go To Special).
+        const [first, ...more] = spans;
+        if (more.length > 0) await applyFormatting(first.rows, first.cols, formatting, { moreAreas: more });
+        else await applyFormatting(first.rows, first.cols, formatting);
         landed++;
+      } else {
+        if (spans.length > 1) {
+          tx = ownUndoTransaction(await beginUndoTransaction("Format Cells"), UNDO_CLOSES);
+        }
+        for (const { rows, cols } of spans) {
+          await applyFormatting(rows, cols, formatting, { target: owned.ref });
+          landed++;
+        }
       }
       await tx?.commit();
     } catch (error) {

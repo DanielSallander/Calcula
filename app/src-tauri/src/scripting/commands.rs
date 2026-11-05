@@ -95,6 +95,7 @@ pub(crate) fn diff_grids_to_updates(before: &Grid, after: &Grid) -> Vec<CellUpda
                 invariant: Some(true),
                 pasted: None,
                 moved: None,
+                source: None,
             });
         }
     }
@@ -1014,6 +1015,7 @@ pub(crate) fn apply_script_modified_grids_core(
     cells_modified: u32,
     surface: &str,
     surface_id: &str,
+    regions: crate::commands::data::RegionGate,
     apply_active: ActiveSheetApply<'_>,
 ) -> Result<(), String> {
     if cells_modified == 0 || modified_grids.is_empty() {
@@ -1059,8 +1061,19 @@ pub(crate) fn apply_script_modified_grids_core(
     //
     // Deciding first makes a refusal atomic: nothing has been touched yet, so
     // there is nothing to roll back.
+    //
+    // LIVE DATA TABLES are decided in the same pass, on every sheet, for both
+    // reasons (BUG-0652's off-sheet hole): a script writing PART of a table's
+    // body, or a `=TABLE(..)` marker, on a background sheet used to be
+    // installed with no gate at all -- and `parse_script_formula_writes` would
+    // then turn the typed marker into a live table body only the Data Table
+    // command may create. The rule is the batch's (`check_cells_write`):
+    // writing every body cell replaces the table, as in Excel [LIVE]. The
+    // active sheet is judged against its MIRROR (`state.grid`, taken first:
+    // canonical order grid, grids), the grid the batch gate reads.
     let non_active_touched: Vec<(usize, Vec<(u32, u32)>)> = {
         let mut touched: Vec<(usize, Vec<(u32, u32)>)> = Vec::new();
+        let active_mirror = state.grid.read().map_err(|e| e.to_string())?;
         let app_grids = state.grids.read().map_err(|e| e.to_string())?;
         // Borrowed gate form: `grids` is held for the whole loop and
         // std::sync::Mutex is not reentrant, so the locking wrapper would
@@ -1094,6 +1107,11 @@ pub(crate) fn apply_script_modified_grids_core(
                 idx,
                 diff.iter().map(|u| (u.row, u.col)),
             )?;
+            let table_sheet: &Grid = if idx == active_sheet { &*active_mirror } else { before };
+            crate::data_tables::check_cells_write(
+                table_sheet,
+                diff.iter().map(|u| (u.row, u.col, u.value.as_str())),
+            )?;
             // Collect the NON-active coordinates for the writeback gate below.
             // The active sheet is filtered by `update_cells_batch`'s own
             // writeback pass (partial-success: claimed cells are dropped, never
@@ -1106,9 +1124,24 @@ pub(crate) fn apply_script_modified_grids_core(
         touched
     };
 
+    // PIVOT / REPORT OUTPUT REGIONS, decided for EVERY changed sheet before ANY
+    // of them is mutated (NEW-paste-pivot-region) -- for the protection
+    // pre-pass's two reasons: the active sheet's own gate
+    // (`update_cells_batch_with_controls`) runs only after the background
+    // sheets below are installed, and those are installed wholesale with no
+    // gate at all. Excel refuses a VBA write into a PivotTable cell ("We can't
+    // change this part of the PivotTable." [LIVE, pastec/probe-pivot.ps1]). A
+    // `.calp` merge or hold-back names `VersionOverlay`: it lays a version's
+    // own pivot output over this one. No lock is held here
+    // (`protected_regions` is taken and released inside).
+    crate::commands::data::check_batch_regions(state, active_sheet, &updates, regions)?;
+    for (idx, cells) in &non_active_touched {
+        crate::commands::data::check_batch_region_cells(state, *idx, cells.iter().copied(), regions)?;
+    }
+
     // PUBLISHED WRITEBACK CLAIMS, decided before ANY sheet is mutated.
     //
-    // Deliberately OUTSIDE the block above: the writeback gate takes
+    // Deliberately OUTSIDE the protection block above: the writeback gate takes
     // `writeback_index` / `writeback_layer` / `sheet_ids`, and the established
     // acquisition order elsewhere on the edit path (commands/data.rs) is
     // writeback_index BEFORE grids. Taking them while the grids lock is held
@@ -1122,6 +1155,19 @@ pub(crate) fn apply_script_modified_grids_core(
         state,
         &non_active_touched,
     )?;
+
+    // A SPILLED VALUE ON THE ACTIVE SHEET, decided before ANY sheet is mutated.
+    // `update_cells_batch_core` refuses it (per cell, `SpillOriginPolicy::Refuse`)
+    // -- but only after the non-active grids below have been installed, so that
+    // refusal used to leave every background sheet written with no recalc and
+    // no audit entry: the atomicity hole the protection pre-pass above names.
+    // The same rule, asked first; with no lock held (`spill_hosts` is taken and
+    // released inside). Background sheets keep their wholesale-install
+    // semantics (`release_spills_orphaned_by_grid`).
+    if !updates.is_empty() {
+        let active_cells: Vec<(u32, u32)> = updates.iter().map(|u| (u.row, u.col)).collect();
+        crate::commands::data::check_spill_protection_cells(state, active_sheet, &active_cells)?;
+    }
 
     // Apply non-active-sheet writes the undoable + parsed + recalc-tracked way,
     // in two phases under one grids lock:
@@ -1329,6 +1375,270 @@ pub(crate) fn apply_script_modified_grids_core(
     Ok(())
 }
 
+/// THE MODULE RUNTIME'S FORMATTING ON THE TRAIL (owner, 2026-11-04: "Macros
+/// should be able to change formatting as well"). The interpreter's one
+/// formatting op is `Calcula.applyNamedStyle`, which it cannot apply to the
+/// clone it runs on: it QUEUES a `DeferredAction::ApplyNamedStyle`, which
+/// Rust applies once the run has succeeded, IN THE RUN'S OWN UNDO STEP
+/// ([`apply_run_with_queued_styles`]; a run that throws returns no actions, so
+/// it applies none). Each one APPLIED is recorded here -- only after it was --
+/// as an always-on `ScriptExecuted` row: surface, id, sheet, the style and its
+/// range, `formatting: true`, exactly as the run's cell writes are recorded, so
+/// a module macro's formatting is on the same trail as an object-script
+/// macro's. The sheet is the one the run had made active when it queued the
+/// style (`DeferredAction::ActivateSheet`, followed in order). Answers how
+/// many rows it wrote.
+pub(crate) fn record_queued_formatting(
+    state: &AppState,
+    surface: &str,
+    surface_id: &str,
+    start_sheet: usize,
+    actions: &[script_engine::types::DeferredAction],
+) -> usize {
+    use script_engine::types::DeferredAction;
+    let names: Vec<String> = state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+    let mut sheet = start_sheet;
+    let mut written = 0;
+    for action in actions {
+        match action {
+            DeferredAction::ActivateSheet { sheet_index } => sheet = *sheet_index,
+            DeferredAction::ApplyNamedStyle { name, row, col, end_row, end_col } => {
+                let (r1, c1) = (end_row.unwrap_or(*row), end_col.unwrap_or(*col));
+                let (first_row, last_row) = ((*row).min(r1), (*row).max(r1));
+                let (first_col, last_col) = ((*col).min(c1), (*col).max(c1));
+                let range = if first_row == last_row && first_col == last_col {
+                    crate::held_button_code::a1(first_row, first_col)
+                } else {
+                    format!(
+                        "{}:{}",
+                        crate::held_button_code::a1(first_row, first_col),
+                        crate::held_button_code::a1(last_row, last_col)
+                    )
+                };
+                let sheet_name = names.get(sheet).cloned().unwrap_or_else(|| format!("Sheet{}", sheet + 1));
+                let description = format!(
+                    "{} '{}' applied the cell style '{}' to {}!{} (with the run's cells, in its one undo step)",
+                    surface_label(surface),
+                    surface_id,
+                    name,
+                    sheet_name,
+                    range
+                );
+                let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+                extra.insert("surface".into(), serde_json::json!(surface));
+                if !surface_id.is_empty() {
+                    extra.insert("surfaceId".into(), serde_json::json!(surface_id));
+                }
+                extra.insert("sheet".into(), serde_json::json!(sheet));
+                extra.insert("formatting".into(), serde_json::json!(true));
+                extra.insert("formatChanges".into(), serde_json::json!(1));
+                extra.insert("namedStyle".into(), serde_json::json!(name));
+                extra.insert("firstRow".into(), serde_json::json!(first_row));
+                extra.insert("lastRow".into(), serde_json::json!(last_row));
+                extra.insert("firstCol".into(), serde_json::json!(first_col));
+                extra.insert("lastCol".into(), serde_json::json!(last_col));
+                crate::calp_commands::record_audit_event_with_extra(
+                    state,
+                    calp::audit::AuditEvent::ScriptExecuted,
+                    description,
+                    extra,
+                );
+                written += 1;
+            }
+            _ => {}
+        }
+    }
+    written
+}
+
+/// The stores a rollback restores through (`undo_commands::roll_back_open_changes_after`).
+pub(crate) struct RunRollbackStores<'a> {
+    pub user_files: &'a UserFilesState,
+    pub pivot: &'a PivotState,
+    pub slicer: &'a crate::slicer::SlicerState,
+    pub ribbon: &'a RibbonFilterState,
+    pub pane: &'a PaneControlState,
+    pub timeline: &'a crate::timeline_slicer::TimelineSlicerState,
+}
+
+/// One queued named style, on the sheet it lands on (inclusive, normalised).
+struct QueuedStyle {
+    sheet: usize,
+    name: String,
+    rows: (u32, u32),
+    cols: (u32, u32),
+}
+
+/// The refusal a module run's queued style ends the run with: nothing the run
+/// did is kept.
+fn queued_style_refusal(state: &AppState, q: &QueuedStyle, why: &str) -> String {
+    let names: Vec<String> = state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+    let sheet_name = names.get(q.sheet).cloned().unwrap_or_else(|| format!("Sheet{}", q.sheet + 1));
+    let range = if q.rows.0 == q.rows.1 && q.cols.0 == q.cols.1 {
+        crate::held_button_code::a1(q.rows.0, q.cols.0)
+    } else {
+        format!(
+            "{}:{}",
+            crate::held_button_code::a1(q.rows.0, q.cols.0),
+            crate::held_button_code::a1(q.rows.1, q.cols.1)
+        )
+    };
+    format!(
+        "The script's cell style '{}' could not be applied to {}!{}: {} Every change the script made was undone, \
+         so nothing was changed.",
+        q.name,
+        sheet_name,
+        range,
+        why.trim_end_matches('.').to_string() + "."
+    )
+}
+
+/// A MODULE RUN IS ONE STEP, ALL OR NOTHING (owner decision B, follow-up F9,
+/// applied to the module runtime's formatting). `Calcula.applyNamedStyle` is
+/// queued by the interpreter (it cannot style the clone it runs on); it used
+/// to be replayed by the PAGE after Rust had committed the run's cells as one
+/// undo step -- so each style was an undo step of its own, and a style that
+/// failed (a protected sheet) left the run's cells applied. Now Rust applies
+/// the run's cells (`apply_cells`) AND every queued style inside ONE undo
+/// transaction -- the run's, or the one a caller holds open, which it joins --
+/// on the sheet the run had made active when it queued each style:
+///
+/// 1. Every style is GATED FIRST (the sheet exists, the style exists, the
+///    sheet's protection allows Format Cells), before anything is written, so
+///    an ordinary refusal changes nothing at all.
+/// 2. A failure AFTER the first write (the cells refused, or a gate that
+///    changed in between) takes back exactly what was recorded in the step
+///    since the run began (`roll_back_open_changes_after`), leaving no undo and
+///    no redo step, and a refusal row on the trail.
+/// 3. Each style APPLIED is recorded on the trail (`record_queued_formatting`)
+///    -- never one that was not.
+///
+/// A run with no queued style is `apply_cells` alone, exactly as before.
+/// Answers how many styles were applied; `Err` is the sentence the run ends
+/// with.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_run_with_queued_styles(
+    state: &AppState,
+    file_state: &FileState,
+    stores: &RunRollbackStores<'_>,
+    surface: &str,
+    surface_id: &str,
+    start_sheet: usize,
+    actions: &[script_engine::types::DeferredAction],
+    apply_cells: impl FnOnce() -> Result<(), String>,
+) -> Result<usize, String> {
+    use script_engine::types::DeferredAction;
+    let mut queued: Vec<QueuedStyle> = Vec::new();
+    let mut sheet = start_sheet;
+    for action in actions {
+        match action {
+            DeferredAction::ActivateSheet { sheet_index } => sheet = *sheet_index,
+            DeferredAction::ApplyNamedStyle { name, row, col, end_row, end_col } => {
+                let (r1, c1) = (end_row.unwrap_or(*row), end_col.unwrap_or(*col));
+                queued.push(QueuedStyle {
+                    sheet,
+                    name: name.clone(),
+                    rows: ((*row).min(r1), (*row).max(r1)),
+                    cols: ((*col).min(c1), (*col).max(c1)),
+                });
+            }
+            _ => {}
+        }
+    }
+    if queued.is_empty() {
+        return apply_cells().map(|_| 0);
+    }
+
+    // 1. GATE EVERY STYLE before anything is written.
+    let refuse = |q: &QueuedStyle, why: &str| -> String {
+        let sentence = queued_style_refusal(state, q, why);
+        record_queued_style_refusal(state, surface, surface_id, q, &sentence);
+        sentence
+    };
+    let sheet_count = state.grids.read().map(|g| g.len()).unwrap_or(0);
+    for q in &queued {
+        if q.sheet >= sheet_count {
+            return Err(refuse(q, "that sheet no longer exists"));
+        }
+        if !state.named_styles.read().map(|n| n.contains_key(&q.name)).unwrap_or(false) {
+            return Err(refuse(q, &format!("there is no cell style named '{}'", q.name)));
+        }
+        if let Err(why) = crate::protection::check_sheet_action(state, q.sheet, "formatCells", "apply a named style") {
+            return Err(refuse(q, &why));
+        }
+    }
+
+    // 2. ONE STEP: open it, or join the caller's; note where the run begins.
+    let (opened, at) = {
+        let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let opened = !undo.has_open_transaction();
+        if opened {
+            undo.begin_transaction(format!("{} edit", surface_label(surface)));
+        }
+        let at = undo.current_transaction_mut().map(|t| t.changes.len()).unwrap_or(0);
+        (opened, at)
+    };
+    let take_back_and_close = || {
+        crate::undo_commands::roll_back_open_changes_after(
+            state,
+            file_state,
+            stores.user_files,
+            stores.pivot,
+            stores.slicer,
+            stores.ribbon,
+            stores.pane,
+            stores.timeline,
+            at,
+        );
+        if opened {
+            if let Ok(mut undo) = state.undo_stack.lock() {
+                undo.cancel_transaction();
+            }
+        }
+    };
+    if let Err(why) = apply_cells() {
+        take_back_and_close();
+        return Err(why);
+    }
+    for q in &queued {
+        let rows: Vec<u32> = (q.rows.0..=q.rows.1).collect();
+        let cols: Vec<u32> = (q.cols.0..=q.cols.1).collect();
+        if let Err(why) =
+            crate::named_styles_cmd::apply_named_style_on_sheet(state, file_state, &q.name, &rows, &cols, q.sheet)
+        {
+            take_back_and_close();
+            return Err(refuse(q, &why));
+        }
+    }
+    if opened {
+        let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo.commit_transaction();
+    }
+    // 3. On the trail, now that each one was applied.
+    record_queued_formatting(state, surface, surface_id, start_sheet, actions);
+    Ok(queued.len())
+}
+
+/// The trail row of a module run whose queued style ended it (nothing kept).
+fn record_queued_style_refusal(state: &AppState, surface: &str, surface_id: &str, q: &QueuedStyle, sentence: &str) {
+    let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+    extra.insert("surface".into(), serde_json::json!(surface));
+    if !surface_id.is_empty() {
+        extra.insert("surfaceId".into(), serde_json::json!(surface_id));
+    }
+    extra.insert("sheet".into(), serde_json::json!(q.sheet));
+    extra.insert("formatting".into(), serde_json::json!(true));
+    extra.insert("namedStyle".into(), serde_json::json!(q.name));
+    extra.insert("ok".into(), serde_json::json!(false));
+    extra.insert("rolledBack".into(), serde_json::json!(true));
+    crate::calp_commands::record_audit_event_with_extra(
+        state,
+        calp::audit::AuditEvent::ScriptExecuted,
+        format!("{} '{}' stopped: {}", surface_label(surface), surface_id, sentence),
+        extra,
+    );
+}
+
 /// `apply_script_modified_grids_core` wired to the real edit pipeline. This is
 /// the entry point every surface with Tauri `State` handles uses (run_script,
 /// MCP execute_script).
@@ -1345,7 +1655,11 @@ pub(crate) fn apply_script_modified_grids(
     cells_modified: u32,
     surface: &str,
     surface_id: &str,
+    regions: crate::commands::data::RegionGate,
 ) -> Result<(), String> {
+    // ONE REFRESH (NEW-double-refresh): the write's shared recalculations
+    // leave the live data tables to the tail below, which refreshes once.
+    let deferred = crate::data_tables::defer_refresh_to_caller();
     apply_script_modified_grids_core(
         state,
         file_state,
@@ -1358,6 +1672,7 @@ pub(crate) fn apply_script_modified_grids(
         cells_modified,
         surface,
         surface_id,
+        regions,
         &|updates, control_values| {
             crate::commands::data::update_cells_batch_with_controls(
                 state.clone(),
@@ -1367,10 +1682,25 @@ pub(crate) fn apply_script_modified_grids(
                 updates,
                 None,
                 Some(control_values),
+                regions,
             )
             .map(|_| ())
         },
-    )
+    )?;
+    drop(deferred);
+    // Under automatic calculation the workbook's live data tables follow a
+    // script's writes, on any sheet, as they follow a typed edit (BUG-0652).
+    // Once per run, with every lock released; the caller repaints the grid.
+    let mut refreshed = Vec::new();
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &mut refreshed,
+    );
+    Ok(())
 }
 
 /// Persist EVERYTHING a successful script run produced server-side: the grid
@@ -1407,6 +1737,7 @@ pub(crate) fn apply_script_result(
         cells_modified,
         surface,
         surface_id,
+        crate::commands::data::RegionGate::Enforce,
     )?;
     // Outside the grid apply on purpose: a script may set only document
     // properties and touch no cell at all, which short-circuits the grid path.
@@ -1493,6 +1824,8 @@ pub fn run_script(
     pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     request: RunScriptRequest,
     window: tauri::Window,
 ) -> Result<RunScriptResponse, String> {
@@ -1520,6 +1853,8 @@ pub fn run_script(
         &pivot_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &slicer_state,
+        &timeline_state,
         &request.source,
         &request.filename,
         request.view_state.as_ref(),
@@ -1545,6 +1880,8 @@ pub(crate) fn run_in_interpreter(
     pivot_state: &State<'_, crate::pivot::PivotState>,
     pane_control_state: &PaneControlState,
     ribbon_filter_state: &RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     source: &str,
     filename: &str,
     view_state: Option<&super::types::HostViewState>,
@@ -1592,26 +1929,55 @@ pub(crate) fn run_in_interpreter(
     //    the active one via update_cells_batch, the rest snapshot-undoable +
     //    parsed + per-sheet recalced + audited (one combined transaction). See
     //    apply_script_modified_grids_core for the recalc-order reasoning.
+    //
+    //    ...and the FORMATTING it asked for (owner, 2026-11-04): the module
+    //    runtime's one formatting op, `Calcula.applyNamedStyle`, is queued by
+    //    the interpreter and applied HERE, with the cells, in the run's ONE undo
+    //    step -- a style that cannot be applied takes the whole run back
+    //    (`apply_run_with_queued_styles`, which also puts each applied style on
+    //    the trail). The page no longer replays it.
+    let mut formatting_applied = false;
     if let script_engine::ScriptResult::Success {
         cells_modified,
         workbook_properties_changed,
+        deferred_actions,
         ..
     } = &result
     {
-        apply_script_result(
-            state,
-            file_state,
-            user_files_state,
-            pivot_state,
-            pane_control_state,
-            ribbon_filter_state,
-            &modified_grids,
-            active_sheet,
-            *cells_modified,
-            workbook_properties_changed,
+        let stores = RunRollbackStores {
+            user_files: user_files_state.inner(),
+            pivot: pivot_state.inner(),
+            slicer: slicer_state,
+            ribbon: ribbon_filter_state,
+            pane: pane_control_state,
+            timeline: timeline_state,
+        };
+        let applied = apply_run_with_queued_styles(
+            state.inner(),
+            file_state.inner(),
+            &stores,
             surface,
             surface_id,
+            active_sheet,
+            deferred_actions,
+            || {
+                apply_script_result(
+                    state,
+                    file_state,
+                    user_files_state,
+                    pivot_state,
+                    pane_control_state,
+                    ribbon_filter_state,
+                    &modified_grids,
+                    active_sheet,
+                    *cells_modified,
+                    workbook_properties_changed,
+                    surface,
+                    surface_id,
+                )
+            },
         )?;
+        formatting_applied = applied > 0;
     }
 
     // 4. Convert to response type. run_script is a string-output surface:
@@ -1631,8 +1997,13 @@ pub(crate) fn run_in_interpreter(
             cells_modified,
             duration_ms,
             bookmark_mutations,
-            deferred_actions,
+            // Applied above, in the run's step: never replayed by the page.
+            deferred_actions: deferred_actions
+                .into_iter()
+                .filter(|a| !matches!(a, script_engine::types::DeferredAction::ApplyNamedStyle { .. }))
+                .collect(),
             screen_updating,
+            formatting_applied,
         }),
         script_engine::ScriptResult::Error { message, output } => {
             Ok(RunScriptResponse::Error {
@@ -2972,6 +3343,7 @@ mod script_apply_tests {
             cells_modified,
             surface,
             surface_id,
+            crate::commands::data::RegionGate::Enforce,
             &active,
         );
         let recorded = calls.borrow().clone();
@@ -2994,6 +3366,121 @@ mod script_apply_tests {
             .get_cell(row, col)
             .map(|c| c.value.clone())
             .unwrap_or(CellValue::Empty)
+    }
+
+    // --- LIVE DATA TABLES and the atomicity of a refusal --------------------
+
+    /// Sheet 1 holding a live one-variable data table: inputs K2:K3, body
+    /// L2:L3 (`=TABLE(,A1)`, Excel's marker, as the Data Table command writes
+    /// it), and a plain A1.
+    fn sheet_with_data_table() -> Grid {
+        let locale = engine::LocaleSettings::invariant();
+        let mut g = Grid::new();
+        g.set_cell(0, 0, Cell::new_number(1.0));
+        g.set_cell(1, 10, Cell::new_number(5.0));
+        g.set_cell(2, 10, Cell::new_number(7.0));
+        for row in [1, 2] {
+            let mut body = crate::parse_cell_input_invariant("=TABLE(,A1)", &locale);
+            body.value = CellValue::Number(10.0);
+            g.set_cell(row, 11, body);
+        }
+        assert!(engine::data_table::has_data_tables(&g), "the fixture holds a live table");
+        g
+    }
+
+    /// Nothing landed: no undo entry, the document clean, sheet 1's L2 still
+    /// the table's.
+    fn assert_untouched(h: &Harness, what: &str) {
+        assert_eq!(h.state.undo_stack.lock().unwrap().undo_depth(), 0, "{what}: an undo entry was recorded");
+        assert!(!h.file_state.is_dirty(), "{what}: the document was marked modified");
+        let l2 = h.state.grids.read().unwrap()[1].get_cell(1, 11).cloned().expect("L2");
+        assert!(engine::data_table::is_data_table_cell(&l2), "{what}: L2 is no longer the table's");
+    }
+
+    /// Excel [LIVE, BUG-0652]: part of a data table's body cannot be changed
+    /// ("Cannot change part of a data table."), and `=TABLE(..)` cannot be
+    /// entered anywhere ("That function isn't valid."). A script's write to a
+    /// BACKGROUND sheet used to be installed with no gate at all -- and its
+    /// typed marker was then parsed into a live table body.
+    ///
+    /// SABOTAGE: delete the `check_cells_write` call from the pre-pass of
+    /// `apply_script_modified_grids_core` -- fails at "WROTE PART".
+    #[test]
+    fn a_script_cannot_change_part_of_a_background_data_table() {
+        let h = harness(sheet_with_data_table());
+        let mut after = sheet_with_data_table();
+        after.set_cell(1, 11, script_wrote(CellValue::Number(9.0)));
+        let grids = modified(&h, after);
+        let (result, active_calls) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert_eq!(
+            result.err().as_deref(),
+            Some(engine::data_table::PART_OF_DATA_TABLE),
+            "WROTE PART: a script overwrote L2 of a live data table on another sheet"
+        );
+        assert!(active_calls.is_empty());
+        assert_untouched(&h, "part of the body");
+
+        // A typed marker on the background sheet is refused too...
+        let mut after = sheet_with_data_table();
+        after.set_cell(5, 5, script_wrote(CellValue::Text("=TABLE(,A1)".to_string())));
+        let grids = modified(&h, after);
+        let (result, _) = apply(&h, &grids, 1, "run_script", "s-1");
+        assert_eq!(
+            result.err().as_deref(),
+            Some(engine::data_table::TABLE_NOT_VALID),
+            "TYPED MARKER: a script's =TABLE(..) on another sheet was accepted"
+        );
+        assert!(h.state.grids.read().unwrap()[1].get_cell(5, 5).is_none(), "F6 stayed empty");
+        assert_untouched(&h, "the typed marker");
+
+        // ...while writing the WHOLE body replaces the table, as in Excel.
+        let mut after = sheet_with_data_table();
+        after.set_cell(1, 11, script_wrote(CellValue::Number(9.0)));
+        after.set_cell(2, 11, script_wrote(CellValue::Number(8.0)));
+        let grids = modified(&h, after);
+        let (result, _) = apply(&h, &grids, 2, "notebook", "nb-1:cell-2");
+        assert!(result.is_ok(), "the whole body may be replaced: {result:?}");
+        assert_eq!(value_at(&h, 1, 1, 11), CellValue::Number(9.0));
+        assert_eq!(value_at(&h, 1, 2, 11), CellValue::Number(8.0));
+    }
+
+    /// A refusal on the ACTIVE sheet (the batch's own gates: a data table, a
+    /// spilled value) is decided BEFORE any background sheet is installed. The
+    /// batch asks it only after the install, so the refusal used to leave the
+    /// script's background writes in place -- with no recalculation and no
+    /// audit entry -- and report an error.
+    ///
+    /// SABOTAGE: delete the active-sheet `check_spill_protection_cells` call
+    /// from `apply_script_modified_grids_core` -- fails at "HALF APPLIED
+    /// (spill)"; delete the pre-pass `check_cells_write` -- fails at "HALF
+    /// APPLIED (table)".
+    #[test]
+    fn an_active_sheet_refusal_leaves_every_background_sheet_untouched() {
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(0, 0, Cell::new_number(5.0));
+        let h = harness(sheet1.clone());
+        let mut background = sheet1.clone();
+        background.set_cell(0, 0, script_wrote(CellValue::Number(42.0)));
+
+        // A typed marker on the ACTIVE sheet.
+        let mut active = h.state.grids.read().unwrap()[0].clone();
+        active.set_cell(5, 5, script_wrote(CellValue::Text("=TABLE(,A1)".to_string())));
+        let (result, active_calls) = apply(&h, &[active, background.clone()], 2, "mcp", "agent");
+        assert_eq!(value_at(&h, 1, 0, 0), CellValue::Number(5.0), "HALF APPLIED (table): sheet 2 was written");
+        assert_eq!(result.err().as_deref(), Some(engine::data_table::TABLE_NOT_VALID));
+        assert!(active_calls.is_empty(), "the active leg never ran");
+
+        // A spilled value on the ACTIVE sheet: A2 belongs to A1's array.
+        h.state.spill_hosts.lock().unwrap().insert((0, 1, 0), (0, 0));
+        let mut active = h.state.grids.read().unwrap()[0].clone();
+        active.set_cell(1, 0, script_wrote(CellValue::Number(7.0)));
+        let (result, active_calls) = apply(&h, &[active, background], 2, "mcp", "agent");
+        assert_eq!(value_at(&h, 1, 0, 0), CellValue::Number(5.0), "HALF APPLIED (spill): sheet 2 was written");
+        let err = result.expect_err("a spilled value on the active sheet is refused");
+        assert!(err.contains("spilled from the formula in A1"), "the batch's own message: {err}");
+        assert!(active_calls.is_empty(), "the active leg never ran");
+        assert_eq!(h.state.undo_stack.lock().unwrap().undo_depth(), 0);
+        assert!(!h.file_state.is_dirty());
     }
 
     // --- DEFECT 2: formula strings written off the active sheet ------------
@@ -3483,3 +3970,7 @@ mod script_apply_tests {
         assert_eq!(value_at(&h, 1, 3, 2), CellValue::Number(42.0));
     }
 }
+
+#[cfg(test)]
+#[path = "queued_style_tests.rs"]
+mod queued_style_tests;

@@ -14,10 +14,22 @@
 //
 // - `across`: one region per ROW, in ONE call, so Merge Across over N rows is
 //   atomic and ONE undo step.
-// - `absorb`: a merge wholly inside the range is dissolved and re-merged into
-//   the bigger one (Excel); a PARTIAL overlap is still refused.
-// - `keep_first_value`: Excel's value rule -- a region whose top-left cell
-//   holds no content takes the first cell in reading order that does.
+// - every merge merges the UNION of the range and every merge it touches,
+//   dissolving them into the new region(s), as Excel's Range.Merge does
+//   (`expand_over_merges`); a partial overlap is no longer refused. (The
+//   `absorb` option that once asked for this is gone.)
+// - EVERY merge applies Excel's value rule (NEW-merge-first-value): a region
+//   whose top-left cell holds no content takes the first cell in reading
+//   order that does, MOVED there as a cut and paste moves it -- readers of the
+//   moved cell follow it, a reader of the top-left is #REF! [LIVE, Excel 16,
+//   2026-11-05, tablec/probe2.ps1: F1="title", `Range("E1:G1").Merge` ->
+//   E1="title", =F1 reads =E1, =E1 reads #REF!; E1:F2 with F1 and E2 filled
+//   keeps F1 (reading order); a formula moves unchanged, its format with it;
+//   Merge & Center, Merge Across and Merge Cells keep the same value]. It was
+//   an option (`keep_first_value`) only the ribbon set, so a script's
+//   api.mergeCells and the fill engine left the top-left empty and DESTROYED
+//   the value; the ribbon re-pointed references from the frontend, which a
+//   script never did. Both now happen here, on every door.
 // - `probe`: every gate runs and the plan is reported (regions created and
 //   dissolved, how many discard values) with NOTHING changed and the document
 //   left clean, so the gesture can show Excel's data-loss warning BEFORE
@@ -62,6 +74,41 @@ fn rect_contains(outer: &MergedRegion, inner: &MergedRegion) -> bool {
         && inner.start_col >= outer.start_col
         && inner.end_col <= outer.end_col
 }
+
+/// The rectangle a merge of `rect` really merges: `rect` grown, until it stops
+/// growing, to take in every existing merge it touches -- a merge the growth
+/// reaches is taken in too. Excel's `Range.Merge` over a range that only PARTLY
+/// overlaps a merge merges the UNION, silently [LIVE, Excel 16 build 20326,
+/// 2026-11-05, miscb-probe1/2.ps1]: E1:F1 merged, `Range("E1:E2").Merge` ->
+/// E1:F2; E1:F1 and E3:G3 merged, `Range("E1:E3").Merge` -> E1:G3; E1:F2 and
+/// G2:H2 merged, `Range("F1:G1").Merge` -> E1:H2 (the chain); `Merge(True)`
+/// (Merge Across) over E1:E2 with E1:F1 merged -> E1:F1 and E2:F2; a range
+/// wholly inside a merge leaves it as it is. The ribbon's Merge Cells and
+/// Merge Across do the same through the selection, which grows to whole merged
+/// areas before they run (Merge & Center then UNMERGES, being a toggle).
+fn expand_over_merges(rect: &MergedRegion, merges: &[MergedRegion]) -> MergedRegion {
+    let mut out = rect.clone();
+    loop {
+        let mut grew = false;
+        for m in merges {
+            if rects_intersect(&out, m) && !rect_contains(&out, m) {
+                out.start_row = out.start_row.min(m.start_row);
+                out.start_col = out.start_col.min(m.start_col);
+                out.end_row = out.end_row.max(m.end_row);
+                out.end_col = out.end_col.max(m.end_col);
+                grew = true;
+            }
+        }
+        if !grew {
+            return out;
+        }
+    }
+}
+
+/// The merged-cells set changed between the expansion the gates judged and
+/// the write's own: refused rather than merge cells no gate saw.
+const MERGES_CHANGED_DURING_MERGE: &str =
+    "The merged cells changed while merging. Nothing was changed; try again.";
 
 /// Excel's notion of "this cell holds something" for the merge warning and the
 /// value rule: a constant (a single space included) or ANY formula (`=""`
@@ -147,7 +194,8 @@ fn master_cell_data(
 /// Merge cells in a range on a NON-ACTIVE sheet (Wave 3 cross-sheet ops).
 ///
 /// The same chain as the active path — protection (per-cell + formatCells
-/// option) on the TARGET sheet, writeback claim guard, overlap refusal — but
+/// option) on the TARGET sheet, writeback claim guard, the union with every
+/// merge the range touches (`expand_over_merges`) — but
 /// against `grids[target]` and the per-sheet merge store. Undo is two
 /// sheet-tagged CustomRestores in ONE transaction: the slave cells
 /// ("script_grid_cells") and the sheet's merge set ("sheet_merge_regions"),
@@ -165,6 +213,22 @@ pub(crate) fn merge_cells_off_sheet(
     end_row: u32,
     end_col: u32,
 ) -> Result<MergeResult, String> {
+    // Read the target sheet's merge set (mirror-vs-store resolved by the
+    // helper) for the union and the undo snapshot.
+    let previous_regions: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(state, target, |merged| merged.iter().cloned().collect());
+    // THE UNION (Excel, `expand_over_merges`), judged by every gate below.
+    let new_region = expand_over_merges(
+        &MergedRegion {
+            start_row: start_row.min(end_row),
+            start_col: start_col.min(end_col),
+            end_row: start_row.max(end_row),
+            end_col: start_col.max(end_col),
+        },
+        &previous_regions,
+    );
+    let (start_row, start_col, end_row, end_col) =
+        (new_region.start_row, new_region.start_col, new_region.end_row, new_region.end_col);
     crate::protection::check_sheet_protection_range(
         state,
         target,
@@ -193,39 +257,21 @@ pub(crate) fn merge_cells_off_sheet(
     )?;
 
     let min_row = start_row.min(end_row);
-    let max_row = start_row.max(end_row);
     let min_col = start_col.min(end_col);
-    let max_col = start_col.max(end_col);
 
-    // Read the target sheet's merge set (mirror-vs-store resolved by the
-    // helper) for the overlap check and the undo snapshot.
-    let previous_regions: Vec<MergedRegion> =
-        crate::report::with_sheet_merges(state, target, |merged| merged.iter().cloned().collect());
-
-    if min_row == max_row && min_col == max_col {
+    // Every merge the union touches lies inside it and is dissolved into it;
+    // a union that IS one existing merge (a range wholly inside it, or that
+    // merge again) changes nothing, as in Excel.
+    let contained: Vec<MergedRegion> =
+        previous_regions.iter().filter(|r| rects_intersect(&new_region, r)).cloned().collect();
+    let single_cell = new_region.start_row == new_region.end_row && new_region.start_col == new_region.end_col;
+    if single_cell || contained == [new_region.clone()] {
         return Ok(MergeResult {
             success: false,
             merged_regions: previous_regions,
             ..Default::default()
         });
     }
-
-    for region in &previous_regions {
-        let overlaps = !(max_row < region.start_row
-            || min_row > region.end_row
-            || max_col < region.start_col
-            || min_col > region.end_col);
-        if overlaps {
-            return Err("Cannot merge: selection overlaps with existing merged region".to_string());
-        }
-    }
-
-    let new_region = MergedRegion {
-        start_row: min_row,
-        start_col: min_col,
-        end_row: max_row,
-        end_col: max_col,
-    };
 
     // Clear slave cells on the target grid, capturing their prior state.
     let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::new();
@@ -243,9 +289,29 @@ pub(crate) fn merge_cells_off_sheet(
         // `stored_cells_in`): a whole-column merge must not walk a million
         // empty coordinates.
         let stored = stored_cells_in(&grids[target], &new_region);
+        // Excel's value rule, as on the active sheet (NEW-merge-first-value):
+        // an empty top-left takes the first cell in reading order that holds
+        // something. Its readers are NOT re-pointed here --
+        // `relocate_cell_references` acts on the active sheet -- but the value
+        // survives, where it used to be destroyed with the other cells.
+        let master_holds = grids[target].get_cell(min_row, min_col).is_some_and(holds_content);
+        let first_content: Option<(u32, u32)> = if master_holds {
+            None
+        } else {
+            stored
+                .iter()
+                .copied()
+                .find(|&coord| coord != (min_row, min_col) && grids[target].get_cell(coord.0, coord.1).is_some_and(holds_content))
+        };
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut grids = grids.authorize(&effect);
         let grid = &mut grids[target];
+        if let Some((from_row, from_col)) = first_content {
+            if let Some(source) = grid.get_cell(from_row, from_col).cloned() {
+                previous_cells.push((min_row, min_col, grid.get_cell(min_row, min_col).cloned()));
+                grid.set_cell(min_row, min_col, source);
+            }
+        }
         for (row, col) in stored {
             if row == min_row && col == min_col {
                 continue; // Master cell keeps its content.
@@ -292,6 +358,9 @@ pub(crate) fn merge_cells_off_sheet(
     let merge_effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let merged_regions: Vec<MergedRegion> =
         crate::report::with_sheet_merges_mut(state, &merge_effect, target, |merged| {
+            for region in &contained {
+                merged.remove(region);
+            }
             merged.insert(new_region.clone());
             merged.iter().cloned().collect()
         });
@@ -321,6 +390,7 @@ pub(crate) fn merge_cells_off_sheet(
         success: true,
         merged_regions,
         created_regions: vec![new_region],
+        removed_regions: contained,
         ..Default::default()
     })
 }
@@ -433,6 +503,27 @@ pub fn merge_cells_core(
             }
         }
     }
+    // ONE REFRESH (NEW-double-refresh): on the active sheet the shared
+    // recalculation below leaves the live data tables to this command's own
+    // tail, which refreshes once. (The off-sheet path above ends in
+    // `recalc_after_off_sheet_write`, whose own refresh is its one.)
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
+    // THE UNION (Excel, `expand_over_merges`): a range that partly overlaps a
+    // merge merges the union of the two. Every gate below judges the UNION --
+    // its cells are the ones this merge clears -- and the write re-derives it
+    // under its held guards and refuses if the merged set moved in between.
+    let requested = MergedRegion {
+        start_row: start_row.min(end_row),
+        start_col: start_col.min(end_col),
+        end_row: start_row.max(end_row),
+        end_col: start_col.max(end_col),
+    };
+    let gated = {
+        let merged = state.merged_regions.read().map_err(|e| e.to_string())?;
+        let current: Vec<MergedRegion> = merged.iter().cloned().collect();
+        expand_over_merges(&requested, &current)
+    };
+    let (start_row, start_col, end_row, end_col) = (gated.start_row, gated.start_col, gated.end_row, gated.end_col);
     // Sheet protection, BEFORE any lock below (the gate takes its own locks).
     // Merging clears every non-master cell in the range — on a protected sheet
     // that is a content-destroying write, so it needs the same per-cell gate as
@@ -490,14 +581,12 @@ pub fn merge_cells_core(
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
-    // Normalize coordinates (ensure start <= end)
-    let rect = MergedRegion {
-        start_row: start_row.min(end_row),
-        start_col: start_col.min(end_col),
-        end_row: start_row.max(end_row),
-        end_col: start_col.max(end_col),
-    };
+    // The union again, under the held guards: the gates above judged `gated`.
     let current: Vec<MergedRegion> = merged_regions.iter().cloned().collect();
+    let rect = expand_over_merges(&requested, &current);
+    if rect != gated {
+        return Err(MERGES_CHANGED_DURING_MERGE.to_string());
+    }
 
     // Nothing to merge: a single cell, or Merge Across over one column (each
     // row would be a 1x1). Excel does nothing in both cases.
@@ -516,21 +605,15 @@ pub fn merge_cells_core(
         return Err("Merge Across can merge at most 10,000 rows at once. Select fewer rows.".to_string());
     }
 
-    // Existing merges inside the range are absorbed (with `absorb`); one that
-    // only PARTLY overlaps is refused, as before -- Excel never reaches that
-    // case because its selection grows to take in whole merged areas, and
-    // Calcula's selection does the same (useSelection).
-    let mut contained: Vec<MergedRegion> = Vec::new();
-    for region in &current {
-        if !rects_intersect(&rect, region) {
-            continue;
-        }
-        if opts.absorb && rect_contains(&rect, region) {
-            contained.push(region.clone());
-        } else {
-            return Err("Cannot merge: selection overlaps with existing merged region".to_string());
-        }
-    }
+    // Every existing merge the union touches lies wholly inside it, and is
+    // dissolved into the new merge(s) -- Excel's `Range.Merge`, which also
+    // absorbs a merge wholly inside the range. (A merge that only PARTLY
+    // overlapped used to be refused.)
+    let contained: Vec<MergedRegion> = current
+        .iter()
+        .filter(|region| rects_intersect(&rect, region))
+        .cloned()
+        .collect();
 
     let planned: Vec<MergedRegion> = if opts.across {
         (rect.start_row..=rect.end_row)
@@ -583,7 +666,7 @@ pub fn merge_cells_core(
         let master_holds = grid
             .get_cell(region.start_row, region.start_col)
             .is_some_and(holds_content);
-        moves.push(if opts.keep_first_value && !master_holds { first_content } else { None });
+        moves.push(if master_holds { None } else { first_content });
     }
     let moved_cells: Vec<MovedCell> = planned
         .iter()
@@ -705,8 +788,8 @@ pub fn merge_cells_core(
         ));
     }
 
-    undo_stack.commit_owned(transaction);
-
+    // THE STEP STAYS OPEN until the moved values' readers are re-pointed
+    // below, so the merge and the re-pointing are ONE Ctrl+Z.
     let regions_snapshot: Vec<MergedRegion> = merged_regions.iter().cloned().collect();
 
     // PHASE B — dependents (§2c). Merging is a content-DESTROYING bulk rewrite:
@@ -728,6 +811,34 @@ pub fn merge_cells_core(
         crate::undo_commands::rebuild_all_dependencies(state);
     }
 
+    // A MOVED value keeps its readers, as Excel's cut and paste does: formulas
+    // that read it now read the top-left cell, and one that read the (empty)
+    // top-left is #REF! [LIVE, tablec/probe2.ps1]. Done HERE, for every door --
+    // the ribbon gesture did it from the frontend and a script's merge never
+    // did. Inside the still-open step; each call takes its own locks.
+    for m in &moved_cells {
+        match crate::commands::structure::relocate_cell_references_recording(
+            state,
+            file_state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            m.from_row,
+            m.from_col,
+            m.from_row,
+            m.from_col,
+            m.to_row,
+            m.to_col,
+            None,
+            true,
+        ) {
+            Ok(cells) => updated_cells.extend(cells),
+            Err(e) => crate::log_warn!("MERGE", "re-pointing the readers of a moved merge value failed: {}", e),
+        }
+    }
+    state.undo_stack.lock().map_err(|e| e.to_string())?.commit_owned(transaction);
+
     if !seeds.is_empty() {
         crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
             state,
@@ -738,6 +849,16 @@ pub fn merge_cells_core(
             &mut updated_cells,
         );
     }
+    // A LIVE DATA TABLE follows the merge under automatic calculation, as
+    // after any edit (BUG-0652, rev-dt2-1). Every guard is dropped above.
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &mut updated_cells,
+    );
 
     Ok(MergeResult {
         success: true,
@@ -1020,9 +1141,10 @@ fn remember_original(
 ///   writeback claim and the array guard on the backing sheet.
 /// - `probe`: the plan (`lossy_regions` from the BACKING grid, the regions to
 ///   create and dissolve, the moves) with nothing changed and no effect.
-/// - `across`: one region per row; `absorb`: merges wholly inside the range
-///   are dissolved and re-merged, a partial overlap still refuses.
-/// - `keep_first_value`: a region whose top-left holds nothing takes the first
+/// - `across`: one region per row; every merge the range touches is taken
+///   into the union (`expand_over_merges`) and dissolved into the new
+///   region(s), exactly as on a sheet.
+/// - Excel's value rule (every merge): a region whose top-left holds nothing takes the first
 ///   cell in reading order that does (value, formula and style), and every
 ///   formula ON THE BACKING SHEET is re-pointed for that move by the rule
 ///   `relocate_cell_references` applies for the sheet gesture (which cannot
@@ -1052,12 +1174,18 @@ pub(crate) fn merge_cells_on_target(
     let opts = options.unwrap_or_default();
     let t = crate::cell_target::resolve_cell_target(state, target)?;
     let backing = t.backing_index;
-    let rect = MergedRegion {
-        start_row: start_row.min(end_row),
-        start_col: start_col.min(end_col),
-        end_row: start_row.max(end_row),
-        end_col: start_col.max(end_col),
-    };
+    let current: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(state, backing, |merged| merged.iter().cloned().collect());
+    // THE UNION (Excel, `expand_over_merges`), judged by every gate below.
+    let rect = expand_over_merges(
+        &MergedRegion {
+            start_row: start_row.min(end_row),
+            start_col: start_col.min(end_col),
+            end_row: start_row.max(end_row),
+            end_col: start_col.max(end_col),
+        },
+        &current,
+    );
     crate::cell_target::ensure_in_extent(&t, rect.start_row, rect.start_col, rect.end_row, rect.end_col)?;
     crate::cell_target::gate_target_cells(
         state,
@@ -1073,9 +1201,6 @@ pub(crate) fn merge_cells_on_target(
         state, backing, rect.start_row, rect.start_col, rect.end_row, rect.end_col,
     )?;
 
-    let current: Vec<MergedRegion> =
-        crate::report::with_sheet_merges(state, backing, |merged| merged.iter().cloned().collect());
-
     // Nothing to merge: a single cell, or Merge Across over one column.
     let single_cell = rect.start_row == rect.end_row && rect.start_col == rect.end_col;
     let single_column_across = opts.across && rect.start_col == rect.end_col;
@@ -1086,19 +1211,10 @@ pub(crate) fn merge_cells_on_target(
         return Err("Merge Across can merge at most 10,000 rows at once. Select fewer rows.".to_string());
     }
 
-    // ABSORB: merges wholly inside are dissolved first; a partial overlap
-    // refuses, exactly as on a sheet.
-    let mut contained: Vec<MergedRegion> = Vec::new();
-    for region in &current {
-        if !rects_intersect(&rect, region) {
-            continue;
-        }
-        if opts.absorb && rect_contains(&rect, region) {
-            contained.push(region.clone());
-        } else {
-            return Err("Cannot merge: selection overlaps with existing merged region".to_string());
-        }
-    }
+    // Every merge the union touches lies inside it and is dissolved into the
+    // new merge(s), exactly as on a sheet.
+    let mut contained: Vec<MergedRegion> =
+        current.iter().filter(|region| rects_intersect(&rect, region)).cloned().collect();
     contained.sort_by_key(|r| (r.start_row, r.start_col, r.end_row, r.end_col));
 
     let planned: Vec<MergedRegion> = if opts.across {
@@ -1151,7 +1267,7 @@ pub(crate) fn merge_cells_on_target(
             lossy_regions += 1;
         }
         let master_holds = grid.get_cell(region.start_row, region.start_col).is_some_and(holds_content);
-        moves.push(if opts.keep_first_value && !master_holds { first_content } else { None });
+        moves.push(if master_holds { None } else { first_content });
     }
     let moved_cells: Vec<MovedCell> = planned
         .iter()

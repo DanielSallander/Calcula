@@ -39,7 +39,32 @@ pub(crate) fn arrow_member(array: &dyn Array, idx: usize, locale: &LocaleSetting
         return None;
     }
     let source = arrow_member_source(array.data_type(), &key);
+    // A non-finite float member keeps its machine key ("inf", "-inf", "NaN":
+    // what a selection matches on) and is LABELLED with the word the app
+    // shows for it everywhere else (`@api/locale` `nonFiniteNumberText`).
+    if let Some(word) = non_finite_member_label(array.data_type(), &key) {
+        return Some(MemberRef { key, label: word.to_string() });
+    }
     Some(MemberRef::from_source(key, &source, locale))
+}
+
+/// The label of a float member that is not a finite number -- Infinity,
+/// -Infinity, NaN, the words `@api/locale`'s `nonFiniteNumberText` writes on
+/// a canvas visual (open-ledger round D) -- or `None` for any other member.
+fn non_finite_member_label(data_type: &ArrowDataType, key: &str) -> Option<&'static str> {
+    if !matches!(data_type, ArrowDataType::Float32 | ArrowDataType::Float64) {
+        return None;
+    }
+    let value = parse_machine_number(key)?;
+    if value.is_nan() {
+        Some("NaN")
+    } else if value == f64::INFINITY {
+        Some("Infinity")
+    } else if value == f64::NEG_INFINITY {
+        Some("-Infinity")
+    } else {
+        None
+    }
 }
 
 /// What the KEY of a value of `data_type` is, so its label can be written for
@@ -61,8 +86,13 @@ pub(crate) fn arrow_member_source(data_type: &ArrowDataType, key: &str) -> Membe
         | ArrowDataType::Float32
         | ArrowDataType::Float64
         | ArrowDataType::Decimal128(_, _) => match parse_machine_number(key) {
-            Some(value) => MemberSource::Number { value },
-            None => MemberSource::Text,
+            // A non-finite float (a column holding a 1/0) is no number a
+            // member can be written as or sorted among: its key is its
+            // machine text ("inf", "-inf", "NaN") and it is TEXT, never a
+            // `Number { inf }` that a label writer formats and a numeric sort
+            // places. `arrow_member` labels it Infinity / -Infinity / NaN.
+            Some(value) if value.is_finite() => MemberSource::Number { value },
+            _ => MemberSource::Text,
         },
         ArrowDataType::Date32 | ArrowDataType::Timestamp(_, _) => {
             engine::iso_member_source(key).unwrap_or(MemberSource::Text)
@@ -140,6 +170,40 @@ pub(crate) fn parse_machine_number(s: &str) -> Option<f64> {
     s.parse::<f64>().ok()
 }
 
+/// A model number as a GRID value: the number, or `#NUM!` when it is not
+/// finite. A DAX measure's `1/0`, `-1/0` and `0/0` are Infinity, -Infinity and
+/// NaN, which no Excel cell can hold: [LIVE] Excel 16 shows `#NUM!` for all
+/// three, in CUBEVALUE and in a data-model PivotTable's value cells alike
+/// (open-ledger round D). Every grid writer of a BI number goes through this:
+/// [`typed_cell`] (Insert Result and its refresh), the drill-through sheet and
+/// the PivotTable writer.
+pub(crate) fn grid_number_value(n: f64) -> engine::CellValue {
+    if n.is_finite() {
+        engine::CellValue::Number(n)
+    } else {
+        engine::CellValue::Error(engine::CellError::Num)
+    }
+}
+
+/// The non-finite spellings the host's machine text writes (`f64`'s
+/// `Display`: `arrow_value_to_string`). A column of no known type only reads
+/// THESE as a number; `"Infinity"` or `"nan"` there is someone's text.
+fn is_machine_non_finite(s: &str) -> bool {
+    matches!(s, "inf" | "-inf" | "NaN")
+}
+
+/// A query result's machine text in a `Number` / `Unknown` column as a grid
+/// value, or `None` when it is not a number (the caller writes text). A
+/// non-finite number is `#NUM!` ([`grid_number_value`]).
+pub(crate) fn machine_number_cell_value(text: &str, kind: BiColumnKind) -> Option<engine::CellValue> {
+    let n = parse_machine_number(text)?;
+    if n.is_finite() || kind == BiColumnKind::Number || is_machine_non_finite(text) {
+        Some(grid_number_value(n))
+    } else {
+        None
+    }
+}
+
 /// One query-result cell as the grid writer stores it: the cell, plus the
 /// number format a date must be shown with. The caller interns the format as
 /// a style (`Cell` carries a style index, not a format).
@@ -152,7 +216,8 @@ pub(crate) struct TypedBiCell {
 /// THE writer of one query-result cell (DC1, DC4), from its machine text and
 /// its column's declared kind:
 ///
-/// - `Number`: the invariant machine parse, else text;
+/// - `Number`: the invariant machine parse, else text; a non-finite number
+///   (a DAX `1/0`) is `#NUM!`, as Excel shows it ([`grid_number_value`]);
 /// - `Date` / `DateTime`: the ISO text becomes a date serial, shown with the
 ///   locale's short-date pattern (plus its time pattern for a date-time).
 ///   The pattern is FROZEN at write time, exactly as typed date entry freezes
@@ -166,8 +231,8 @@ pub(crate) fn typed_cell(text: Option<&str>, kind: BiColumnKind, locale: &Locale
     let plain = |cell: Cell| TypedBiCell { cell, number_format: None };
     let Some(text) = text else { return plain(Cell::new()) };
     match kind {
-        BiColumnKind::Number | BiColumnKind::Unknown => match parse_machine_number(text) {
-            Some(n) => plain(Cell::new_number(n)),
+        BiColumnKind::Number | BiColumnKind::Unknown => match machine_number_cell_value(text, kind) {
+            Some(value) => plain(Cell { value, ..Cell::new() }),
             None => plain(Cell::new_text(text.to_string())),
         },
         BiColumnKind::Date | BiColumnKind::DateTime => match engine::iso_member_source(text) {
@@ -233,5 +298,49 @@ impl ResultCellWriter {
             }
         }
         cell
+    }
+}
+
+#[cfg(test)]
+mod non_finite_member_tests {
+    use super::*;
+    use arrow::array::{Float64Array, Int64Array};
+
+    /// NEW-kpi-band-sort (member half): a float column holding 1/0, -1/0
+    /// and 0/0 listed them as NUMBER members (`Number { inf }`). Each keeps
+    /// its machine key -- the text a selection matches on -- is TEXT, and is
+    /// labelled with the app's word for it.
+    #[test]
+    fn a_non_finite_float_member_keeps_its_key_and_reads_as_its_word() {
+        let locale = LocaleSettings::from_locale_id("sv-SE");
+        let values = Float64Array::from(vec![f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 2.5]);
+        let members: Vec<MemberRef> = (0..values.len())
+            .map(|i| arrow_member(&values, i, &locale).expect("a member"))
+            .collect();
+        assert_eq!(
+            members,
+            vec![
+                MemberRef { key: "inf".into(), label: "Infinity".into() },
+                MemberRef { key: "-inf".into(), label: "-Infinity".into() },
+                MemberRef { key: "NaN".into(), label: "NaN".into() },
+                MemberRef { key: "2.5".into(), label: "2,5".into() },
+            ]
+        );
+        // An integer column's text is never one of these words.
+        let ints = Int64Array::from(vec![7]);
+        assert_eq!(arrow_member(&ints, 0, &locale).unwrap(), MemberRef { key: "7".into(), label: "7".into() });
+    }
+
+    /// The member SOURCE of a non-finite float key is Text, never a
+    /// `Number { inf }` that a label writer formats and a numeric sort places.
+    #[test]
+    fn a_non_finite_float_key_is_a_text_member_source() {
+        for key in ["inf", "-inf", "NaN"] {
+            assert_eq!(arrow_member_source(&ArrowDataType::Float64, key), MemberSource::Text, "{key}");
+        }
+        assert_eq!(
+            arrow_member_source(&ArrowDataType::Float64, "2.5"),
+            MemberSource::Number { value: 2.5 }
+        );
     }
 }

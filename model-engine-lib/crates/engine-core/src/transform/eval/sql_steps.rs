@@ -114,8 +114,9 @@ async fn run_sql_inner(
 ///   allowlist-unchecked. Now every path parses the same way.
 fn expression_sql(step: &SqlStep<'_>, input: &[Column], source: &str) -> EngineResult<String> {
     let parsed = parse_row_expression(step.table, step.index, input, source)?;
+    // A transformation is Power Query, not DAX: `null + 5` is `null`.
     parsed
-        .to_sql_string()
+        .to_relational_sql_string()
         .map_err(|e| step.error(format!("{e}")))
 }
 
@@ -454,7 +455,7 @@ fn aggregate_sql(
             let parsed = parse_row_expression(step.table, step.index, input, expression)?;
             let operand_type = infer_parsed_type(&parsed, input);
             let sql = parsed
-                .to_sql_string()
+                .to_relational_sql_string()
                 .map_err(|e| step.error(format!("{e}")))?;
             fractional_cast(
                 format!("({sql})"),

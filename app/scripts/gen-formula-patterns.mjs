@@ -37,6 +37,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { gradeJobs, resolveGrader } from "../../tests/eval/lib/grader.mjs";
+import { classifyPatterns, renderArtifact } from "./lib/formulaPatterns.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -393,97 +394,8 @@ function hashOf(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 }
 
-function renderArtifact(verified, sourceHash) {
-  const rows = verified
-    .map((p) => {
-      const e = p.expect;
-      const expect =
-        e.kind === "number"
-          ? `{ kind: "number", number: ${e.number}${
-              e.tolerance === undefined ? "" : `, tolerance: ${e.tolerance}`
-            } }`
-          : e.kind === "boolean"
-            ? `{ kind: "boolean", boolean: ${e.boolean} }`
-            : e.kind === "error"
-              ? `{ kind: "error", error: ${JSON.stringify(e.error)} }`
-              : e.kind === "display"
-                ? `{ kind: "display", display: ${JSON.stringify(e.display)} }`
-                : `{ kind: "text", text: ${JSON.stringify(e.text)} }`;
-      const fixture = p.fixture
-        .map((c) => `{ a1: ${JSON.stringify(c.a1)}, input: ${JSON.stringify(c.input)} }`)
-        .join(", ");
-      return [
-        "  {",
-        `    id: ${JSON.stringify(p.id)},`,
-        `    fn: ${JSON.stringify(p.function)},`,
-        `    intent: ${JSON.stringify(p.intent)},`,
-        `    fixture: [${fixture}],`,
-        `    target: ${JSON.stringify(p.target)},`,
-        `    formula: ${JSON.stringify(p.formula)},`,
-        `    expect: ${expect},`,
-        `    oracle: ${JSON.stringify(p.oracle)},`,
-        `    result: ${JSON.stringify(p.engineDisplay)},`,
-        "  },",
-      ].join("\n");
-    })
-    .join("\n");
-
-  return `// GENERATED FILE — DO NOT EDIT.
-// Produced by app/scripts/gen-formula-patterns.mjs from functions/*.md.
-// Every entry below was evaluated by Calcula's own engine and reproduced the
-// result its document states; candidates that did not are excluded and reported
-// by the generator rather than silently dropped.
-// Regenerate with:  npm run gen:formula-patterns
-// Verify in CI with: npm run check:formula-patterns
-
-export interface FormulaPatternCell {
-  readonly a1: string;
-  readonly input: string;
-}
-
-export interface FormulaPatternExpectation {
-  readonly kind: "number" | "text" | "boolean" | "error" | "display";
-  readonly number?: number;
-  readonly text?: string;
-  readonly boolean?: boolean;
-  readonly error?: string;
-  readonly display?: string;
-  /** Absolute tolerance, set from the precision the source document stated. */
-  readonly tolerance?: number;
-}
-
-export interface FormulaPattern {
-  readonly id: string;
-  readonly fn: string;
-  readonly intent: string;
-  readonly fixture: readonly FormulaPatternCell[];
-  readonly target: string;
-  readonly formula: string;
-  readonly expect: FormulaPatternExpectation;
-  /**
-   * Where the expectation came from.
-   *
-   * "doc" — the function document states this answer AND Calcula's engine
-   * independently reproduced it. Two agreeing sources; usable as an eval task.
-   *
-   * "engine" — the document's example carried no answer attributable to this
-   * cell, so the engine's own result is the expectation. Fine for teaching a
-   * model what a real formula looks like; it CANNOT detect an engine defect,
-   * because the engine wrote the answer.
-   */
-  readonly oracle: "doc" | "engine";
-  /** What the engine actually displayed, kept so a reader can see the answer. */
-  readonly result: string;
-}
-
-/** sha256 (truncated) of the parsed candidates this artifact was built from. */
-export const FORMULA_PATTERNS_SOURCE_HASH = ${JSON.stringify(sourceHash)};
-
-export const FORMULA_PATTERNS: readonly FormulaPattern[] = [
-${rows}
-];
-`;
-}
+// renderArtifact lives in ./lib/formulaPatterns.mjs with the classification,
+// so the determinism of the pair is unit-tested without an engine.
 
 // ---------------------------------------------------------------------------
 
@@ -509,103 +421,11 @@ function main() {
   console.log(`[patterns] verifying ${patterns.length} candidates against the engine...`);
   const { byId, summary } = verify(patterns);
 
-  /** Turn what the engine produced into an expectation a task can assert. */
-  const expectationFrom = (o) => {
-    switch (o.kind) {
-      case "number":
-        return { kind: "number", number: o.number };
-      case "text":
-        return { kind: "text", text: o.text };
-      case "boolean":
-        return { kind: "boolean", boolean: o.boolean };
-      case "error":
-        return { kind: "error", error: o.error };
-      case "blank":
-        return { kind: "number", number: 0 };
-      default:
-        // A spill has no single-cell answer, and `other` is a contained list or
-        // dict. Neither can be a scalar expectation, so neither ships.
-        return null;
-    }
-  };
-
-  // Functions whose answer depends on WHEN or on chance, not on the fixture.
-  //
-  // A pattern calling one of these cannot carry a recorded result: the library
-  // is checked into git and the guard re-runs it forever, so `=TODAY()` verified
-  // on 2026-09-07 reds every build from 2026-09-08 onward. That is a test people
-  // learn to ignore, which costs more than the coverage it was buying.
-  //
-  // They still ship, and the guard still runs them — it just asserts that they
-  // EVALUATE rather than what to. A volatile pattern that starts returning an
-  // error is still caught, which is the part worth catching.
-  const VOLATILE = /\b(TODAY|NOW|RAND|RANDBETWEEN|RANDARRAY)\s*\(/i;
-  const isVolatile = (formula) => VOLATILE.test(formula);
-
-  const verified = [];
-  const mismatches = [];
-  const errored = [];
-  for (const p of patterns) {
-    const r = byId.get(p.id);
-    if (!r || r.error) {
-      errored.push({ id: p.id, reason: r ? r.error : "the grader returned no result" });
-      continue;
-    }
-    if (!r.converged) {
-      errored.push({ id: p.id, reason: "the fixture did not settle" });
-      continue;
-    }
-    const cell = r.cells[0];
-    if (cell.outcome.parseError) {
-      errored.push({ id: p.id, reason: `the formula did not parse: ${cell.outcome.parseError}` });
-      continue;
-    }
-
-    if (p.stated) {
-      // THE DOC MADE A CLAIM. Agreement is the strongest evidence available —
-      // a human wrote the answer and the engine independently reproduced it.
-      if (cell.verdict && cell.verdict.matched) {
-        verified.push({ ...p, expect: p.stated, oracle: "doc", volatile: isVolatile(p.formula), engineDisplay: cell.outcome.display });
-      } else if (p.statedResult.trim() === cell.outcome.display) {
-        // THE TYPED COMPARISON DISAGREED BUT THE RENDERING IS IDENTICAL. This is
-        // a classification error on this script's side, not a disagreement about
-        // the answer: `BIN2OCT` states "011" and returns the TEXT "011", which
-        // this parser had read as the number 11. The document and the engine
-        // plainly agree, so the pattern ships with a display expectation.
-        verified.push({
-          ...p,
-          expect: { kind: "display", display: cell.outcome.display },
-          oracle: "doc",
-          volatile: isVolatile(p.formula),
-          engineDisplay: cell.outcome.display,
-        });
-      } else {
-        // Excluded AND named. Either the document is stale or the engine has a
-        // defect; both are worth someone's attention and neither is noise.
-        mismatches.push({
-          id: p.id,
-          stated: p.statedResult,
-          engine: cell.outcome.display,
-          why: cell.verdict ? cell.verdict.reason : "no verdict",
-        });
-      }
-      continue;
-    }
-
-    // NO ATTRIBUTABLE CLAIM. The example is still a real, realistic formula over
-    // a real fixture, so it earns its place with the engine as its oracle —
-    // which is what a retrieved example is for. It cannot catch an engine bug,
-    // and is marked so nobody later mistakes it for evidence that it could.
-    const derived = expectationFrom(cell.outcome);
-    if (!derived) {
-      errored.push({
-        id: p.id,
-        reason: `the result is a ${cell.outcome.kind} and has no single-cell value`,
-      });
-      continue;
-    }
-    verified.push({ ...p, expect: derived, oracle: "engine", volatile: isVolatile(p.formula), engineDisplay: cell.outcome.display });
-  }
+  // Which candidates ship, and with what expectation. A pattern whose answer is
+  // the clock or the RNG (TODAY, NOW, RAND, RANDBETWEEN, RANDARRAY -- directly
+  // or through a cell it reads) ships SHAPE-ONLY, so the checked-in library is
+  // the same bytes on every run and every day. See ./lib/formulaPatterns.mjs.
+  const { verified, mismatches, errored } = classifyPatterns(patterns, byId);
 
   console.log(
     `[patterns] engine summary: ${summary.matched} matched, ${summary.unmatched} unmatched, ${summary.errored} errored`,

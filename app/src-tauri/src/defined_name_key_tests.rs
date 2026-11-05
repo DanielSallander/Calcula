@@ -201,3 +201,140 @@ fn a_table_and_a_defined_name_collide_by_excels_name_rule() {
         refused.error
     );
 }
+
+impl Wb {
+    /// A header and one data row in column `col`, for a table to sit on.
+    fn seed_column(&self, col: u32) {
+        self.set(0, col, "H");
+        self.set(1, col, "1");
+    }
+
+    /// A table over column `col` (header row 1, one data row) through the
+    /// REAL create door, `tables::create_table_core`.
+    fn create_table(&self, name: &str, col: u32) -> crate::tables::TableResult {
+        crate::tables::create_table_core(
+            &self.state,
+            &self.file,
+            &self.files,
+            &self.pivots,
+            &self.pane,
+            &self.filters,
+            crate::tables::CreateTableParams {
+                name: name.to_string(),
+                start_row: 0,
+                start_col: col,
+                end_row: 1,
+                end_col: col,
+                has_headers: true,
+                style_options: None,
+                style_name: None,
+            },
+        )
+    }
+
+    fn rename_table(&self, id: identity::EntityId, new_name: &str) -> crate::tables::TableResult {
+        crate::tables::rename_table_core(
+            &self.state,
+            &self.file,
+            &self.files,
+            &self.pivots,
+            &self.pane,
+            &self.filters,
+            0,
+            id,
+            new_name.to_string(),
+        )
+    }
+
+    fn rename_name(&self, old: &str, new: &str) -> crate::named_ranges::NamedRangeResult {
+        crate::named_ranges::rename_named_range_core(
+            &self.state,
+            &self.file,
+            &self.files,
+            &self.pivots,
+            &self.pane,
+            &self.filters,
+            old,
+            new,
+        )
+    }
+
+    fn table_count(&self) -> usize {
+        self.state.table_names.read().unwrap().len()
+    }
+}
+
+/// OWNER DECISION (2026-11-04, BUG-0616 note (d)): TABLES AND DEFINED NAMES
+/// REFUSE EACH OTHER IN BOTH DIRECTIONS, through every door that can claim a
+/// name -- a deliberate difference from Excel, whose COM accepts a table
+/// renamed onto a defined name (and a defined name renamed onto a table) and
+/// then leaves the table unreachable by name in formulas. Each refusal leaves
+/// the document CLEAN and the registries as they were; each door's positive
+/// control (a free name) succeeds in the same test. And a GENERATED name
+/// skips a defined name, as Excel's does [LIVE, 2026-11-04,
+/// calpdec-probe/genname.ps1: a defined name `Table1` makes the next table
+/// `Table2`].
+///
+/// SABOTAGES (separate builds, each fails its own assertion): (1) drop the
+/// `name_collides_with_defined_name` arm from `create_table_core` -- "a table
+/// CREATED onto a defined name". (2) `create_table_core` mints its effect
+/// before the gates again -- "a refused create left the document dirty".
+/// (3) `generate_table_name` ignores `taken_by_defined_name` -- "the
+/// generated name".
+#[test]
+fn tables_and_defined_names_refuse_each_other_in_both_directions_through_every_door() {
+    let wb = Wb::new();
+    assert!(wb.define("Rate", "=1").success);
+    wb.seed_column(0);
+    wb.seed_column(3);
+
+    // TABLE -> DEFINED NAME, create door.
+    crate::document_effect::mark_saved(&wb.file);
+    let refused = wb.create_table("rate", 0);
+    assert!(!refused.success, "a table CREATED onto a defined name must be refused");
+    assert!(
+        refused.error.as_deref().unwrap_or("").contains("A defined name with this name already exists"),
+        "{:?}",
+        refused.error
+    );
+    assert_eq!(wb.table_count(), 0, "nothing was registered");
+    assert!(!wb.file.is_dirty(), "a refused create left the document dirty");
+    // Positive control: a free name is created.
+    let sales = wb.create_table("Sales", 0);
+    assert!(sales.success, "a free table name must be accepted: {:?}", sales.error);
+    let sales_id = sales.table.expect("the created table").id;
+
+    // TABLE -> DEFINED NAME, rename door.
+    crate::document_effect::mark_saved(&wb.file);
+    let refused = wb.rename_table(sales_id, "RATE");
+    assert!(!refused.success, "a table RENAMED onto a defined name must be refused (Excel accepts it)");
+    assert!(!wb.file.is_dirty(), "a refused rename left the document dirty");
+    assert!(
+        wb.state.table_names.read().unwrap().contains_key(&crate::tables::table_name_key("Sales")),
+        "the table keeps its name"
+    );
+    assert!(wb.rename_table(sales_id, "Revenue").success, "positive control: a free name renames");
+
+    // DEFINED NAME -> TABLE, create door.
+    let refused = wb.define("REVENUE", "=2");
+    assert!(!refused.success, "a defined name CREATED onto a table must be refused");
+    assert!(refused.error.as_deref().unwrap_or("").contains("A table named"), "{:?}", refused.error);
+
+    // DEFINED NAME -> TABLE, rename door (Excel's Name.Name accepts it).
+    crate::document_effect::mark_saved(&wb.file);
+    let refused = wb.rename_name("Rate", "revenue");
+    assert!(!refused.success, "a defined name RENAMED onto a table must be refused");
+    assert!(refused.error.as_deref().unwrap_or("").contains("A table named"), "{:?}", refused.error);
+    assert!(!wb.file.is_dirty(), "a refused name rename left the document dirty");
+    assert!(wb.rename_name("Rate", "Ratio").success, "positive control: a free name renames");
+
+    // THE GENERATED NAME skips a defined name, as Excel's does.
+    assert!(wb.define("Table1", "=3").success);
+    let generated = wb.create_table("", 3);
+    assert!(generated.success, "{:?}", generated.error);
+    assert_eq!(
+        generated.table.expect("the generated table").name,
+        "Table2",
+        "the generated name must skip the defined name Table1 (Excel names it Table2)"
+    );
+}

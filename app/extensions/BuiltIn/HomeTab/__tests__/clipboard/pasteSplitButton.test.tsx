@@ -400,7 +400,9 @@ describe("the menu: Excel's rows, in Excel's order, each with its picture", () =
     await render(bandLayout(1200));
     await openMenu();
     expect(byTestId("fmt-paste-paste").querySelector("kbd")?.textContent).toBe("Ctrl+V");
-    expect(byTestId("fmt-paste-special").querySelector("kbd")?.textContent).toBe("Ctrl+Shift+V");
+    // Excel's keys (BUG-0375, [LIVE]): Paste Special is Ctrl+Alt+V, Paste Values Ctrl+Shift+V.
+    expect(byTestId("fmt-paste-special").querySelector("kbd")?.textContent).toBe("Ctrl+Alt+V");
+    expect(byTestId("fmt-paste-values").querySelector("kbd")?.textContent).toBe("Ctrl+Shift+V");
     // Keep Source Formatting runs PASTE too, but the chip belongs to ONE row.
     const ctrlV = rows().filter((r) => r.querySelector("kbd")?.textContent === "Ctrl+V");
     expect(ctrlV.map((r) => r.getAttribute("data-testid"))).toEqual(["fmt-paste-paste"]);

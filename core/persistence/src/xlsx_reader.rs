@@ -19,8 +19,9 @@ use std::path::Path;
 /// Excel stores every function added after 2007 with a namespace prefix so that
 /// Excel 2007 opens the file without silently computing something else:
 /// `_xlfn.` for the function itself, `_xlfn._xlws.` for the worksheet-only
-/// dynamic-array functions (FILTER, SORT), and `_xlpm.` for LAMBDA parameter
-/// names. The prefixes are a STORAGE detail, not part of the function name --
+/// dynamic-array functions (FILTER, SORT), `_xlpm.` for LAMBDA parameter
+/// names, and `_xleta.` for a function used as a value (`MAP(A1:A3,_xleta.ABS)`).
+/// The prefixes are a STORAGE detail, not part of the function name --
 /// Excel's own UI shows `STDEV.S`, never `_xlfn.STDEV.S`.
 ///
 /// Calcula implements all of these, so the only thing that stood between it and
@@ -46,13 +47,16 @@ use std::path::Path;
 /// delimiter involved (`"`, `'`, `[`, `]`, the prefixes, the boundary
 /// punctuation) is ASCII, so byte comparison at a char boundary is exact.
 ///
-/// The export side needs no counterpart for `_xlfn.`: `rust_xlsxwriter::Formula::new`
-/// re-adds the prefixes from its own table when it writes the formula back.
+/// The export side's counterpart is `xlsx_formula_text::escape_future_functions`
+/// (Calcula's own table, string-aware) and the `_xlpm.` / `_xleta.` spellings
+/// of `xlsx_formula_text::excel_formula_text`.
 /// Excel's file-only spellings of typed syntax (`_xlop.y`, `_TRO_*`,
 /// `ANCHORARRAY`, `SINGLE`, `[#This Row],`) are turned back first by
 /// `xlsx_formula_text::calcula_formula_text`, which calls this.
 pub(crate) fn strip_future_function_prefixes(formula: &str) -> String {
-    const PREFIXES: [&str; 3] = ["_xlfn._xlws.", "_xlfn.", "_xlpm."];
+    // `_xleta.`: a bare function used as a value ([LIVE] Excel 16 saves
+    // `=SUM(MAP(A1:A3,ABS))` as `SUM(_xlfn.MAP(A1:A3,_xleta.ABS))`).
+    const PREFIXES: [&str; 4] = ["_xlfn._xlws.", "_xlfn.", "_xlpm.", "_xleta."];
 
     #[derive(PartialEq)]
     enum Span {
@@ -143,8 +147,12 @@ pub(crate) fn strip_future_function_prefixes(formula: &str) -> String {
         // Only strip at an identifier BOUNDARY: the prefix must not be the tail
         // of a longer name (a user range named `MY_xlfn.X`, or `Ö_xlfn.X` --
         // a non-ASCII letter is part of a name too).
+        // A trim reference's dot after its colon (`A1:._xlpm.A5`, the text
+        // `_TRO_TRAILING(A1:_xlpm.A5)` turns into) ends no name.
+        let after_trim_dot = prev == Some('.') && out.ends_with(":.");
         let at_boundary = match prev {
             None => true,
+            Some(_) if after_trim_dot => true,
             Some(p) => !(p.is_alphanumeric() || p == '_' || p == '.'),
         };
         if at_boundary {
@@ -181,7 +189,7 @@ pub(crate) fn strip_future_function_prefixes(formula: &str) -> String {
 /// name, never a user's.
 fn is_compatibility_name(name: &str) -> bool {
     let starts = |prefix: &str| name.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix));
-    starts("_xlfn.") || starts("_xlpm.")
+    starts("_xlfn.") || starts("_xlpm.") || starts("_xleta.")
 }
 
 fn error_literal(e: &calamine::CellErrorType) -> String {
@@ -467,7 +475,6 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
 
     // ---------- First pass: calamine reads cell values ----------
     let mut sheets = Vec::new();
-    let mut tables = Vec::new();
     let mut meta_charts: Vec<crate::MetaChart> = Vec::new();
     let mut meta_sparklines: Vec<crate::MetaSparkline> = Vec::new();
 
@@ -479,7 +486,8 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
 
         // Check if this is the Calcula metadata sheet
         if sheet_name == META_SHEET_NAME {
-            // Extract metadata (tables, charts, sparklines) from the hidden
+            // Extract metadata (charts, sparklines; tables are Excel's own
+            // table parts, `xlsx_tables::read_table_parts`) from the hidden
             // sheet. The JSON may be CHUNKED across row 0 (A1, B1, C1, ...)
             // to stay under Excel's 32,767-char cell limit — concatenate all
             // string cells of row 0 in order (a single-cell legacy meta is
@@ -494,7 +502,6 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
                         })
                         .collect();
                     if let Some(meta) = CalculaMeta::from_json(&json) {
-                        tables = meta.tables;
                         meta_charts = meta.charts;
                         meta_sparklines = meta.sparklines;
                     }
@@ -585,7 +592,7 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
                         let fr_col = (actual_col - formula_start.1) as usize;
                         fr.get((fr_row, fr_col))
                             .filter(|f| !f.is_empty())
-                            .map(|f| format!("={}", crate::xlsx_formula_text::calcula_formula_text(f)))
+                            .map(|f| format!("={}", crate::xlsx_formula_text::calcula_cell_formula_text(f, Some((actual_row, actual_col)))))
                     } else {
                         None
                     }
@@ -814,7 +821,8 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
     let mut wb = Workbook {
         sheets,
         active_sheet: 0,
-        tables,
+        // Excel's table parts, read in the second ZIP pass below.
+        tables: Vec::new(),
         slicers: Vec::new(),
         timeline_slicers: Vec::new(),
         user_files: HashMap::new(),
@@ -906,6 +914,11 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
             wb.calculation_incomplete = read_calculation_incomplete(&mut archive);
 
             let sheet_paths = crate::xlsx_style_reader::build_sheet_path_mapping(&mut archive);
+            // Excel's tables (ListObjects) into the table store.
+            crate::xlsx_tables::read_table_parts(&mut archive, &sheet_paths, &sheet_names, &mut wb);
+            // Excel's live What-If data tables (`<f t="dataTable">`, BUG-0652)
+            // back into their `TABLE(..)` bodies.
+            crate::xlsx_data_tables::read_data_tables(&mut archive, &sheet_paths, &sheet_names, &mut wb);
             let native_entries =
                 crate::xlsx_chart_reader::parse_xlsx_charts(&mut archive, &sheet_paths);
 

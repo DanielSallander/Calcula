@@ -2927,9 +2927,9 @@ declare interface ScriptTableHandle {
    * Reach: broker `api.objectGetState`, unlocked tier, class read.
    */
   getTotals(): Promise<ScriptTableTotals>;
-  /** Delete this table (the cells and their values are kept).
+  /** Delete this table: its cells are cleared and references to it become #REF! (`convertToRange()` keeps the cells).
    *
-   * Calcula policy (generated): Delete a table (the cells and their values are kept).
+   * Calcula policy (generated): Delete a table (its cells are cleared, and formulas that use the table show #REF!).
    * Reach: broker `api.deleteTable`, unlocked tier, class mutate.
    */
   delete(): Promise<void>;
@@ -4436,6 +4436,42 @@ declare interface UnlockedAPI {
    * Reach: broker `api.deleteColumns`, unlocked tier, class mutate.
    */
   deleteColumns(startCol: number, count: number, sheet?: SheetRef): Promise<void>;
+  /**
+   * Insert empty cells in a block, shifting the cells there right or down --
+   * Excel's Insert Cells (VBA `Range("B2:C3").Insert Shift:=xlDown`). ACTIVE
+   * sheet only (call setActiveSheet first). A block spanning every column
+   * (row) inserts entire rows (columns), as Excel does. If the shift would cut
+   * a merged block it is refused, nothing changed, unless `unmergeCutMerges`
+   * says to unmerge them (Excel asks the person that question).
+   *
+   * Calcula policy (generated): Insert empty cells in a block on the active sheet, shifting the cells there right or down.
+   * Reach: broker `api.insertCells`, unlocked tier, class mutate.
+   */
+  insertCells(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    shift: "right" | "down",
+    options?: { unmergeCutMerges?: boolean },
+  ): Promise<void>;
+  /**
+   * Delete a block of cells, shifting the cells beside it left or up -- Excel's
+   * Delete Cells (VBA `Range("B2:C3").Delete Shift:=xlToLeft`); their contents
+   * are lost. ACTIVE sheet only; the same whole-line and merge rules as
+   * insertCells.
+   *
+   * Calcula policy (generated): Delete a block of cells on the active sheet, shifting the cells beside it left or up (their contents are lost).
+   * Reach: broker `api.deleteCells`, unlocked tier, class mutate.
+   */
+  deleteCells(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    shift: "left" | "up",
+    options?: { unmergeCutMerges?: boolean },
+  ): Promise<void>;
   /** Merge a rectangle into one cell (only the top-left value survives).
    *
    * Calcula policy (generated): Merge a block of cells into one (only the top-left value is kept).
@@ -5510,6 +5546,10 @@ declare interface UnlockedAPI {
    *
    * ACTIVE sheet only — a sheet ref naming another one rejects. Resolves to
    * how many cells were written (0 when the band already covers the range).
+   * Merged cells in the filled area that are not the band's own repeated
+   * merges stop the fill before anything is written, as in Excel: "series"
+   * (AutoFill) rejects with "To do this, all the merged cells need to be the
+   * same size."; "copy" (FillDown) writes nothing and resolves to 0.
    *
    * Calcula policy (generated): Fill a block of cells from its leading rows or columns, exactly like dragging the fill handle — copying values and shifting formulas, or continuing a series (a single undo step).
    * Reach: broker `api.fillRange`, unlocked tier, class mutate. Limits: maxCells 100,000.
@@ -5614,9 +5654,9 @@ declare interface UnlockedAPI {
    * Reach: broker `api.createTable`, unlocked tier, class mutate.
    */
   createTable(startRow: number, startCol: number, endRow: number, endCol: number, options?: { name?: string; hasHeaders?: boolean }): Promise<ScriptObjectRef>;
-  /** Delete a table (its cells and values are kept). ACTIVE SHEET only.
+  /** Delete a table: its cells are cleared and references to it become #REF! (Excel's ListObject.Delete). ACTIVE SHEET only.
    *
-   * Calcula policy (generated): Delete a table (the cells and their values are kept).
+   * Calcula policy (generated): Delete a table (its cells are cleared, and formulas that use the table show #REF!).
    * Reach: broker `api.deleteTable`, unlocked tier, class mutate.
    */
   deleteTable(tableId: string): Promise<void>;
@@ -6198,8 +6238,10 @@ declare interface ScriptRange {
   cells(rowOffset: number, colOffset: number): ScriptRange;
   /** The top-left cell's display value.
    *
-   * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
-   * Reach: broker `api.objectGetState`, unlocked tier, class read.
+   * Calcula policy (generated) depends on how the object was obtained:
+   * - Through `api.table.range` on ScriptTableHandle, `api.table.cell` on ScriptTableHandle: Read another object in this workbook (its chart spec, table cells, slicer selection, ...). Reach: broker `api.objectGetState`, unlocked tier, class read.
+   * - Through `range` on SheetContext, `cell` on SheetContext: Read cells on the sheet currently shown. Reach: broker `sheet.getCellValue`, restricted tier, class read.
+   * - Through `range` on TableContext, `cell` on TableContext: Read its own object's properties / selection / spec. Reach: broker `object.getState`, aspect `table.getCellValue`, restricted tier, class read.
    */
   getValue(): Promise<string>;
   /**
@@ -6207,55 +6249,77 @@ declare interface ScriptRange {
    * These are FORMATTED strings: do NOT write them back (every formula would
    * become its rendered text). Use getData() when you need types or formulas.
    *
-   * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
-   * Reach: broker `api.objectGetState`, unlocked tier, class read.
+   * Calcula policy (generated) depends on how the object was obtained:
+   * - Through `api.table.range` on ScriptTableHandle, `api.table.cell` on ScriptTableHandle: Read another object in this workbook (its chart spec, table cells, slicer selection, ...). Reach: broker `api.objectGetState`, unlocked tier, class read.
+   * - Through `range` on SheetContext, `cell` on SheetContext: Read a block of cells on the sheet currently shown in one go (values, types and formulas). Reach: broker `sheet.getRangeValues`, restricted tier, class read. Limits: maxCells 100,000.
+   * - Through `range` on TableContext, `cell` on TableContext: Read its own object's properties / selection / spec. Reach: broker `object.getState`, aspect `table.getRangeData`, restricted tier, class read.
    */
   getValues(): Promise<string[][]>;
   /** All cells with value, type and formula — ONE round trip. The safe read
    *  for a read/modify/write round-trip.
    *
-   * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
-   * Reach: broker `api.objectGetState`, unlocked tier, class read.
+   * Calcula policy (generated) depends on how the object was obtained:
+   * - Through `api.table.range` on ScriptTableHandle, `api.table.cell` on ScriptTableHandle: Read another object in this workbook (its chart spec, table cells, slicer selection, ...). Reach: broker `api.objectGetState`, unlocked tier, class read.
+   * - Through `range` on SheetContext, `cell` on SheetContext: Read a block of cells on the sheet currently shown in one go (values, types and formulas). Reach: broker `sheet.getRangeValues`, restricted tier, class read. Limits: maxCells 100,000.
+   * - Through `range` on TableContext, `cell` on TableContext: Read its own object's properties / selection / spec. Reach: broker `object.getState`, aspect `table.getRangeData`, restricted tier, class read.
    */
   getData(): Promise<ScriptCell[][]>;
   /** All formulas as a rows x cols grid ("" where a cell has none).
    *
-   * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
-   * Reach: broker `api.objectGetState`, unlocked tier, class read.
+   * Calcula policy (generated) depends on how the object was obtained:
+   * - Through `api.table.range` on ScriptTableHandle, `api.table.cell` on ScriptTableHandle: Read another object in this workbook (its chart spec, table cells, slicer selection, ...). Reach: broker `api.objectGetState`, unlocked tier, class read.
+   * - Through `range` on SheetContext, `cell` on SheetContext: Read a block of cells on the sheet currently shown in one go (values, types and formulas). Reach: broker `sheet.getRangeValues`, restricted tier, class read. Limits: maxCells 100,000.
+   * - Through `range` on TableContext, `cell` on TableContext: Read its own object's properties / selection / spec. Reach: broker `object.getState`, aspect `table.getRangeData`, restricted tier, class read.
    */
   getFormulas(): Promise<string[][]>;
   /** All formats as a rows x cols grid — ONE round trip. The read-back twin of
-   *  format(): every writable key reports back in the same vocabulary. */
+   *  format(): every writable key reports back in the same vocabulary.
+   *
+   * Calcula policy (generated): Read how a block of cells looks on the sheet currently shown (font, colour, alignment, number format, borders — never the values).
+   * Reach: broker `sheet.getRangeFormat`, restricted tier, class read. Limits: maxCells 100,000.
+   */
   getFormats(): Promise<ScriptCellFormat[][]>;
-  /** The top-left cell's format. */
+  /** The top-left cell's format.
+   *
+   * Calcula policy (generated): Read how a block of cells looks on the sheet currently shown (font, colour, alignment, number format, borders — never the values).
+   * Reach: broker `sheet.getRangeFormat`, restricted tier, class read. Limits: maxCells 100,000.
+   */
   getFormat(): Promise<ScriptCellFormat>;
   /** Set the top-left cell's value. Numbers and booleans land TYPED; `null`
    *  clears the cell.
    *
-   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
-   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   * Calcula policy (generated) depends on how the object was obtained:
+   * - Through `api.table.range` on ScriptTableHandle, `api.table.cell` on ScriptTableHandle: Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...). Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   * - Through `range` on SheetContext, `cell` on SheetContext: Write cells on the sheet currently shown. Reach: broker `sheet.setCellValue`, restricted tier, class mutate.
+   * - Through `range` on TableContext, `cell` on TableContext: Change its own object (slicer selection, shape properties, chart spec, panel badge, ...). Reach: broker `object.setState`, aspect `table.setCellValue`, restricted tier, class mutate.
    */
   setValue(value: ScriptCellValue): Promise<void>;
   /** Set values from a 2D array (clamped to the range's dimensions) — ONE call,
    *  one undo step. Numbers/booleans land typed; `null` clears a cell;
    *  `undefined` leaves it untouched.
    *
-   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
-   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   * Calcula policy (generated) depends on how the object was obtained:
+   * - Through `api.table.range` on ScriptTableHandle, `api.table.cell` on ScriptTableHandle: Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...). Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   * - Through `range` on SheetContext, `cell` on SheetContext: Write a block of cells on the sheet currently shown in one go (a single undo step). Reach: broker `sheet.setRangeValues`, restricted tier, class mutate. Limits: maxCells 100,000.
+   * - Through `range` on TableContext, `cell` on TableContext: Change its own object (slicer selection, shape properties, chart spec, panel badge, ...). Reach: broker `object.setState`, aspect `table.setRangeValues`, restricted tier, class mutate.
    */
   setValues(values: Array<Array<ScriptCellValue | undefined>>): Promise<void>;
   /** Apply a PARTIAL format to every cell in the range — ONE call, one undo
    *  step. Absent properties are left alone:
    *  `await sheet.range("A1:C1").format({ bold: true })`.
    *
-   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
-   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   * Calcula policy (generated) depends on how the object was obtained:
+   * - Through `api.table.range` on ScriptTableHandle, `api.table.cell` on ScriptTableHandle: Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...). Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   * - Through `range` on SheetContext, `cell` on SheetContext: Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders). Reach: broker `sheet.setRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
+   * - Through `range` on TableContext, `cell` on TableContext: Change its own object (slicer selection, shape properties, chart spec, panel badge, ...). Reach: broker `object.setState`, aspect `table.setRangeFormat`, restricted tier, class mutate.
    */
   format(format: ScriptFormat): Promise<void>;
   /** Remove ALL formatting from the range, keeping the values.
    *
-   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
-   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   * Calcula policy (generated) depends on how the object was obtained:
+   * - Through `api.table.range` on ScriptTableHandle, `api.table.cell` on ScriptTableHandle: Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...). Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   * - Through `range` on SheetContext, `cell` on SheetContext: Remove all formatting from a block of cells on the sheet currently shown (the values are kept). Reach: broker `sheet.clearRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
+   * - Through `range` on TableContext, `cell` on TableContext: Change its own object (slicer selection, shape properties, chart spec, panel badge, ...). Reach: broker `object.setState`, aspect `table.clearRangeFormat`, restricted tier, class mutate.
    */
   clearFormat(): Promise<void>;
   /** Apply a NAMED cell style ("Good", "Heading 1", a custom one) to every
@@ -6655,13 +6719,13 @@ declare interface SheetContext extends BaseObjectContext {
    *  their own (active) sheet, and may not set `locked` / `formulaHidden`.
    *
    * Calcula policy (generated): Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders).
-   * Reach: broker `sheet.setRangeFormat`, restricted tier, class mutate. Limits: maxCells 4,000,000.
+   * Reach: broker `sheet.setRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
    */
   setRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, format: ScriptFormat, sheet?: SheetRef): Promise<void>;
   /** Remove ALL formatting from a rectangle on this sheet, keeping the values.
    *
    * Calcula policy (generated): Remove all formatting from a block of cells on the sheet currently shown (the values are kept).
-   * Reach: broker `sheet.clearRangeFormat`, restricted tier, class mutate. Limits: maxCells 4,000,000.
+   * Reach: broker `sheet.clearRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
    */
   clearRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<void>;
   /** Read a rectangle's formats on this sheet as a dense rows x cols grid —

@@ -176,7 +176,8 @@ describe("an operation over a DYNAMIC ARRAY is refused whole, before anything is
   it("a paste WITHOUT an operation is not this gate's to refuse (Excel allows Paste Values over an array)", async () => {
     h.spills.mockResolvedValue(SEQUENCE_A1_A3);
     expect(await paste(column(3), at(0, 0), "values", "none")).toBe(true);
-    expect(h.updateCell).toHaveBeenCalledTimes(3);
+    expect(h.batch, "the three values go out in ONE batch (BUG-0345)").toHaveBeenCalledTimes(1);
+    expect((h.batch.mock.calls[0][0] as unknown[]).length).toBe(3);
     expect(h.spills).not.toHaveBeenCalled();
   });
 
@@ -259,9 +260,12 @@ describe("on a protected sheet, an operation over a WITHHELD formula is refused 
     ]);
     expect(await paste(column(2), at(4, 4, 5), "values", "add")).toBe(true);
     expect(h.alert, "a hidden blank or constant was refused").not.toHaveBeenCalled();
+    // Both cells in the paste's ONE batch (BUG-0345).
     expect(h.batch.mock.calls.map((c) => c[0])).toEqual([
-      [{ row: 4, col: 4, value: "10", invariant: true, pasted: true }],
-      [{ row: 5, col: 4, value: "27", invariant: true, pasted: true }],
+      [
+        { row: 4, col: 4, value: "10", invariant: true, pasted: true },
+        { row: 5, col: 4, value: "27", invariant: true, pasted: true },
+      ],
     ]);
   });
 
@@ -298,7 +302,8 @@ describe("a clipboard taller than a spread argument list (200,000 rows)", () => 
 
   it("Paste Values pastes instead of throwing RangeError", async () => {
     await expect(paste(column(TALL), at(0, 4), "values", "none", 5)).resolves.toBe(true);
-    expect(h.updateCell, "the paste clamps to the grid's 5 rows").toHaveBeenCalledTimes(5);
+    expect(h.batch).toHaveBeenCalledTimes(1);
+    expect((h.batch.mock.calls[0][0] as unknown[]).length, "the paste clamps to the grid's 5 rows").toBe(5);
   });
 
   it("Values > Add re-reads the 200,000 source rows and pastes", async () => {
@@ -308,6 +313,7 @@ describe("a clipboard taller than a spread argument list (200,000 rows)", () => 
       [0, 99_999],
       [100_000, 199_999],
     ]);
-    expect(h.batch).toHaveBeenCalledTimes(5);
+    expect(h.batch, "the five results go out in ONE batch (BUG-0345)").toHaveBeenCalledTimes(1);
+    expect((h.batch.mock.calls[0][0] as unknown[]).length).toBe(5);
   });
 });

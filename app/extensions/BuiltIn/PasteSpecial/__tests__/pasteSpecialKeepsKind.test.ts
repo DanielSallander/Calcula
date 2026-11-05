@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   batch: vi.fn(),
   updateCell: vi.fn(),
   setCellStyle: vi.fn(),
+  setCellStyles: vi.fn(),
   applyFormatting: vi.fn(),
   typedSheet: vi.fn(),
   typedTarget: vi.fn(),
@@ -45,6 +46,7 @@ vi.mock("@api/lib", async (importOriginal) => ({
   getStyle: (...a: unknown[]) => h.style(...a),
   updateCell: (...a: unknown[]) => h.updateCell(...a),
   setCellStyle: (...a: unknown[]) => h.setCellStyle(...a),
+  setCellStyles: (...a: unknown[]) => h.setCellStyles(...a),
   applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
   updateCellsBatch: (...a: unknown[]) => h.batch(...a),
   getRangeCellsTyped: (...a: unknown[]) => h.typedSheet(...a),
@@ -120,7 +122,7 @@ const landedIn = (row: number, col: number, styleIndex: number) => [{ row, col, 
 let destStyle = TEXT_STYLE;
 
 beforeEach(() => {
-  for (const fn of [h.batch, h.updateCell, h.setCellStyle, h.applyFormatting, h.typedSheet, h.typedTarget, h.styledTarget, h.style, h.alert]) {
+  for (const fn of [h.batch, h.updateCell, h.setCellStyle, h.setCellStyles, h.applyFormatting, h.typedSheet, h.typedTarget, h.styledTarget, h.style, h.alert]) {
     fn.mockReset();
   }
   h.log.length = 0;
@@ -144,6 +146,10 @@ beforeEach(() => {
     }
     h.log.push(`setCellStyle${opts?.target ? "@target" : ""} ${row},${col} ${index}`);
     return null;
+  });
+  // The style-only BATCH (one call for every style-only write).
+  h.setCellStyles.mockImplementation(async (writes: Array<{ row: number; col: number; styleIndex: number; keepBorders?: boolean }>, opts?: { target?: unknown }) => {
+    h.log.push(`setCellStyles${opts?.target ? "@target" : ""} ${writes.map((w) => `${w.row},${w.col} ${w.styleIndex}${w.keepBorders ? " keepBorders" : ""}`).join("; ")}`);
   });
   h.applyFormatting.mockImplementation(async (rows: number[], cols: number[], fmt: Record<string, unknown>, opts?: { target?: unknown }) => {
     h.log.push(`applyFormatting${opts?.target ? "@target" : ""} ${rows},${cols} ${JSON.stringify(fmt)}`);
@@ -187,13 +193,10 @@ describe("on the sheet: a pasted number or formula is written ONCE, as a paste",
     expect(h.log).toEqual([`batch ${JSON.stringify([{ row: 2, col: 5, value: "=D3", pasted: true }])}`]);
   });
 
-  it("Paste All + Add: one write, then the source's style", async () => {
+  it("Paste All + Add: ONE write, the source's style riding it (BUG-0345: it was a second call)", async () => {
     givenSheet(typed(2, 5, "number", 5, "=A1"), typed(0, 4, "number", 1));
     await paste(clip("1", null, 4), "all", "add");
-    expect(h.log).toEqual([
-      `batch ${JSON.stringify([{ row: 2, col: 5, value: "=(A1)+1", pasted: true }])}`,
-      "setCellStyle 2,5 4",
-    ]);
+    expect(h.log).toEqual([`batch ${JSON.stringify([{ row: 2, col: 5, value: "=(A1)+1", pasted: true, styleIndex: 4 }])}`]);
   });
 
   it("the destination's format does not change the write: a General cell gets the same one", async () => {
@@ -212,15 +215,18 @@ describe("on the sheet: a pasted number or formula is written ONCE, as a paste",
   it("a copy WITHOUT stored values keeps the display-text route as an ENTRY: Paste Values of 007 into @ stays text", async () => {
     givenSheet(null, null);
     await paste(clip("007"), "values", "none");
-    expect(h.log).toEqual(["updateCell 2,5 007"]);
+    // In the paste's ONE batch, without `pasted` / `invariant`: an entry, read as typed.
+    expect(h.log).toEqual([`batch ${JSON.stringify([{ row: 2, col: 5, value: "007" }])}`]);
   });
 
-  it("rev3B#1: a style restore the backend refuses AFTER the content landed is never reported as a skipped cell", async () => {
-    // Paste All into a cell whose formatting the protected sheet refuses: the
-    // formula landed, so the cell was pasted -- just without its formatting.
+  it("rev3B#1: a style write the backend refuses AFTER the content landed is never reported as a skipped cell", async () => {
+    // Paste (No Borders) into a cell whose formatting the sheet refuses at the
+    // write: the formula landed, so the cell was pasted -- just without its
+    // formatting. (Paste All's style rides its content write, so it has no
+    // separate style write to refuse.)
     givenSheet(null, null);
-    h.setCellStyle.mockRejectedValue(new Error("This sheet is protected: formatting cells is not allowed."));
-    expect(await paste(clip("7", "=C1", 4), "all", "none")).toBe(true);
+    h.setCellStyles.mockRejectedValue(new Error("This sheet is protected: formatting cells is not allowed."));
+    expect(await paste(clip("7", "=C1", 4), "allExceptBorders", "none")).toBe(true);
     expect(h.log).toEqual([`batch ${JSON.stringify([{ row: 2, col: 5, value: "=D3", pasted: true }])}`]);
     const said = h.alert.mock.calls.map((c) => String(c[0]));
     expect(said, "a cell whose formula landed was counted as skipped").toEqual([
@@ -228,11 +234,13 @@ describe("on the sheet: a pasted number or formula is written ONCE, as a paste",
     ]);
   });
 
-  it("positive control: a write the backend REFUSES is a skipped cell", async () => {
+  it("positive control: a content batch the backend REFUSES refuses the paste whole, said once", async () => {
+    // The content goes out in ONE batch (BUG-0345), refused whole -- as Excel
+    // refuses a paste whole.
     givenSheet(null, null);
     h.batch.mockRejectedValue(new Error("The cell is protected."));
-    expect(await paste(clip("7", "=C1", 4), "all", "none")).toBe(true);
-    expect(h.alert.mock.calls.map((c) => String(c[0]))).toEqual(["Paste Special skipped 1 cell(s):\nThe cell is protected."]);
+    await expect(paste(clip("7", "=C1", 4), "all", "none")).rejects.toThrow("The cell is protected.");
+    expect(h.alert.mock.calls.map((c) => String(c[0]))).toEqual(["The cell is protected."]);
   });
 });
 
@@ -284,9 +292,8 @@ describe("on a floating grid: Paste All + an operation pastes the source's style
       // Every cell that takes the style is CHECKED before any write (never half done).
       "check@target 3,0:3,3",
       `batch@target ${JSON.stringify([{ row: 3, col: 3, value: "=(A1)+1", pasted: true, styleIndex: 4 }])}`,
-      "setCellStyle@target 3,0 4",
-      "setCellStyle@target 3,1 4",
-      "setCellStyle@target 3,2 4",
+      // The style-only writes in ONE call (BUG-0345).
+      "setCellStyles@target 3,0 4; 3,1 4; 3,2 4",
     ]);
   });
 
@@ -295,7 +302,7 @@ describe("on a floating grid: Paste All + an operation pastes the source's style
     h.typedTarget.mockResolvedValue([typed(3, 0, "number", 5, "=A1"), typed(3, 1, "text", "rich")]);
     await paste(four(["x", "y"]), "all", "add", REF, { startRow: 3, startCol: 0, endRow: 3, endCol: 1, type: "cells" } as never);
     expect(h.batch, "a content write re-entered the formula or flattened the rich text").not.toHaveBeenCalled();
-    expect(h.log).toEqual(["check@target 3,0:3,1", "setCellStyle@target 3,0 4", "setCellStyle@target 3,1 4"]);
+    expect(h.log).toEqual(["check@target 3,0:3,1", "setCellStyles@target 3,0 4; 3,1 4"]);
   });
 
   it("Values + Add (no style travels) writes nothing back", async () => {
@@ -304,6 +311,7 @@ describe("on a floating grid: Paste All + an operation pastes the source's style
     await paste(four(["1"]), "values", "add", REF, { startRow: 3, startCol: 0, endRow: 3, endCol: 0, type: "cells" } as never);
     expect(h.batch).not.toHaveBeenCalled();
     expect(h.setCellStyle, "Paste Values carries no style").not.toHaveBeenCalled();
+    expect(h.setCellStyles, "Paste Values carries no style").not.toHaveBeenCalled();
     expect(h.styledTarget, "no styled read is needed").not.toHaveBeenCalled();
   });
 });

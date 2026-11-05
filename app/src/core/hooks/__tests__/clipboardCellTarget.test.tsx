@@ -194,9 +194,12 @@ describe("Paste into a floating grid's cells", () => {
     expect(opts).toEqual({ target: REF });
     // The formula is written as a PASTE (it stays one in an @ cell); this copy
     // read no stored values, so the constant is its display text, an entry.
+    // Each write names its SOURCE cell in the grid's own coordinates (BUG-0657):
+    // the backend writes what that cell holds at the write; `value` is the
+    // fallback. (`sheetIndex` is not used with a `target`.)
     expect(updates).toEqual([
-      { row: 4, col: 3, value: "B2", styleIndex: 0 },
-      { row: 4, col: 4, value: "=A1+1@3,2", styleIndex: 4, pasted: true },
+      { row: 4, col: 3, value: "B2", styleIndex: 0, source: { sheetIndex: 0, row: 1, col: 1, target: REF } },
+      { row: 4, col: 4, value: "=A1+1@3,2", styleIndex: 4, pasted: true, source: { sheetIndex: 0, row: 1, col: 2, target: REF } },
     ]);
     expect(seam.selectTargetCells).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "object" }),

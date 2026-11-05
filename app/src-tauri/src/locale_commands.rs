@@ -35,12 +35,18 @@ pub fn get_locale_settings(state: State<AppState>) -> LocaleSettingsData {
 #[tauri::command]
 pub fn set_locale(
     state: State<AppState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     app: AppHandle,
     window: Window,
     locale_id: String,
 ) -> Result<LocaleSettingsData, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let data = set_locale_core(&state, &app_locale::settings_dir(), &locale_id)?;
+    // Every model's DAX FORMAT follows the new app locale (BUG-0522), in the
+    // background; each engine reads the locale as it is when the walk reaches
+    // it, and `bi:format-culture-applied` follows once all have it -- the
+    // event a listener that re-queries a model waits for (rev-backend-5).
+    crate::bi::commands::apply_format_culture_to_all_engines(&bi_state, app.clone());
     if let Err(e) = app.emit(app_locale::LOCALE_CHANGED_EVENT, &data) {
         crate::log_warn!("SYS", "Could not announce {}: {}", app_locale::LOCALE_CHANGED_EVENT, e);
     }

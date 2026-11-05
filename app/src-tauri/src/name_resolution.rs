@@ -164,8 +164,10 @@ pub struct NameEvalCtx<'a> {
     pub spill_ranges: &'a crate::document_effect::Persisted<crate::SpillRangeMap>,
     /// Scope: a sheet-scoped name resolves only on its own sheet.
     pub sheet_index: usize,
-    /// The evaluating cell's row — only consulted for `[@ThisRow]` table refs
-    /// reached through a name's definition.
+    /// The evaluating cell's row: a defined name's RELATIVE references are
+    /// anchored here (`crate::resolve_names_in_ast_at`), and `[@ThisRow]` table
+    /// refs reached through a name's definition read it. `0` (with `col` 0)
+    /// means "no using cell": the name's text as written.
     pub row: u32,
     /// The evaluating cell's column, for the same reason as `row`. A bare
     /// `[@Column]` resolves against the table the cell is INSIDE, and a
@@ -200,15 +202,26 @@ pub fn eval_ast<'a>(stored: &'a Expression, ctx: &NameEvalCtx<'_>) -> Cow<'a, Ex
     let has_names = needs_name_resolution(stored, ctx.named_ranges);
     let has_tables = crate::ast_has_table_refs(stored);
     let has_spills = crate::ast_has_spill_refs(stored);
-    if !has_names && !has_tables && !has_spills {
+    // A bare table name (`=ROWS(Tbl)`), the whole table (NEW-bare-table-name):
+    // one walk, and only in a workbook that has a table.
+    let has_bare_tables = crate::ast_names_a_table(stored, ctx.table_names);
+    if !has_names && !has_tables && !has_spills && !has_bare_tables {
         return Cow::Borrowed(stored);
     }
     let expanded = if has_names {
         let mut visited = HashSet::new();
-        crate::resolve_names_in_ast(stored, ctx.named_ranges, ctx.sheet_index, &mut visited)
+        // At the evaluating cell: a relative name means the cell that uses it,
+        // so its precedents (`stored_ast_references`, which expands through
+        // here) are that cell's own, per using cell.
+        crate::resolve_names_in_ast_at(stored, ctx.named_ranges, ctx.sheet_index, (ctx.row, ctx.col), &mut visited)
     } else {
         stored.clone()
     };
+    // After the splice: a name's definition may itself be a bare table name
+    // (`Data` = `=Tbl`). Every defined name is spliced away by now, so a name
+    // still standing is none.
+    let mut expanded = expanded;
+    crate::bind_bare_table_names(&mut expanded, ctx.table_names, &|_| false);
     let expanded = if crate::ast_has_table_refs(&expanded) {
         let table_ctx = crate::TableRefContext {
             tables: ctx.tables,
@@ -225,6 +238,9 @@ pub fn eval_ast<'a>(stored: &'a Expression, ctx: &NameEvalCtx<'_>) -> Cow<'a, Ex
     // The lock is taken and released HERE, around a pure map read: no
     // evaluation happens inside it. See `NameTables::spill_ranges`.
     let expanded = if crate::ast_has_spill_refs(&expanded) {
+        // `a#` with `a` bound to a cell is that cell's spill (BUG-0646).
+        let mut expanded = expanded;
+        parser::bind_spill_anchor_names(&mut expanded);
         let map = ctx.spill_ranges.read().unwrap();
         let out = crate::resolve_spill_refs_in_ast(&expanded, &map, ctx.sheet_index, ctx.sheet_names);
         drop(map);
@@ -1138,11 +1154,11 @@ mod tests {
             "a LAMBDA parameter shadows the name in the body too"
         );
         // ...but a real reference beside the shadow still moves. (The binding
-        // itself comes back from the lexer in capitals — restamping a LOCAL is
-        // exactly what `restamp` refuses to do, and this walk inherits that.)
+        // keeps its DECLARED spelling, as Excel shows it -- lane formd,
+        // `parser::respell_bound_names` -- and this walk never restamps it.)
         assert_eq!(
             renamed("=LET(rate, 2, rate*RATE2)", "RATE2", "Fee").as_deref(),
-            Some("=LET(RATE,2,RATE*Fee)")
+            Some("=LET(rate,2,rate*Fee)")
         );
     }
 

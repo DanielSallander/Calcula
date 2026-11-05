@@ -67,16 +67,12 @@ describe("pivot-api utilities", () => {
   });
 
   describe("createFieldConfig", () => {
-    it("creates config with defaults", () => {
+    // Changed deliberately: this pinned `sortOrder: "asc"`, `showSubtotals:
+    // true`, `collapsed: false` and `hiddenItems: []` as defaults, which a
+    // layout edit then SENT and so reset (see createFieldConfig's doc).
+    it("carries only what it is given, so an update keeps the field's own settings", () => {
       const config = createFieldConfig(0, "Region");
-      expect(config).toEqual({
-        sourceIndex: 0,
-        name: "Region",
-        sortOrder: "asc",
-        showSubtotals: true,
-        collapsed: false,
-        hiddenItems: [],
-      });
+      expect(config).toEqual({ sourceIndex: 0, name: "Region" });
     });
 
     it("allows overriding defaults", () => {

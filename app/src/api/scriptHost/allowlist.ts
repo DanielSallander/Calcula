@@ -16,6 +16,7 @@ import {
   vDistRegistry, vDistPackageRef, vDistNextVersion, vDistPublishPreview,
   vDistPublish, vDistPublishModel,
   vKey, vKV, vUdf, vRangeRef, vRangeWrite, MAX_RANGE_CELLS, vFormatRangeRef, MAX_FORMAT_RECT_CELLS,
+  vFormatRangeRefRestricted, MAX_RESTRICTED_FORMAT_RECT_CELLS,
   vRangeFormat, vRangeFormatUnlocked, vRowColOp, vDimension, vDimensionRuns, MAX_DIMENSION_RUNS, vFreeze,
   vNamedStyleApply, vNamedStyleCreate, vNamedStyleName,
   vAutoFitSpan, MAX_AUTOFIT_SPAN, vFillRange,
@@ -48,6 +49,7 @@ import {
   vFormulaRead, vFormulaWrite, vPasteRange, vPrintPdf,
   vSelect, vScrollTo, vClearRange, MAX_SELECT_AREAS,
   vRangeEdge, vUsedRange, vTabColor,
+  vInsertCells, vDeleteCells,
   vMoveSheet, vCopySheet, vAddSheet, vSplit,
   vCanvasLayout, vCanvasLayoutQuery,
   vCrossFilterQuery, vSetCrossFilter, vClearCrossFilters,
@@ -198,10 +200,12 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Put a formula into a cell on the sheet currently shown, written either in ordinary A1 form or in R1C1 form (pass nothing to clear it)" },
   // FORMATTING (B2). Same reach as sheet.setRangeValues — the sheet currently
   // shown — but it changes appearance instead of content, so it is strictly less
-  // destructive than the write row above it.
-  "sheet.setRangeFormat":  { tier: "restricted", class: "mutate", validate: vRangeFormat, limits: { maxCells: MAX_FORMAT_RECT_CELLS },
+  // destructive than the write row above it. Whole lines at any size; any other
+  // rectangle up to the RESTRICTED bound (BUG-0659, validators.ts
+  // MAX_RESTRICTED_FORMAT_RECT_CELLS), never the unlocked rows' 4,000,000.
+  "sheet.setRangeFormat":  { tier: "restricted", class: "mutate", validate: vRangeFormat, limits: { maxCells: MAX_RESTRICTED_FORMAT_RECT_CELLS },
                              desc: "Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders)" },
-  "sheet.clearRangeFormat":{ tier: "restricted", class: "mutate", validate: vFormatRangeRef, limits: { maxCells: MAX_FORMAT_RECT_CELLS },
+  "sheet.clearRangeFormat":{ tier: "restricted", class: "mutate", validate: vFormatRangeRefRestricted, limits: { maxCells: MAX_RESTRICTED_FORMAT_RECT_CELLS },
                              desc: "Remove all formatting from a block of cells on the sheet currently shown (the values are kept)" },
   // FORMAT READ-BACK (Wave 3). The other half of the two rows above: a format
   // read is addressed exactly like a value read (same validators, same clamp),
@@ -355,6 +359,14 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.deleteRows":        { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Delete rows on a sheet, shifting everything below them up (their contents are lost)" },
   "api.insertColumns":     { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Insert columns on a sheet, shifting everything to their right" },
   "api.deleteColumns":     { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Delete columns on a sheet, shifting the rest left (their contents are lost)" },
+  // Excel's Insert / Delete Cells (BUG-0358: what the macro recorder replays a
+  // Home > Insert Cells... / Delete Cells... as -- VBA's Range.Insert Shift /
+  // Range.Delete Shift). Structure, so the same tier and no capability as the
+  // four line rows above; ACTIVE SHEET ONLY, because the backend command is.
+  "api.insertCells":       { tier: "unlocked", class: "mutate", validate: vInsertCells,
+                             desc: "Insert empty cells in a block on the active sheet, shifting the cells there right or down" },
+  "api.deleteCells":       { tier: "unlocked", class: "mutate", validate: vDeleteCells,
+                             desc: "Delete a block of cells on the active sheet, shifting the cells beside it left or up (their contents are lost)" },
   "api.mergeCells":        { tier: "unlocked", class: "mutate", validate: vRangeRef, desc: "Merge a block of cells into one (only the top-left value is kept)" },
   "api.unmergeCells":      { tier: "unlocked", class: "mutate", validate: vCellRef,  desc: "Split a merged block back into individual cells" },
   // ---- unlocked: DATA VALIDATION (Wave 3, item 5). Excel's Data ▸ Data
@@ -778,7 +790,7 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.createTable":       { tier: "unlocked", class: "mutate", validate: vCreateTable,
                              desc: "Turn a block of cells into a table (with filter buttons and a header row)" },
   "api.deleteTable":       { tier: "unlocked", class: "mutate", validate: vObjectId,
-                             desc: "Delete a table (the cells and their values are kept)" },
+                             desc: "Delete a table (its cells are cleared, and formulas that use the table show #REF!)" },
   "api.createNamedRange":  { tier: "unlocked", class: "mutate", validate: vCreateNamedRange,
                              desc: "Create a named range (a name that formulas can use for a block of cells)" },
   "api.deleteNamedRange":  { tier: "unlocked", class: "mutate", validate: vNamedRangeName,

@@ -843,10 +843,21 @@ pub struct SortPivotFieldRequest {
     pub field_index: usize,
     /// Sort direction
     pub sort_by: SortBy,
-    /// Sort by values of a data hierarchy (optional)
+    /// Sort by the VALUES of this data field (its name, `ValueField::name`
+    /// -- Excel's AutoSortField) instead of by labels (BUG-0459). `None`: a
+    /// label sort, which also clears a standing value sort.
     pub values_hierarchy: Option<String>,
-    /// Scope of pivot items for sorting by values
+    /// The line of the OTHER axis a value sort reads along, as the member
+    /// KEYS of its items outermost first (Office.js `sortByValues`'
+    /// `pivotItemScope`). Empty or absent: that axis's grand total. Ignored
+    /// when `scope_group_path` is given.
     pub pivot_item_scope: Option<Vec<String>>,
+    /// The clicked value cell's `groupPath` (`[fieldIndex, valueId]` pairs):
+    /// the host keeps the entries of the OTHER axis's fields and stores their
+    /// member keys as the scope -- the cell's column for a row field, its row
+    /// for a column field (Excel's PivotLine).
+    #[serde(default)]
+    pub scope_group_path: Option<Vec<(usize, u32)>>,
 }
 
 /// Request to set a data hierarchy's aggregation function.
@@ -1262,6 +1273,38 @@ pub struct PivotCellData {
     /// cells, and on any header whose text is not one member's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<crate::api_types::MemberRef>,
+    /// Which non-finite number a value cell holds -- a model measure's `1/0`,
+    /// `-1/0` or `0/0` -- when it holds one. The cell's `value` is then the
+    /// text `#NUM!`, as Excel shows it in a data-model PivotTable [LIVE];
+    /// this says WHICH, so a canvas visual can write Power BI's word for it
+    /// ("Infinity", "-Infinity", "NaN"). JSON has no non-finite number: the
+    /// value used to arrive as `null` and showed as an empty cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_finite: Option<NonFiniteNumber>,
+}
+
+/// A non-finite number, named on the wire (`PivotCellData::non_finite`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NonFiniteNumber {
+    Infinity,
+    NegativeInfinity,
+    Nan,
+}
+
+impl NonFiniteNumber {
+    /// The kind of `n`, or `None` when `n` is finite.
+    pub fn of(n: f64) -> Option<Self> {
+        if n.is_nan() {
+            Some(Self::Nan)
+        } else if n == f64::INFINITY {
+            Some(Self::Infinity)
+        } else if n == f64::NEG_INFINITY {
+            Some(Self::NegativeInfinity)
+        } else {
+            None
+        }
+    }
 }
 
 fn is_false(v: &bool) -> bool { !v }

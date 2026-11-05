@@ -607,3 +607,127 @@ fn a_slicer_move_racing_lock_objects_lands_before_the_toggle_returns_never_after
     assert_refused_by_lock(again, "update_slicer_position after the lock");
     assert_eq!(wb.slicer.slicers.read().unwrap()[&id].x, 50.0);
 }
+
+// ---------------------------------------------------------------------------
+// 4. Undo / redo and the raw JSON editor (BUG-0656, decided 2026-11-04)
+// ---------------------------------------------------------------------------
+
+/// Pop the top undo (or redo) step and run it through the real restore body.
+fn history(wb: &Workbook, is_undo: bool) -> crate::undo_commands::UndoResult {
+    let transaction = {
+        let mut stack = wb.state.undo_stack.lock().unwrap();
+        if is_undo { stack.pop_undo() } else { stack.pop_redo() }
+    }
+    .expect("a step to replay");
+    crate::undo_commands::apply_changes(
+        &wb.state,
+        &wb.file,
+        &wb.files,
+        &wb.pivots,
+        &wb.slicer,
+        &wb.filters,
+        &wb.pane,
+        &wb.timelines,
+        transaction,
+        is_undo,
+    )
+}
+
+/// THE DECISION, both halves. UNDO AND REDO ARE NOT A USER MOVE: a chart moved
+/// before Lock Objects went on is put back by Ctrl+Z and moved again by
+/// Ctrl+Y on the locked page, as Excel's Undo would (restoring a state from
+/// history is not a gesture the lock is about). THE RAW JSON OBJECT EDITOR IS
+/// a user edit: a replacement that moves or resizes a chart, a slicer or a
+/// timeline on the locked page is refused with the lock's message and the
+/// document clean; one that keeps the placement goes through; and on the
+/// unlocked page the same JSON move lands (positive control).
+///
+/// SABOTAGES (separate builds, each fails its own assertion): (1) the `obj_chart`
+/// restore skips a chart whose page is locked -- "Ctrl+Z must put the chart
+/// back". (2) `set_chart_json` drops its lock decision -- "JSON chart move".
+/// (3) `set_slicer_json` drops its lock decision -- "JSON slicer move".
+#[test]
+fn undo_still_restores_a_move_on_a_locked_page_but_the_json_editor_asks() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb);
+    let chart = chart_on(canvas, 100.0);
+    wb.state.charts.write(&crate::document_effect::test_seed_effect()).unwrap().push(chart.clone());
+
+    // A move made while the page was unlocked, then the lock.
+    let moved = with_json(&chart, |v| v["x"] = serde_json::json!(260.0));
+    crate::chart_commands::update_chart_core(&wb.state, &wb.file, moved.clone(), None).expect("an unlocked page moves");
+    lock(&wb, canvas, true);
+
+    // Undo and redo restore it on the locked page.
+    assert!(history(&wb, true).success, "the move's step undoes");
+    assert_eq!(stored_chart_x(&wb, chart.id), 100.0, "Ctrl+Z must put the chart back, even on a locked page");
+    assert!(history(&wb, false).success, "the move's step redoes");
+    assert_eq!(stored_chart_x(&wb, chart.id), 260.0, "Ctrl+Y moves it again, even on a locked page");
+
+    // The JSON editor asks.
+    let json_of = |entry: &ChartEntry| serde_json::to_string(entry).unwrap();
+    let id = chart.id.to_string();
+    let json_move = with_json(&moved, |v| v["x"] = serde_json::json!(40.0));
+    assert_clean_refusal(&wb, "JSON chart move", || crate::json_view::set_chart_json(&wb.state, &wb.file, &id, &json_of(&json_move)));
+    assert_eq!(stored_chart_x(&wb, chart.id), 260.0, "a refused JSON edit moves nothing");
+    let json_retitle = with_json(&moved, |v| v["spec"]["title"] = serde_json::json!("Revenue"));
+    crate::json_view::set_chart_json(&wb.state, &wb.file, &id, &json_of(&json_retitle))
+        .expect("a JSON edit that keeps the placement is formatting");
+
+    let slicer_id = insert_slicer(&wb, canvas);
+    let slicer = wb.slicer.slicers.read().unwrap()[&slicer_id].clone();
+    let slicer_json = |s: &crate::slicer::Slicer| serde_json::to_string(s).unwrap();
+    let mut slicer_moved = slicer.clone();
+    slicer_moved.x = 99.0;
+    assert_clean_refusal(&wb, "JSON slicer move", || {
+        crate::json_view::set_slicer_json(&wb.state, &wb.file, &wb.slicer, &slicer_id.to_string(), &slicer_json(&slicer_moved))
+    });
+    assert_eq!(wb.slicer.slicers.read().unwrap()[&slicer_id].x, 10.0);
+    let mut slicer_renamed = slicer.clone();
+    slicer_renamed.name = "Area".to_string();
+    crate::json_view::set_slicer_json(&wb.state, &wb.file, &wb.slicer, &slicer_id.to_string(), &slicer_json(&slicer_renamed))
+        .expect("a JSON rename is formatting");
+
+    let timeline_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    let timeline = crate::timeline_slicer::TimelineSlicer {
+        id: timeline_id,
+        name: "Order Date".to_string(),
+        header_text: None,
+        sheet_index: canvas,
+        x: 10.0,
+        y: 20.0,
+        width: 350.0,
+        height: 100.0,
+        source_type: crate::timeline_slicer::TimelineSourceType::Pivot,
+        source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+        field_name: "OrderDate".to_string(),
+        level: crate::timeline_slicer::TimelineLevel::Months,
+        selection_start: None,
+        selection_end: None,
+        show_header: true,
+        show_level_selector: true,
+        show_scrollbar: true,
+        style_preset: "TimelineStyleLight1".to_string(),
+        connected_pivot_ids: vec![],
+        container: None,
+    };
+    wb.timelines.timelines.write(&crate::document_effect::test_seed_effect()).unwrap().insert(timeline_id, timeline.clone());
+    let mut timeline_resized = timeline.clone();
+    timeline_resized.width = 500.0;
+    let timeline_json = serde_json::to_string(&timeline_resized).unwrap();
+    assert_clean_refusal(&wb, "JSON timeline resize", || {
+        crate::json_view::set_timeline_json(&wb.state, &wb.file, &wb.timelines, &timeline_id.to_string(), &timeline_json)
+    });
+    assert_eq!(wb.timelines.timelines.read().unwrap()[&timeline_id].width, 350.0);
+
+    // POSITIVE CONTROL: unlocked, the same JSON moves land.
+    lock(&wb, canvas, false);
+    crate::json_view::set_chart_json(&wb.state, &wb.file, &id, &json_of(&json_move)).expect("an unlocked page takes the JSON move");
+    assert_eq!(stored_chart_x(&wb, chart.id), 40.0);
+    crate::json_view::set_slicer_json(&wb.state, &wb.file, &wb.slicer, &slicer_id.to_string(), &slicer_json(&slicer_moved))
+        .expect("an unlocked page takes the JSON slicer move");
+    assert_eq!(wb.slicer.slicers.read().unwrap()[&slicer_id].x, 99.0);
+    crate::json_view::set_timeline_json(&wb.state, &wb.file, &wb.timelines, &timeline_id.to_string(), &timeline_json)
+        .expect("an unlocked page takes the JSON timeline resize");
+    assert_eq!(wb.timelines.timelines.read().unwrap()[&timeline_id].width, 500.0);
+}

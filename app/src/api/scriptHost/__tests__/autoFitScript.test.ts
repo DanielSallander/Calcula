@@ -96,7 +96,8 @@ describe("autoFitFromScript — columns", () => {
       const { lib, colWidths } = makeLib({ cols: { 0: [cell(0, 0, "Hi")] } });
       await autoFitFromScript(lib, "columns", 0, 0, undefined);
       // The contributor was ASKED, and its wider requirement won the max.
-      expect(measureColumn).toHaveBeenCalledWith(0, fakeCtx);
+      // A whole column: no fitted-row restriction (BUG-0351's third argument).
+      expect(measureColumn).toHaveBeenCalledWith(0, fakeCtx, undefined);
       expect(colWidths).toEqual([{ index: 0, size: 150 }]);
     } finally {
       unregister();

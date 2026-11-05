@@ -78,7 +78,14 @@ function orientedTextExtent(
   if (orientation.kind === "stacked") {
     return stackedTextExtent(text, (t) => ctx.measureText(t).width, lineHeight);
   }
-  return rotatedTextExtent(ctx.measureText(text).width, lineHeight, orientation.degrees);
+  // A hard break puts rotated text on several lines (the painter's
+  // `layoutRotatedLines`): the block is the widest line by one pitch per line.
+  // Wrap Text's own breaks depend on the row height being fitted and are not
+  // modelled here; a wrapped value is measured at its hard breaks only.
+  const lines = splitHardBreaks(text);
+  let widest = 0;
+  for (const line of lines) widest = Math.max(widest, ctx.measureText(line).width);
+  return rotatedTextExtent(widest, lineHeight * lines.length, orientation.degrees);
 }
 
 /**
@@ -219,6 +226,9 @@ function maxRichTextFontSize(runs: RichTextRun[], baseFontSize: number): number 
  *          describe the ACTIVE sheet's columns). False for cells that are not
  *          the active sheet's -- an object's own cells (a floating grid's),
  *          whose column index would alias the host's column.
+ * @param rows - The rows being fitted (BUG-0351: AutoFit Column Width over a
+ *          partial range fits only the selected cells, Excel). A contributor's
+ *          content outside them sizes nothing. Absent: the whole column.
  * @returns Optimal width in pixels, or null when there is nothing to fit
  *          (Excel leaves the column width unchanged in that case)
  */
@@ -229,13 +239,14 @@ export function measureOptimalColumnWidth(
   theme: { cellFontFamily: string; cellFontSize: number },
   minWidth: number,
   includeContributions = true,
+  rows?: ReadonlyArray<{ startRow: number; endRow: number }>,
 ): number | null {
   const ctx = getMeasureContext();
   let maxWidth = 0;
   let hasContent = false;
 
   const contributions = includeContributions && hasAutoFitContributors()
-    ? collectAutoFitColumnContributions(col, ctx)
+    ? collectAutoFitColumnContributions(col, ctx, rows)
     : [];
 
   const claimedRows: ClaimedSpan[] = [];

@@ -79,6 +79,43 @@ pub fn df_table_name(name: &str) -> String {
     name.to_lowercase().replace('.', "_")
 }
 
+/// The WHEN condition of a `CASE` the engine runs on DataFusion, spelled so a
+/// NULL condition is FALSE: `COALESCE(c, FALSE)`.
+///
+/// SQL takes a `CASE` branch only when its condition is TRUE, and so does
+/// DAX's `IF` (a BLANK compared with a value is never TRUE). DataFusion 44
+/// does not, in one shape: `CASE WHEN c THEN col END` -- one WHEN, a bare
+/// column, no ELSE (or `ELSE NULL`, which the planner drops) -- runs its
+/// `case_column_or_null` fast path, `nullif(col, not(c))`, and a NULL `c`
+/// makes that `nullif(col, NULL)`, which is `col`
+/// (datafusion-physical-expr 44.0.0, `expressions/case.rs`). So every
+/// conditional aggregate `AGG(CASE WHEN keep THEN col END)` also aggregated
+/// the rows whose KEEP condition is NULL -- a BLANK attribute, an unmatched
+/// dimension row -- and `COUNT(CASE WHEN cat = 'Bikes' THEN amount END)`
+/// over `(Bikes, 10), (Bikes, NULL), (NULL, 7)` answered 2.
+///
+/// `COALESCE(c, FALSE)` is never NULL, so every evaluation path agrees. Not
+/// `(c) IS TRUE`: DataFusion 44 types `IS TRUE` non-nullable in the logical
+/// plan but nullable in the physical one, and a query that uses one twice
+/// (a DISTINCTCOUNT's two arms, two measures under one KEEP) fails with
+/// "Physical input schema should be the same as the one converted from
+/// logical input schema" once common-subexpression elimination shares it.
+/// COALESCE's nullability is one function in both plans.
+///
+/// `is_predicate` says the condition is already boolean (a comparison,
+/// AND/OR/NOT, IS NULL, IN, ...); otherwise it is cast to BOOLEAN first, as
+/// `CASE` itself casts a non-boolean WHEN (COALESCE would not coerce a number
+/// and `FALSE` to one type). PostgreSQL and SQL Server evaluate `CASE`
+/// correctly, so source dialects never call this: their pushed SQL keeps the
+/// bare condition.
+pub fn null_is_false_condition(condition_sql: &str, is_predicate: bool) -> String {
+    if is_predicate {
+        format!("COALESCE({condition_sql}, FALSE)")
+    } else {
+        format!("COALESCE(CAST({condition_sql} AS BOOLEAN), FALSE)")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

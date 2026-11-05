@@ -272,6 +272,16 @@ async function handleCellEdited(row: number, col: number, value: string): Promis
     return;
   }
 
+  // A TOTALS cell: the backend decides what the column's totals function
+  // becomes from what is now in the cell -- a constant sets it to None, a
+  // formula to the function it spells or to Custom, as Excel does
+  // (NEW-totals-constant-none). Never a calculated column: a formula typed
+  // into the totals row used to fill the whole column with it.
+  if (table && table.styleOptions.totalRow && row === table.endRow) {
+    await checkAutoExpand(row, col);
+    return;
+  }
+
   // Check for calculated column (formula entered in a table data cell)
   if (table && value.startsWith("=") && row >= table.startRow + (table.styleOptions.headerRow ? 1 : 0)) {
     const colIndex = col - table.startCol;

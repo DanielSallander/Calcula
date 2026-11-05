@@ -137,7 +137,9 @@ function undoTheMerge(): void {
 describe("[LIVE] a merge that moves a value moves its followers, and its Undo moves them back", () => {
   it("announces the move it recorded, after the commit", async () => {
     await runMergeGesture("mergeCenter", { selection: sel(0, 0, 0, 2), refresh: vi.fn(async () => {}) });
-    expect(api.relocateCellReferences).toHaveBeenCalledWith(0, 1, 0, 1, 0, 0);
+    // The backend's merge re-points the moved value's readers itself (round C);
+    // a second frontend relocation would turn those readers into #REF!.
+    expect(api.relocateCellReferences).not.toHaveBeenCalled();
     expect(announced, "the merge recorded a move it never announced").toEqual([
       {
         source: "edit",

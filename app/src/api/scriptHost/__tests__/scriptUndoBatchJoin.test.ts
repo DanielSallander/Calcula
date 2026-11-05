@@ -53,6 +53,8 @@ function makeLib(open: boolean, failWrite = false, beginAnswer?: boolean) {
     getActiveSheet: vi.fn(async () => 0),
     getSheets: vi.fn(async () => ({ sheets: [{ index: 0, name: "Sheet1" }], activeIndex: 0 })),
     getViewportCells: vi.fn(async () => [{ row: 0, col: 0, display: "5" }]),
+    // The fill asks the sheet's merges first (Excel's merge rule, round D).
+    getMergedRegions: vi.fn(async () => []),
     getUndoState: vi.fn(async () => ({ transactionOpen: open })),
     beginUndoTransaction: vi.fn(async (description: string) => {
       undo.push(`begin:${description}`);

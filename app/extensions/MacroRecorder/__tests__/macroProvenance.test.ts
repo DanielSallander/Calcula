@@ -214,16 +214,15 @@ describe("the library carries each module's origin", () => {
         "or from the command line, it may also read and change cells on any sheet",
     );
     expect(objectRoute).toContain("read and change cells on any sheet");
-    expect(objectRoute).toContain("the same cell access an approved module macro has");
-    // A granted fill copies the band's styles (module parity: fill_range clones
-    // value + style), so "no formatting" alone would be false; every OTHER
-    // formatting route -- api.setRangeFormat and the restricted sheet.* format
-    // rows -- is refused to such a run (explicitRunGrant.ts).
+    // FORMATTING (owner, 2026-11-04): what it may change, and the line drawn --
+    // bound to the broker by "its limits are the broker's" below.
     expect(objectRoute).toContain(
-      "where filling a range also copies the formatting of the cells it fills from",
+      "and change how they look -- fonts, colours, number formats, borders, cell styles and the size of rows and columns",
     );
-    expect(objectRoute).toContain("no other formatting, no sheet structure, no files, no other macros or commands");
-    expect(objectRoute).not.toContain("no formatting,");
+    expect(objectRoute).toContain(
+      "it cannot lock or unlock cells, hide or show rows, change the sheets' structure, or reach files, other macros or commands",
+    );
+    expect(objectRoute).not.toContain("no other formatting");
     // Not "no cell access": every restricted realm reaches the sheet on screen
     // (the restricted sheet.* rows), and so does this one.
     expect(objectRoute).toContain(
@@ -310,32 +309,48 @@ describe("the library carries each module's origin", () => {
     }
   });
 
-  // THE SENTENCE IS BOUND TO THE BROKER. "no other formatting" and "the sheet on
-  // screen" are claims about what the broker admits, so they are read from it:
-  // a granted run (explicitRun present) reaches no formatting write -- neither
-  // an unlocked api.* row nor a restricted sheet.* row -- and an ungranted
-  // restricted realm is admitted the sheet on screen.
-  // SABOTAGE: delete "sheet.setRangeFormat" from EXPLICIT_RUN_REFUSED_FORMAT_METHODS
-  // (explicitRunGrant.ts) -> `reachable` names it and this goes red.
-  it("its limits are the broker's: no formatting write for a granted run, the sheet on screen without one", async () => {
+  // THE SENTENCE IS BOUND TO THE BROKER. "change how they look", "cannot lock or
+  // unlock cells, hide or show rows" and "the sheet on screen" are claims about
+  // what the broker admits, so they are read from it (owner, 2026-11-04): a
+  // granted run (cells + formatting) reaches every cell-formatting write -- the
+  // unlocked api.* rows and the restricted sheet.* rows -- but not a style
+  // catalogue edit, a conditional-format rule, a hide or a protection change;
+  // and an ungranted restricted realm is admitted the sheet on screen.
+  // SABOTAGE: delete "api.applyNamedStyle" from EXPLICIT_RUN_FORMAT_METHODS
+  // (explicitRunGrant.ts) -> `unreachable` names it and this goes red.
+  it("its limits are the broker's: how cells look for a granted run, not protection or visibility", async () => {
     const { ALLOWLIST } = await import("@api/scriptHost/allowlist");
     const { decidePolicy } = await import("@api/scriptHost/brokerPolicy");
     const { explicitRunAdmits, explicitRunRestrictedRefusal } = await import(
       "@api/scriptHost/explicitRunGrant"
     );
     const none = new Set<never>();
-    const granted = { tier: "restricted" as const, explicitRun: { cells: true }, grants: none, declaredCapabilities: none };
-    const formattingWrites = Object.keys(ALLOWLIST).filter(
-      (m) => /Format|Style/.test(m) && ALLOWLIST[m].class === "mutate",
-    );
-    // Positive control: the filter sees both families.
-    expect(formattingWrites).toEqual(
-      expect.arrayContaining(["api.setRangeFormat", "api.applyNamedStyle", "sheet.setRangeFormat", "sheet.clearRangeFormat"]),
-    );
-    const reachable = formattingWrites.filter((m) =>
-      ALLOWLIST[m].tier === "unlocked" ? explicitRunAdmits(granted, m) : explicitRunRestrictedRefusal(m) === null,
-    );
-    expect(reachable, "a granted run can still format through these").toEqual([]);
+    const granted = {
+      tier: "restricted" as const,
+      explicitRun: { cells: true, formatting: true },
+      grants: none,
+      declaredCapabilities: none,
+    };
+    const reaches = (m: string): boolean =>
+      ALLOWLIST[m].tier === "unlocked" ? explicitRunAdmits(granted, m) : explicitRunRestrictedRefusal(m, granted) === null;
+    const cellFormatting = ["api.setRangeFormat", "api.clearRangeFormat", "api.applyNamedStyle", "sheet.setRangeFormat", "sheet.clearRangeFormat"];
+    const sizes = ["api.setRowHeight", "api.setColumnWidth", "api.setRowHeights", "api.setColumnWidths"];
+    const unreachable = [...cellFormatting, ...sizes].filter((m) => !reaches(m));
+    expect(unreachable, "the sentence promises formatting the broker refuses").toEqual([]);
+    const notPromised = [
+      "api.createNamedStyle",
+      "api.deleteNamedStyle",
+      "api.addConditionalFormat",
+      "api.setRowsHidden",
+      "api.setColumnsHidden",
+      "api.protectSheet",
+      "api.mergeCells",
+    ];
+    // Positive control: each is a real mutate row.
+    for (const m of notPromised) expect(ALLOWLIST[m]?.class, m).toBe("mutate");
+    expect(notPromised.filter(reaches), "a granted run reaches what the sentence says it cannot").toEqual([]);
+    // ...and the protection attributes stay out of the one row that takes them.
+    expect(decidePolicy(granted, "api.setRangeFormat", [0, 0, 0, 0, { locked: false }]).admitted).toBe(false);
 
     const plain = { tier: "restricted" as const, grants: none, declaredCapabilities: none };
     expect(decidePolicy(plain, "sheet.getCellValue", [0, 0]).admitted).toBe(true);

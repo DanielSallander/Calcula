@@ -19,7 +19,14 @@ import {
 import type { RecordedAction, RecordedEvent } from "../lib/types";
 // The REAL broker validators, so "the generated call is accepted by the
 // script API" is a fact this suite checks rather than a claim it makes.
-import { vSortRange, vBiModelMutation, vAddSheet, vDimensionRuns } from "@api/scriptHost/validators";
+import {
+  vSortRange,
+  vBiModelMutation,
+  vAddSheet,
+  vDimensionRuns,
+  vInsertCells,
+  vDeleteCells,
+} from "@api/scriptHost/validators";
 
 // ============================================================================
 // Fixtures
@@ -564,6 +571,15 @@ describe("structural actions (object script)", () => {
       "await api.mergeCells(0, 0, 0, 3); // A1:D1",
     ],
     [{ kind: "unmergeCells", row: 0, col: 0 }, "await api.unmergeCells(0, 0); // A1"],
+    // Home > Insert Cells... / Delete Cells... (BUG-0358).
+    [
+      { kind: "insertCells", startRow: 1, startCol: 1, endRow: 2, endCol: 2, shift: "down", unmergeCutMerges: false },
+      'await api.insertCells(1, 1, 2, 2, "down"); // B2:C3',
+    ],
+    [
+      { kind: "deleteCells", startRow: 4, startCol: 0, endRow: 4, endCol: 3, shift: "left", unmergeCutMerges: true },
+      'await api.deleteCells(4, 0, 4, 3, "left", { unmergeCutMerges: true }); // A5:D5',
+    ],
     [{ kind: "rowHeight", row: 4, height: 32 }, "await api.setRowHeight(4, 32);"],
     [{ kind: "columnWidth", col: 2, width: 140 }, "await api.setColumnWidth(2, 140);"],
     // A batch resize is ONE run-based call (NEW-recorder-select-all).
@@ -590,6 +606,15 @@ describe("structural actions (object script)", () => {
       expect(gen([act(event)], NB).unsupported).toHaveLength(1);
     });
   }
+
+  // BUG-0358: the replay call is one the broker ADMITS -- the recorder writes
+  // what the validator reads (an unknown shift or option would be refused).
+  it("replays a recorded Insert / Delete Cells as a call the broker's validator accepts", () => {
+    expect(vInsertCells([1, 1, 2, 2, "down"])).toBe(true);
+    expect(vDeleteCells([4, 0, 4, 3, "left", { unmergeCutMerges: true }])).toBe(true);
+    expect(vInsertCells([1, 1, 2, 2, "left"])).not.toBe(true);
+    expect(vDeleteCells([1, 1, 2, 2, "up", { unmerge: true }])).not.toBe(true);
+  });
 
   // A canvas sheet's KIND is fixed at creation, so a recorded canvas must
   // replay as a canvas — never as the one-argument (worksheet) form.

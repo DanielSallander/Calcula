@@ -715,6 +715,10 @@ impl<'a> ParsedFormatting<'a> {
 /// floating grid's backing sheet, ONLY, inside its write extent, gated by the
 /// HOST's protection. Refused together with `sheet_indices`; the result then
 /// describes the BACKING cells (their merges included).
+///
+/// `more_areas` (BUG-0394): the OTHER blocks of a Ctrl+click or Go To Special
+/// selection, formatted by this same call as ONE undo step
+/// ([`apply_formatting_areas`]) -- the Home tab made one call per block.
 #[tauri::command]
 pub fn apply_formatting(
     state: State<AppState>,
@@ -722,8 +726,79 @@ pub fn apply_formatting(
     params: FormattingParams,
     sheet_indices: Option<Vec<usize>>,
     target: Option<CellTargetRef>,
+    more_areas: Option<Vec<crate::api_types::FormattingArea>>,
 ) -> Result<FormattingResult, String> {
-    apply_formatting_on(&state, &file_state, &params, sheet_indices.as_deref().unwrap_or(&[]), target.as_ref())
+    let group = sheet_indices.as_deref().unwrap_or(&[]);
+    match more_areas {
+        Some(more) if !more.is_empty() => {
+            if target.is_some() {
+                return Err("Several areas are formatted on the sheet, not in an object's cells.".to_string());
+            }
+            apply_formatting_areas(&state, &file_state, &params, group, &more)
+        }
+        _ => apply_formatting_on(&state, &file_state, &params, group, target.as_ref()),
+    }
+}
+
+/// `params` applied to its own `rows` x `cols` AND to every block of `more`,
+/// on the active sheet (and `group`), as ONE undo step (BUG-0394).
+///
+/// Every refusal that depends on a block -- a partial rectangle too large to
+/// style cell by cell -- is decided for EVERY block before any is written, as
+/// the values are parsed once before them; the protection gate is the
+/// sheet's, so a block that passes it is a sheet that passes it for all. Each
+/// block is then the single-block body (`format_cells_on_sheets`, its own
+/// guards and its tier planning for whole lines) inside the one owned
+/// transaction. The result is every block's cells, and each style once.
+pub(crate) fn apply_formatting_areas(
+    state: &AppState,
+    file_state: &FileState,
+    params: &FormattingParams,
+    group: &[usize],
+    more: &[crate::api_types::FormattingArea],
+) -> Result<FormattingResult, String> {
+    let parsed = {
+        let locale = state.locale.lock().unwrap();
+        ParsedFormatting::parse(params, &locale)?
+    };
+    let mut areas: Vec<(&[u32], &[u32])> = Vec::with_capacity(more.len() + 1);
+    areas.push((&params.rows, &params.cols));
+    areas.extend(more.iter().map(|a| (a.rows.as_slice(), a.cols.as_slice())));
+    for &(rows, cols) in &areas {
+        let lines = rect_of_lists(rows, cols).filter(|r| r.line_extent().is_some());
+        let count = rows.len() as u64 * cols.len() as u64;
+        if lines.is_none() && count > DENSE_BORDER_CELL_LIMIT {
+            return Err(dense_limit_refusal(&FORMAT_WORDING, count));
+        }
+    }
+    let owned = state
+        .undo_stack
+        .lock()
+        .map_err(|e| e.to_string())?
+        .begin_owned_transaction(format!("Format {} areas", areas.len()));
+    let mut cells: Vec<CellData> = Vec::new();
+    let mut styles: Vec<crate::api_types::StyleEntry> = Vec::new();
+    let mut outcome: Result<(), String> = Ok(());
+    for &(rows, cols) in &areas {
+        let route = StyleTargets::Sheets { group, include_active: true };
+        match format_cells_on_sheets(state, file_state, &parsed, rows, cols, route) {
+            Ok((result, _)) => {
+                cells.extend(result.cells);
+                for entry in result.styles {
+                    if !styles.iter().any(|s| s.index == entry.index) {
+                        styles.push(entry);
+                    }
+                }
+            }
+            // What landed stays, committed in the one step below.
+            Err(e) => {
+                outcome = Err(e);
+                break;
+            }
+        }
+    }
+    state.undo_stack.lock().map_err(|e| e.to_string())?.commit_owned(owned);
+    outcome.map(|()| FormattingResult { cells, styles })
 }
 
 /// `apply_formatting` without the Tauri wrappers, so the tests drive the real
@@ -2071,6 +2146,14 @@ fn parse_border_side(param: &crate::api_types::BorderSideParam) -> BorderStyle {
         "dashed" | "dotted" | "double" => 1,
         _ => 0,
     };
+    // NO LINE IS NO LINE, whatever colour the caller names (BUG-0369): the
+    // canonical empty side. A "none" side carrying black used to differ from
+    // the default style's empty side, so clearing a line that was never there
+    // still "changed" every position -- the Borders runner's one write beside
+    // a whole-column No Border gave column A a column format of its own.
+    if line_style == BorderLineStyle::None || width == 0 {
+        return BorderStyle::default();
+    }
     let color = ThemeColor::Absolute(Color::from_hex(&param.color).unwrap_or(Color::new(0, 0, 0)));
 
     BorderStyle {
@@ -3552,14 +3635,56 @@ fn border_preset_on_sheets(
 ///    Decrease with no decimal left to remove (`0`, `0%`). With a DATE active
 ///    and a `0.00` cell beside it, neither changed.
 ///
-/// One deliberate difference: Excel's General count comes from the column
-/// WIDTH (1234.5678 in a default column shows `1234,568` and becomes 4
-/// decimals); the backend does not lay text out, so it counts the decimals of
-/// General's full rendering (`format_general`, up to 10) and gets 5.
+/// GENERAL COUNTS THE DECIMALS SHOWN AT THE COLUMN'S WIDTH (BUG-0355). Excel
+/// [LIVE, Excel 16, 2026-11-04, lane multiarea probe3]: 1234.5678 in a default
+/// column shows `1234,568`, and Increase Decimal makes it `0.0000`, Decrease
+/// `0.00`. The backend does not lay text out, so the grid says what it shows:
+/// `shown` is that text ([`next_decimal_format_shown`], from the frontend's
+/// width-fitting General ladder). Without it (a script, an object's cells) the
+/// count is General's full rendering (`format_general`, up to 10 decimals).
 pub(crate) fn next_decimal_format(
     format: &NumberFormat,
     value: Option<&CellValue>,
     delta: i32,
+) -> Option<NumberFormat> {
+    next_decimal_format_shown(format, value, delta, None)
+}
+
+/// The decimals (and whether it is scientific) of a General NUMBER display --
+/// `1234,568`, `-0.5`, `1,2E+09` -- or `None` for anything else (`####`, text).
+/// General never writes a thousands separator, so either `.` or `,` is the
+/// decimal separator whatever the locale.
+fn general_display_decimals(shown: &str) -> Option<(usize, bool)> {
+    let (mantissa, scientific) = match shown.split_once(['E', 'e']) {
+        Some((m, exponent)) => {
+            let digits = exponent.trim_start_matches(['+', '-']);
+            if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            (m, true)
+        }
+        None => (shown, false),
+    };
+    let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
+    let (whole, fraction) = match unsigned.split_once(['.', ',']) {
+        Some((w, f)) => (w, f),
+        None => (unsigned, ""),
+    };
+    let digits = |s: &str| s.chars().all(|c| c.is_ascii_digit());
+    if whole.is_empty() || !digits(whole) || !digits(fraction) {
+        return None;
+    }
+    Some((fraction.len(), scientific))
+}
+
+/// [`next_decimal_format`] with the text the active cell SHOWS (BUG-0355): for
+/// a General number, its decimals are the ones the column's width shows. A
+/// `shown` that is not a General number display is ignored.
+pub(crate) fn next_decimal_format_shown(
+    format: &NumberFormat,
+    value: Option<&CellValue>,
+    delta: i32,
+    shown: Option<&str>,
 ) -> Option<NumberFormat> {
     let step = |places: u8| -> Option<u8> {
         if delta > 0 {
@@ -3573,12 +3698,11 @@ pub(crate) fn next_decimal_format(
             let Some(CellValue::Number(n)) = value else {
                 return None;
             };
-            let shown = engine::format_number(*n, &NumberFormat::General, &engine::LocaleSettings::invariant());
-            let (mantissa, scientific) = match shown.split_once('E') {
-                Some((m, _)) => (m.to_string(), true),
-                None => (shown.clone(), false),
+            let full = engine::format_number(*n, &NumberFormat::General, &engine::LocaleSettings::invariant());
+            let (decimals, scientific) = match shown.and_then(general_display_decimals) {
+                Some(at_width) => at_width,
+                None => general_display_decimals(&full)?,
             };
-            let decimals = mantissa.split_once('.').map_or(0, |(_, frac)| frac.len());
             let decimals = u8::try_from(decimals).ok()?;
             let next = step(decimals)?;
             Some(if scientific {
@@ -3812,6 +3936,10 @@ fn scan_decimal_section(section: &str) -> DecimalSectionScan {
 /// `active_row` / `active_col` (`activeRow` / `activeCol`), which must lie
 /// inside the selection. Absent, the active cell is `(rows[0], cols[0])` as
 /// before.
+///
+/// `shown_text` (`shownText`, BUG-0355): the text the active cell SHOWS at its
+/// column's width, which a General number's step counts its decimals from
+/// (`next_decimal_format_shown`); absent, General's full rendering.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn adjust_number_format_decimals(
@@ -3824,8 +3952,9 @@ pub fn adjust_number_format_decimals(
     active_col: Option<u32>,
     sheet_indices: Option<Vec<usize>>,
     target: Option<CellTargetRef>,
+    shown_text: Option<String>,
 ) -> Result<FormattingResult, String> {
-    adjust_number_format_decimals_from_wire(
+    adjust_number_format_decimals_from_wire_shown(
         &state,
         &file_state,
         &rows.0,
@@ -3834,6 +3963,7 @@ pub fn adjust_number_format_decimals(
         (active_row, active_col),
         sheet_indices.as_deref().unwrap_or(&[]),
         target.as_ref(),
+        shown_text.as_deref(),
     )
 }
 
@@ -3852,6 +3982,24 @@ pub(crate) fn adjust_number_format_decimals_from_wire(
     group: &[usize],
     target: Option<&CellTargetRef>,
 ) -> Result<FormattingResult, String> {
+    adjust_number_format_decimals_from_wire_shown(state, file_state, rows, cols, delta, active, group, target, None)
+}
+
+/// [`adjust_number_format_decimals_from_wire`] with the text the ACTIVE cell
+/// shows at its column's width (`shown`, BUG-0355): a General number's step
+/// counts the decimals the grid shows (`next_decimal_format_shown`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn adjust_number_format_decimals_from_wire_shown(
+    state: &AppState,
+    file_state: &FileState,
+    rows: &[u32],
+    cols: &[u32],
+    delta: i32,
+    active: (Option<u32>, Option<u32>),
+    group: &[usize],
+    target: Option<&CellTargetRef>,
+    shown: Option<&str>,
+) -> Result<FormattingResult, String> {
     if delta != 1 && delta != -1 {
         return Err(format!("delta must be 1 or -1 (got {})", delta));
     }
@@ -3869,7 +4017,7 @@ pub(crate) fn adjust_number_format_decimals_from_wire(
     let (Some(active_row), Some(active_col)) = (resolve(active.0, rows, "row")?, resolve(active.1, cols, "column")?) else {
         return Ok(FormattingResult { cells: Vec::new(), styles: Vec::new() });
     };
-    adjust_number_format_decimals_at(state, file_state, (active_row, active_col), rows, cols, delta, group, target)
+    adjust_number_format_decimals_at(state, file_state, (active_row, active_col), rows, cols, delta, group, target, shown)
 }
 
 /// `rows` and `cols` as ONE rectangle, when they are: each list holds every
@@ -3962,6 +4110,7 @@ fn adjust_number_format_decimals_at(
     delta: i32,
     group: &[usize],
     target: Option<&CellTargetRef>,
+    shown: Option<&str>,
 ) -> Result<FormattingResult, String> {
     let unchanged = || FormattingResult { cells: Vec::new(), styles: Vec::new() };
     let (active_row, active_col) = active;
@@ -3992,7 +4141,7 @@ fn adjust_number_format_decimals_at(
         };
         let style = locks.styles.get(decide_grid.effective_style_index(active_row, active_col));
         let value = decide_grid.get_cell(active_row, active_col).map(|c| &c.value);
-        next_decimal_format(&style.number_format, value, delta)
+        next_decimal_format_shown(&style.number_format, value, delta, shown)
     };
     let Some(next) = next else {
         return Ok(unchanged());

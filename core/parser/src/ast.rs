@@ -22,6 +22,31 @@
 use identity::RefSiteId;
 use serde::{Deserialize, Serialize};
 
+/// The SHEET QUALIFIER of a reference whose sheet was DELETED -- Excel's
+/// `=#REF!A1`.
+///
+/// Excel [LIVE, Excel 16, 2026-11-05, sheetspill/probe1.ps1] keeps a formula
+/// that read a deleted sheet and replaces only the sheet: `=Sheet2!A1` becomes
+/// `=#REF!A1`, `=SUM(Sheet2!A1:A3)+1` `=SUM(#REF!A1:A3)+1`, `Sheet2!A:A`
+/// `#REF!A:A`, `Sheet2!D1#` `#REF!D1#`, a defined name `=#REF!$A$1:$A$3`, a
+/// conditional format `=A1>#REF!$B$1` -- and every one evaluates `#REF!`
+/// (`ISREF` of one is FALSE). Under manual calculation the cell keeps showing
+/// its old value until F9.
+///
+/// The reference keeps its node (so its text keeps the cell part) and carries
+/// THIS as its sheet. A sheet may legally be CALLED `#REF!` ([LIVE]
+/// `Worksheet.Name = "#REF!"` is accepted and `='#REF!'!A1` reads it), so the
+/// marker is not that text: it begins with U+0001, which no sheet name can
+/// hold and no lexer path produces, so it can never name a real sheet. The
+/// parser produces it from the unquoted `#REF!A1` spelling, the renderer
+/// writes it back as `#REF!`, and the evaluator answers `#REF!` for it.
+pub const REF_ERROR_SHEET: &str = "\u{1}#REF!";
+
+/// True when a reference's sheet qualifier is [`REF_ERROR_SHEET`].
+pub fn is_ref_error_sheet(sheet: &Option<String>) -> bool {
+    sheet.as_deref() == Some(REF_ERROR_SHEET)
+}
+
 /// Represents a parsed formula expression.
 /// This is the core data structure that the evaluator will traverse.
 ///
@@ -50,8 +75,14 @@ pub enum Expression {
     },
 
     /// A range reference like A1:B10 or Sheet1!$A$1:$B$10.
-    /// Both start and end should be CellRef expressions.
-    /// The sheet applies to the entire range.
+    /// Start and end are CellRef expressions, except for Excel's range
+    /// OPERATOR between other references: a LET / LAMBDA name half (`b:b`,
+    /// `a:C3`, `A1:b`) is a `NamedRef`, and `Table1[a]:Table1[c]` holds two
+    /// `TableRef`s; the evaluator spans whatever each half refers to.
+    /// The sheet applies to the entire range. The END corner may carry its own
+    /// qualifier when one was typed (`Sheet1!A1:Sheet1!A3`), which only the
+    /// renderer reads (Excel's formula bar keeps it) and the evaluator checks
+    /// names the same sheet (`#VALUE!` otherwise).
     #[serde(rename = "range")]
     Range {
         sheet: Option<String>,
@@ -246,6 +277,32 @@ pub enum TableSpecifier {
     Totals,
     /// Special specifier combined with column: [#Headers],[Revenue]
     SpecialColumn(Box<TableSpecifier>, String),
+    /// The header row AND the data body: `[[#Headers],[#Data]]`.
+    ///
+    /// One of the TWO pairs of special items Excel accepts in one reference
+    /// (the other is [`TableSpecifier::DataAndTotals`]); `[[#Headers],[#Totals]]`
+    /// and `[[#All],[#Data]]` are refused at entry, and a reversed pair is
+    /// stored in this order [LIVE, Excel 16, parser lane probe: typed
+    /// `Table1[[#Data],[#Headers]]` is kept as `Table1[[#Headers],[#Data]]`].
+    /// A table with no header row reads its data body alone (Excel: ROWS 3 for
+    /// a 3-row headerless table). Before this the second item was read as a
+    /// COLUMN named `#Data` (BUG-0643).
+    HeadersAndData,
+    /// The data body AND the totals row: `[[#Data],[#Totals]]`. A table with no
+    /// totals row reads its data body alone [LIVE: ROWS 5 for a 5-row table].
+    DataAndTotals,
+    /// A special region and a COLUMN SPAN: `[[#Headers],[p]:[q]]`,
+    /// `[[#Headers],[#Data],[p]:[q]]` [LIVE, Excel 16: ROWS 1 and 5, COLUMNS 2].
+    SpecialColumnRange(Box<TableSpecifier>, String, String),
+    /// THE WHOLE TABLE, as its bare name says it: `Tbl` or `Tbl[]` -- the data
+    /// body, the region [`TableSpecifier::DataRows`] reads, but a different
+    /// SPELLING (NEW-bare-table-name). [LIVE, Excel 16, lane namese,
+    /// SCRATCH/namese/p1.txt, table Tbl of 3 rows x 2 columns] `=ROWS(Tbl)` and
+    /// `=ROWS(Tbl[])` are 3 and both show `=ROWS(Tbl)` in the formula bar and
+    /// are filed `ROWS(Tbl[])`; `=ROWS(Tbl[#Data])` (and `Tbl[[#Data]]`) is 3
+    /// too but shows and is filed `ROWS(Tbl[#Data])`. So the formula bar
+    /// renders this as the bare name and the stored text as `Tbl[]`.
+    Whole,
 }
 
 /// Built-in spreadsheet functions resolved at parse time.
@@ -510,6 +567,14 @@ pub enum BuiltinFunction {
     // Calcula-only padding (not in Excel); Snowflake semantics, see fn_lpad.
     LPad,
     RPad,
+    // Calcula-only short spellings (not in Excel: [LIVE] `=AVG(1,2)`,
+    // `=CEIL(1.5)`, `=POW(2,3)`, `=FACTORIAL(3)` are #NAME?). Each computes
+    // what its Excel counterpart does (AVERAGE, CEILING, POWER, FACT) and is
+    // its OWN function, so the formula keeps the name the user typed.
+    Avg,
+    Ceil,
+    Pow,
+    Factorial,
     ValueToText,
     ArrayToText,
 
@@ -572,6 +637,60 @@ pub enum BuiltinFunction {
     NegbinomDist,
     ConfidenceNorm,
     ConfidenceT,
+    ZTest,
+
+    // Excel's COMPATIBILITY functions (lane legacystats, 2026-11-05). Each is
+    // its OWN function, never the modern one under another name: it keeps the
+    // name it was typed with (the formula bar, `.cala` and the `.xlsx` file
+    // all show `=TDIST(..)`, which Excel writes with no `_xlfn.` prefix), and
+    // where its arguments or meaning differ from the modern function's
+    // (`TDIST(x,df,tails)` against `T.DIST(x,df,cumulative)`, `NORMSDIST(z)`
+    // against `NORM.S.DIST(z,cumulative)`) it has its own implementation.
+    // Before, the parser stored these under the modern name, so `TDIST(x,df,1)`
+    // ran as `T.DIST(x,df,TRUE)` -- the LEFT tail -- and `NORMSDIST(z)` was
+    // `#VALUE!` at the modern arity.
+    NormSDistCompat,
+    TDistCompat,
+    FDistCompat,
+    BetaDistCompat,
+    LognormDistCompat,
+    HypgeomDistCompat,
+    NegbinomDistCompat,
+    // Same arguments and meaning as the modern function; the shared
+    // implementation runs, the name stays the one typed.
+    NormDistCompat,
+    NormInvCompat,
+    NormSInvCompat,
+    TInvCompat,
+    TTestCompat,
+    ChiDistCompat,
+    ChiInvCompat,
+    ChiTestCompat,
+    FInvCompat,
+    FTestCompat,
+    BinomDistCompat,
+    CritBinomCompat,
+    PoissonCompat,
+    BetaInvCompat,
+    GammaDistCompat,
+    GammaInvCompat,
+    WeibullCompat,
+    ExponDistCompat,
+    LogInvCompat,
+    CovarCompat,
+    ConfidenceCompat,
+    ZTestCompat,
+    ForecastCompat,
+    // The modern spelling of a function whose compatibility spelling is the
+    // older variant (`StdevP` is `STDEVP`, this is `STDEV.P`).
+    StdevPop,
+    VarPop,
+    RankEq,
+    PercentileInc,
+    QuartileInc,
+    ModeSngl,
+    PercentRankInc,
+    GammaLnPrecise,
 
     // Descriptive/Analytical statistical functions
     Correl,
@@ -861,7 +980,8 @@ impl BuiltinFunction {
         match name.to_uppercase().as_str() {
             // Aggregate functions
             "SUM" => BuiltinFunction::Sum,
-            "AVERAGE" | "AVG" => BuiltinFunction::Average,
+            "AVERAGE" => BuiltinFunction::Average,
+            "AVG" => BuiltinFunction::Avg,
             "MIN" => BuiltinFunction::Min,
             "MAX" => BuiltinFunction::Max,
             "COUNT" => BuiltinFunction::Count,
@@ -895,9 +1015,11 @@ impl BuiltinFunction {
             "ABS" => BuiltinFunction::Abs,
             "ROUND" => BuiltinFunction::Round,
             "FLOOR" => BuiltinFunction::Floor,
-            "CEILING" | "CEIL" => BuiltinFunction::Ceiling,
+            "CEILING" => BuiltinFunction::Ceiling,
+            "CEIL" => BuiltinFunction::Ceil,
             "SQRT" => BuiltinFunction::Sqrt,
-            "POWER" | "POW" => BuiltinFunction::Power,
+            "POWER" => BuiltinFunction::Power,
+            "POW" => BuiltinFunction::Pow,
             "MOD" => BuiltinFunction::Mod,
             "INT" => BuiltinFunction::Int,
             "SIGN" => BuiltinFunction::Sign,
@@ -928,7 +1050,8 @@ impl BuiltinFunction {
             "GCD" => BuiltinFunction::Gcd,
             "LCM" => BuiltinFunction::Lcm,
             "COMBIN" => BuiltinFunction::Combin,
-            "FACT" | "FACTORIAL" => BuiltinFunction::Fact,
+            "FACT" => BuiltinFunction::Fact,
+            "FACTORIAL" => BuiltinFunction::Factorial,
             "DEGREES" => BuiltinFunction::Degrees,
             "RADIANS" => BuiltinFunction::Radians,
 
@@ -1012,15 +1135,21 @@ impl BuiltinFunction {
             // Statistical functions
             "MEDIAN" => BuiltinFunction::Median,
             "STDEV" => BuiltinFunction::Stdev,
-            "STDEVP" | "STDEV.P" => BuiltinFunction::StdevP,
+            "STDEVP" => BuiltinFunction::StdevP,
+            "STDEV.P" => BuiltinFunction::StdevPop,
             "VAR" => BuiltinFunction::Var,
-            "VARP" | "VAR.P" => BuiltinFunction::VarP,
+            "VARP" => BuiltinFunction::VarP,
+            "VAR.P" => BuiltinFunction::VarPop,
             "LARGE" => BuiltinFunction::Large,
             "SMALL" => BuiltinFunction::Small,
-            "RANK" | "RANK.EQ" => BuiltinFunction::Rank,
-            "PERCENTILE" | "PERCENTILE.INC" => BuiltinFunction::Percentile,
-            "QUARTILE" | "QUARTILE.INC" => BuiltinFunction::Quartile,
-            "MODE" | "MODE.SNGL" => BuiltinFunction::Mode,
+            "RANK" => BuiltinFunction::Rank,
+            "RANK.EQ" => BuiltinFunction::RankEq,
+            "PERCENTILE" => BuiltinFunction::Percentile,
+            "PERCENTILE.INC" => BuiltinFunction::PercentileInc,
+            "QUARTILE" => BuiltinFunction::Quartile,
+            "QUARTILE.INC" => BuiltinFunction::QuartileInc,
+            "MODE" => BuiltinFunction::Mode,
+            "MODE.SNGL" => BuiltinFunction::ModeSngl,
             "FREQUENCY" => BuiltinFunction::Frequency,
 
             // Financial functions
@@ -1129,51 +1258,88 @@ impl BuiltinFunction {
             "STDEV.S" => BuiltinFunction::StdevS,
             "VAR.S" => BuiltinFunction::VarS,
             "RANK.AVG" => BuiltinFunction::RankAvg,
-            "PERCENTRANK" | "PERCENTRANK.INC" => BuiltinFunction::PercentRank,
+            "PERCENTRANK" => BuiltinFunction::PercentRank,
+            "PERCENTRANK.INC" => BuiltinFunction::PercentRankInc,
             "TREND" => BuiltinFunction::Trend,
             "GROWTH" => BuiltinFunction::Growth,
             "LINEST" => BuiltinFunction::Linest,
             "LOGEST" => BuiltinFunction::Logest,
 
             // Probability distributions
-            "NORM.DIST" | "NORMDIST" => BuiltinFunction::NormDist,
-            "NORM.INV" | "NORMINV" => BuiltinFunction::NormInv,
-            "NORM.S.DIST" | "NORMSDIST" => BuiltinFunction::NormSDist,
-            "NORM.S.INV" | "NORMSINV" => BuiltinFunction::NormSInv,
-            "T.DIST" | "TDIST" => BuiltinFunction::TDist,
+            "NORM.DIST" => BuiltinFunction::NormDist,
+            "NORM.INV" => BuiltinFunction::NormInv,
+            "NORM.S.DIST" => BuiltinFunction::NormSDist,
+            "NORM.S.INV" => BuiltinFunction::NormSInv,
+            "T.DIST" => BuiltinFunction::TDist,
             "T.DIST.2T" => BuiltinFunction::TDist2T,
             "T.DIST.RT" => BuiltinFunction::TDistRT,
             "T.INV" => BuiltinFunction::TInv,
-            "T.INV.2T" | "TINV" => BuiltinFunction::TInv2T,
-            "T.TEST" | "TTEST" => BuiltinFunction::TTest,
-            "CHISQ.DIST" | "CHISQDIST" => BuiltinFunction::ChisqDist,
-            "CHISQ.DIST.RT" | "CHIDIST" => BuiltinFunction::ChisqDistRT,
+            "T.INV.2T" => BuiltinFunction::TInv2T,
+            "T.TEST" => BuiltinFunction::TTest,
+            "CHISQ.DIST" => BuiltinFunction::ChisqDist,
+            "CHISQ.DIST.RT" => BuiltinFunction::ChisqDistRT,
             "CHISQ.INV" => BuiltinFunction::ChisqInv,
-            "CHISQ.INV.RT" | "CHIINV" => BuiltinFunction::ChisqInvRT,
-            "CHISQ.TEST" | "CHITEST" => BuiltinFunction::ChisqTest,
-            "F.DIST" | "FDIST" => BuiltinFunction::FDist,
+            "CHISQ.INV.RT" => BuiltinFunction::ChisqInvRT,
+            "CHISQ.TEST" => BuiltinFunction::ChisqTest,
+            "F.DIST" => BuiltinFunction::FDist,
             "F.DIST.RT" => BuiltinFunction::FDistRT,
             "F.INV" => BuiltinFunction::FInv,
-            "F.INV.RT" | "FINV" => BuiltinFunction::FInvRT,
-            "F.TEST" | "FTEST" => BuiltinFunction::FTest,
-            "BINOM.DIST" | "BINOMDIST" => BuiltinFunction::BinomDist,
-            "BINOM.INV" | "CRITBINOM" => BuiltinFunction::BinomInv,
+            "F.INV.RT" => BuiltinFunction::FInvRT,
+            "F.TEST" => BuiltinFunction::FTest,
+            "BINOM.DIST" => BuiltinFunction::BinomDist,
+            "BINOM.INV" => BuiltinFunction::BinomInv,
             "BINOM.DIST.RANGE" => BuiltinFunction::BinomDistRange,
-            "POISSON.DIST" | "POISSONDIST" => BuiltinFunction::PoissonDist,
-            "BETA.DIST" | "BETADIST" => BuiltinFunction::BetaDist,
-            "BETA.INV" | "BETAINV" => BuiltinFunction::BetaInv,
-            "GAMMA.DIST" | "GAMMADIST" => BuiltinFunction::GammaDist,
-            "GAMMA.INV" | "GAMMAINV" => BuiltinFunction::GammaInv,
+            "POISSON.DIST" => BuiltinFunction::PoissonDist,
+            "BETA.DIST" => BuiltinFunction::BetaDist,
+            "BETA.INV" => BuiltinFunction::BetaInv,
+            "GAMMA.DIST" => BuiltinFunction::GammaDist,
+            "GAMMA.INV" => BuiltinFunction::GammaInv,
             "GAMMA" => BuiltinFunction::GammaFn,
-            "GAMMALN" | "GAMMALN.PRECISE" => BuiltinFunction::GammaLnFn,
-            "WEIBULL.DIST" | "WEIBULL" => BuiltinFunction::WeibullDist,
-            "EXPON.DIST" | "EXPONDIST" => BuiltinFunction::ExponDist,
-            "LOGNORM.DIST" | "LOGNORMDIST" => BuiltinFunction::LognormDist,
-            "LOGNORM.INV" | "LOGINV" => BuiltinFunction::LognormInv,
-            "HYPGEOM.DIST" | "HYPGEOMDIST" => BuiltinFunction::HypgeomDist,
-            "NEGBINOM.DIST" | "NEGBINOMDIST" => BuiltinFunction::NegbinomDist,
+            "GAMMALN" => BuiltinFunction::GammaLnFn,
+            "GAMMALN.PRECISE" => BuiltinFunction::GammaLnPrecise,
+            "WEIBULL.DIST" => BuiltinFunction::WeibullDist,
+            "EXPON.DIST" => BuiltinFunction::ExponDist,
+            "LOGNORM.DIST" => BuiltinFunction::LognormDist,
+            "LOGNORM.INV" => BuiltinFunction::LognormInv,
+            "HYPGEOM.DIST" => BuiltinFunction::HypgeomDist,
+            "NEGBINOM.DIST" => BuiltinFunction::NegbinomDist,
             "CONFIDENCE.NORM" => BuiltinFunction::ConfidenceNorm,
             "CONFIDENCE.T" => BuiltinFunction::ConfidenceT,
+            "Z.TEST" => BuiltinFunction::ZTest,
+
+            // Excel's compatibility functions: each its own function under its
+            // own name (see the enum). There is no `POISSONDIST` or
+            // `CHISQDIST` in Excel ([LIVE] Excel 16: #NAME?), so neither is
+            // a built-in here.
+            "NORMSDIST" => BuiltinFunction::NormSDistCompat,
+            "TDIST" => BuiltinFunction::TDistCompat,
+            "FDIST" => BuiltinFunction::FDistCompat,
+            "BETADIST" => BuiltinFunction::BetaDistCompat,
+            "LOGNORMDIST" => BuiltinFunction::LognormDistCompat,
+            "HYPGEOMDIST" => BuiltinFunction::HypgeomDistCompat,
+            "NEGBINOMDIST" => BuiltinFunction::NegbinomDistCompat,
+            "NORMDIST" => BuiltinFunction::NormDistCompat,
+            "NORMINV" => BuiltinFunction::NormInvCompat,
+            "NORMSINV" => BuiltinFunction::NormSInvCompat,
+            "TINV" => BuiltinFunction::TInvCompat,
+            "TTEST" => BuiltinFunction::TTestCompat,
+            "CHIDIST" => BuiltinFunction::ChiDistCompat,
+            "CHIINV" => BuiltinFunction::ChiInvCompat,
+            "CHITEST" => BuiltinFunction::ChiTestCompat,
+            "FINV" => BuiltinFunction::FInvCompat,
+            "FTEST" => BuiltinFunction::FTestCompat,
+            "BINOMDIST" => BuiltinFunction::BinomDistCompat,
+            "CRITBINOM" => BuiltinFunction::CritBinomCompat,
+            "POISSON" => BuiltinFunction::PoissonCompat,
+            "BETAINV" => BuiltinFunction::BetaInvCompat,
+            "GAMMADIST" => BuiltinFunction::GammaDistCompat,
+            "GAMMAINV" => BuiltinFunction::GammaInvCompat,
+            "WEIBULL" => BuiltinFunction::WeibullCompat,
+            "EXPONDIST" => BuiltinFunction::ExponDistCompat,
+            "LOGINV" => BuiltinFunction::LogInvCompat,
+            "COVAR" => BuiltinFunction::CovarCompat,
+            "CONFIDENCE" => BuiltinFunction::ConfidenceCompat,
+            "ZTEST" => BuiltinFunction::ZTestCompat,
 
             // Descriptive/Analytical statistical functions
             "CORREL" => BuiltinFunction::Correl,
@@ -1182,7 +1348,7 @@ impl BuiltinFunction {
             "SLOPE" => BuiltinFunction::Slope,
             "INTERCEPT" => BuiltinFunction::Intercept,
             "STEYX" => BuiltinFunction::Steyx,
-            "COVARIANCE.P" | "COVAR" => BuiltinFunction::CovarianceP,
+            "COVARIANCE.P" => BuiltinFunction::CovarianceP,
             "COVARIANCE.S" => BuiltinFunction::CovarianceS,
             "KURT" => BuiltinFunction::Kurt,
             "SKEW" => BuiltinFunction::Skew,
@@ -1205,7 +1371,8 @@ impl BuiltinFunction {
             "GAUSS" => BuiltinFunction::Gauss,
 
             // Forecasting
-            "FORECAST" | "FORECAST.LINEAR" => BuiltinFunction::ForecastLinear,
+            "FORECAST" => BuiltinFunction::ForecastCompat,
+            "FORECAST.LINEAR" => BuiltinFunction::ForecastLinear,
             "FORECAST.ETS" => BuiltinFunction::ForecastEts,
             "FORECAST.ETS.CONFINT" => BuiltinFunction::ForecastEtsConfint,
             "FORECAST.ETS.SEASONALITY" => BuiltinFunction::ForecastEtsSeason,
@@ -1459,8 +1626,18 @@ impl BuiltinFunction {
     /// must keep meaning what the workbook says. Excel's own function names
     /// are not on this list: in Excel a call to one of them always runs the
     /// function, so no imported workbook can depend on overriding it.
+    /// `AVG`, `CEIL`, `POW` and `FACTORIAL` (lane formc) are Calcula-only for
+    /// the same reason and just as likely names for a workbook's own LAMBDA.
     pub fn yields_to_user_definitions(&self) -> bool {
-        matches!(self, BuiltinFunction::LPad | BuiltinFunction::RPad)
+        matches!(
+            self,
+            BuiltinFunction::LPad
+                | BuiltinFunction::RPad
+                | BuiltinFunction::Avg
+                | BuiltinFunction::Ceil
+                | BuiltinFunction::Pow
+                | BuiltinFunction::Factorial
+        )
     }
 
     /// The name a user definition must carry to take this call over: the
@@ -1482,7 +1659,8 @@ impl BuiltinFunction {
 
     /// Returns the canonical uppercase function name for serialization.
     /// This is the inverse of `from_name`: for each variant, returns the primary
-    /// (most common) name. Aliases like "AVG" map to "AVERAGE".
+    /// name. A function is stored under the name typed: Calcula's `AVG` is
+    /// its own variant and renders "AVG", never "AVERAGE" (lane formc).
     pub fn to_canonical_name(&self) -> &str {
         match self {
             BuiltinFunction::Sum => "SUM",
@@ -1694,6 +1872,10 @@ impl BuiltinFunction {
             BuiltinFunction::TextBefore => "TEXTBEFORE",
             BuiltinFunction::TextAfter => "TEXTAFTER",
             BuiltinFunction::LPad => "LPAD",
+            BuiltinFunction::Avg => "AVG",
+            BuiltinFunction::Ceil => "CEIL",
+            BuiltinFunction::Pow => "POW",
+            BuiltinFunction::Factorial => "FACTORIAL",
             BuiltinFunction::RPad => "RPAD",
             BuiltinFunction::ValueToText => "VALUETOTEXT",
             BuiltinFunction::ArrayToText => "ARRAYTOTEXT",
@@ -1751,6 +1933,45 @@ impl BuiltinFunction {
             BuiltinFunction::NegbinomDist => "NEGBINOM.DIST",
             BuiltinFunction::ConfidenceNorm => "CONFIDENCE.NORM",
             BuiltinFunction::ConfidenceT => "CONFIDENCE.T",
+            BuiltinFunction::ZTest => "Z.TEST",
+            BuiltinFunction::NormSDistCompat => "NORMSDIST",
+            BuiltinFunction::TDistCompat => "TDIST",
+            BuiltinFunction::FDistCompat => "FDIST",
+            BuiltinFunction::BetaDistCompat => "BETADIST",
+            BuiltinFunction::LognormDistCompat => "LOGNORMDIST",
+            BuiltinFunction::HypgeomDistCompat => "HYPGEOMDIST",
+            BuiltinFunction::NegbinomDistCompat => "NEGBINOMDIST",
+            BuiltinFunction::NormDistCompat => "NORMDIST",
+            BuiltinFunction::NormInvCompat => "NORMINV",
+            BuiltinFunction::NormSInvCompat => "NORMSINV",
+            BuiltinFunction::TInvCompat => "TINV",
+            BuiltinFunction::TTestCompat => "TTEST",
+            BuiltinFunction::ChiDistCompat => "CHIDIST",
+            BuiltinFunction::ChiInvCompat => "CHIINV",
+            BuiltinFunction::ChiTestCompat => "CHITEST",
+            BuiltinFunction::FInvCompat => "FINV",
+            BuiltinFunction::FTestCompat => "FTEST",
+            BuiltinFunction::BinomDistCompat => "BINOMDIST",
+            BuiltinFunction::CritBinomCompat => "CRITBINOM",
+            BuiltinFunction::PoissonCompat => "POISSON",
+            BuiltinFunction::BetaInvCompat => "BETAINV",
+            BuiltinFunction::GammaDistCompat => "GAMMADIST",
+            BuiltinFunction::GammaInvCompat => "GAMMAINV",
+            BuiltinFunction::WeibullCompat => "WEIBULL",
+            BuiltinFunction::ExponDistCompat => "EXPONDIST",
+            BuiltinFunction::LogInvCompat => "LOGINV",
+            BuiltinFunction::CovarCompat => "COVAR",
+            BuiltinFunction::ConfidenceCompat => "CONFIDENCE",
+            BuiltinFunction::ZTestCompat => "ZTEST",
+            BuiltinFunction::ForecastCompat => "FORECAST",
+            BuiltinFunction::StdevPop => "STDEV.P",
+            BuiltinFunction::VarPop => "VAR.P",
+            BuiltinFunction::RankEq => "RANK.EQ",
+            BuiltinFunction::PercentileInc => "PERCENTILE.INC",
+            BuiltinFunction::QuartileInc => "QUARTILE.INC",
+            BuiltinFunction::ModeSngl => "MODE.SNGL",
+            BuiltinFunction::PercentRankInc => "PERCENTRANK.INC",
+            BuiltinFunction::GammaLnPrecise => "GAMMALN.PRECISE",
             BuiltinFunction::Correl => "CORREL",
             BuiltinFunction::Pearson => "PEARSON",
             BuiltinFunction::Rsq => "RSQ",
@@ -1778,7 +1999,7 @@ impl BuiltinFunction {
             BuiltinFunction::PermutationA => "PERMUTATIONA",
             BuiltinFunction::Phi => "PHI",
             BuiltinFunction::Gauss => "GAUSS",
-            BuiltinFunction::ForecastLinear => "FORECAST",
+            BuiltinFunction::ForecastLinear => "FORECAST.LINEAR",
             BuiltinFunction::ForecastEts => "FORECAST.ETS",
             BuiltinFunction::ForecastEtsConfint => "FORECAST.ETS.CONFINT",
             BuiltinFunction::ForecastEtsSeason => "FORECAST.ETS.SEASONALITY",
@@ -2011,8 +2232,8 @@ impl BuiltinFunction {
             FunctionMeta::new("ROUND", "Math", "ROUND(number, num_digits)", "Rounds a number"),
             FunctionMeta::new("ROUNDUP", "Math", "ROUNDUP(number, num_digits)", "Rounds a number up, away from zero"),
             FunctionMeta::new("ROUNDDOWN", "Math", "ROUNDDOWN(number, num_digits)", "Rounds a number down, toward zero"),
-            FunctionMeta::new("FLOOR", "Math", "FLOOR(number, significance)", "Rounds a number down to the nearest multiple of significance"),
-            FunctionMeta::new("CEILING", "Math", "CEILING(number, significance)", "Rounds a number up to the nearest multiple of significance"),
+            FunctionMeta::new("FLOOR", "Compatibility", "FLOOR(number, significance)", "Rounds a number down to the nearest multiple of significance"),
+            FunctionMeta::new("CEILING", "Compatibility", "CEILING(number, significance)", "Rounds a number up to the nearest multiple of significance"),
             FunctionMeta::new("SQRT", "Math", "SQRT(number)", "Square root"),
             FunctionMeta::new("POWER", "Math", "POWER(number, power)", "Raises to power"),
             FunctionMeta::new("MOD", "Math", "MOD(number, divisor)", "Returns remainder"),
@@ -2026,6 +2247,10 @@ impl BuiltinFunction {
             FunctionMeta::new("COMBIN", "Math", "COMBIN(number, number_chosen)", "Returns the number of combinations"),
             FunctionMeta::new("COMBINA", "Math", "COMBINA(number, number_chosen)", "Returns the number of combinations with repetitions"),
             FunctionMeta::new("FACT", "Math", "FACT(number)", "Returns the factorial of a number"),
+            FunctionMeta::new("AVG", "Math", "AVG(number1, [number2], ...)", "Returns the average of numbers, as AVERAGE does (Calcula function, not in Excel)"),
+            FunctionMeta::new("CEIL", "Math", "CEIL(number, significance)", "Rounds a number up to the nearest multiple of significance, as CEILING does (Calcula function, not in Excel)"),
+            FunctionMeta::new("POW", "Math", "POW(number, power)", "Raises to power, as POWER does (Calcula function, not in Excel)"),
+            FunctionMeta::new("FACTORIAL", "Math", "FACTORIAL(number)", "Returns the factorial of a number, as FACT does (Calcula function, not in Excel)"),
             FunctionMeta::new("FACTDOUBLE", "Math", "FACTDOUBLE(number)", "Returns the double factorial of a number"),
             FunctionMeta::new("MULTINOMIAL", "Math", "MULTINOMIAL(number1, [number2], ...)", "Returns the multinomial of a set of numbers"),
             FunctionMeta::new("PI", "Math", "PI()", "Returns the value of pi"),
@@ -2093,7 +2318,7 @@ impl BuiltinFunction {
             FunctionMeta::new("XOR", "Logical", "XOR(logical1, [logical2], ...)", "Returns TRUE if an odd number of arguments are TRUE"),
             FunctionMeta::new("LET", "Logical", "LET(name1, name_value1, calculation_or_name2, [name_value2, calculation_or_name3], ...)", "Assigns names to calculation results to improve readability and performance"),
             FunctionMeta::new("LAMBDA", "Logical", "LAMBDA([parameter1, parameter2, ...], calculation)", "Creates a custom reusable function with parameters"),
-            FunctionMeta::with_template("MAP", "Logical", "MAP(array, lambda)", "Returns an array by applying a LAMBDA to each value in an array", "=MAP(, LAMBDA(, ))"),
+            FunctionMeta::with_template("MAP", "Logical", "MAP(array1, [array2], ..., lambda)", "Returns an array by applying a LAMBDA to each value in one or more arrays", "=MAP(, LAMBDA(, ))"),
             FunctionMeta::with_template("REDUCE", "Logical", "REDUCE(initial_value, array, lambda)", "Reduces an array to a single value by applying a LAMBDA accumulator", "=REDUCE(, , LAMBDA(, , ))"),
             FunctionMeta::with_template("SCAN", "Logical", "SCAN(initial_value, array, lambda)", "Scans an array by applying a LAMBDA and returns an array of intermediate values", "=SCAN(, , LAMBDA(, , ))"),
             FunctionMeta::with_template("MAKEARRAY", "Logical", "MAKEARRAY(rows, cols, lambda)", "Returns an array of specified dimensions by applying a LAMBDA", "=MAKEARRAY(, , LAMBDA(, , ))"),
@@ -2230,16 +2455,16 @@ impl BuiltinFunction {
             // Statistical functions
             // ================================================================
             FunctionMeta::new("MEDIAN", "Statistical", "MEDIAN(number1, [number2], ...)", "Returns the median of the given numbers"),
-            FunctionMeta::new("STDEV", "Statistical", "STDEV(number1, [number2], ...)", "Estimates standard deviation based on a sample"),
-            FunctionMeta::new("STDEVP", "Statistical", "STDEVP(number1, [number2], ...)", "Calculates standard deviation based on the entire population"),
-            FunctionMeta::new("VAR", "Statistical", "VAR(number1, [number2], ...)", "Estimates variance based on a sample"),
-            FunctionMeta::new("VARP", "Statistical", "VARP(number1, [number2], ...)", "Calculates variance based on the entire population"),
+            FunctionMeta::new("STDEV", "Compatibility", "STDEV(number1, [number2], ...)", "Estimates standard deviation based on a sample"),
+            FunctionMeta::new("STDEVP", "Compatibility", "STDEVP(number1, [number2], ...)", "Calculates standard deviation based on the entire population"),
+            FunctionMeta::new("VAR", "Compatibility", "VAR(number1, [number2], ...)", "Estimates variance based on a sample"),
+            FunctionMeta::new("VARP", "Compatibility", "VARP(number1, [number2], ...)", "Calculates variance based on the entire population"),
             FunctionMeta::new("LARGE", "Statistical", "LARGE(array, k)", "Returns the k-th largest value in a data set"),
             FunctionMeta::new("SMALL", "Statistical", "SMALL(array, k)", "Returns the k-th smallest value in a data set"),
-            FunctionMeta::new("RANK", "Statistical", "RANK(number, ref, [order])", "Returns the rank of a number in a list of numbers"),
-            FunctionMeta::new("PERCENTILE", "Statistical", "PERCENTILE(array, k)", "Returns the k-th percentile of values in a range"),
-            FunctionMeta::new("QUARTILE", "Statistical", "QUARTILE(array, quart)", "Returns the quartile of a data set"),
-            FunctionMeta::new("MODE", "Statistical", "MODE(number1, [number2], ...)", "Returns the most frequently occurring value"),
+            FunctionMeta::new("RANK", "Compatibility", "RANK(number, ref, [order])", "Returns the rank of a number in a list of numbers"),
+            FunctionMeta::new("PERCENTILE", "Compatibility", "PERCENTILE(array, k)", "Returns the k-th percentile of values in a range"),
+            FunctionMeta::new("QUARTILE", "Compatibility", "QUARTILE(array, quart)", "Returns the quartile of a data set"),
+            FunctionMeta::new("MODE", "Compatibility", "MODE(number1, [number2], ...)", "Returns the most frequently occurring value"),
             FunctionMeta::new("FREQUENCY", "Statistical", "FREQUENCY(data_array, bins_array)", "Returns a frequency distribution as a vertical array"),
             // Dot-style aliases
             FunctionMeta::new("STDEV.P", "Statistical", "STDEV.P(number1, [number2], ...)", "Calculates standard deviation based on the entire population"),
@@ -2254,7 +2479,7 @@ impl BuiltinFunction {
             FunctionMeta::new("QUARTILE.EXC", "Statistical", "QUARTILE.EXC(array, quart)", "Returns the quartile of a data set (exclusive)"),
             FunctionMeta::new("MODE.SNGL", "Statistical", "MODE.SNGL(number1, [number2], ...)", "Returns the most frequently occurring value"),
             FunctionMeta::new("MODE.MULT", "Statistical", "MODE.MULT(number1, [number2], ...)", "Returns a vertical array of the most frequently occurring values"),
-            FunctionMeta::new("PERCENTRANK", "Statistical", "PERCENTRANK(array, x, [significance])", "Returns the percentage rank of a value in a data set"),
+            FunctionMeta::new("PERCENTRANK", "Compatibility", "PERCENTRANK(array, x, [significance])", "Returns the percentage rank of a value in a data set"),
             FunctionMeta::new("PERCENTRANK.INC", "Statistical", "PERCENTRANK.INC(array, x, [significance])", "Returns the percentage rank of a value (inclusive)"),
             FunctionMeta::new("PERCENTRANK.EXC", "Statistical", "PERCENTRANK.EXC(array, x, [significance])", "Returns the percentage rank of a value (exclusive)"),
             // Regression & Correlation
@@ -2270,7 +2495,7 @@ impl BuiltinFunction {
             FunctionMeta::new("STEYX", "Statistical", "STEYX(known_y, known_x)", "Returns the standard error of the predicted y-value"),
             FunctionMeta::new("COVARIANCE.P", "Statistical", "COVARIANCE.P(array1, array2)", "Returns population covariance"),
             FunctionMeta::new("COVARIANCE.S", "Statistical", "COVARIANCE.S(array1, array2)", "Returns sample covariance"),
-            FunctionMeta::new("COVAR", "Statistical", "COVAR(array1, array2)", "Returns covariance"),
+            FunctionMeta::new("COVAR", "Compatibility", "COVAR(array1, array2)", "Returns covariance"),
             // Descriptive statistics
             FunctionMeta::new("KURT", "Statistical", "KURT(number1, [number2], ...)", "Returns the kurtosis of a data set"),
             FunctionMeta::new("SKEW", "Statistical", "SKEW(number1, [number2], ...)", "Returns the skewness of a distribution"),
@@ -2328,8 +2553,9 @@ impl BuiltinFunction {
             FunctionMeta::new("NEGBINOM.DIST", "Statistical", "NEGBINOM.DIST(number_f, number_s, probability_s, cumulative)", "Returns the negative binomial distribution"),
             FunctionMeta::new("CONFIDENCE.NORM", "Statistical", "CONFIDENCE.NORM(alpha, standard_dev, size)", "Returns the confidence interval for a population mean (normal distribution)"),
             FunctionMeta::new("CONFIDENCE.T", "Statistical", "CONFIDENCE.T(alpha, standard_dev, size)", "Returns the confidence interval for a population mean (Student's t-distribution)"),
+            FunctionMeta::new("Z.TEST", "Statistical", "Z.TEST(array, x, [sigma])", "Returns the one-tailed probability-value of a z-test"),
             // Forecasting
-            FunctionMeta::new("FORECAST", "Statistical", "FORECAST(x, known_y, known_x)", "Calculates a future value along a linear trend"),
+            FunctionMeta::new("FORECAST", "Compatibility", "FORECAST(x, known_y, known_x)", "Calculates a future value along a linear trend"),
             FunctionMeta::new("FORECAST.LINEAR", "Statistical", "FORECAST.LINEAR(x, known_y, known_x)", "Calculates a future value along a linear trend"),
             FunctionMeta::new("FORECAST.ETS", "Statistical", "FORECAST.ETS(target_date, values, timeline, [seasonality], [data_completion], [aggregation])", "Returns a forecasted value based on exponential smoothing"),
             FunctionMeta::new("FORECAST.ETS.CONFINT", "Statistical", "FORECAST.ETS.CONFINT(target_date, values, timeline, [confidence_level], [seasonality], [data_completion], [aggregation])", "Returns a confidence interval for a forecast value"),
@@ -2343,34 +2569,37 @@ impl BuiltinFunction {
             FunctionMeta::new("STDEVPA", "Statistical", "STDEVPA(value1, [value2], ...)", "Calculates standard deviation of a population, including text and logicals"),
             FunctionMeta::new("VARA", "Statistical", "VARA(value1, [value2], ...)", "Estimates variance, including text and logicals"),
             FunctionMeta::new("VARPA", "Statistical", "VARPA(value1, [value2], ...)", "Calculates variance of a population, including text and logicals"),
-            // Legacy compatibility aliases (no separate catalog entry needed, same syntax)
-            FunctionMeta::new("NORMDIST", "Statistical", "NORMDIST(x, mean, standard_dev, cumulative)", "Returns the normal distribution"),
-            FunctionMeta::new("NORMINV", "Statistical", "NORMINV(probability, mean, standard_dev)", "Returns the inverse of the normal distribution"),
-            FunctionMeta::new("NORMSDIST", "Statistical", "NORMSDIST(z)", "Returns the standard normal cumulative distribution"),
-            FunctionMeta::new("NORMSINV", "Statistical", "NORMSINV(probability)", "Returns the inverse of the standard normal distribution"),
-            FunctionMeta::new("TDIST", "Statistical", "TDIST(x, degrees_freedom, tails)", "Returns the Student's t-distribution"),
-            FunctionMeta::new("TINV", "Statistical", "TINV(probability, degrees_freedom)", "Returns the inverse of the Student's t-distribution"),
-            FunctionMeta::new("TTEST", "Statistical", "TTEST(array1, array2, tails, type)", "Returns the probability associated with a Student's t-test"),
-            FunctionMeta::new("CHISQDIST", "Statistical", "CHISQDIST(x, degrees_freedom, cumulative)", "Returns the chi-squared distribution"),
-            FunctionMeta::new("CHIDIST", "Statistical", "CHIDIST(x, degrees_freedom)", "Returns the right-tailed chi-squared distribution"),
-            FunctionMeta::new("CHIINV", "Statistical", "CHIINV(probability, degrees_freedom)", "Returns the inverse of the right-tailed chi-squared distribution"),
-            FunctionMeta::new("CHITEST", "Statistical", "CHITEST(actual_range, expected_range)", "Returns the chi-squared test for independence"),
-            FunctionMeta::new("FDIST", "Statistical", "FDIST(x, degrees_freedom1, degrees_freedom2)", "Returns the F distribution"),
-            FunctionMeta::new("FINV", "Statistical", "FINV(probability, degrees_freedom1, degrees_freedom2)", "Returns the inverse of the F distribution"),
-            FunctionMeta::new("FTEST", "Statistical", "FTEST(array1, array2)", "Returns the result of an F-test"),
-            FunctionMeta::new("BINOMDIST", "Statistical", "BINOMDIST(number_s, trials, probability_s, cumulative)", "Returns the binomial distribution probability"),
-            FunctionMeta::new("CRITBINOM", "Statistical", "CRITBINOM(trials, probability_s, alpha)", "Returns the smallest value for which the binomial distribution is >= alpha"),
-            FunctionMeta::new("POISSONDIST", "Statistical", "POISSONDIST(x, mean, cumulative)", "Returns the Poisson distribution"),
-            FunctionMeta::new("BETADIST", "Statistical", "BETADIST(x, alpha, beta, [A], [B])", "Returns the beta cumulative distribution"),
-            FunctionMeta::new("BETAINV", "Statistical", "BETAINV(probability, alpha, beta, [A], [B])", "Returns the inverse of the beta distribution"),
-            FunctionMeta::new("GAMMADIST", "Statistical", "GAMMADIST(x, alpha, beta, cumulative)", "Returns the gamma distribution"),
-            FunctionMeta::new("GAMMAINV", "Statistical", "GAMMAINV(probability, alpha, beta)", "Returns the inverse of the gamma distribution"),
-            FunctionMeta::new("WEIBULL", "Statistical", "WEIBULL(x, alpha, beta, cumulative)", "Returns the Weibull distribution"),
-            FunctionMeta::new("EXPONDIST", "Statistical", "EXPONDIST(x, lambda, cumulative)", "Returns the exponential distribution"),
-            FunctionMeta::new("LOGNORMDIST", "Statistical", "LOGNORMDIST(x, mean, standard_dev)", "Returns the lognormal distribution"),
-            FunctionMeta::new("LOGINV", "Statistical", "LOGINV(probability, mean, standard_dev)", "Returns the inverse of the lognormal distribution"),
-            FunctionMeta::new("HYPGEOMDIST", "Statistical", "HYPGEOMDIST(sample_s, number_sample, population_s, number_pop)", "Returns the hypergeometric distribution"),
-            FunctionMeta::new("NEGBINOMDIST", "Statistical", "NEGBINOMDIST(number_f, number_s, probability_s)", "Returns the negative binomial distribution"),
+            // Excel's compatibility functions, each its own entry: its own name and
+            // its OWN arity (`TDIST` takes tails, `NORMSDIST` no cumulative flag),
+            // which `parser::builtin_arity` and the .xlsx export's arity check read.
+            FunctionMeta::new("NORMDIST", "Compatibility", "NORMDIST(x, mean, standard_dev, cumulative)", "Returns the normal distribution"),
+            FunctionMeta::new("NORMINV", "Compatibility", "NORMINV(probability, mean, standard_dev)", "Returns the inverse of the normal distribution"),
+            FunctionMeta::new("NORMSDIST", "Compatibility", "NORMSDIST(z)", "Returns the standard normal cumulative distribution"),
+            FunctionMeta::new("NORMSINV", "Compatibility", "NORMSINV(probability)", "Returns the inverse of the standard normal distribution"),
+            FunctionMeta::new("TDIST", "Compatibility", "TDIST(x, degrees_freedom, tails)", "Returns the Student's t-distribution"),
+            FunctionMeta::new("TINV", "Compatibility", "TINV(probability, degrees_freedom)", "Returns the inverse of the Student's t-distribution"),
+            FunctionMeta::new("TTEST", "Compatibility", "TTEST(array1, array2, tails, type)", "Returns the probability associated with a Student's t-test"),
+            FunctionMeta::new("CHIDIST", "Compatibility", "CHIDIST(x, degrees_freedom)", "Returns the right-tailed chi-squared distribution"),
+            FunctionMeta::new("CHIINV", "Compatibility", "CHIINV(probability, degrees_freedom)", "Returns the inverse of the right-tailed chi-squared distribution"),
+            FunctionMeta::new("CHITEST", "Compatibility", "CHITEST(actual_range, expected_range)", "Returns the chi-squared test for independence"),
+            FunctionMeta::new("FDIST", "Compatibility", "FDIST(x, degrees_freedom1, degrees_freedom2)", "Returns the F distribution"),
+            FunctionMeta::new("FINV", "Compatibility", "FINV(probability, degrees_freedom1, degrees_freedom2)", "Returns the inverse of the F distribution"),
+            FunctionMeta::new("FTEST", "Compatibility", "FTEST(array1, array2)", "Returns the result of an F-test"),
+            FunctionMeta::new("BINOMDIST", "Compatibility", "BINOMDIST(number_s, trials, probability_s, cumulative)", "Returns the binomial distribution probability"),
+            FunctionMeta::new("CRITBINOM", "Compatibility", "CRITBINOM(trials, probability_s, alpha)", "Returns the smallest value for which the binomial distribution is >= alpha"),
+            FunctionMeta::new("POISSON", "Compatibility", "POISSON(x, mean, cumulative)", "Returns the Poisson distribution"),
+            FunctionMeta::new("BETADIST", "Compatibility", "BETADIST(x, alpha, beta, [A], [B])", "Returns the beta cumulative distribution"),
+            FunctionMeta::new("BETAINV", "Compatibility", "BETAINV(probability, alpha, beta, [A], [B])", "Returns the inverse of the beta distribution"),
+            FunctionMeta::new("GAMMADIST", "Compatibility", "GAMMADIST(x, alpha, beta, cumulative)", "Returns the gamma distribution"),
+            FunctionMeta::new("GAMMAINV", "Compatibility", "GAMMAINV(probability, alpha, beta)", "Returns the inverse of the gamma distribution"),
+            FunctionMeta::new("WEIBULL", "Compatibility", "WEIBULL(x, alpha, beta, cumulative)", "Returns the Weibull distribution"),
+            FunctionMeta::new("EXPONDIST", "Compatibility", "EXPONDIST(x, lambda, cumulative)", "Returns the exponential distribution"),
+            FunctionMeta::new("LOGNORMDIST", "Compatibility", "LOGNORMDIST(x, mean, standard_dev)", "Returns the lognormal distribution"),
+            FunctionMeta::new("LOGINV", "Compatibility", "LOGINV(probability, mean, standard_dev)", "Returns the inverse of the lognormal distribution"),
+            FunctionMeta::new("HYPGEOMDIST", "Compatibility", "HYPGEOMDIST(sample_s, number_sample, population_s, number_pop)", "Returns the hypergeometric distribution"),
+            FunctionMeta::new("NEGBINOMDIST", "Compatibility", "NEGBINOMDIST(number_f, number_s, probability_s)", "Returns the negative binomial distribution"),
+            FunctionMeta::new("CONFIDENCE", "Compatibility", "CONFIDENCE(alpha, standard_dev, size)", "Returns the confidence interval for a population mean (normal distribution)"),
+            FunctionMeta::new("ZTEST", "Compatibility", "ZTEST(array, x, [sigma])", "Returns the one-tailed probability-value of a z-test"),
 
             // ================================================================
             // Financial functions
@@ -2581,10 +2810,6 @@ impl BuiltinFunction {
             // Parser aliases (not shown in catalog with separate entries,
             // but included so from_name() lookup works)
             // ================================================================
-            FunctionMeta::alias("AVG", "Math"),
-            FunctionMeta::alias("CEIL", "Math"),
-            FunctionMeta::alias("POW", "Math"),
-            FunctionMeta::alias("FACTORIAL", "Math"),
             FunctionMeta::alias("FILE.READ", "File"),
             FunctionMeta::alias("FILE.LINES", "File"),
             FunctionMeta::alias("FILE.EXISTS", "File"),

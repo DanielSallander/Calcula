@@ -27,5 +27,8 @@ mod tests;
 // Re-export commonly used types for convenience
 pub use ast::{BinaryOperator, BuiltinFunction, Expression, FunctionMeta, UnaryOperator, Value};
 pub use lexer::Lexer;
-pub use parser::{parse, ParseError, ParseResult, Parser};
+pub use parser::{
+    anchor_name_references, any_unbound_name, bind_spill_anchor_names, builtin_arity, check_entered_formula, parse,
+    replace_unbound_names, resolve_r1c1_names, ParseError, ParseResult, Parser,
+};
 pub use token::Token;

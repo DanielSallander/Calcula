@@ -80,7 +80,13 @@ describe('AppEvents', () => {
     // 79 since DATA_COMMAND_APPLIED (round 11): a Sort, a Remove Duplicates or
     // a Text to Columns rewrote cells in place -- Excel ends the clipboard
     // mode, a copy's and a cut's, on each [LIVE], and Core's clipboard listens.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`79`);
+    //
+    // 80 since BI_FORMAT_CULTURE_APPLIED (open-ledger round C): Rust's walk
+    // that gives every model engine the new DAX FORMAT culture ends AFTER
+    // LOCALE_CHANGED, so a listener that re-queries a model waits for this
+    // (@api/locale onBiFormatCultureApplied) -- the pivots, the pivot
+    // cross-filter views, the charts and the bound measures.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`80`);
   });
 
   it('all values use the app: prefix', () => {

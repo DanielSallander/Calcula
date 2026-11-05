@@ -383,6 +383,29 @@ describe("resolveVisualContainer -- bound > stored > defaults, per leaf", () => 
     expect(r.title.show).toBe(true); // an unbound leaf still reads the stored literal
   });
 
+  it("BUG-0510: a BOUND solid background colour paints over a stored gradient and a hidden background", () => {
+    const gradient = { type: "linear" as const, stops: [{ offset: 0, color: "#000000" }, { offset: 1, color: "#ffffff" }] };
+    const stored = { background: { gradient, show: false } } as VisualContainerFormat;
+    // Unbound: the stored gradient and the hidden background stand.
+    const plain = resolveVisualContainer(stored, defaults());
+    expect(plain.background.gradient).toEqual(gradient);
+    expect(plain.background.show).toBe(false);
+    // Bound colour: the colour paints -- no gradient over it, the background shown.
+    const bound = new Map<ContainerFieldId, unknown>([["background.color", "#ff0000"]]);
+    const r = resolveVisualContainer(stored, defaults(), bound);
+    expect(r.background.color).toBe("#ff0000");
+    expect(r.background.gradient).toBeNull();
+    expect(r.background.show).toBe(true);
+    // A bound VISIBILITY still decides whether it shows.
+    const both = new Map<ContainerFieldId, unknown>([["background.color", "#ff0000"], ["background.show", false]]);
+    expect(resolveVisualContainer(stored, defaults(), both).background.show).toBe(false);
+    // "" (the family default) and an invalid colour are no solid colour: the gradient stays.
+    for (const value of ["", "rgb(1,2,3)"]) {
+      const notSolid = new Map<ContainerFieldId, unknown>([["background.color", value]]);
+      expect(resolveVisualContainer(stored, defaults(), notSolid).background.gradient).toEqual(gradient);
+    }
+  });
+
   it("an INVALID bound value falls back to the STORED literal, not the default", () => {
     const stored: VisualContainerFormat = { title: { color: "#111111", fontSize: 18 }, border: { width: 3 } };
     const bound = new Map<ContainerFieldId, unknown>([

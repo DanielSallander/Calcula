@@ -88,6 +88,13 @@ pub enum CubeError {
     NotAvailable,
     /// Bad reference (e.g. CUBERANKEDMEMBER rank out of range) -> #REF!
     Reference,
+    /// The model answered a number a cell cannot hold: DAX's `+Infinity`,
+    /// `-Infinity` or `NaN` (`1/0`, `-1/0`, `0/0` are "not errors but special
+    /// values in DAX" -- *The Definitive Guide to DAX*) -> #NUM!. [LIVE]
+    /// Excel 16's CUBEVALUE over a data-model measure `1/0`, `-1/0` or `0/0`
+    /// shows `#NUM!` (Value2 -2146826252) for all three, and so does a
+    /// data-model PivotTable's value cell; never `#DIV/0!`.
+    Num,
     /// The model's security refused the query: the active "view as" role
     /// denies an object the formula reads, or its row filters cannot be
     /// enforced for it. Renders as `#N/A` like [`NotAvailable`](Self::NotAvailable)
@@ -108,6 +115,7 @@ impl CubeError {
             // distinction survives everywhere a message can be carried.
             CubeError::NotAvailable | CubeError::Refused => CellError::NA,
             CubeError::Reference => CellError::Ref,
+            CubeError::Num => CellError::Num,
         }
     }
 }

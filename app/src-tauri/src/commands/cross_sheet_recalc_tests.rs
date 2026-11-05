@@ -1600,6 +1600,44 @@ fn a_sheet_moved_or_copied_into_a_3d_span_is_read_by_it_and_one_moved_out_is_not
     assert_eq!(wb.number(0, 0, 0), 5.0, "a copy inside the span: its edit did not recalculate the sum");
 }
 
+/// BUG-0658: under MANUAL calculation a sheet move or copy that changes a 3-D
+/// span leaves its readers for F9, and the workbook pending. Excel [LIVE,
+/// whatifcalc/probe3, 2026-11-04]: Sheet5 (A1 = 1000) moved into
+/// `=SUM(Sheet2:Sheet3!A1)` leaves 11 with xlPending, and F9 gives 1011; a copy
+/// into the span and a move out of it behave the same. Calcula recalculated
+/// every sheet at once, whatever the mode.
+///
+/// SABOTAGE: drop the manual branch of `recalculate_3d_span_readers` -- fails
+/// at "RECALCULATED UNDER MANUAL".
+#[test]
+fn under_manual_calculation_a_3d_span_change_waits_for_f9() {
+    let wb = Workbook::new(4);
+    wb.set(0, 0, "=SUM(Sheet1:Sheet3!K20)"); // Sheet1!A1
+    wb.switch_to(3);
+    wb.set(19, 10, "5"); // Sheet4!K20, outside the span
+    assert_eq!(wb.number(0, 0, 0), 0.0);
+    crate::calculation::set_calculation_mode_impl(&wb.state, "manual");
+    // A completed Calculate Now first, so the workbook starts "done".
+    crate::calculation::run_calculation_pass(
+        crate::calculation::CalcScope::Workbook, None, &wb.state, &wb.files, &wb.pivots, &wb.pane, &wb.filters, None,
+    )
+    .expect("F9");
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "done");
+
+    crate::sheets::move_sheet_impl(&wb.state, &wb.file, &wb.slicer, &wb.timeline, &wb.filters, 3, 1)
+        .expect("move Sheet4 into the span");
+    crate::sheets::recalculate_3d_span_readers(&wb.state, &wb.files, &wb.pivots, &wb.pane, &wb.filters);
+    assert_eq!(wb.number(0, 0, 0), 0.0, "RECALCULATED UNDER MANUAL: the span's reader must wait for F9 (Excel)");
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "pending", "the workbook says it is pending");
+
+    crate::calculation::run_calculation_pass(
+        crate::calculation::CalcScope::Workbook, None, &wb.state, &wb.files, &wb.pivots, &wb.pane, &wb.filters, None,
+    )
+    .expect("F9");
+    assert_eq!(wb.number(0, 0, 0), 5.0, "F9 reads the new span");
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "done");
+}
+
 /// misc19 (round 19): a grouped entry is ONE backend call that opens and closes
 /// its own undo step. The frontend held `begin_undo_transaction` open across
 /// `await update_cell`, an event emit and `await update_cell_on_sheets`, so a

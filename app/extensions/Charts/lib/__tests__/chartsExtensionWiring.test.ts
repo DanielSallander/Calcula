@@ -183,4 +183,19 @@ describe("an app locale switch repaints every chart in the new locale (P2 S8)", 
     expect(body).toContain("invalidateAllChartCaches();");
     expect(body).toContain("context.events.emit(AppEvents.GRID_REFRESH);");
   });
+
+  it("re-reads again when Rust's FORMAT-culture walk ends (@api/locale onBiFormatCultureApplied)", () => {
+    // NEW-locale-listener-seam (round C): a model chart's data is a MODEL
+    // query, and the engines take the new DAX FORMAT culture in a walk that
+    // ends AFTER `locale:changed` -- a read made on LOCALE_CHANGED alone could
+    // keep FORMAT text in the old culture with nothing re-reading it. The SAME
+    // handler (drop the rasters, refresh) runs on the walk's end, through the
+    // one seam, never a private Tauri listener.
+    const source = chartsIndexSource();
+    expect(source).toContain('import { onBiFormatCultureApplied } from "@api/locale";');
+    expect(source, "Charts does not re-read when the engines have the new culture").toContain(
+      "cleanupFunctions.push(onBiFormatCultureApplied(handleLocaleChanged));",
+    );
+    expect(source).not.toContain("bi:format-culture-applied");
+  });
 });

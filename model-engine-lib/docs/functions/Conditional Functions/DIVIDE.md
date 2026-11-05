@@ -18,7 +18,7 @@ DIVIDE(numerator, denominator [, alternate])
 
 ## Return value
 
-A decimal number — the result of the division, or the alternate value if the denominator is zero.
+A decimal number — the result of the division, or the alternate value (BLANK when none is given) if the denominator is zero OR BLANK. The `/` operator instead answers `+/-Infinity` for `x / 0` and `NaN` for `0 / 0` (DAX's special values, never an error).
 
 ## Remarks
 

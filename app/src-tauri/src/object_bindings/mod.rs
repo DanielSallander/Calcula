@@ -46,6 +46,8 @@ mod catalog_tests;
 #[cfg(test)]
 mod container_literal_tests;
 #[cfg(test)]
+mod control_spelling_tests;
+#[cfg(test)]
 mod command_tests;
 #[cfg(test)]
 mod dev_carriage_tests;
@@ -758,6 +760,9 @@ fn set_inner(
     // A per-button navigator path binds a setting of a LIVE page of a Page
     // Navigator (D §3.18a); one whose page later goes away stays, dormant.
     page_overrides::check_binding_target(cx.state, &request.object, &request.path)?;
+    // A painted control's dead second spelling of its background or border
+    // (BUG-0491) is no more bindable than it is writable.
+    crate::controls::refuse_dead_container_binding(cx.state, &request.object, &request.path)?;
     let world = FormulaWorld::read(cx.state);
     let normalized = normalize_for(
         cx,

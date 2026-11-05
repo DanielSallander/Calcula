@@ -419,6 +419,37 @@ async fn page_filters_run_inside_the_engine_on_a_grouped_chart() {
     assert!(close(&data_numbers(&view), &[10.0, 60.0]), "East in 2024: Y1 10, Y2 60; got {:?}", data_numbers(&view));
 }
 
+/// BUG-0450: THE REPORT EDITORS' DRY RUN DESCRIBES THE REPORT CREATE REPORT
+/// WRITES. The dry run ("describe the report in words") went through
+/// `run_design_query`, the CHART route, where the query's own FILTERS run
+/// inside the engine and draw no filter area -- so it counted up to one row
+/// per FILTERS field fewer than the report, which keeps them as its filter
+/// area. Asked with `forReport` it takes the report's route and counts with
+/// the report's own row definition (`report::report_visible_rows`).
+///
+/// SABOTAGE: make `design_query_response` take the chart route whatever
+/// `for_report` says -- the equality fails (the premise below shows by how
+/// much).
+#[tokio::test]
+async fn the_report_dry_run_counts_the_rows_create_report_writes() {
+    let (bi, conn) = bi().await;
+    let locale = engine::LocaleSettings::from_locale_id("en-US");
+    let report = request(conn, &["Revenue"], vec![year()], vec![region(Some(&["East"]), None)]);
+    let (_d, _c, written) = super::compute_design_query_view_for_report(&bi, &report).await.expect("the report runs");
+    let writes = crate::report::report_visible_rows(&written);
+    let dry = super::design_query_response(&bi, &report, true, &locale).await.expect("the dry run runs");
+    assert_eq!(dry.row_count, writes, "the dry run must count the rows Create Report writes, filter area included");
+    assert_eq!(dry.col_count, written.col_count, "and its columns");
+    // The premise: on the chart route the filter area is not drawn, so the
+    // chart's view really is shorter.
+    let chart = super::design_query_response(&bi, &report, false, &locale).await.expect("the chart route runs");
+    assert!(
+        chart.row_count < writes,
+        "premise: the chart route ({}) must be shorter than the report ({writes})",
+        chart.row_count
+    );
+}
+
 /// A page filter carries its LEVEL: a slicer PINNED at level 2 survives a bare
 /// `CLEAR`, which removes an ordinary (level-1) one -- so a Card agrees with a
 /// BI pivot on the same page about what a pinned slicer means.

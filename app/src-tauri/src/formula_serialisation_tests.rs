@@ -421,18 +421,22 @@ fn deleting_a_sheet_turns_plain_cross_sheet_references_into_ref() {
     // `ColumnRef`, `RowRef` and a sheet-qualified `Range` all fell through to
     // its leaf arm, so `=Sheet2!A1` survived Sheet2's deletion verbatim. The
     // rename twin had always handled all four -- the asymmetry was the tell.
+    //
+    // The formula is KEPT and reads `#REF!` where the sheet was, as Excel
+    // writes it [LIVE, Excel 16, 2026-11-05, sheetspill/probe1.ps1]; it used to
+    // become a #REF! constant (`None`).
     let after = vec!["Sheet1".to_string(), "Sheet3".to_string()];
-    for formula in [
-        "=Sheet2!A1",
-        "=SUM(Sheet2!A1:B2)",
-        "=Sheet2!A:A",
-        "=Sheet2!1:1",
-        "=Sheet2!A1+Sheet1!A1",
+    for (formula, excel) in [
+        ("=Sheet2!A1", "=#REF!A1"),
+        ("=SUM(Sheet2!A1:B2)", "=SUM(#REF!A1:B2)"),
+        ("=Sheet2!A:A", "=#REF!A:A"),
+        ("=Sheet2!1:1", "=#REF!1:1"),
+        ("=Sheet2!A1+Sheet1!A1", "=#REF!A1+SHEET1!A1"),
     ] {
         assert_eq!(
-            crate::repair_3d_refs_on_delete(formula, "Sheet2", &after),
-            None,
-            "`{}` must become #REF! when Sheet2 is deleted",
+            crate::repair_3d_refs_on_delete(formula, "Sheet2", &after).as_deref(),
+            Some(excel),
+            "`{}` must read #REF! where Sheet2 was when Sheet2 is deleted",
             formula
         );
     }
@@ -640,9 +644,9 @@ fn a_rename_that_does_touch_the_formula_still_repairs_it() {
 #[test]
 fn a_delete_that_does_touch_the_formula_still_produces_a_ref_error() {
     assert_eq!(
-        crate::repair_3d_refs_on_delete("=Gone!A1", "Gone", &["Sheet1".to_string()]),
-        None,
-        "a reference to the deleted sheet must still become #REF!",
+        crate::repair_3d_refs_on_delete("=Gone!A1", "Gone", &["Sheet1".to_string()]).as_deref(),
+        Some("=#REF!A1"),
+        "a reference to the deleted sheet must still read #REF! (Excel's `=#REF!A1`)",
     );
 }
 
@@ -1170,7 +1174,9 @@ fn a_refusal_is_deterministic_when_two_formulas_are_unreadable() {
 #[test]
 fn a_reference_to_a_deleted_sheet_still_becomes_a_ref_error() {
     // THE COUNTERWEIGHT to all of the above: refusing must not have been bought
-    // by making the repair timid. `None` from the repair still means `#REF!`.
+    // by making the repair timid. The reference reads `#REF!` where the sheet
+    // was and the cell KEEPS its formula (Excel's `=#REF!A1`, [LIVE]); the
+    // value is the recalculation's to change, not the repair's.
     let mut grid = engine::Grid::new();
     grid.set_cell(0, 0, engine::Cell::new_formula("=Gone!A1".to_string()));
     grid.set_cell(0, 1, engine::Cell::new_formula("=1+1".to_string()));
@@ -1182,8 +1188,7 @@ fn a_reference_to_a_deleted_sheet_still_becomes_a_ref_error() {
     .expect("this repair produces readable text everywhere");
 
     let cell = grids[0].get_cell(0, 0).expect("the cell still exists");
-    assert!(cell.ast.is_none(), "a #REF! cell keeps no formula");
-    assert_eq!(cell.value, engine::CellValue::Error(engine::CellError::Ref));
+    assert_eq!(cell.formula_string_raw().as_deref(), Some("#REF!A1"), "the formula was not kept");
     assert_eq!(
         grids[0].get_cell(0, 1).and_then(|c| c.formula_string_raw()),
         Some("1+1".to_string()),

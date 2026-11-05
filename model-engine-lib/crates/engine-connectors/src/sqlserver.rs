@@ -897,7 +897,37 @@ mod tests {
             ..Default::default()
         };
         let (sql, _) = SqlServerConnector::build_aggregate_sql(&request);
-        assert!(sql.contains("COUNT(DISTINCT [customer_id]) AS [unique_customers]"));
+        // A measure's count is BLANK, never 0 (DAX; round C), and DAX's
+        // DISTINCTCOUNT counts BLANK as one value (round D): SQL's
+        // COUNT(DISTINCT) skips NULL, so the BLANK value is added back.
+        assert!(
+            sql.contains(
+                "NULLIF((COUNT(DISTINCT [customer_id]) + MAX(CASE WHEN ([customer_id]) IS NULL \
+                 THEN 1 ELSE 0 END)), 0) AS [unique_customers]"
+            ),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn build_aggregate_sql_count_distinct_no_blank_skips_blank() {
+        // DAX DISTINCTCOUNTNOBLANK: SQL's own COUNT(DISTINCT), no BLANK value.
+        let request = FetchRequest {
+            schema: Some("dbo".into()),
+            table: "orders".into(),
+            aggregates: vec![AggregateExpr {
+                column: "customer_id".into(),
+                function: AggregateFunction::CountDistinctNoBlank,
+                alias: Some("unique_customers".into()),
+            }],
+            ..Default::default()
+        };
+        let (sql, _) = SqlServerConnector::build_aggregate_sql(&request);
+        assert!(
+            sql.contains("NULLIF(COUNT(DISTINCT [customer_id]), 0) AS [unique_customers]"),
+            "{sql}"
+        );
+        assert!(!sql.contains("IS NULL"), "{sql}");
     }
 
     #[test]

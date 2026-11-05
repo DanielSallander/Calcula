@@ -48,6 +48,7 @@ fn format_agg_name(op: &AggregateOp) -> &'static str {
         AggregateOp::Min => "MIN",
         AggregateOp::Max => "MAX",
         AggregateOp::DistinctCount => "DISTINCTCOUNT",
+        AggregateOp::DistinctCountNoBlank => "DISTINCTCOUNTNOBLANK",
         AggregateOp::CountRows => "COUNTROWS",
         AggregateOp::Median => "MEDIAN",
         AggregateOp::StdevSample => "STDEV.S",

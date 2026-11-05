@@ -427,7 +427,8 @@ pub(crate) fn update_cells_batch_on_target(
 /// owned undo step. Returns the coordinates written.
 ///
 /// `format_allowed` false (the host forbids Format Cells): no update's style
-/// is written -- except a MOVED cell's (`CellUpdateInput::moved`), whose
+/// is written -- except a MOVED cell's (`CellUpdateInput::moved`, honoured
+/// only when its source holds that style: `honoured_move_claims`), whose
 /// format moves with it -- and a cleared cell gets its OWN previous style
 /// back. A blank that names no style keeps its own format either way. Each
 /// format write asks the option again under its guards and is dropped when
@@ -447,8 +448,58 @@ pub(crate) fn write_batch_on_backing(
     format_allowed: bool,
 ) -> Result<Vec<(u32, u32)>, String> {
     let backing = t.backing_index;
+    // Which MOVE claims this batch honours, decided ONCE and BEFORE any write
+    // by the sheet route's own rule (`commands::data::honoured_move_claims`,
+    // BUG-0654): a claim is honoured only when its source cell -- read under
+    // the held grid guards, before this batch writes anything -- shows exactly
+    // the style the write carries. An unbound claim is a COPY, so `moved` is
+    // never a way to land an arbitrary style on an unlocked backing cell of a
+    // protected host that refuses Format Cells. The object sources resolve to
+    // their backing sheets holding nothing (`move_claim_source_sheets`).
+    // ...and what each PASTE source holds NOW (BUG-0657), read under the same
+    // guards, before any write, by the sheet route's own rule
+    // (`commands::data::resolve_paste_sources`).
+    let paste_sheets = crate::commands::data::paste_source_sheets(state, &updates);
+    let (honoured_moves, pasted_from_source) = {
+        let move_source_sheets = crate::commands::data::move_claim_source_sheets(state, &updates);
+        // CANONICAL LOCK ORDER: the active grid, then the grids; read and released.
+        let grid = state.grid.read().map_err(|e| e.to_string())?;
+        let grids = state.grids.read().map_err(|e| e.to_string())?;
+        // The active index is read UNDER the grid guards (rev-backend-8), as
+        // `update_cells_batch_core` reads it: read before them, a sheet switch
+        // in between paired the mirror `grid` with the previous sheet's index,
+        // so a claim on the new active sheet was judged against the wrong grid.
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        // A source's hidden formula is pasted as its value: the styles, then
+        // the protection, after the grids (the canonical order).
+        let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+        let protected_sheets: std::collections::HashSet<usize> = {
+            let protection = state.sheet_protection.read().map_err(|e| e.to_string())?;
+            protection.iter().filter(|(_, p)| p.protected).map(|(sheet, _)| *sheet).collect()
+        };
+        (
+            crate::commands::data::honoured_move_claims(&updates, &move_source_sheets, &grid, &grids, active_sheet),
+            crate::commands::data::resolve_paste_sources(
+                state,
+                &updates,
+                &paste_sheets,
+                &grid,
+                &grids,
+                active_sheet,
+                &styles,
+                &protected_sheets,
+            ),
+        )
+    };
     let mut written: Vec<(u32, u32)> = Vec::with_capacity(updates.len());
-    for u in updates {
+    for ((mut u, moved), from_source) in updates.into_iter().zip(honoured_moves).zip(pasted_from_source) {
+        // A write resolved from its paste SOURCE writes what the source held
+        // at the read above, as an invariant paste.
+        if let Some(text) = from_source {
+            u.value = text;
+            u.invariant = Some(true);
+            u.pasted = Some(true);
+        }
         // The cell as it was: its own style (put back after a clear when the
         // paste's format is dropped) and its Locked flag (kept when the host
         // is protected at the write).
@@ -458,8 +509,8 @@ pub(crate) fn write_batch_on_backing(
         // `CellUpdateInput::moved`; Excel [LIVE, rev14A/probe-cut.ps1]: a bold
         // 0.00 cell cut to an unlocked cell of a protected sheet lands bold
         // 0.00 with Format Cells off or on -- only a COPY drops it). Its Locked
-        // flag is still kept below (`keep_backing_lock`).
-        let moved = u.is_move();
+        // flag is still kept below (`keep_backing_lock`). `moved` is the
+        // HONOURED claim (above), never the bare `CellUpdateInput::is_move`.
         let carries_format = format_allowed || moved;
         let style = if carries_format { u.style_index } else { None };
         // `false`: the format was refused under the write's guards -- the

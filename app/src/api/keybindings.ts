@@ -195,7 +195,13 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   { id: "core.cut", combo: "Ctrl+X", commandId: "core.clipboard.cut", label: "Cut", category: "Clipboard", source: "built-in" },
   { id: "core.copy", combo: "Ctrl+C", commandId: "core.clipboard.copy", label: "Copy", category: "Clipboard", source: "built-in" },
   { id: "core.paste", combo: "Ctrl+V", commandId: "core.clipboard.paste", label: "Paste", category: "Clipboard", source: "built-in" },
-  { id: "core.pasteSpecial", combo: "Ctrl+Shift+V", commandId: "core.clipboard.pasteSpecial", label: "Paste Special", category: "Clipboard", source: "built-in" },
+  // Excel's keys [LIVE, Excel 16 build 20527 (Microsoft 365), 2026-11-04,
+  // paste-x/probe3.ps1, keystrokes sent to Excel's own window]: Ctrl+Alt+V
+  // opens the Paste Special dialog; Ctrl+Shift+V pastes VALUES (a copied
+  // bold 0.00 =2+3 lands as the constant 5 in General, not bold). BUG-0375:
+  // Paste Special was on Ctrl+Shift+V.
+  { id: "core.pasteSpecial", combo: "Ctrl+Alt+V", commandId: "core.clipboard.pasteSpecial", label: "Paste Special", category: "Clipboard", source: "built-in" },
+  { id: "core.pasteValues", combo: "Ctrl+Shift+V", commandId: "core.clipboard.pasteValues", label: "Paste Values", category: "Clipboard", source: "built-in" },
 
   // Edit
   // Undo/redo are app-global (fire even when focus is on a non-grid shell

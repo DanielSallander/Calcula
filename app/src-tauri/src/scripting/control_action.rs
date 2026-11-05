@@ -1333,6 +1333,8 @@ pub fn run_control_action(
     pivot_state: tauri::State<'_, crate::pivot::PivotState>,
     pane_control_state: tauri::State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: tauri::State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: tauri::State<'_, crate::slicer::SlicerState>,
+    timeline_state: tauri::State<'_, crate::timeline_slicer::TimelineSlicerState>,
     request: RunControlActionRequest,
     window: tauri::Window,
 ) -> Result<ControlActionOutcome, String> {
@@ -1347,6 +1349,8 @@ pub fn run_control_action(
                 &pivot_state,
                 &pane_control_state,
                 &ribbon_filter_state,
+                &slicer_state,
+                &timeline_state,
                 &click.source,
                 &click.filename,
                 request.view_state.as_ref(),

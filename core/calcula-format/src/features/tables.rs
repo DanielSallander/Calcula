@@ -32,6 +32,12 @@ pub struct TableColumnDef {
     pub totals_row_formula: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calculated_formula: Option<String>,
+    /// Excel's `totalsRowLabel`, kept while the totals row is hidden
+    /// (NEW-totals-label-persist). Declared by the `table_totals_row_label`
+    /// manifest feature id; an older reader drops it -- the constant does not
+    /// come back when the row is shown again, a visible loss, never a lie.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals_row_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +68,7 @@ impl From<&SavedTable> for TableDef {
                 totals_row_function: c.totals_row_function.clone(),
                 totals_row_formula: c.totals_row_formula.clone(),
                 calculated_formula: c.calculated_formula.clone(),
+                totals_row_label: c.totals_row_label.clone(),
             }).collect(),
             style_options: TableStyleOptionsDef {
                 banded_rows: t.style_options.banded_rows,
@@ -93,6 +100,7 @@ impl From<&TableDef> for SavedTable {
                 totals_row_function: c.totals_row_function.clone(),
                 totals_row_formula: c.totals_row_formula.clone(),
                 calculated_formula: c.calculated_formula.clone(),
+                totals_row_label: c.totals_row_label.clone(),
             }).collect(),
             style_options: SavedTableStyleOptions {
                 banded_rows: t.style_options.banded_rows,

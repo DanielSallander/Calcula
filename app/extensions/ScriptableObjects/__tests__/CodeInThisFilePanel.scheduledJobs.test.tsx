@@ -431,7 +431,9 @@ describe("CodeInThisFilePanel — a macro written as an object script (F7)", () 
     await render();
     const badge = container.querySelector("[data-cell-access-when-you-run-it]");
     expect(badge?.textContent).toBe("Any sheet when you run it");
-    expect(badge?.getAttribute("title")).toContain("it may also read and change the cells of any sheet, and nothing more");
+    expect(badge?.getAttribute("title")).toContain(
+      "it may also read and change the cells of any sheet, and how they look, and nothing more",
+    );
     expect(container.textContent).toContain("Restricted");
     expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.trim() === "Open in editor")).toBe(
       false,

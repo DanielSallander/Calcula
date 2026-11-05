@@ -147,6 +147,48 @@ pub fn parse_cell_input_in_format(
     locale: &crate::LocaleSettings,
     target_format: Option<&NumberFormat>,
 ) -> (Cell, Option<NumberFormat>) {
+    ladder_in_format(input, locale, target_format, Writer::Typed)
+}
+
+/// Who writes the text the ladder reads: someone TYPING it, or a PASTE of a
+/// copied cell. Only a typed formula is put through the checks Excel makes on
+/// ENTRY (`parser::check_entered_formula`); a pasted one is the copied cell's
+/// own formula -- shifted, never re-typed -- and is read the way a stored
+/// formula is read on load. Excel [LIVE, round C shiftnames probeA copyUp]:
+/// `=LET(A1,5,A1+RC4)` (stored `$D2`) copied up a row pastes
+/// `=LET(A1,5,A1+$D1)`, the `$` reference that formula cannot be TYPED with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Writer {
+    Typed,
+    Pasted,
+}
+
+/// The cell a formula's text becomes, for `writer`.
+fn formula_cell(text: String, writer: Writer) -> Cell {
+    match writer {
+        Writer::Typed => entered_formula(text),
+        Writer::Pasted => Cell::new_formula(text),
+    }
+}
+
+/// The ladder for a PASTED write (the app's `CellUpdateInput::pasted`, a
+/// write resolved from its paste source): no destination format (Excel's Text
+/// format governs typing, never a paste -- see `parse_cell_input_in_format`),
+/// and a formula read as a stored one, never put through the entry checks
+/// (see [`Writer`]). Every other rung is the typed ladder's.
+pub fn parse_pasted_input(
+    input: &str,
+    locale: &crate::LocaleSettings,
+) -> (Cell, Option<NumberFormat>) {
+    ladder_in_format(input, locale, None, Writer::Pasted)
+}
+
+fn ladder_in_format(
+    input: &str,
+    locale: &crate::LocaleSettings,
+    target_format: Option<&NumberFormat>,
+    writer: Writer,
+) -> (Cell, Option<NumberFormat>) {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return (Cell::new(), None);
@@ -172,7 +214,7 @@ pub fn parse_cell_input_in_format(
     if trimmed.starts_with('=') {
         // Delocalize the formula: convert locale separators to invariant format for storage
         let invariant = crate::delocalize_formula(trimmed, locale);
-        return (Cell::new_formula(invariant), None);
+        return (formula_cell(invariant, writer), None);
     }
     let upper = trimmed.to_uppercase();
     if upper == "TRUE" {
@@ -213,7 +255,7 @@ pub fn parse_cell_input_in_format(
         && !trimmed[1..].trim().is_empty()
     {
         let invariant = crate::delocalize_formula(trimmed, locale);
-        return (Cell::new_formula(format!("={}", invariant)), None);
+        return (formula_cell(format!("={}", invariant), writer), None);
     }
     (Cell::new_text(trimmed.to_string()), None)
 }
@@ -304,6 +346,47 @@ fn apostrophe_implied_format(
     }
 }
 
+/// A TYPED formula: parsed, then put through the checks Excel makes on entry
+/// and a stored formula is not put through again on load
+/// (`parser::check_entered_formula` -- BUG-0648's shadowed built-in arity,
+/// `=LET(abs,LAMBDA(x,y,x+y),abs(1,2))`, which Excel 16 refuses to accept). A
+/// refusal is kept exactly as a parse error is (`Cell::new_formula`'s error
+/// arm): the typed text, as text.
+fn entered_formula(text: String) -> Cell {
+    match parser::parse(&text) {
+        Ok(ast) if parser::check_entered_formula(&ast).is_err() => Cell::new_text(text),
+        Ok(ast) => Cell::new_formula_with_ast(ast),
+        Err(_) => Cell::new_formula(text),
+    }
+}
+
+/// The formula an UNCHANGED RE-ENTRY keeps (F2, then Enter): `existing`'s own
+/// formula when `input` spells exactly it AND typing that text fresh would be
+/// refused by an entry check (`parser::check_entered_formula`); `None`
+/// otherwise, and the caller types the input as usual.
+///
+/// [LIVE] Excel 16 refuses to TYPE `=#REF!A1` (0x800A03EC, lane formd
+/// SCRATCH/formd/p1.json: `=#REF!A1`, `=#REF!A1+1`, `=SUM(#REF!A1:B2)`), yet a
+/// cell that came to hold one -- its sheet deleted, or a workbook opened --
+/// survives F2 and Enter in both. Without this the re-entry would be refused
+/// and the cell would keep the typed TEXT, losing the formula. Only a refusal
+/// is overridden, so an ordinary re-entry is still typed afresh.
+pub fn reentered_formula(existing: &Cell, input: &str, locale: &crate::LocaleSettings) -> Option<Cell> {
+    let ast = existing.get_ast()?;
+    let trimmed = input.trim();
+    if !trimmed.starts_with('=') {
+        return None;
+    }
+    let invariant = crate::delocalize_formula(trimmed, locale);
+    if invariant != format!("={}", existing.formula_string()?) {
+        return None;
+    }
+    match parser::parse(&invariant) {
+        Ok(typed) if parser::check_entered_formula(&typed).is_err() => Some(Cell::new_formula_with_ast(ast.clone())),
+        _ => None,
+    }
+}
+
 /// Parse cell input that is already in invariant (US) format.
 /// Formulas are stored as-is without delocalization; numbers use '.' as decimal separator.
 pub fn parse_cell_input_invariant(input: &str, locale: &crate::LocaleSettings) -> Cell {
@@ -328,6 +411,23 @@ pub fn parse_cell_input_invariant_in_format(
     locale: &crate::LocaleSettings,
     target_format: Option<&NumberFormat>,
 ) -> Cell {
+    ladder_invariant(input, locale, target_format, Writer::Typed)
+}
+
+/// [`parse_pasted_input`] in the invariant (US) spelling: the ladder a PASTE
+/// written in canonical form takes -- every write the batch resolves from its
+/// paste source, and a copied stored value or formula the frontend sends
+/// invariant. No destination format, and a formula read as a stored one.
+pub fn parse_pasted_input_invariant(input: &str, locale: &crate::LocaleSettings) -> Cell {
+    ladder_invariant(input, locale, None, Writer::Pasted)
+}
+
+fn ladder_invariant(
+    input: &str,
+    locale: &crate::LocaleSettings,
+    target_format: Option<&NumberFormat>,
+    writer: Writer,
+) -> Cell {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Cell::new();
@@ -342,7 +442,7 @@ pub fn parse_cell_input_invariant_in_format(
     }
     if trimmed.starts_with('=') {
         // Formula is already in invariant format — store directly
-        return Cell::new_formula(trimmed.to_string());
+        return formula_cell(trimmed.to_string(), writer);
     }
     let upper = trimmed.to_uppercase();
     if upper == "TRUE" {
@@ -817,5 +917,86 @@ pub fn parse_date_time_input(
             },
         )),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod entry_arity_tests {
+    use super::*;
+    use crate::locale::LocaleSettings;
+
+    /// BUG-0648 [LIVE, Excel 16: rev18x pass1 J17/J18/J21/J22, pass2 J104,
+    /// parser lane probe J58/J59]. A call named like a built-in IS the built-in
+    /// even beside a LET / LAMBDA name of that spelling, and an arity the
+    /// built-in refuses is a formula Excel will not accept when typed. Calcula
+    /// stored each as a formula and evaluated the built-in with the refused
+    /// arity. Typed, it is now kept as TEXT -- what any refused entry is here --
+    /// while the same text still LOADS as a formula (`Cell::new_formula`), so a
+    /// workbook already holding one opens.
+    #[test]
+    fn a_shadowed_built_in_with_a_refused_arity_is_refused_at_entry() {
+        let en = LocaleSettings::from_locale_id("en-US");
+        for typed in [
+            "=LET(abs,LAMBDA(x,y,x+y),abs(1,2))",
+            "=LET(pi,LAMBDA(x,x*2),pi(3))",
+            "=LET(round,LAMBDA(x,x*2),round(3))",
+            "=LET(max,LAMBDA(x,x),max())",
+            "=LET(f,LAMBDA(abs,abs(1,2)),f(3))",
+        ] {
+            let cell = parse_cell_input(typed, &en);
+            assert!(cell.get_ast().is_none(), "{typed} must be refused at entry, not stored as a formula");
+            assert_eq!(cell.value, CellValue::Text(typed.to_string()), "{typed}: the typed text is kept");
+            assert!(parse_cell_input_invariant(typed, &en).get_ast().is_none(), "{typed}: the invariant door too");
+            assert!(Cell::new_formula(typed.to_string()).get_ast().is_some(), "{typed}: a stored one still loads");
+        }
+        // Accepted: a valid arity calls the built-in [LIVE: ABS(-3) = 3,
+        // ROUND(3.14159,1) = 3.1, SUM(3), IF(2,3)], and a plain bad-arity call
+        // is outside this check.
+        for typed in [
+            "=LET(abs,LAMBDA(x,x+1),abs(-3))",
+            "=LET(round,LAMBDA(x,x*2),round(3.14159,1))",
+            "=LET(sum,LAMBDA(x,x*2),sum(3))",
+            "=LET(if,LAMBDA(x,x*3),if(2,3))",
+            "=LET(x,LAMBDA(a,a*2),x(3))",
+        ] {
+            assert!(parse_cell_input(typed, &en).get_ast().is_some(), "{typed} must be accepted");
+        }
+    }
+
+    /// NEW-typed-ref-error [LIVE, Excel 16, lane formd, SCRATCH/formd/p1.json
+    /// J2138..J2178]: a reference into a DELETED sheet cannot be typed
+    /// (`=#REF!A1`, `=#REF!A1+1`, `=SUM(#REF!A1:B2)` refused with 0x800A03EC)
+    /// while the bare error can (`=#REF!` #REF!, `=#REF!+1`, `=SUM(#REF!)`).
+    /// Calcula stored all six as formulas. Typed, the refused ones are kept as
+    /// TEXT; a stored one still LOADS, and F2 + Enter over it keeps the
+    /// formula (`reentered_formula`) as Excel's does.
+    #[test]
+    fn a_reference_into_a_deleted_sheet_is_refused_when_typed_and_kept_on_reentry() {
+        let en = LocaleSettings::from_locale_id("en-US");
+        let sv = LocaleSettings::from_locale_id("sv-SE");
+        for typed in ["=#REF!A1", "=#REF!A1+1", "=SUM(#REF!A1:B2)", "=#REF!$A$1"] {
+            let cell = parse_cell_input(typed, &en);
+            assert!(cell.get_ast().is_none(), "{typed} must be refused at entry, not stored as a formula");
+            assert_eq!(cell.value, CellValue::Text(typed.to_string()), "{typed}: the typed text is kept");
+            assert!(parse_cell_input_invariant(typed, &en).get_ast().is_none(), "{typed}: the invariant door too");
+            let stored = Cell::new_formula(typed.to_string());
+            assert!(stored.get_ast().is_some(), "{typed}: a stored one still loads");
+            // F2 + Enter: the formula bar shows the stored formula, and
+            // committing it unchanged keeps the formula.
+            let shown = format!("={}", stored.formula_string().unwrap());
+            let kept = reentered_formula(&stored, &shown, &en)
+                .unwrap_or_else(|| panic!("{typed}: F2 + Enter must keep the stored formula"));
+            assert_eq!(kept.get_ast(), stored.get_ast(), "{typed}: the same formula is kept");
+            assert!(reentered_formula(&stored, &shown, &sv).is_some(), "{typed}: in the sv-SE dialect too");
+        }
+        // A CHANGED entry is typed afresh (and refused), and an ordinary
+        // formula's re-entry is never short-circuited.
+        let stored = Cell::new_formula("=#REF!A1".to_string());
+        assert!(reentered_formula(&stored, "=#REF!A2", &en).is_none());
+        let plain = Cell::new_formula("=A1+1".to_string());
+        assert!(reentered_formula(&plain, "=A1+1", &en).is_none());
+        for typed in ["=#REF!", "=#REF!+1", "=SUM(#REF!)"] {
+            assert!(parse_cell_input(typed, &en).get_ast().is_some(), "{typed} must be accepted");
+        }
     }
 }

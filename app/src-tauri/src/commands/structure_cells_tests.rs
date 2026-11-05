@@ -974,6 +974,35 @@ fn undo_of_insert_rows_puts_a_moved_spill_back_whole() {
     assert!(fx.state.spill_ranges.read().unwrap().contains_key(&(0, 4, 1)), "B5 owns its cells again");
 }
 
+/// BUG-0356: the same edit on a sheet that is NOT active (a script's
+/// `insertRows` with a sheet index -- the off-sheet structural path) recorded
+/// the grid snapshot but no spill claims, so Undo left the claim the edit had
+/// moved: Sheet2's `B5 =SEQUENCE(3)` came back owning nothing while the map
+/// still claimed B7:B9 for an origin at B7 that no longer exists.
+///
+/// SABOTAGE: drop `record_spill_claims_for_undo` from
+/// `off_sheet_structural_edit` -- fails at "STALE CLAIM".
+#[test]
+fn undo_of_insert_rows_on_a_background_sheet_puts_its_spill_back_whole() {
+    let fx = Fx::new(2);
+    fx.put(1, "B5", "=SEQUENCE(3)");
+    fx.settle();
+    assert!(fx.state.spill_ranges.read().unwrap().contains_key(&(1, 4, 1)), "precondition: Sheet2!B5 spills");
+    insert_rows_impl(&fx.state, &fx.file, &fx.pivots, &fx.files, &fx.pane, &fx.filters, &fx.slicer, &fx.timeline, 1, 2, Some(1))
+        .expect("insert rows on Sheet2 while Sheet1 is active");
+    assert_eq!(fx.number(1, "B9"), 3.0, "the spill moved down with its rows");
+    assert!(fx.state.spill_ranges.read().unwrap().contains_key(&(1, 6, 1)), "the moved origin owns its cells");
+    fx.undo();
+    assert!(
+        !fx.state.spill_ranges.read().unwrap().contains_key(&(1, 6, 1)),
+        "STALE CLAIM: Undo left the moved origin's claim on Sheet2"
+    );
+    assert!(fx.state.spill_ranges.read().unwrap().contains_key(&(1, 4, 1)), "Sheet2!B5 owns its cells again");
+    fx.settle();
+    assert_eq!(fx.number(1, "B5"), 1.0, "the origin is a spill again, not #SPILL!");
+    assert_eq!(fx.number(1, "B7"), 3.0);
+}
+
 // Insert/Delete Sheet Rows and Columns: the same rules, through
 // `BandEdit::whole_lines` (a child so it shares `Fx` and the A1 helpers).
 #[path = "structure_lines_tests.rs"]
@@ -989,3 +1018,9 @@ mod review;
 // stores follow an Undo / Redo from the step itself, never its description.
 #[path = "structural_delta_tests.rs"]
 mod structural_delta;
+
+// A LET / LAMBDA name spelled like a cell (`x1`) through every structural
+// command, Insert/Delete Cells, Cut+Paste and defined names, and the Name
+// Manager refusing such a formula as Excel does.
+#[path = "cell_shaped_names_tests.rs"]
+mod cell_shaped_names;

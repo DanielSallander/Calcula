@@ -9,6 +9,9 @@ description = "Calcula .calp package format — publish, pull, and version manag
 identity = { path = "../identity" }
 persistence = { path = "../persistence" }
 engine = { path = "../engine" }
+# `parser::ast::REF_ERROR_SHEET`: the marker a reference to a deleted sheet
+# carries (`=#REF!A1`), which the gone-walker in `sheet_renames` writes.
+parser = { path = "../parser" }
 calcula-format = { path = "../calcula-format" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

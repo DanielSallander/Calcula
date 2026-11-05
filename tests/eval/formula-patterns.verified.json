@@ -1259,11 +1259,11 @@
       "statedResult": "Approximately 0.6630 (66.3% of the standard beta distribution with alpha=2, beta=5 falls at or below 0.4)",
       "expect": {
         "kind": "number",
-        "number": 0.7667200000000027
+        "number": 0.7667199999999992
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.7667200000000027"
+      "engineDisplay": "0.7667199999999992"
     },
     {
       "id": "BETA.INV#1",
@@ -1289,11 +1289,11 @@
       "statedResult": "Approximately 0.4 (the value below which 66.3% of the beta distribution falls with alpha=2 and beta=5)",
       "expect": {
         "kind": "number",
-        "number": 0.3405842787490292
+        "number": 0.34058427874903097
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.3405842787490292"
+      "engineDisplay": "0.34058427874903097"
     },
     {
       "id": "BIN2DEC#1",
@@ -2121,11 +2121,11 @@
       "statedResult": "Approximately 0.0500 (there is a 5% probability of observing a chi-squared value this large or larger with 10 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": 2.5728686564881463e+28
+        "number": 0.05000058909139821
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "25728686564881463000000000000"
+      "engineDisplay": "0.05000058909139821"
     },
     {
       "id": "CHISQ.DIST#1",
@@ -2181,11 +2181,11 @@
       "statedResult": "Approximately 18.307 (the critical chi-squared value for a right-tailed test at the 5% significance level with 10 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": 167.2650922371132
+        "number": 18.307038053275154
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "167.2650922371132"
+      "engineDisplay": "18.307038053275154"
     },
     {
       "id": "CHISQ.INV#1",
@@ -2211,11 +2211,11 @@
       "statedResult": "Approximately 18.307 (the chi-squared value below which 95% of the distribution falls with 10 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": 167.2650922371132
+        "number": 18.30703805327515
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "167.2650922371132"
+      "engineDisplay": "18.30703805327515"
     },
     {
       "id": "CHISQ.TEST#1",
@@ -2313,11 +2313,11 @@
       "statedResult": "Approximately 0.1232 (the p-value suggests the difference between observed and expected is not statistically significant at the 5% level)",
       "expect": {
         "kind": "number",
-        "number": 0.4843222188948081
+        "number": 0.48432221889338467
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.4843222188948081"
+      "engineDisplay": "0.48432221889338467"
     },
     {
       "id": "CHOOSE#1.B2",
@@ -2969,11 +2969,11 @@
       "statedResult": "Approximately 0.6929",
       "expect": {
         "kind": "number",
-        "number": 0.6929519127335031
+        "number": 0.6929519121748389
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.6929519127335031"
+      "engineDisplay": "0.6929519121748389"
     },
     {
       "id": "CONFIDENCE.T#1",
@@ -3023,11 +3023,11 @@
       "statedResult": "Approximately 1.7882",
       "expect": {
         "kind": "number",
-        "number": 1.7883922649259336
+        "number": 1.7883922649266617
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "1.7883922649259336"
+      "engineDisplay": "1.7883922649266617"
     },
     {
       "id": "CONVERT#1",
@@ -7752,11 +7752,11 @@
       "statedResult": "0.842701 (approximately)",
       "expect": {
         "kind": "number",
-        "number": 0.8427006897475899
+        "number": 0.842700792949715
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.8427006897475899"
+      "engineDisplay": "0.842700792949715"
     },
     {
       "id": "ERF#1",
@@ -7782,11 +7782,11 @@
       "statedResult": "0.842701 (approximately)",
       "expect": {
         "kind": "number",
-        "number": 0.8427006897475899
+        "number": 0.842700792949715
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.8427006897475899"
+      "engineDisplay": "0.842700792949715"
     },
     {
       "id": "ERFC.PRECISE#1",
@@ -7812,11 +7812,11 @@
       "statedResult": "0.157299 (approximately)",
       "expect": {
         "kind": "number",
-        "number": 0.15729931025241006
+        "number": 0.15729920705028536
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.15729931025241006"
+      "engineDisplay": "0.15729920705028536"
     },
     {
       "id": "ERFC#1",
@@ -7842,11 +7842,11 @@
       "statedResult": "0.157299 (approximately)",
       "expect": {
         "kind": "number",
-        "number": 0.15729931025241006
+        "number": 0.15729920705028536
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.15729931025241006"
+      "engineDisplay": "0.15729920705028536"
     },
     {
       "id": "ERROR.TYPE#1.A2",
@@ -8505,11 +8505,11 @@
       "statedResult": "Approximately 0.0126 (there is a 1.26% probability of observing an F-value this large or larger)",
       "expect": {
         "kind": "number",
-        "number": 0.012622708649845271
+        "number": 0.012622708649838187
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.012622708649845271"
+      "engineDisplay": "0.012622708649838187"
     },
     {
       "id": "F.DIST#1",
@@ -8535,11 +8535,11 @@
       "statedResult": "Approximately 0.9543 (cumulative probability with df1=5, df2=10)",
       "expect": {
         "kind": "number",
-        "number": 0.9565149593408901
+        "number": 0.9565149593408894
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.9565149593408901"
+      "engineDisplay": "0.9565149593408894"
     },
     {
       "id": "F.INV.RT#1",
@@ -8565,11 +8565,11 @@
       "statedResult": "Approximately 2.7109 (the critical F-value for a right-tailed test at the 5% significance level)",
       "expect": {
         "kind": "number",
-        "number": 10000
+        "number": 2.710889837209686
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "10000"
+      "engineDisplay": "2.710889837209686"
     },
     {
       "id": "F.INV#1",
@@ -8595,11 +8595,11 @@
       "statedResult": "Approximately 2.7109 (the F-value below which 95% of the distribution falls with 5 and 20 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": 10000
+        "number": 2.7108898372096855
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "10000"
+      "engineDisplay": "2.7108898372096855"
     },
     {
       "id": "F.TEST#1",
@@ -9786,11 +9786,11 @@
       "statedResult": "Approximately 0.8753 (87.53% of the gamma distribution with shape=3 and scale=2 falls at or below 10)",
       "expect": {
         "kind": "number",
-        "number": -4.716562899359819e+28
+        "number": 0.8753479805169191
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "-47165628993598190000000000000"
+      "engineDisplay": "0.8753479805169191"
     },
     {
       "id": "GAMMA.INV#1",
@@ -9816,11 +9816,11 @@
       "statedResult": "Approximately 10 (the value below which 87.53% of the gamma distribution falls with shape=3 and scale=2)",
       "expect": {
         "kind": "number",
-        "number": 151.01960323391341
+        "number": 9.998860844254008
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "151.01960323391341"
+      "engineDisplay": "9.998860844254008"
     },
     {
       "id": "GAMMA#1.B2",
@@ -9952,11 +9952,11 @@
       "statedResult": "Approximately 0.4772 (47.72% of the standard normal distribution falls between the mean and 2 standard deviations above)",
       "expect": {
         "kind": "number",
-        "number": 0.47724993711274366
+        "number": 0.4772498680518208
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.47724993711274366"
+      "engineDisplay": "0.4772498680518208"
     },
     {
       "id": "GCD#1",
@@ -16481,11 +16481,11 @@
       "statedResult": "Approximately 0.0390 (3.9% of the lognormal distribution with mean=3.5 and standard_dev=1.2 falls at or below 4)",
       "expect": {
         "kind": "number",
-        "number": 0.03908351124680265
+        "number": 0.039083555706800485
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.03908351124680265"
+      "engineDisplay": "0.039083555706800485"
     },
     {
       "id": "LOGNORM.INV#1",
@@ -16511,11 +16511,11 @@
       "statedResult": "Approximately 4 (the value below which 3.9% of the lognormal distribution falls with mean=3.5 and standard_dev=1.2)",
       "expect": {
         "kind": "number",
-        "number": 3.9952559322898735
+        "number": 3.9952559412689825
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "3.9952559322898735"
+      "engineDisplay": "3.9952559412689825"
     },
     {
       "id": "LOWER#1.B2",
@@ -18223,11 +18223,11 @@
       "statedResult": "Approximately 0.9088 (90.88% of values fall at or below 42)",
       "expect": {
         "kind": "number",
-        "number": 0.9087887152305422
+        "number": 0.9087887802741321
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.9087887152305422"
+      "engineDisplay": "0.9087887802741321"
     },
     {
       "id": "NORM.INV#1",
@@ -18253,11 +18253,11 @@
       "statedResult": "Approximately 42 (the value below which 90.88% of the distribution falls)",
       "expect": {
         "kind": "number",
-        "number": 42.00010261667221
+        "number": 42.00010261782042
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "42.00010261667221"
+      "engineDisplay": "42.00010261782042"
     },
     {
       "id": "NORM.S.DIST#1",
@@ -18283,11 +18283,11 @@
       "statedResult": "Approximately 0.9750 (97.5% of the standard normal distribution falls at or below z=1.96)",
       "expect": {
         "kind": "number",
-        "number": 0.9750021738917761
+        "number": 0.9750021048517796
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.9750021738917761"
+      "engineDisplay": "0.9750021048517796"
     },
     {
       "id": "NORM.S.INV#1",
@@ -18313,11 +18313,11 @@
       "statedResult": "Approximately 1.96 (the z-score below which 97.5% of the standard normal distribution falls)",
       "expect": {
         "kind": "number",
-        "number": 1.959963986120195
+        "number": 1.9599639845400538
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "1.959963986120195"
+      "engineDisplay": "1.9599639845400538"
     },
     {
       "id": "NOT#1.C2",
@@ -18418,6 +18418,141 @@
       "oracle": "engine",
       "volatile": false,
       "engineDisplay": "TRUE"
+    },
+    {
+      "id": "NOW#1.B2",
+      "function": "NOW",
+      "intent": "The NOW function returns the current date and time as a serial number.",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Description"
+        },
+        {
+          "a1": "B1",
+          "input": "Value"
+        },
+        {
+          "a1": "A2",
+          "input": "Current Date/Time"
+        },
+        {
+          "a1": "A3",
+          "input": "Date Only"
+        },
+        {
+          "a1": "B3",
+          "input": "=INT(NOW())"
+        },
+        {
+          "a1": "A4",
+          "input": "Time Only"
+        },
+        {
+          "a1": "B4",
+          "input": "=NOW()-INT(NOW())"
+        }
+      ],
+      "target": "B2",
+      "formula": "=NOW()",
+      "stated": null,
+      "statedResult": "",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
+    },
+    {
+      "id": "NOW#1.B3",
+      "function": "NOW",
+      "intent": "The NOW function returns the current date and time as a serial number.",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Description"
+        },
+        {
+          "a1": "B1",
+          "input": "Value"
+        },
+        {
+          "a1": "A2",
+          "input": "Current Date/Time"
+        },
+        {
+          "a1": "B2",
+          "input": "=NOW()"
+        },
+        {
+          "a1": "A3",
+          "input": "Date Only"
+        },
+        {
+          "a1": "A4",
+          "input": "Time Only"
+        },
+        {
+          "a1": "B4",
+          "input": "=NOW()-INT(NOW())"
+        }
+      ],
+      "target": "B3",
+      "formula": "=INT(NOW())",
+      "stated": null,
+      "statedResult": "",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
+    },
+    {
+      "id": "NOW#1.B4",
+      "function": "NOW",
+      "intent": "The NOW function returns the current date and time as a serial number.",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Description"
+        },
+        {
+          "a1": "B1",
+          "input": "Value"
+        },
+        {
+          "a1": "A2",
+          "input": "Current Date/Time"
+        },
+        {
+          "a1": "B2",
+          "input": "=NOW()"
+        },
+        {
+          "a1": "A3",
+          "input": "Date Only"
+        },
+        {
+          "a1": "B3",
+          "input": "=INT(NOW())"
+        },
+        {
+          "a1": "A4",
+          "input": "Time Only"
+        }
+      ],
+      "target": "B4",
+      "formula": "=NOW()-INT(NOW())",
+      "stated": null,
+      "statedResult": "",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
     },
     {
       "id": "NPER#1.A7",
@@ -21500,6 +21635,276 @@
       "oracle": "engine",
       "volatile": false,
       "engineDisplay": "1"
+    },
+    {
+      "id": "RAND#1.B2",
+      "function": "RAND",
+      "intent": "The RAND function generates a random decimal number between 0 (inclusive) and 1 (exclusive).",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Scenario"
+        },
+        {
+          "a1": "B1",
+          "input": "Random Factor"
+        },
+        {
+          "a1": "A2",
+          "input": "Simulation 1"
+        },
+        {
+          "a1": "A3",
+          "input": "Simulation 2"
+        },
+        {
+          "a1": "B3",
+          "input": "=RAND()"
+        },
+        {
+          "a1": "A4",
+          "input": "Simulation 3"
+        },
+        {
+          "a1": "B4",
+          "input": "=RAND()"
+        }
+      ],
+      "target": "B2",
+      "formula": "=RAND()",
+      "stated": null,
+      "statedResult": "Each cell returns a different random decimal between 0 and 1, such as 0.7281, 0.1543, 0.9067. Values change each time the sheet recalculates.",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
+    },
+    {
+      "id": "RAND#1.B3",
+      "function": "RAND",
+      "intent": "The RAND function generates a random decimal number between 0 (inclusive) and 1 (exclusive).",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Scenario"
+        },
+        {
+          "a1": "B1",
+          "input": "Random Factor"
+        },
+        {
+          "a1": "A2",
+          "input": "Simulation 1"
+        },
+        {
+          "a1": "B2",
+          "input": "=RAND()"
+        },
+        {
+          "a1": "A3",
+          "input": "Simulation 2"
+        },
+        {
+          "a1": "A4",
+          "input": "Simulation 3"
+        },
+        {
+          "a1": "B4",
+          "input": "=RAND()"
+        }
+      ],
+      "target": "B3",
+      "formula": "=RAND()",
+      "stated": null,
+      "statedResult": "",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
+    },
+    {
+      "id": "RAND#1.B4",
+      "function": "RAND",
+      "intent": "The RAND function generates a random decimal number between 0 (inclusive) and 1 (exclusive).",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Scenario"
+        },
+        {
+          "a1": "B1",
+          "input": "Random Factor"
+        },
+        {
+          "a1": "A2",
+          "input": "Simulation 1"
+        },
+        {
+          "a1": "B2",
+          "input": "=RAND()"
+        },
+        {
+          "a1": "A3",
+          "input": "Simulation 2"
+        },
+        {
+          "a1": "B3",
+          "input": "=RAND()"
+        },
+        {
+          "a1": "A4",
+          "input": "Simulation 3"
+        }
+      ],
+      "target": "B4",
+      "formula": "=RAND()",
+      "stated": null,
+      "statedResult": "",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
+    },
+    {
+      "id": "RANDBETWEEN#1.B2",
+      "function": "RANDBETWEEN",
+      "intent": "The RANDBETWEEN function returns a random integer between two specified values (inclusive on both ends).",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Employee"
+        },
+        {
+          "a1": "B1",
+          "input": "Random Group (1-5)"
+        },
+        {
+          "a1": "A2",
+          "input": "Alice"
+        },
+        {
+          "a1": "A3",
+          "input": "Bob"
+        },
+        {
+          "a1": "B3",
+          "input": "=RANDBETWEEN(1, 5)"
+        },
+        {
+          "a1": "A4",
+          "input": "Carol"
+        },
+        {
+          "a1": "B4",
+          "input": "=RANDBETWEEN(1, 5)"
+        }
+      ],
+      "target": "B2",
+      "formula": "=RANDBETWEEN(1, 5)",
+      "stated": null,
+      "statedResult": "Each employee is randomly assigned a group number between 1 and 5 (e.g., 3, 1, 5). Values change on each recalculation.",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
+    },
+    {
+      "id": "RANDBETWEEN#1.B3",
+      "function": "RANDBETWEEN",
+      "intent": "The RANDBETWEEN function returns a random integer between two specified values (inclusive on both ends).",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Employee"
+        },
+        {
+          "a1": "B1",
+          "input": "Random Group (1-5)"
+        },
+        {
+          "a1": "A2",
+          "input": "Alice"
+        },
+        {
+          "a1": "B2",
+          "input": "=RANDBETWEEN(1, 5)"
+        },
+        {
+          "a1": "A3",
+          "input": "Bob"
+        },
+        {
+          "a1": "A4",
+          "input": "Carol"
+        },
+        {
+          "a1": "B4",
+          "input": "=RANDBETWEEN(1, 5)"
+        }
+      ],
+      "target": "B3",
+      "formula": "=RANDBETWEEN(1, 5)",
+      "stated": null,
+      "statedResult": "",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
+    },
+    {
+      "id": "RANDBETWEEN#1.B4",
+      "function": "RANDBETWEEN",
+      "intent": "The RANDBETWEEN function returns a random integer between two specified values (inclusive on both ends).",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Employee"
+        },
+        {
+          "a1": "B1",
+          "input": "Random Group (1-5)"
+        },
+        {
+          "a1": "A2",
+          "input": "Alice"
+        },
+        {
+          "a1": "B2",
+          "input": "=RANDBETWEEN(1, 5)"
+        },
+        {
+          "a1": "A3",
+          "input": "Bob"
+        },
+        {
+          "a1": "B3",
+          "input": "=RANDBETWEEN(1, 5)"
+        },
+        {
+          "a1": "A4",
+          "input": "Carol"
+        }
+      ],
+      "target": "B4",
+      "formula": "=RANDBETWEEN(1, 5)",
+      "stated": null,
+      "statedResult": "",
+      "expect": {
+        "kind": "number"
+      },
+      "oracle": "engine",
+      "volatile": true,
+      "engineDisplay": "(volatile number)"
     },
     {
       "id": "RANK.AVG#1.B2",
@@ -25459,11 +25864,11 @@
       "statedResult": "Approximately 0.0247 (there is a 2.47% probability of observing a t-value this extreme in either tail with 15 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": 0.024505803246312352
+        "number": 0.024505803246513937
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.024505803246312352"
+      "engineDisplay": "0.024505803246513937"
     },
     {
       "id": "T.DIST.RT#1",
@@ -25489,11 +25894,11 @@
       "statedResult": "Approximately 0.0410 (there is a 4.1% probability of observing a t-value this large or larger with 20 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": 0.04109813198467649
+        "number": 0.04109813198557864
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.04109813198467649"
+      "engineDisplay": "0.04109813198557864"
     },
     {
       "id": "T.DIST#1",
@@ -25519,11 +25924,11 @@
       "statedResult": "Approximately 0.9609 (left-tail probability with 10 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": 0.9607818798764419
+        "number": 0.96078187987615
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.9607818798764419"
+      "engineDisplay": "0.96078187987615"
     },
     {
       "id": "T.INV.2T#1",
@@ -25549,11 +25954,11 @@
       "statedResult": "Approximately 2.0860 (the critical value for a two-tailed test at the 5% significance level with 20 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": 2.0859634472461765
+        "number": 2.0859634472658644
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "2.0859634472461765"
+      "engineDisplay": "2.0859634472658644"
     },
     {
       "id": "T.INV#1",
@@ -25579,11 +25984,11 @@
       "statedResult": "Approximately -1.7247 (the t-value below which 5% of the distribution falls with 20 degrees of freedom)",
       "expect": {
         "kind": "number",
-        "number": -1.7247182429112478
+        "number": -1.7247182429207861
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "-1.7247182429112478"
+      "engineDisplay": "-1.7247182429207861"
     },
     {
       "id": "T.TEST#1",
@@ -25657,11 +26062,11 @@
       "statedResult": "Approximately 0.0036 (the two-tailed p-value for a paired t-test, suggesting a statistically significant difference between the before and after scores)",
       "expect": {
         "kind": "number",
-        "number": 0.00876965945832553
+        "number": 0.008769659458325621
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "0.00876965945832553"
+      "engineDisplay": "0.008769659458325621"
     },
     {
       "id": "T#1.B2",
@@ -26080,12 +26485,11 @@
       "stated": null,
       "statedResult": "",
       "expect": {
-        "kind": "text",
-        "text": "Invoice dated October 8, 2026"
+        "kind": "text"
       },
       "oracle": "engine",
       "volatile": true,
-      "engineDisplay": "Invoice dated October 8, 2026"
+      "engineDisplay": "(volatile text)"
     },
     {
       "id": "TEXTAFTER#1",
@@ -26637,12 +27041,11 @@
       "stated": null,
       "statedResult": "",
       "expect": {
-        "kind": "number",
-        "number": 46303
+        "kind": "number"
       },
       "oracle": "engine",
       "volatile": true,
-      "engineDisplay": "46303"
+      "engineDisplay": "(volatile number)"
     },
     {
       "id": "TODAY#1.B4",
@@ -26691,12 +27094,11 @@
       "stated": null,
       "statedResult": "",
       "expect": {
-        "kind": "number",
-        "number": 13264
+        "kind": "number"
       },
       "oracle": "engine",
       "volatile": true,
-      "engineDisplay": "13264"
+      "engineDisplay": "(volatile number)"
     },
     {
       "id": "TODAY#1.B5",
@@ -26745,12 +27147,11 @@
       "stated": null,
       "statedResult": "",
       "expect": {
-        "kind": "number",
-        "number": 36
+        "kind": "number"
       },
       "oracle": "engine",
       "volatile": true,
-      "engineDisplay": "36"
+      "engineDisplay": "(volatile number)"
     },
     {
       "id": "TRIM#1",
@@ -29977,42 +30378,6 @@
     {
       "id": "MODE.MULT#1",
       "reason": "the result is a spill and has no single-cell value"
-    },
-    {
-      "id": "NOW#1.B2",
-      "reason": "the fixture did not settle"
-    },
-    {
-      "id": "NOW#1.B3",
-      "reason": "the fixture did not settle"
-    },
-    {
-      "id": "NOW#1.B4",
-      "reason": "the fixture did not settle"
-    },
-    {
-      "id": "RAND#1.B2",
-      "reason": "the fixture did not settle"
-    },
-    {
-      "id": "RAND#1.B3",
-      "reason": "the fixture did not settle"
-    },
-    {
-      "id": "RAND#1.B4",
-      "reason": "the fixture did not settle"
-    },
-    {
-      "id": "RANDBETWEEN#1.B2",
-      "reason": "the fixture did not settle"
-    },
-    {
-      "id": "RANDBETWEEN#1.B3",
-      "reason": "the fixture did not settle"
-    },
-    {
-      "id": "RANDBETWEEN#1.B4",
-      "reason": "the fixture did not settle"
     },
     {
       "id": "SEQUENCE#1",

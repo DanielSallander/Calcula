@@ -154,7 +154,6 @@ const SELECTION_WRITE_COMMANDS: Readonly<Record<string, string>> = {
   "format.numberNumber": "Number Format",
   "edit.insertDate": "Insert Date",
   "edit.insertTime": "Insert Time",
-  "clipboard.pasteSpecial": "Paste Special",
   "insert.chart": "Insert Chart",
   "checkbox.toggle": "Toggle Checkbox",
 };
@@ -169,7 +168,8 @@ const SELECTION_WRITE_COMMANDS: Readonly<Record<string, string>> = {
  * outright while an owner holds the selection (`refuseIfSelectionOwned`):
  * Ctrl+; / Ctrl+Shift+: and Space write through Core's own cell paths, and F11
  * builds a chart (an Insert-tab act), none of which has a target route.
- * Ctrl+Alt+V reaches the Paste Special door, which asks its own question.
+ * Ctrl+Alt+V is not this keyboard's: the keybinding registry runs Paste
+ * Special, whose door asks its own question.
  */
 const SELECTION_WRITE_CAPABILITY: Readonly<Partial<Record<string, CellTargetCapability>>> = {
   "format.toggleBold": "format",
@@ -183,7 +183,6 @@ const SELECTION_WRITE_CAPABILITY: Readonly<Partial<Record<string, CellTargetCapa
   "format.numberDate": "numberFormat",
   "format.numberTime": "numberFormat",
   "format.numberNumber": "numberFormat",
-  "clipboard.pasteSpecial": "content",
 };
 
 /** The capability `command` asks for, or undefined (it refuses outright). */
@@ -1105,21 +1104,15 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      // Handle Ctrl+Alt+V - Paste Special
-      if (modKey && altKey && key.toLowerCase() === 'v' && onCommand) {
-        event.preventDefault();
-        event.stopPropagation();
-        eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Alt+V', ['Ctrl', 'Alt']);
-        onCommand('clipboard.pasteSpecial');
-        fnLog.exit('handleKeyDown', 'paste special');
-        return;
-      }
-
-      // Clipboard (Ctrl+C/X/V) and undo/redo (Ctrl+Z/Y) are owned by the
-      // centralized keybinding registry. Its capture-phase handler matches these
+      // Clipboard (Ctrl+C/X/V, Ctrl+Alt+V Paste Special, Ctrl+Shift+V Paste
+      // Values) and undo/redo (Ctrl+Z/Y) are owned by the centralized
+      // keybinding registry. Its capture-phase handler matches these
       // grid-scoped commands and stopPropagation()s before this bubble-phase
-      // handler runs whenever the grid is focused, so cases for them here would be
-      // dead. See app/src/api/keybindings.ts.
+      // handler runs whenever the grid is focused, so cases for them here would
+      // be dead -- or worse: a Ctrl+Alt+V case here used to open Paste Special
+      // AFTER the user had rebound Paste Special to another key in Settings,
+      // because the registry then no longer took Ctrl+Alt+V. The registry is
+      // the one source of a shortcut. See app/src/api/keybindings.ts.
       if (modKey && !altKey) {
         switch (key.toLowerCase()) {
           case 'a': {

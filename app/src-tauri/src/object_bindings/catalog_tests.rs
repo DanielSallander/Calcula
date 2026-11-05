@@ -440,13 +440,40 @@ fn catalog_type_of(t: visual_format::FieldType) -> BindableValueType {
 
 /// The container fields a kind deliberately has NO Container row for (WP-C
 /// spec 2.7): `lockAspect` is never bound; the rest live elsewhere (a Family
-/// row) or are the object's identity / move handle.
+/// row) or are the object's identity / move handle -- and (BUG-0491) every
+/// field the family NEVER PAINTS: a slicer's, a timeline's and a floating
+/// grid's header is one line, so the title's wrap, the subtitle, the divider
+/// and the spacing below them change nothing (the providers' `null` rows in
+/// their `CONTAINER_BINDING_PATHS`, pinned the other way by
+/// ObjectPane/__tests__/objectFormatBindingPaths.test.ts). A row for one let a
+/// script, MCP or the AI bind or write a fact that paints nothing.
 fn container_exclusions(kind: ObjectBindingKind) -> &'static [&'static str] {
     match kind {
         ObjectBindingKind::Chart => &["/lockAspect", "/title/text", "/title/color", "/title/fontSize"],
-        ObjectBindingKind::Slicer | ObjectBindingKind::TimelineSlicer => {
-            &["/lockAspect", "/title/text", "/title/show"]
-        }
+        ObjectBindingKind::Slicer | ObjectBindingKind::TimelineSlicer => &[
+            "/lockAspect",
+            "/title/text",
+            "/title/show",
+            "/title/wrap",
+            "/subtitle/show",
+            "/subtitle/text",
+            "/subtitle/fontFamily",
+            "/subtitle/fontSize",
+            "/subtitle/bold",
+            "/subtitle/italic",
+            "/subtitle/underline",
+            "/subtitle/color",
+            "/subtitle/background",
+            "/subtitle/align",
+            "/subtitle/wrap",
+            "/divider/show",
+            "/divider/color",
+            "/divider/style",
+            "/divider/width",
+            "/divider/ignorePadding",
+            "/spacing/belowSubtitle",
+            "/spacing/belowDivider",
+        ],
         ObjectBindingKind::Pivot => &["/lockAspect"],
         ObjectBindingKind::FloatingRange => &[
             "/lockAspect",
@@ -456,6 +483,27 @@ fn container_exclusions(kind: ObjectBindingKind) -> &'static [&'static str] {
             "/padding/right",
             "/padding/bottom",
             "/padding/left",
+            "/title/wrap",
+            "/subtitle/show",
+            "/subtitle/text",
+            "/subtitle/fontFamily",
+            "/subtitle/fontSize",
+            "/subtitle/bold",
+            "/subtitle/italic",
+            "/subtitle/underline",
+            "/subtitle/color",
+            "/subtitle/background",
+            "/subtitle/align",
+            "/subtitle/wrap",
+            "/divider/show",
+            "/divider/color",
+            "/divider/style",
+            "/divider/width",
+            "/divider/ignorePadding",
+            "/spacing/custom",
+            "/spacing/belowTitle",
+            "/spacing/belowSubtitle",
+            "/spacing/belowDivider",
         ],
         ObjectBindingKind::Control | ObjectBindingKind::CanvasPage => &[],
     }
@@ -512,8 +560,8 @@ fn container_rows_are_the_field_table() {
             }
         }
     }
-    // 51 fields x 5 kinds minus the exclusions (4 + 1 + 3 + 3 + 7).
-    assert_eq!(container_rows, 51 * 5 - 18, "the Container row count");
+    // 51 fields x 5 kinds minus the exclusions (4 + 1 + 22 + 22 + 28).
+    assert_eq!(container_rows, 51 * 5 - 77, "the Container row count");
     // Never two spellings of one fact: no Family row lives under a container root.
     for r in BINDABLE_PATHS.iter().filter(|r| r.origin == BindableOrigin::Family) {
         if let Some(root) = container_root(r.kind) {

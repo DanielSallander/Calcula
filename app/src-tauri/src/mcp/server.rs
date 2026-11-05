@@ -1032,7 +1032,7 @@ impl CalculaMcpServer {
         }
     }
 
-    #[tool(description = "Delete a structured table by id. The cell values stay; the table object, its autofilter and any attached object script are removed. Undoable.")]
+    #[tool(description = "Delete a structured table by id, as Excel's ListObject.Delete does: the table, its cells (values and formats), its autofilter and any attached object script are removed, and every formula reference to it becomes #REF!. Undoable.")]
     async fn delete_table(
         &self,
         params: Parameters<DeleteTableParams>,

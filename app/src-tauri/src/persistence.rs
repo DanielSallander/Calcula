@@ -302,6 +302,7 @@ fn table_to_saved(table: &Table, sheet_ids: &[SheetId]) -> Option<SavedTable> {
                 totals_row_function: totals_fn_to_string(&c.totals_row_function),
                 totals_row_formula: c.totals_row_formula.clone(),
                 calculated_formula: c.calculated_formula.clone(),
+                totals_row_label: c.totals_row_label.clone(),
             })
             .collect(),
         style_options: SavedTableStyleOptions {
@@ -343,6 +344,9 @@ pub fn saved_table_to_table_at(saved: &SavedTable, sheet_index: usize) -> Table 
                 totals_row_function: string_to_totals_fn(&c.totals_row_function),
                 totals_row_formula: c.totals_row_formula.clone(),
                 calculated_formula: c.calculated_formula.clone(),
+                // NEW-totals-label-persist: the label a hidden totals row
+                // keeps rides the saved column.
+                totals_row_label: c.totals_row_label.clone(),
             })
             .collect(),
         style_options: TableStyleOptions {
@@ -4985,10 +4989,12 @@ pub fn open_file(
                 {
                     auto_filters.insert(
                         *sheet_index,
+                        // Above the totals row, as Excel's is
+                        // (`Table::filter_end_row`).
                         crate::autofilter::AutoFilter::new(
                             seed.start_row,
                             seed.start_col,
-                            seed.end_row,
+                            seed.filter_end_row(),
                             seed.end_col,
                         ),
                     );

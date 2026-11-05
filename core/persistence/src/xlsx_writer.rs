@@ -10,6 +10,11 @@ use rust_xlsxwriter::{
 };
 use std::path::Path;
 
+/// Which single-cell formulas are written DYNAMIC, as Excel saves them
+/// (lane xlsxdyn, rev-parse-1).
+#[path = "xlsx_dynamic_formula.rs"]
+pub(crate) mod dynamic_formula;
+
 /// The error literals a `t="e"` cached result may carry as they are
 /// (`<c t="e"><v>#DIV/0!</v></c>`). Every other error -- Excel's newer ones
 /// (`#SPILL!`, `#CALC!`, ...) and Calcula's own (`#CONFLICT!`, `#LIMIT!`, a
@@ -124,6 +129,12 @@ struct CachedResults {
     parts: std::collections::HashSet<String>,
     /// The rich error values the markers and the static errors refer to.
     rich: RichErrors,
+    /// The workbook's defined names, which a formula's bare name may be
+    /// rather than a function value (`xlsx_formula_text::DefinedNames`).
+    names: crate::xlsx_formula_text::DefinedNames,
+    /// Which defined names Excel takes for one value, for the dynamic flag
+    /// (`dynamic_formula::excel_saves_dynamic`).
+    shapes: dynamic_formula::NameShapes,
 }
 
 impl CachedResults {
@@ -176,10 +187,12 @@ impl CachedResults {
     /// the library's `0` placeholder every formula showed 0). The text is
     /// Excel's spelling of it (`xlsx_formula_text::excel_formula_text`), for
     /// the cell at 0-based `(row, col)` (a bare `C` / `R` is that cell's
-    /// column / row to Excel).
-    fn formula(&mut self, formula: &str, value: &SavedCellValue, row: u32, col: u16) -> rust_xlsxwriter::Formula {
-        let text = crate::xlsx_formula_text::excel_formula_text(formula, Some((row, u32::from(col))));
-        crate::xlsx_formula_text::library_formula(&text).set_result(self.literal(value))
+    /// column / row to Excel). Also whether the text calls one of the
+    /// workbook's named LAMBDAs (`DefinedNames::calls_lambda`).
+    fn formula(&mut self, formula: &str, value: &SavedCellValue, row: u32, col: u16) -> (rust_xlsxwriter::Formula, bool) {
+        let text = crate::xlsx_formula_text::excel_formula_text_with_names(formula, Some((row, u32::from(col))), &self.names);
+        let calls_lambda = self.names.calls_lambda(&text);
+        (crate::xlsx_formula_text::library_formula(&text).set_result(self.literal(value)), calls_lambda)
     }
 }
 
@@ -190,7 +203,12 @@ impl CachedResults {
 /// 16: `=AddOne(4)` with `AddOne` = `LAMBDA(n,n+1)` is
 /// `<c r="A1" cm="1"><f t="array" ref="A1">AddOne(4)</f><v>5</v></c>`). As a
 /// plain formula Excel opened it as `=@AddOne(4)`, the implicit-intersection
-/// form, which cuts an array result down to one value (round 15 sweep).
+/// form, which cuts an array result down to one value (round 15 sweep). So
+/// is a call the engine left unresolved (`Opt(1)` with `Opt` a named
+/// LAMBDA, BUG-0645): the rev18x verifier's real-path export opened as
+/// `=@Opt(1)`. So is every formula Excel itself saves dynamic
+/// (`dynamic_formula::excel_saves_dynamic`): written plain, Excel opens it
+/// with its implicit intersection and a wrong value (rev-parse-1).
 fn write_formula_cell(
     worksheet: &mut rust_xlsxwriter::Worksheet,
     row: u32,
@@ -200,8 +218,11 @@ fn write_formula_cell(
     format: Option<&Format>,
     cached_results: &mut CachedResults,
 ) -> Result<(), rust_xlsxwriter::XlsxError> {
-    let dynamic = formula.contains(engine::ast_render::NAMED_INVOKE_MARKER);
-    let formula = cached_results.formula(formula, value, row, col);
+    let (formula_written, calls_lambda) = cached_results.formula(formula, value, row, col);
+    let dynamic = calls_lambda
+        || formula.contains(engine::ast_render::NAMED_INVOKE_MARKER)
+        || dynamic_formula::excel_saves_dynamic(formula, &cached_results.shapes);
+    let formula = formula_written;
     match (dynamic, format) {
         (true, Some(fmt)) => worksheet.write_dynamic_formula_with_format(row, col, formula, fmt)?,
         (true, None) => worksheet.write_dynamic_formula(row, col, formula)?,
@@ -638,11 +659,15 @@ pub struct XlsxExportLosses {
     /// Cells (`Sheet1!J17`) whose formula Excel could not hold
     /// (`xlsx_formula_text::Unwritable`): written as the value alone.
     pub formulas: Vec<String>,
+    /// Tables Excel could not hold as tables (`xlsx_tables::TableParts`): a
+    /// reused name, an overlap, a column list that does not fit the range.
+    /// Their cells are written; the table is not.
+    pub tables: Vec<String>,
 }
 
 impl XlsxExportLosses {
     pub fn is_empty(&self) -> bool {
-        self.hyperlinks.is_empty() && self.defined_names.is_empty() && self.formulas.is_empty()
+        self.hyperlinks.is_empty() && self.defined_names.is_empty() && self.formulas.is_empty() && self.tables.is_empty()
     }
 
     /// The sentence the user reads, or `None` when nothing was left out.
@@ -673,10 +698,15 @@ impl XlsxExportLosses {
             1 => parts.push(format!("the formula in {}", list(&self.formulas))),
             n => parts.push(format!("the formulas in {} cells ({})", n, list(&self.formulas))),
         }
+        match self.tables.len() {
+            0 => {}
+            1 => parts.push(format!("the table {}", list(&self.tables))),
+            n => parts.push(format!("{} tables ({})", n, list(&self.tables))),
+        }
         Some(format!(
             "The workbook was saved as .xlsx, but {} could not be written to that format and {} left out of the file.",
             parts.join(" and "),
-            if self.hyperlinks.len() + self.defined_names.len() + self.formulas.len() == 1 { "was" } else { "were" }
+            if self.hyperlinks.len() + self.defined_names.len() + self.formulas.len() + self.tables.len() == 1 { "was" } else { "were" }
         ))
     }
 }
@@ -689,6 +719,11 @@ pub fn save_xlsx_reporting_losses(
     manual_calculation: bool,
 ) -> Result<XlsxExportLosses, PersistenceError> {
     let mut losses = XlsxExportLosses::default();
+    // LIVE DATA TABLES (BUG-0652): their bodies are written as values and the
+    // finished sheet parts given Excel's `<f t="dataTable">` element
+    // (`xlsx_data_tables`). `None` -- and nothing cloned -- without one.
+    let data_tables = crate::xlsx_data_tables::strip_for_writer(workbook);
+    let workbook: &Workbook = data_tables.as_ref().map_or(workbook, |(stripped, _)| stripped);
     // The theme's body / heading fonts, which a `Body` / `Headings` family is
     // written as (`with_excel_font_name`).
     let theme_fonts = &workbook.theme.fonts;
@@ -734,7 +769,11 @@ pub fn save_xlsx_reporting_losses(
     // Cached formula results Excel types and the library cannot (see
     // `CachedResults`), and each sheet part's standard column width (padded),
     // both stated in the finished archive by `finish_archive`.
-    let mut cached_results = CachedResults::default();
+    let mut cached_results = CachedResults {
+        names: crate::xlsx_formula_text::DefinedNames::of(workbook),
+        shapes: dynamic_formula::NameShapes::of(workbook),
+        ..CachedResults::default()
+    };
     let mut standard_widths: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     // Static error cells per sheet part, written as Excel's `t="e"` by
     // `finish_archive` (see `retype_static_errors`).
@@ -742,10 +781,17 @@ pub fn save_xlsx_reporting_losses(
     let mut static_errors: std::collections::HashMap<String, std::collections::HashMap<(u32, u32), (String, Option<usize>)>> =
         std::collections::HashMap::new();
 
+    // The tables Excel can hold, as Excel table parts (`xlsx_tables`).
+    let table_parts = crate::xlsx_tables::TableParts::new(workbook, &mut losses);
+
     // ========================================================================
     // Sheets
     // ========================================================================
     for (sheet_position, sheet) in workbook.sheets.iter().enumerate() {
+        // The sheet's cells as Excel holds them beside its tables (qualified
+        // structured references, text headers: `TableParts::export_sheet`).
+        let exported = table_parts.export_sheet(sheet);
+        let sheet = exported.as_ref().unwrap_or(sheet);
         let worksheet = xlsx.add_worksheet();
         // rust_xlsxwriter numbers its worksheet parts in the order the sheets
         // are added, from 1: the part this sheet's cached results go to.
@@ -895,6 +941,12 @@ pub fn save_xlsx_reporting_losses(
         for col in sheet.hidden_cols.union(&sheet.user_hidden_cols) {
             worksheet.set_column_hidden(*col as u16)?;
         }
+
+        // ---- Tables ----
+        // BEFORE every other writer of cells: the library writes table
+        // captions and formulas into the cells, which the merges, links and
+        // the cell loop below then overwrite (`TableParts::add_to_sheet`).
+        table_parts.add_to_sheet(worksheet, sheet, &mut losses);
 
         // ---- Merged regions ----
         // MUST run BEFORE the cell loop: merge_range writes a blank string into
@@ -1065,7 +1117,7 @@ pub fn save_xlsx_reporting_losses(
             // library's `0` placeholder -- or, blocked, the #SPILL! Excel
             // caches for it (#VALUE! plus the rich value that names it).
             let cached = if blocked { SavedCellValue::Error("#SPILL!".to_string()) } else { cell.value.clone() };
-            let formula = crate::xlsx_formula_text::library_formula(&crate::xlsx_formula_text::excel_formula_text(clean_formula, Some((*row, *col))))
+            let formula = crate::xlsx_formula_text::library_formula(&crate::xlsx_formula_text::excel_formula_text_with_names(clean_formula, Some((*row, *col)), &cached_results.names))
                 .set_result(cached_results.literal(&cached));
             let format = cell_format(sheet, cell, linked_cells.contains(&(*row, *col)), &hyperlink_format, theme_fonts);
             match format {
@@ -1305,12 +1357,23 @@ pub fn save_xlsx_reporting_losses(
     // LET parameters and the `_xlfn.` future-function prefixes, which
     // `define_name` does not add ([LIVE] Excel 16 saves a name `=LAMBDA(n,n+1)`
     // as `_xlfn.LAMBDA(_xlpm.n,_xlpm.n+1)` and `=XLOOKUP(..)` as
-    // `_xlfn.XLOOKUP(..)`; see `xlsx_formula_text`).
+    // `_xlfn.XLOOKUP(..)`; see `xlsx_formula_text`), and a reference that
+    // names no sheet as the using sheet's, `!A1` (its `$` as the name has it:
+    // a relative part means the using cell) -- [LIVE] Excel refused a
+    // workbook whose name read `A1` (`excel_name_formula_text`). A table
+    // name in it is spelled as the table declares it, as in a cell
+    // (`xlsx_tables::respell_table_names`): a name's text re-rendered by a
+    // rename or a structural edit holds the lexer's upper-case `DATA[Q]`, and
+    // [LIVE] Excel 16 refused a file whose formula read so for a table Data.
+    let declared_tables: Vec<&str> = workbook.tables.iter().map(|t| t.name.as_str()).collect();
     let name_formulas = crate::xlsx_formula_text::escape_defined_name_formulas(
         &workbook
             .named_ranges
             .iter()
-            .map(|nr| crate::xlsx_formula_text::excel_formula_text(&nr.refers_to, None))
+            .map(|nr| {
+                let text = crate::xlsx_formula_text::excel_name_formula_text(&nr.refers_to, &cached_results.names);
+                crate::xlsx_tables::respell_table_names(&text, &declared_tables).unwrap_or(text)
+            })
             .collect::<Vec<_>>(),
     )?;
     // Names scoped to a sheet whose name holds a `!`, written into the
@@ -1372,8 +1435,9 @@ pub fn save_xlsx_reporting_losses(
     }
 
     // ========================================================================
-    // Calcula metadata sheet (tables + full-fidelity charts/sparklines)
+    // Calcula metadata sheet (full-fidelity charts/sparklines)
     // ========================================================================
+    // Tables are not carried: they are Excel table parts (`xlsx_tables`).
     // Charts/sparklines are keyed by visible-sheet POSITION (SheetIds are
     // re-minted on import); entries whose sheet no longer exists are dropped.
     let meta_charts: Vec<crate::MetaChart> = workbook
@@ -1410,8 +1474,8 @@ pub fn save_xlsx_reporting_losses(
                 })
         })
         .collect();
-    if !workbook.tables.is_empty() || !meta_charts.is_empty() || !meta_sparklines.is_empty() {
-        let mut meta = CalculaMeta::new(workbook.tables.clone());
+    if !meta_charts.is_empty() || !meta_sparklines.is_empty() {
+        let mut meta = CalculaMeta::new();
         meta.charts = meta_charts;
         meta.sparklines = meta_sparklines;
         let json = meta.to_json();
@@ -1455,6 +1519,13 @@ pub fn save_xlsx_reporting_losses(
             &static_errors,
             &bang_scoped_names,
         )?;
+        let bytes = match &data_tables {
+            Some((_, parts)) => crate::xlsx_data_tables::finish_with_data_tables(&bytes, parts)?,
+            None => bytes,
+        };
+        // A calculated column whose formula holds an `@` (a column NAME's):
+        // the library garbles it in the table part (`TableParts::finish_archive`).
+        let bytes = table_parts.finish_archive(&bytes)?.unwrap_or(bytes);
         std::fs::write(path, bytes)?;
     }
 
@@ -5837,7 +5908,9 @@ mod tests {
         for expected in [
             r#"<f t="array" ref="A1:C1">{1,2,3}</f>"#,
             "<f>SUM({1,2})</f>",
-            "<f>A1:A3*{1;2;3}</f>",
+            // Dynamic now, as Excel saves it (`<f t="array" ..>B5:B7*{1;2;3}</f>`
+            // above; NEW-xlsx-let-dynamic) -- the braces are what this pins.
+            ">A1:A3*{1;2;3}</f>",
             "{&quot;a&quot;,&quot;b&quot;}&amp;&quot;x&quot;</f>",
         ] {
             let alt = expected.replace("&quot;", "\"");
@@ -6056,7 +6129,7 @@ mod tests {
         // Nothing left out, nothing to say.
         let clean = save_xlsx_reporting_losses(&one_sheet(vec![]), &dir.path().join("clean.xlsx"), false).unwrap();
         assert!(clean.is_empty() && clean.message().is_none());
-        let many = XlsxExportLosses { hyperlinks: (1..=7).map(|i| format!("S!A{}", i)).collect(), defined_names: vec![], formulas: vec![] };
+        let many = XlsxExportLosses { hyperlinks: (1..=7).map(|i| format!("S!A{}", i)).collect(), defined_names: vec![], formulas: vec![], tables: vec![] };
         assert_eq!(
             many.message().as_deref(),
             Some("The workbook was saved as .xlsx, but 7 hyperlinks (S!A1, S!A2, S!A3, S!A4, S!A5 and 2 more) could not be written to that format and were left out of the file.")

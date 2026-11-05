@@ -287,6 +287,10 @@ impl<'a> PivotCalculator<'a> {
         let col_fields = self.effective_col_fields.clone();
         let mut row_tree = self.build_axis_tree(&row_fields);
         let mut col_tree = self.build_axis_tree(&col_fields);
+        // Sort by value (BUG-0459): a field's items re-ordered within each
+        // parent by a data field's value along one line of the other axis.
+        self.apply_value_sorts(&mut row_tree, &row_fields, &col_fields, true);
+        self.apply_value_sorts(&mut col_tree, &col_fields, &row_fields, false);
 
         // Apply ragged hierarchy behaviors to the trees
         for hc in &self.definition.hierarchy_configs {
@@ -1187,6 +1191,7 @@ impl<'a> PivotCalculator<'a> {
             let name = format_date_level_name(&field.name, level);
             let mut vf_field = PivotField::new(effective_index, name);
             vf_field.sort_order = field.sort_order;
+            vf_field.value_sort = field.value_sort.clone();
             vf_field.show_subtotals = field.show_subtotals;
             // Individual item collapse state doesn't transfer to virtual fields
             vf_field.collapsed = false;
@@ -1303,6 +1308,7 @@ impl<'a> PivotCalculator<'a> {
         // Create effective PivotField
         let mut vf_field = PivotField::new(effective_index, name);
         vf_field.sort_order = field.sort_order;
+        vf_field.value_sort = field.value_sort.clone();
         vf_field.show_subtotals = field.show_subtotals;
         vf_field.collapsed = false;
         vf_field.collapsed_items = Vec::new();
@@ -1377,6 +1383,7 @@ impl<'a> PivotCalculator<'a> {
         // Add the virtual group field BEFORE the original field (creates hierarchy)
         let mut group_field = PivotField::new(effective_index, name);
         group_field.sort_order = field.sort_order;
+        group_field.value_sort = field.value_sort.clone();
         group_field.show_subtotals = true;
         effective.push(group_field);
 
@@ -1567,10 +1574,19 @@ impl<'a> PivotCalculator<'a> {
             }
             Some((sort_fi, mapping))
         });
+        // A field sorted by VALUE is first put in ASCENDING label order in
+        // either direction: `apply_value_sorts` then re-orders it, breaking
+        // ties by that order (`value_sort_level`).
+        let label_order = match field.sort_order {
+            crate::definition::SortOrder::Descending if self.value_sort_field_index(field).is_some() => {
+                crate::definition::SortOrder::Ascending
+            }
+            order => order,
+        };
         self.sort_value_ids(
             &mut sorted_ids,
             field_cache,
-            &field.sort_order,
+            &label_order,
             &sort_by_map,
             source_order.get(level).and_then(Option::as_ref),
         );
@@ -1694,6 +1710,160 @@ impl<'a> PivotCalculator<'a> {
         }
     }
     
+    // ========================================================================
+    // SORT BY VALUE (BUG-0459)
+    // ========================================================================
+
+    /// The value field (index into `definition.value_fields`) a field sorts
+    /// by when its VALUE sort is in force: it has a `value_sort`, is sorted
+    /// Ascending or Descending (Manual / DataSourceOrder ignore it), and some
+    /// value field carries the sort's name. `None`: the field sorts by label.
+    fn value_sort_field_index(&self, field: &PivotField) -> Option<usize> {
+        use crate::definition::SortOrder;
+        let vs = field.value_sort.as_ref()?;
+        if !matches!(field.sort_order, SortOrder::Ascending | SortOrder::Descending) {
+            return None;
+        }
+        self.definition.value_fields.iter().position(|v| v.name == vs.value_field)
+    }
+
+    /// The member id a scope KEY names on the field at `effective_index`:
+    /// the blank member for the key "" (`BLANK_MEMBER_KEY`), else the item
+    /// whose `member_key` is the key. `None`: no item carries it.
+    fn member_id_of_key(&self, effective_index: FieldIndex, key: &str) -> Option<ValueId> {
+        if key == crate::cache::BLANK_MEMBER_KEY {
+            return Some(VALUE_ID_BLANK);
+        }
+        let fc = self.cache.get_field(effective_index)?;
+        (0..fc.unique_count() as ValueId).find(|&id| fc.member_key(id) == key)
+    }
+
+    /// Re-orders the items of every level of `tree` whose field sorts by
+    /// VALUE (`PivotField::value_sort`): within each parent, by the data
+    /// field's aggregate at that item along the sort's line of the OTHER
+    /// axis (`other_fields`; an empty scope is that axis's grand total).
+    ///
+    /// Excel's rules [LIVE Excel 16, `PivotField.AutoSort` with and without a
+    /// PivotLine]: siblings are sorted, parents are not moved by a child
+    /// level's sort; an item with NO data on the line is the smallest (first
+    /// ascending, last descending); equal values are ordered by label, as
+    /// `value_sort_level` spells out. The value read is the
+    /// cell's own aggregate -- for a data-model pivot the engine's, since
+    /// its totals overrides are already in the accumulators.
+    fn apply_value_sorts(
+        &mut self,
+        tree: &mut Vec<AxisNode>,
+        fields: &[PivotField],
+        other_fields: &[PivotField],
+        is_row: bool,
+    ) {
+        use crate::definition::SortOrder;
+        // Per level: (value field, descending, the line's member ids).
+        let plans: Vec<Option<(usize, bool, Vec<ValueId>)>> = fields
+            .iter()
+            .map(|field| {
+                let vf_idx = self.value_sort_field_index(field)?;
+                let vs = field.value_sort.as_ref()?;
+                let descending = field.sort_order == SortOrder::Descending;
+                // A line deeper than the other axis, or a key no item carries
+                // any more: there is no such line, every item reads blank, and
+                // the ascending label order stands.
+                if vs.scope.len() > other_fields.len() {
+                    return None;
+                }
+                let mut line = Vec::with_capacity(vs.scope.len());
+                for (key, other) in vs.scope.iter().zip(other_fields) {
+                    line.push(self.member_id_of_key(other.source_index, key)?);
+                }
+                Some((vf_idx, descending, line))
+            })
+            .collect();
+        if plans.iter().all(Option::is_none) {
+            return;
+        }
+        self.ensure_aggregates_computed();
+        let mut path: Vec<ValueId> = Vec::new();
+        self.value_sort_level(tree, 0, &plans, &mut path, is_row);
+    }
+
+    /// One level of [`Self::apply_value_sorts`]: sorts `nodes` (the children
+    /// of the item at `path`) when level `level` sorts by value, then recurses.
+    fn value_sort_level(
+        &self,
+        nodes: &mut Vec<AxisNode>,
+        level: usize,
+        plans: &[Option<(usize, bool, Vec<ValueId>)>],
+        path: &mut Vec<ValueId>,
+        is_row: bool,
+    ) {
+        if let Some(Some((vf_idx, descending, line))) = plans.get(level) {
+            let aggregation = self.definition.value_fields[*vf_idx].aggregation;
+            let keys: Vec<Option<f64>> = nodes
+                .iter()
+                .map(|node| {
+                    path.push(node.value_id);
+                    let value = if is_row {
+                        self.aggregate_or_blank(path, line, *vf_idx, aggregation)
+                    } else {
+                        self.aggregate_or_blank(line, path, *vf_idx, aggregation)
+                    };
+                    path.pop();
+                    value
+                })
+                .collect();
+            let mut order: Vec<usize> = (0..nodes.len()).collect();
+            // Equal values: the nodes were built in ASCENDING label order, so
+            // the index is the label order. Excel [LIVE] keeps it ascending
+            // for the direction that is "natural" to the line and reverses it
+            // for the other: along a COLUMN line ascending ties read A..Z and
+            // descending is the exact reverse (Z..A); along the GRAND TOTAL
+            // descending ties read A..Z and ascending is the exact reverse.
+            let ties_descending = if line.is_empty() { !*descending } else { *descending };
+            order.sort_by(|&a, &b| {
+                let by_value = match (keys[a], keys[b]) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                };
+                let by_value = if *descending { by_value.reverse() } else { by_value };
+                by_value.then_with(|| if ties_descending { b.cmp(&a) } else { a.cmp(&b) })
+            });
+            let mut taken: Vec<Option<AxisNode>> = std::mem::take(nodes).into_iter().map(Some).collect();
+            *nodes = order.into_iter().filter_map(|i| taken[i].take()).collect();
+        }
+        if level + 1 < plans.len() {
+            for node in nodes.iter_mut() {
+                path.push(node.value_id);
+                self.value_sort_level(&mut node.children, level + 1, plans, path, is_row);
+                path.pop();
+            }
+        }
+    }
+
+    /// The aggregate of value field `vf_idx` at a (row path, column path)
+    /// intersection -- each a prefix of member ids, a shorter one reading the
+    /// subtotal -- or `None` when no record reaches it (Excel's empty cell).
+    fn aggregate_or_blank(
+        &self,
+        row_values: &[ValueId],
+        col_values: &[ValueId],
+        vf_idx: usize,
+        aggregation: AggregationType,
+    ) -> Option<f64> {
+        let row_len = self.row_field_indices.len();
+        let mut key = vec![VALUE_ID_EMPTY; row_len];
+        let n = row_values.len().min(row_len);
+        key[..n].copy_from_slice(&row_values[..n]);
+        let slot = self.cache.get_row_slot(&key)?;
+        let acc = slot.get(self.cache.col_layout().acc_index(col_values, vf_idx))?;
+        if acc.count == 0 {
+            None
+        } else {
+            Some(acc.compute(aggregation))
+        }
+    }
+
     /// Compares two cache values for sorting.
     fn compare_values(
         &self,
@@ -5954,5 +6124,193 @@ mod member_source_tests {
             want.sort();
             assert_eq!(ids, want, "{blank:?} hides the NULLs and the empty text");
         }
+    }
+}
+
+/// Sort by value (BUG-0459), pinned against live Excel 16 over the probe
+/// table below (`PivotField.AutoSort(order, "Sum of Amount", PivotLine)`).
+#[cfg(test)]
+mod value_sort_tests {
+    use super::*;
+    use engine::CellValue;
+    use crate::definition::{AggregationType, PivotField, PivotId, SortOrder, ValueField, ValueSort};
+    use crate::view::PivotRowType;
+
+    fn pid() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9])
+    }
+
+    /// Fields: 0 Region, 1 Product, 2 Year, 3 Amount -- the [LIVE] probe's
+    /// table. East: A 10/50, B 30/5, C 20/20 (2023/2024). West: A 5, B 40,
+    /// D 30, E 30 (2023) and C 70 (2024 only).
+    fn probe_cache() -> PivotCache {
+        let rows: &[(&str, &str, &str, f64)] = &[
+            ("East", "A", "2023", 10.0),
+            ("East", "A", "2024", 50.0),
+            ("East", "B", "2023", 30.0),
+            ("East", "B", "2024", 5.0),
+            ("East", "C", "2023", 20.0),
+            ("East", "C", "2024", 20.0),
+            ("West", "A", "2023", 5.0),
+            ("West", "B", "2023", 40.0),
+            ("West", "C", "2024", 70.0),
+            ("West", "D", "2023", 30.0),
+            ("West", "E", "2023", 30.0),
+        ];
+        let mut cache = PivotCache::new(pid(), 4);
+        for (i, name) in ["Region", "Product", "Year", "Amount"].iter().enumerate() {
+            cache.set_field_name(i, name.to_string());
+        }
+        for (i, (region, product, year, amount)) in rows.iter().enumerate() {
+            cache.add_record(
+                i as u32,
+                &[
+                    CellValue::Text(region.to_string()),
+                    CellValue::Text(product.to_string()),
+                    CellValue::Text(year.to_string()),
+                    CellValue::Number(*amount),
+                ],
+            );
+        }
+        cache
+    }
+
+    /// Region > Product on rows, Year on columns, Sum of Amount.
+    fn probe_def() -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Region".into()), PivotField::new(1, "Product".into())];
+        def.column_fields = vec![PivotField::new(2, "Year".into())];
+        def.value_fields = vec![ValueField::new(3, "Sum of Amount".into(), AggregationType::Sum)];
+        def
+    }
+
+    fn by_value(scope: &[&str]) -> Option<ValueSort> {
+        Some(ValueSort {
+            value_field: "Sum of Amount".into(),
+            scope: scope.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    fn sort_product(def: &mut PivotDefinition, order: SortOrder, scope: &[&str]) {
+        def.row_fields[1].sort_order = order;
+        def.row_fields[1].value_sort = by_value(scope);
+    }
+
+    /// The row labels in view order (Data and Subtotal rows), "|"-joined.
+    fn row_labels(def: &PivotDefinition) -> String {
+        let mut cache = probe_cache();
+        let view = calculate_pivot(def, &mut cache);
+        view.rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| matches!(d.row_type, PivotRowType::Data | PivotRowType::Subtotal))
+            .map(|(_, cells)| cells[0].formatted_value.clone())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn label_order_is_unchanged_without_a_value_sort() {
+        assert_eq!(row_labels(&probe_def()), "East|A|B|C|West|A|B|C|D|E");
+    }
+
+    #[test]
+    fn descending_by_the_grand_total_sorts_each_regions_products() {
+        // [LIVE] P1 / G1: East A 60, C 40, B 35; West C 70, B 40, D 30, E 30, A 5.
+        let mut def = probe_def();
+        sort_product(&mut def, SortOrder::Descending, &[]);
+        assert_eq!(row_labels(&def), "East|A|C|B|West|C|B|D|E|A");
+    }
+
+    #[test]
+    fn ascending_by_the_grand_total_reverses_ties() {
+        // [LIVE] G2: West A 5, E 30, D 30, B 40, C 70 (the exact reverse of G1).
+        let mut def = probe_def();
+        sort_product(&mut def, SortOrder::Ascending, &[]);
+        assert_eq!(row_labels(&def), "East|B|C|A|West|A|E|D|B|C");
+    }
+
+    #[test]
+    fn descending_along_a_column_line_puts_no_data_last() {
+        // [LIVE] L1, the 2023 column: West B 40, E 30, D 30, A 5, C (no 2023 data).
+        let mut def = probe_def();
+        sort_product(&mut def, SortOrder::Descending, &["2023"]);
+        assert_eq!(row_labels(&def), "East|B|C|A|West|B|E|D|A|C");
+    }
+
+    #[test]
+    fn ascending_along_a_column_line_puts_no_data_first() {
+        // [LIVE] L2: West C (no data), A 5, D 30, E 30, B 40.
+        let mut def = probe_def();
+        sort_product(&mut def, SortOrder::Ascending, &["2023"]);
+        assert_eq!(row_labels(&def), "East|A|C|B|West|C|A|D|E|B");
+    }
+
+    #[test]
+    fn an_outer_field_sorts_by_its_subtotals() {
+        // Region descending by the grand total -- West 145, East 135 -- and
+        // [LIVE] L3, ascending along 2023 -- East 60, West 105.
+        let mut def = probe_def();
+        def.row_fields[0].sort_order = SortOrder::Descending;
+        def.row_fields[0].value_sort = by_value(&[]);
+        assert_eq!(row_labels(&def), "West|A|B|C|D|E|East|A|B|C");
+        def.row_fields[0].sort_order = SortOrder::Ascending;
+        def.row_fields[0].value_sort = by_value(&["2023"]);
+        assert_eq!(row_labels(&def), "East|A|B|C|West|A|B|C|D|E");
+    }
+
+    #[test]
+    fn a_column_field_sorts_by_a_rows_values() {
+        // [LIVE] P7: Year descending along East's row -- 2024 (75), 2023 (60).
+        let mut def = probe_def();
+        def.column_fields[0].sort_order = SortOrder::Descending;
+        def.column_fields[0].value_sort = by_value(&["East"]);
+        let mut cache = probe_cache();
+        let view = calculate_pivot(&def, &mut cache);
+        let years: Vec<String> = view
+            .cells
+            .iter()
+            .flat_map(|row| row.iter())
+            .map(|c| c.formatted_value.clone())
+            .filter(|s| s == "2023" || s == "2024")
+            .collect();
+        assert_eq!(years, vec!["2024".to_string(), "2023".to_string()]);
+        // Ascending along the same row: 2023 (60), 2024 (75).
+        def.column_fields[0].sort_order = SortOrder::Ascending;
+        let mut cache = probe_cache();
+        let view = calculate_pivot(&def, &mut cache);
+        let years: Vec<String> = view
+            .cells
+            .iter()
+            .flat_map(|row| row.iter())
+            .map(|c| c.formatted_value.clone())
+            .filter(|s| s == "2023" || s == "2024")
+            .collect();
+        assert_eq!(years, vec!["2023".to_string(), "2024".to_string()]);
+    }
+
+    #[test]
+    fn an_unknown_value_field_or_manual_order_leaves_the_label_sort() {
+        let mut def = probe_def();
+        sort_product(&mut def, SortOrder::Descending, &[]);
+        def.row_fields[1].value_sort.as_mut().unwrap().value_field = "No Such Field".into();
+        // The field's own label direction stands.
+        assert_eq!(row_labels(&def), "East|C|B|A|West|E|D|C|B|A");
+        let mut def = probe_def();
+        sort_product(&mut def, SortOrder::DataSourceOrder, &[]);
+        assert_eq!(row_labels(&def), "East|A|B|C|West|A|B|C|D|E");
+    }
+
+    #[test]
+    fn a_value_sort_round_trips_and_an_absent_one_reads_none() {
+        let mut def = probe_def();
+        sort_product(&mut def, SortOrder::Descending, &["2023"]);
+        let json = serde_json::to_string(&def.row_fields[1]).unwrap();
+        let back: PivotField = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.value_sort, def.row_fields[1].value_sort);
+        let plain = serde_json::to_string(&def.row_fields[0]).unwrap();
+        assert!(!plain.contains("value_sort"), "an absent value sort is not written: {plain}");
+        let read: PivotField = serde_json::from_str(&plain).unwrap();
+        assert_eq!(read.value_sort, None);
     }
 }

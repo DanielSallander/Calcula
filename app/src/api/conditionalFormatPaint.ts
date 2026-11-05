@@ -107,6 +107,12 @@ export function conditionalResultsToOverride(
       override.backgroundColor = cf.colorScaleColor;
       hasOverride = true;
     }
+    // Show Bar Only / Show Icon Only (BUG-0511): the backend flags the result of
+    // the rule that asked for it, and every cell painter then skips the value.
+    if (cf.hideValue === true) {
+      override.hideValue = true;
+      hasOverride = true;
+    }
     const fmt = cf.format;
     if (!fmt) continue;
     if (fmt.backgroundColor && !override.backgroundColor) {

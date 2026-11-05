@@ -29,9 +29,10 @@ pub(crate) fn aggregate_output_type(
     input: Option<&DataType>,
 ) -> Option<DataType> {
     match operation {
-        AggregateOp::Count | AggregateOp::CountRows | AggregateOp::DistinctCount => {
-            Some(DataType::Int64)
-        }
+        AggregateOp::Count
+        | AggregateOp::CountRows
+        | AggregateOp::DistinctCount
+        | AggregateOp::DistinctCountNoBlank => Some(DataType::Int64),
         AggregateOp::Sum => match input? {
             DataType::Int32 | DataType::Int64 => Some(DataType::Int64),
             DataType::Float64 | DataType::Decimal(_, _) => Some(DataType::Float64),

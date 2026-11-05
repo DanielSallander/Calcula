@@ -9,7 +9,9 @@
 //            Field Settings are DISABLED with a reason on a data-model pivot --
 //            and on a pivot whose kind is not known (never guessed);
 //          - a cell whose value field cannot be named greys every value item
-//            with a reason; Sort by value is greyed with its reason (BUG-0459);
+//            with a reason; Sort by value sorts the clicked row's field by the
+//            cell's value field along its column (BUG-0459), greyed on the
+//            Grand Total row;
 //          - each item calls the one action it names, with the cell's value
 //            field; a failure toasts "<Label> failed: <reason>";
 //          - the drill-through doors (model-drillthrough.md 2.9): the run row
@@ -94,16 +96,21 @@ vi.mock("../selectionHandler", () => {
 vi.mock("../../lib/pivotCellDoubleClick", () => ({ runPivotDrillThrough: vi.fn() }));
 vi.mock("../../lib/valueFieldEdits", () => ({ editPivotValueField: vi.fn(() => Promise.resolve()) }));
 vi.mock("../../lib/valueFieldDialogRequest", () => ({ requestValueFieldDialog: vi.fn(() => Promise.resolve()) }));
+vi.mock("../../lib/pivot-api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/pivot-api")>();
+  return { ...actual, sortPivotField: vi.fn(() => Promise.resolve({})) };
+});
 
 import { showDialog, showToast } from "@api";
 import { CommandRegistry } from "@api/commands";
 import type { PivotCellData, PivotRowData, PivotViewResponse } from "../../lib/pivot-api";
+import { sortPivotField } from "../../lib/pivot-api";
 import { cachePivotView, deleteCachedPivotView } from "../../lib/pivotViewStore";
 import {
   registerPivotContextMenuItems,
   MODEL_PIVOT_REASON,
   VALUE_FIELD_UNKNOWN_REASON,
-  SORT_BY_VALUE_REASON,
+  SORT_GRAND_TOTAL_ROW_REASON,
   COPY_UNAVAILABLE_REASON,
 } from "../pivotContextMenu";
 import { runPivotDrillThrough } from "../../lib/pivotCellDoubleClick";
@@ -127,7 +134,7 @@ function view(): PivotViewResponse {
   return {
     pivotId: "p1",
     version: 1,
-    rowCount: 3,
+    rowCount: 4,
     colCount: 3,
     rowLabelColCount: 1,
     columnHeaderRowCount: 1,
@@ -141,11 +148,14 @@ function view(): PivotViewResponse {
       row(0, [cell("Corner", "Row Labels"), cell("ColumnHeader", "Sum of Sales"), cell("ColumnHeader", "Count of Sales")], "ColumnHeader"),
       row(1, [
         cell("RowHeader", "East", { groupPath: [[3, 5]] }),
-        cell("Data", 100, { valueFieldIndex: 0 }),
+        // Its path: the row's item, then the column's (a Year item).
+        cell("Data", 100, { valueFieldIndex: 0, groupPath: [[3, 5], [7, 2]] }),
         cell("Data", 7, { valueFieldIndex: 1 }),
       ]),
       // A value cell that names no value field (two fields, no index).
       row(2, [cell("RowHeader", "West", { groupPath: [[3, 6]] }), cell("Data", 60, { valueFieldIndex: 0 }), cell("Data", 4)]),
+      // The Grand Total row: its label names no item.
+      row(3, [cell("GrandTotal", "Grand Total"), cell("GrandTotal", 160, { valueFieldIndex: 0 }), cell("GrandTotal", 11, { valueFieldIndex: 1 })], "GrandTotal"),
     ],
   } as unknown as PivotViewResponse;
 }
@@ -158,7 +168,7 @@ function install(isModel: boolean | undefined): void {
       name: "PivotTable1",
       startRow: ANCHOR.row,
       startCol: ANCHOR.col,
-      endRow: ANCHOR.row + 2,
+      endRow: ANCHOR.row + 3,
       endCol: ANCHOR.col + 2,
       isEmpty: false,
       ...(isModel === undefined ? {} : { isModel }),
@@ -239,11 +249,11 @@ describe("visibility", () => {
     expect(findItem("pivot:copy").shortcut).toBe("Ctrl+C");
   });
 
-  it("range pivot: Summarize Values By shows and every value item is enabled (Sort excepted)", () => {
+  it("range pivot: Summarize Values By shows and every value item is enabled", () => {
     install(false);
     const ctx = ctxAt(1, 2);
     expect(visible(findItem("pivot:summarizeBy"), ctx)).toBe(true);
-    for (const id of [...VALUE_ITEMS.filter((i) => i !== "pivot:sortByValue"), "pivot:summarizeBy"]) {
+    for (const id of [...VALUE_ITEMS, "pivot:summarizeBy"]) {
       expect(disabled(findItem(id), ctx), id).toBe(false);
     }
     expect(label(findItem("pivot:removeValueField"), ctx)).toBe('Remove "Count of Sales"');
@@ -289,17 +299,23 @@ describe("visibility", () => {
     expect(label(findItem("pivot:removeValueField"), ctx)).toBe("Remove Value Field");
   });
 
-  it("Sort by value is greyed with its reason, children too (BUG-0459)", () => {
+  it("Sort by value is enabled on a value cell and greyed on the Grand Total row (BUG-0459)", () => {
     install(false);
     const ctx = ctxAt(1, 1);
     const sort = findItem("pivot:sortByValue");
     expect(label(sort, ctx)).toBe("Sort");
-    expect(disabled(sort, ctx)).toBe(true);
-    expect(reason(sort, ctx)).toBe(SORT_BY_VALUE_REASON);
-    expect(sort.children?.map((c) => [c.label, c.disabled, c.disabledReason])).toEqual([
-      ["Sort Smallest to Largest", true, SORT_BY_VALUE_REASON],
-      ["Sort Largest to Smallest", true, SORT_BY_VALUE_REASON],
+    expect(disabled(sort, ctx)).toBe(false);
+    expect(sort.children?.map((c) => [c.label, disabled(c, ctx)])).toEqual([
+      ["Sort Smallest to Largest", false],
+      ["Sort Largest to Smallest", false],
     ]);
+    // A model pivot sorts by value too.
+    install(true);
+    expect(disabled(sort, ctxAt(1, 1))).toBe(false);
+    const total = ctxAt(3, 1);
+    expect(disabled(sort, total)).toBe(true);
+    expect(reason(sort, total)).toBe(SORT_GRAND_TOTAL_ROW_REASON);
+    for (const child of sort.children ?? []) expect(reason(child, total)).toBe(SORT_GRAND_TOTAL_ROW_REASON);
   });
 
   it("the Show Values As choices are the dialog's list; a based one says it opens a dialog", () => {
@@ -321,6 +337,30 @@ describe("visibility", () => {
 });
 
 describe("actions", () => {
+  it("Sort Largest to Smallest sorts the row's field by the cell's value field along its column (BUG-0459)", async () => {
+    install(false);
+    await findItem("pivot:sortByValue:descending").onClick(ctxAt(1, 1));
+    expect(sortPivotField).toHaveBeenCalledWith({
+      pivotId: "p1",
+      fieldIndex: 3,
+      valuesHierarchy: "Sum of Sales",
+      scopeGroupPath: [[7, 2]],
+      sortBy: "descending",
+    });
+  });
+
+  it("Sort Smallest to Largest in a column with no column items reads the grand total line", async () => {
+    install(false);
+    await findItem("pivot:sortByValue:ascending").onClick(ctxAt(1, 2));
+    expect(sortPivotField).toHaveBeenCalledWith({
+      pivotId: "p1",
+      fieldIndex: 3,
+      valuesHierarchy: "Count of Sales",
+      scopeGroupPath: [],
+      sortBy: "ascending",
+    });
+  });
+
   it("Summarize Values By > Count summarizes the cell's value field", async () => {
     install(false);
     await findItem("pivot:summarizeBy:count").onClick(ctxAt(1, 2));

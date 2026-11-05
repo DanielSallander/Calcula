@@ -259,6 +259,23 @@ describe("revD#1: a pivot changed while its sheet is not active, then the return
     expect(cachedVersion(7), "the box keeps the old locale's labels").toBe(31);
   });
 
+  // NEW-locale-listener-seam (round C): a BI pivot's view is a MODEL query,
+  // and Rust gives the engines the new DAX FORMAT culture in a walk that ends
+  // AFTER `locale:changed`, so the view re-read on LOCALE_CHANGED may carry
+  // FORMAT text in the old culture. The walk's end re-reads it again.
+  it("the end of the FORMAT-culture walk re-reads the view on screen (FORMAT text in the new culture)", async () => {
+    h.views = { 7: view(7, 41) };
+    window.dispatchEvent(new CustomEvent(AppEvents.LOCALE_CHANGED, { detail: {} }));
+    await settle();
+    expect(cachedVersion(7)).toBe(41);
+    // The engines now have the new culture: the same pivot answers anew.
+    h.views = { 7: view(7, 42) };
+    const { simulateBiFormatCultureAppliedForTests } = await import("@api/locale");
+    simulateBiFormatCultureAppliedForTests();
+    await settle();
+    expect(cachedVersion(7), "the view read before the engines had the new FORMAT culture was kept").toBe(42);
+  });
+
   it("a replaced document (File > Open: AFTER_OPEN, then SHEET_CHANGED asking for a cached hit) never paints the previous document's pivot 7", async () => {
     // The new document's pivot 7 is a different pivot that happens to share the id.
     h.views = { 7: view(7, 3) };

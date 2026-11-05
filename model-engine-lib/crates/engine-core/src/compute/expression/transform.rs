@@ -1828,7 +1828,7 @@ mod tests {
             col("b").add(lit_int(1)),
         );
         let sql = expr.to_sql_string().unwrap();
-        assert_eq!(sql, "((SUM(\"x\") * 2) + 1)");
+        assert_eq!(sql, "(COALESCE((SUM(\"x\") * 2), 0) + 1)");
     }
 
     #[test]
@@ -1844,7 +1844,7 @@ mod tests {
         let sql = expr.to_sql_string().unwrap();
         assert_eq!(
             sql,
-            "CASE WHEN COUNT(\"id\") = 0 THEN NULL ELSE (CAST(SUM(\"amount\") AS DOUBLE) / COUNT(\"id\")) END"
+            "CASE WHEN COALESCE(NULLIF(COUNT(\"id\"), 0), 0) = 0 THEN NULL ELSE (CAST(SUM(\"amount\") AS DOUBLE) / NULLIF(COUNT(\"id\"), 0)) END"
         );
     }
 
@@ -1857,7 +1857,7 @@ mod tests {
         );
         let sql = expr.to_sql_string().unwrap();
         // "total" substituted, "real_column" preserved as column ref
-        assert_eq!(sql, "(SUM(\"amount\") / \"real_column\")");
+        assert_eq!(sql, "(CAST(SUM(\"amount\") AS DOUBLE) / CAST(COALESCE(\"real_column\", 0) AS DOUBLE))");
     }
 
     #[test]

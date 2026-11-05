@@ -35,8 +35,9 @@
 //! deleted it. Leaving such a reference in the publisher's spelling is the
 //! failure this module exists to prevent: in THIS workbook that name may be the
 //! subscriber's own sheet, and an honest `#REF!` would silently turn into a
-//! number. A gone sheet's references become `#REF!`, the answer the sheet's
-//! deletion gave them.
+//! number. A gone sheet's references become `#REF!` where the sheet was --
+//! `Data!A1` reads `#REF!A1`, Excel's text and the answer the sheet's deletion
+//! gave them (the host's delete writes the same text).
 //!
 //! # Spelling is not an edit
 //!
@@ -72,17 +73,54 @@ enum SlotEdit {
     Keep,
     /// Its sheet name was rewritten in place.
     Changed,
-    /// Its sheet does not exist here: the whole reference becomes `#REF!`.
+    /// Its sheet does not exist here: the reference reads `#REF!` where the
+    /// sheet was ([`gone_reference`]).
     Gone,
 }
 
-/// The `#REF!` error literal a gone reference is replaced by.
+/// The `#REF!` error literal: what a gone node becomes when it is not a plain
+/// reference that can carry the deleted-sheet marker ([`gone_reference`]).
 fn ref_error() -> Expression {
     Expression::Literal(engine::Value::Error("#REF!".to_string()))
 }
 
 fn is_ref_error(expr: &Expression) -> bool {
     matches!(expr, Expression::Literal(engine::Value::Error(e)) if e == "#REF!")
+}
+
+/// What a reference to a GONE sheet becomes: the same reference with the
+/// deleted-sheet marker (`parser::ast::REF_ERROR_SHEET`) as its sheet --
+/// Excel's text for a reference whose sheet was deleted, `=#REF!A1`,
+/// `=SUM(#REF!A1:A3)`, `#REF!A:A`, `#REF!1:1` [LIVE, Excel 16, 2026-11-05,
+/// sheetspill/probe1.ps1]. A range's corner that carries its own qualifier
+/// gets the marker too, and a 3D reference becomes its inner reference behind
+/// the marker. This is the host's sheet-delete rule
+/// (`ref_error_reference` in app/src-tauri/src/lib.rs), so a refresh's rewrite
+/// of the upstream text and the subscriber's own deletion of the same sheet
+/// write ONE text: the whole reference turned into `#REF!` here used to differ
+/// from the cell the delete had repaired. Anything that is not a plain
+/// reference becomes the `#REF!` literal.
+fn gone_reference(expr: &Expression) -> Expression {
+    let marker = || Some(parser::ast::REF_ERROR_SHEET.to_string());
+    let mut out = match expr {
+        Expression::Sheet3DRef { reference, .. } => (**reference).clone(),
+        other => other.clone(),
+    };
+    match &mut out {
+        Expression::CellRef { sheet, .. }
+        | Expression::ColumnRef { sheet, .. }
+        | Expression::RowRef { sheet, .. } => *sheet = marker(),
+        Expression::Range { sheet, start, end, .. } => {
+            *sheet = marker();
+            for corner in [start, end] {
+                if let Expression::CellRef { sheet: corner_sheet @ Some(_), .. } = corner.as_mut() {
+                    *corner_sheet = marker();
+                }
+            }
+        }
+        _ => return ref_error(),
+    }
+    out
 }
 
 /// Call `f` on every sheet name a reference in `expr` carries, and apply its
@@ -171,8 +209,11 @@ fn walk_sheet_slots(expr: &mut Expression, f: &mut dyn FnMut(&mut String) -> Slo
             return changed;
         }
         // A spill (`Data!A1#`) and an implicit intersection (`@Data!A1:A9`)
-        // WRAP a reference; when that reference is gone the wrapper goes with
-        // it, because `#REF!#` and `@#REF!` are not formulas.
+        // WRAP a reference. A gone reference keeps its node behind the
+        // marker (`#REF!A1#`, `@#REF!A1:A9`, as the host's delete writes
+        // them), so the wrapper stays; only when it became the bare `#REF!`
+        // literal does the wrapper go with it, because `#REF!#` and `@#REF!`
+        // are not formulas.
         Expression::SpillRef { cell, .. } => {
             let changed = walk_sheet_slots(cell, f);
             if !(changed && is_ref_error(cell)) {
@@ -189,7 +230,12 @@ fn walk_sheet_slots(expr: &mut Expression, f: &mut dyn FnMut(&mut String) -> Slo
         }
     };
     if gone {
-        *expr = ref_error();
+        let replacement = match &*expr {
+            // The wrappers' operand was already rewritten by the walk.
+            Expression::SpillRef { .. } | Expression::ImplicitIntersection { .. } => ref_error(),
+            reference => gone_reference(reference),
+        };
+        *expr = replacement;
     }
     gone
 }
@@ -227,7 +273,9 @@ fn comparable_formula(text: &str) -> Option<String> {
 /// Sheet-name case, sheet-name quoting, whitespace and a leading `=` are
 /// spelling; everything else -- including the case of a string literal -- is
 /// the formula. Texts that differ in more than spelling are rejected without a
-/// parse, so the diff pays for two parses only on a genuine re-spelling.
+/// parse, so the diff pays for two parses only on a genuine re-spelling (or
+/// when one carries the `__INVOKE__` marker, whose old inline spelling a
+/// character filter cannot see through -- see below).
 pub fn same_formula_text(a: &str, b: &str) -> bool {
     if a == b {
         return true;
@@ -237,8 +285,14 @@ pub fn same_formula_text(a: &str, b: &str) -> bool {
             .filter(|c| *c != '\'' && *c != '=' && !c.is_whitespace())
             .flat_map(char::to_uppercase)
     }
-    // A NECESSARY condition: every spelling difference above survives it.
-    if !loose(a).eq(loose(b)) {
+    // A NECESSARY condition: every spelling difference above survives it --
+    // except the invocation marker's. An inline LAMBDA call was rendered
+    // `__INVOKE__(LAMBDA(x,x*2),5)` until lane formc (2026-11-05) taught the
+    // renderer Excel's `LAMBDA(x,x*2)(5)`, which parses back to the SAME tree;
+    // a text written before that (a saved override baseline, an older
+    // published version) is the same formula and is decided by the parse.
+    let marker = engine::ast_render::NAMED_INVOKE_MARKER;
+    if !(a.contains(marker) || b.contains(marker)) && !loose(a).eq(loose(b)) {
         return false;
     }
     match (comparable_formula(a), comparable_formula(b)) {
@@ -1105,6 +1159,30 @@ mod tests {
         }
     }
 
+    /// Two renderer changes of round C must not read as edits of a cell nobody
+    /// touched. (1) Lane formc renders an inline LAMBDA call as Excel does,
+    /// `LAMBDA(X,X*2)(5)`, where every text written before it (an override
+    /// baseline in a saved workbook, an older published version) says
+    /// `__INVOKE__(LAMBDA(X,X*2),5)` -- the same tree. (2) Lane shiftnames
+    /// QUOTES an unbound cell-shaped name in the formula bar (`'D1'`) and keeps
+    /// it bare in the saved text -- the same tree too. A real change is still
+    /// a change: another argument, a quoted name against a cell reference.
+    ///
+    /// SABOTAGE: drop the marker exemption from the `loose` prefilter.
+    #[test]
+    fn a_renderer_respelling_of_round_c_is_the_same_formula() {
+        let new = engine::Cell::new_formula("=LAMBDA(x,x*2)(5)".to_string()).formula_string_raw().unwrap();
+        assert!(!new.contains("__INVOKE__"), "precondition: the inline call renders Excel's spelling: {new}");
+        let old = new.replacen("LAMBDA(", "__INVOKE__(LAMBDA(", 1).replacen(")(", "),", 1);
+        assert!(old.starts_with("__INVOKE__(LAMBDA("), "fixture: {old}");
+        assert!(engine::Cell::new_formula(old.clone()).ast.is_some(), "the old spelling still parses: {old}");
+        assert!(same_formula_text(&old, &new), "{old} vs {new}");
+        assert!(!same_formula_text(&old, &new.replace("(5)", "(6)")), "another argument is an edit");
+
+        assert!(same_formula_text("'D1'+LET(A1,5,A1)", "D1+LET(A1,5,A1)"), "display quote vs saved text");
+        assert!(!same_formula_text("'D1'+LET(A1,5,A1)", "D2+LET(A1,5,A1)"), "another name is an edit");
+    }
+
     /// A merge or a hold-back lays a PUBLISHED cell into a working copy whose
     /// checkout collision-renamed a sheet; the cell must say what the grid says.
     #[test]
@@ -1307,7 +1385,7 @@ mod tests {
         let gone = SheetRenames::default().with_gone(["Data"]);
         let mut rows = vec![binding_row("=Data!A1")];
         assert_eq!(gone.rename_binding_formulas(&mut rows), 1);
-        assert_eq!(rows[0].formula, "=#REF!", "a binding reading a gone sheet reads #REF!");
+        assert_eq!(rows[0].formula, "=#REF!A1", "a binding reading a gone sheet reads #REF!A1, as Excel writes it");
     }
 
     /// A binding re-spelled by a checkout + push round trip is the same
@@ -1376,8 +1454,52 @@ mod tests {
             controls: &mut controls,
             pane_controls: &mut panes,
         });
-        assert_eq!(cfs[0].rules[0]["rule"]["formula"], "=A1>#REF!");
+        assert_eq!(cfs[0].rules[0]["rule"]["formula"], "=A1>#REF!$B$1", "Excel's rule text after the delete");
         assert_eq!(panes[0].config["source"]["reference"], "#REF!");
+    }
+
+    /// NEW-calp-gone-walker-ref. A reference to a GONE sheet keeps its cell
+    /// part and reads `#REF!` where the sheet was -- `=#REF!A1`,
+    /// `SUM(#REF!A1:A3)` -- as Excel writes it [LIVE, Excel 16, 2026-11-05,
+    /// sheetspill/probe1.ps1] and as the host's own sheet delete repairs a cell
+    /// (`ref_error_reference`, app/src-tauri/src/lib.rs; the app-side test
+    /// `calp_materialize_tests::the_refresh_gone_walker_and_the_sheet_delete_write_one_text`
+    /// pins the two against each other). The walker wrote the whole reference
+    /// as `#REF!`, so a refresh's rewrite of an untouched upstream formula
+    /// differed from the cell the subscriber's delete had repaired. Every
+    /// output re-parses to the deleted-sheet marker, never to a sheet called
+    /// "REF".
+    ///
+    /// SABOTAGE: make the gone arm write `ref_error()` again.
+    #[test]
+    fn a_reference_to_a_gone_sheet_reads_ref_where_the_sheet_was() {
+        let gone = SheetRenames::default().with_gone(["Data"]);
+        for (input, expected) in [
+            ("Data!A1", "#REF!A1"),
+            ("=Data!$A$1", "=#REF!$A$1"),
+            ("SUM(Data!A1:A3)+1", "SUM(#REF!A1:A3)+1"),
+            ("SUM(Data!A:A)", "SUM(#REF!A:A)"),
+            ("SUM(Data!1:3)", "SUM(#REF!1:3)"),
+            ("SUM(Data:Data!B1)", "SUM(#REF!B1)"),
+            ("@Data!A1:A9", "@#REF!A1:A9"),
+            ("SUM(Data!A1#)", "SUM(#REF!A1#)"),
+            ("-Data!A1", "-#REF!A1"),
+            ("Other!A1+Data!B2", "OTHER!A1+#REF!B2"),
+        ] {
+            let out = gone.rename_formula(input);
+            assert_eq!(out.as_deref(), Some(expected), "{input}");
+            let reparsed = engine::Cell::new_formula(expected.to_string());
+            let ast = reparsed.ast.as_deref().unwrap_or_else(|| panic!("{expected} must still be a formula"));
+            assert_eq!(
+                engine::ast_render::render_formula_raw(ast),
+                expected.trim_start_matches('='),
+                "{expected} must read back as itself"
+            );
+        }
+        // The marker is not a sheet: a second pass over the output changes
+        // nothing, and a real sheet called REF is a different reference.
+        assert_eq!(gone.rename_formula("#REF!A1"), None);
+        assert!(!same_formula_text("#REF!A1", "REF!A1"));
     }
 
     /// BUG-0263. Slicer computed properties now make the checkout -> push round

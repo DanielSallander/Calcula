@@ -232,13 +232,15 @@ describe("Copy + Paste writes the STORED value of a constant, invariant, in ONE 
     await copyAndPaste(6);
 
     expect(api.updateCellsBatch, "a paste is ONE batch write").toHaveBeenCalledTimes(1);
+    // Each write names its SOURCE cell too (BUG-0657, round C): the backend
+    // writes what the source holds at the write, `value` is the fallback.
     expect(firstBatch(), "a constant was re-typed from its display text").toEqual([
-      { row: 5, col: 0, value: "1.23456", styleIndex: 4, invariant: true, pasted: true },
-      { row: 5, col: 1, value: "1234567890123456", styleIndex: 0, invariant: true, pasted: true },
-      { row: 5, col: 2, value: "3.14159265358979", styleIndex: 0, invariant: true, pasted: true },
-      { row: 5, col: 3, value: "5.5", styleIndex: 6, invariant: true, pasted: true },
-      { row: 5, col: 4, value: "0.5", styleIndex: 7, invariant: true, pasted: true },
-      { row: 5, col: 5, value: "43983", styleIndex: 8, invariant: true, pasted: true },
+      { row: 5, col: 0, value: "1.23456", styleIndex: 4, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } },
+      { row: 5, col: 1, value: "1234567890123456", styleIndex: 0, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 1 } },
+      { row: 5, col: 2, value: "3.14159265358979", styleIndex: 0, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 2 } },
+      { row: 5, col: 3, value: "5.5", styleIndex: 6, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 3 } },
+      { row: 5, col: 4, value: "0.5", styleIndex: 7, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 4 } },
+      { row: 5, col: 5, value: "43983", styleIndex: 8, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 5 } },
     ]);
     // The OTHER programs still get what the cells show.
     expect(sys.written.at(-1)).toBe("1.23\t1.23457E+15\t3.1415926536\t5,50 kr\t50%\t2020-06-01");
@@ -252,11 +254,11 @@ describe("Copy + Paste writes the STORED value of a constant, invariant, in ONE 
     // col 4 empty
     await copyAndPaste(5);
     expect(firstBatch()).toEqual([
-      { row: 5, col: 0, value: "'00123", styleIndex: 9, invariant: true, pasted: true },
-      { row: 5, col: 1, value: "TRUE", styleIndex: 0, invariant: true, pasted: true },
-      { row: 5, col: 2, value: "#N/A", styleIndex: 0, invariant: true, pasted: true },
-      { row: 5, col: 3, value: "'  x  ", styleIndex: 0, invariant: true, pasted: true },
-      { row: 5, col: 4, value: "", styleIndex: 0, invariant: true, pasted: true },
+      { row: 5, col: 0, value: "'00123", styleIndex: 9, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } },
+      { row: 5, col: 1, value: "TRUE", styleIndex: 0, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 1 } },
+      { row: 5, col: 2, value: "#N/A", styleIndex: 0, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 2 } },
+      { row: 5, col: 3, value: "'  x  ", styleIndex: 0, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 3 } },
+      { row: 5, col: 4, value: "", styleIndex: 0, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 4 } },
     ]);
   });
 
@@ -274,8 +276,8 @@ describe("Copy + Paste writes the STORED value of a constant, invariant, in ONE 
     // col 1: no cell at all.
     await copyAndPaste(2);
     expect(firstBatch(), "an empty position dropped its format, or kept the destination's value").toEqual([
-      { row: 5, col: 0, value: "", styleIndex: 12, invariant: true, pasted: true },
-      { row: 5, col: 1, value: "", styleIndex: 0, invariant: true, pasted: true },
+      { row: 5, col: 0, value: "", styleIndex: 12, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } },
+      { row: 5, col: 1, value: "", styleIndex: 0, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 1 } },
     ]);
   });
 
@@ -285,14 +287,16 @@ describe("Copy + Paste writes the STORED value of a constant, invariant, in ONE 
     // `moved` (round 16): a cut's write is a MOVE, so a protected sheet without
     // Format Cells still lands its format, as Excel moves it. Round 18: the
     // claim names its SOURCE cell, which the backend checks holds the style.
-    expect(firstBatch()).toEqual([{ row: 5, col: 0, value: "", styleIndex: 12, invariant: true, pasted: true, moved: { sheetIndex: 0, row: 0, col: 0 } }]);
+    expect(firstBatch()).toEqual([
+      { row: 5, col: 0, value: "", styleIndex: 12, invariant: true, pasted: true, moved: { sheetIndex: 0, row: 0, col: 0 }, source: { sheetIndex: 0, row: 0, col: 0, unshifted: true } },
+    ]);
     expect(api.clearCell, "the cut source keeps its format (Excel takes it off)").toHaveBeenCalled();
   });
 
   it("a FORMULA keeps its own route: the formula (not invariant), flagged as a paste", async () => {
     put(0, { display: "2.47", formula: "=A1*2", styleIndex: 4, type: "number", value: 2.46912 });
     await copyAndPaste(1);
-    expect(firstBatch()).toEqual([{ row: 5, col: 0, value: "=A1*2@5,0", styleIndex: 4, pasted: true }]);
+    expect(firstBatch()).toEqual([{ row: 5, col: 0, value: "=A1*2@5,0", styleIndex: 4, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } }]);
   });
 
   it("Cut + Paste moves the stored value too", async () => {
@@ -302,7 +306,7 @@ describe("Copy + Paste writes the STORED value of a constant, invariant, in ONE 
     // MAJOR): Excel moves a cut cell's format on a protected sheet whatever the
     // Format Cells option says, and drops only a copy's [LIVE].
     expect(firstBatch(), "a cut's write was not marked as a move").toEqual([
-      { row: 5, col: 0, value: "1.23456", styleIndex: 4, invariant: true, pasted: true, moved: { sheetIndex: 0, row: 0, col: 0 } },
+      { row: 5, col: 0, value: "1.23456", styleIndex: 4, invariant: true, pasted: true, moved: { sheetIndex: 0, row: 0, col: 0 }, source: { sheetIndex: 0, row: 0, col: 0, unshifted: true } },
     ]);
     expect(api.clearCell, "the cut source was not cleared").toHaveBeenCalled();
   });
@@ -327,7 +331,9 @@ describe("Copy + Paste writes the STORED value of a constant, invariant, in ONE 
     put(0, { display: "1.23", formula: null, styleIndex: 4, type: "number", value: 1.23456 });
     await copyAndPaste(1);
     expect(getInternalClipboard()?.values).toBeUndefined();
-    expect(firstBatch()).toEqual([{ row: 5, col: 0, value: "1.23", styleIndex: 4 }]);
+    // The display text is only the fallback: the write names its source, so the
+    // backend still writes the stored 1.23456 (BUG-0657).
+    expect(firstBatch()).toEqual([{ row: 5, col: 0, value: "1.23", styleIndex: 4, source: { sheetIndex: 0, row: 0, col: 0 } }]);
   });
 
   it("text from ANOTHER program keeps the entry ladder (typing): no invariant, no style", async () => {
@@ -364,9 +370,9 @@ describe("a number or formula from a Text-formatted (@) source cell stays one", 
 
     expect(api.updateCellsBatch, "a paste from @ cells was written more than once").toHaveBeenCalledTimes(1);
     expect(firstBatch()).toEqual([
-      { row: 5, col: 0, value: "5", styleIndex: 9, invariant: true, pasted: true },
-      { row: 5, col: 1, value: "'007", styleIndex: 9, invariant: true, pasted: true },
-      { row: 5, col: 2, value: "=A1@5,0", styleIndex: 9, pasted: true },
+      { row: 5, col: 0, value: "5", styleIndex: 9, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } },
+      { row: 5, col: 1, value: "'007", styleIndex: 9, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 1 } },
+      { row: 5, col: 2, value: "=A1@5,0", styleIndex: 9, pasted: true, source: { sheetIndex: 0, row: 0, col: 2 } },
     ]);
     expect(api.applyFormatting).not.toHaveBeenCalled();
   });
@@ -442,10 +448,13 @@ describe("a MOVE or a Ctrl+drag COPY writes a constant's stored value too (same 
     // pins the move rule itself.
     // Both are PASTES (they keep their kind in an @ destination, written before
     // the cell takes the source's style), so the formula goes through the batch too.
+    // ONE batch, each write carrying its MOVE claim as a Cut + Paste's does
+    // (NEW-drag-move-whole-table).
     expect(writes()).toEqual([
-      { row: 5, col: 0, value: "1.23456", invariant: true, pasted: true },
-      { row: 5, col: 1, value: "=A1*2", pasted: true },
+      { row: 5, col: 0, value: "1.23456", invariant: true, pasted: true, moved: { sheetIndex: 0, row: 0, col: 0 }, source: { sheetIndex: 0, row: 0, col: 0, unshifted: true } },
+      { row: 5, col: 1, value: "=A1*2", pasted: true, moved: { sheetIndex: 0, row: 0, col: 1 }, source: { sheetIndex: 0, row: 0, col: 1, unshifted: true } },
     ]);
+    expect(api.updateCellsBatch).toHaveBeenCalledTimes(1);
   });
 
   it("Ctrl+dragging a cell copies its stored value", async () => {
@@ -453,7 +462,7 @@ describe("a MOVE or a Ctrl+drag COPY writes a constant's stored value too (same 
     await act(async () => {
       await hook.copyCellsDrag({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, type: "cells" }, 5, 0);
     });
-    expect(writes()).toEqual([{ row: 5, col: 0, value: "1234567890123456", invariant: true, pasted: true }]);
+    expect(writes()).toEqual([{ row: 5, col: 0, value: "1234567890123456", invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } }]);
   });
 
   it("moving and Ctrl+drag-copying whole rows and columns write the stored values in one batch", async () => {
@@ -463,27 +472,29 @@ describe("a MOVE or a Ctrl+drag COPY writes a constant's stored value too (same 
       await hook.moveRows(0, 0, 5);
     });
     expect(api.updateCellsBatch.mock.calls[0]?.[0]).toEqual([
-      { row: 5, col: 0, value: "1.23456", invariant: true, pasted: true },
-      { row: 5, col: 2, value: "'00123", invariant: true, pasted: true },
+      { row: 5, col: 0, value: "1.23456", invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0, unshifted: true }, moved: { sheetIndex: 0, row: 0, col: 0 } },
+      { row: 5, col: 2, value: "'00123", invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 2, unshifted: true }, moved: { sheetIndex: 0, row: 0, col: 2 } },
     ]);
     api.updateCellsBatch.mockClear();
     await act(async () => {
       await hook.copyRowsDrag(0, 0, 7);
     });
     expect(api.updateCellsBatch.mock.calls[0]?.[0]).toEqual([
-      { row: 7, col: 0, value: "1.23456", invariant: true, pasted: true },
-      { row: 7, col: 2, value: "'00123", invariant: true, pasted: true },
+      { row: 7, col: 0, value: "1.23456", invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } },
+      { row: 7, col: 2, value: "'00123", invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 2 } },
     ]);
     api.updateCellsBatch.mockClear();
     await act(async () => {
       await hook.moveColumns(0, 0, 9);
     });
-    expect(api.updateCellsBatch.mock.calls[0]?.[0]).toEqual([{ row: 0, col: 9, value: "1.23456", invariant: true, pasted: true }]);
+    expect(api.updateCellsBatch.mock.calls[0]?.[0]).toEqual([
+      { row: 0, col: 9, value: "1.23456", invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0, unshifted: true }, moved: { sheetIndex: 0, row: 0, col: 0 } },
+    ]);
     api.updateCellsBatch.mockClear();
     await act(async () => {
       await hook.copyColumnsDrag(2, 2, 11);
     });
-    expect(api.updateCellsBatch.mock.calls[0]?.[0]).toEqual([{ row: 0, col: 11, value: "'00123", invariant: true, pasted: true }]);
+    expect(api.updateCellsBatch.mock.calls[0]?.[0]).toEqual([{ row: 0, col: 11, value: "'00123", invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 2 } }]);
   });
 
   it("a Ctrl+drag COPY shifts a formula's relative references, as Copy + Paste does (Excel: =A1 from B1 to C2 is =B2)", async () => {
@@ -491,16 +502,59 @@ describe("a MOVE or a Ctrl+drag COPY writes a constant's stored value too (same 
     await act(async () => {
       await hook.copyCellsDrag({ startRow: 0, startCol: 1, endRow: 0, endCol: 1, type: "cells" }, 1, 2);
     });
-    expect(writes()).toEqual([{ row: 1, col: 2, value: "=A1@1,1", pasted: true }]);
+    expect(writes()).toEqual([{ row: 1, col: 2, value: "=A1@1,1", pasted: true, source: { sheetIndex: 0, row: 0, col: 1 } }]);
     api.updateCell.mockClear();
     await act(async () => {
       await hook.copyRowsDrag(0, 0, 7);
     });
-    expect(api.updateCellsBatch.mock.calls.at(-1)?.[0]).toEqual([{ row: 7, col: 1, value: "=A1@7,0", pasted: true }]);
+    expect(api.updateCellsBatch.mock.calls.at(-1)?.[0]).toEqual([{ row: 7, col: 1, value: "=A1@7,0", pasted: true, source: { sheetIndex: 0, row: 0, col: 1 } }]);
     await act(async () => {
       await hook.copyColumnsDrag(1, 1, 4);
     });
-    expect(api.updateCellsBatch.mock.calls.at(-1)?.[0]).toEqual([{ row: 0, col: 4, value: "=A1@0,3", pasted: true }]);
+    expect(api.updateCellsBatch.mock.calls.at(-1)?.[0]).toEqual([{ row: 0, col: 4, value: "=A1@0,3", pasted: true, source: { sheetIndex: 0, row: 0, col: 1 } }]);
+  });
+
+  // BUG-0657 (round C): a drag move or copy names each write's SOURCE, so the
+  // backend writes what it holds at the write -- but never a source the
+  // gesture has already written over: a line move clears the target lines
+  // before its batch reads them. A drag move writes its block in ONE batch
+  // (NEW-drag-move-whole-table), whose sources the backend reads before any
+  // write lands, so a drag onto its own block names EVERY source -- the one
+  // inside the destination too (it was per-cell, and named only those no
+  // earlier write had replaced).
+  // SABOTAGE: drop the source of a write whose source lies in the destination
+  // in `moveCells` -- fails at "UNNAMED"; name every source in `moveRows`
+  // (drop its target-rows test) -- fails at "CLEARED".
+  it("a drag onto its own block names every source in one batch; a line move none it cleared", async () => {
+    model.cells.set("0,0", { display: "1", formula: null, styleIndex: 0, type: "number", value: 1 });
+    model.cells.set("1,0", { display: "2", formula: null, styleIndex: 0, type: "number", value: 2 });
+    await act(async () => {
+      await hook.moveCells({ startRow: 0, startCol: 0, endRow: 1, endCol: 0, type: "cells" }, 1, 0);
+    });
+    expect(api.updateCellsBatch, "the drag wrote its block in more than one batch").toHaveBeenCalledTimes(1);
+    expect(
+      writes().map((w) => (w as { source?: unknown }).source),
+      "UNNAMED: A2's write (from A2, read before any write of the batch) names no source",
+    ).toEqual([
+      { sheetIndex: 0, row: 0, col: 0, unshifted: true },
+      { sheetIndex: 0, row: 1, col: 0, unshifted: true },
+    ]);
+
+    api.updateCellsBatch.mockClear();
+    model.cells.clear();
+    model.cells.set("1,0", { display: "1", formula: null, styleIndex: 0, type: "number", value: 1 });
+    model.cells.set("2,0", { display: "2", formula: null, styleIndex: 0, type: "number", value: 2 });
+    await act(async () => {
+      // Rows 2:3 onto rows 1:2 -- row 2 is cleared before the batch.
+      await hook.moveRows(1, 2, 0);
+    });
+    expect(
+      (api.updateCellsBatch.mock.calls[0]?.[0] as Array<{ row: number; source?: unknown }>).map((u) => [u.row, u.source]),
+      "CLEARED: the batch named a source row the gesture cleared first",
+    ).toEqual([
+      [0, undefined],
+      [1, { sheetIndex: 0, row: 2, col: 0, unshifted: true }],
+    ]);
   });
 
   it("positive control: unreadable stored values -- the move writes the display text, as before", async () => {
@@ -509,6 +563,133 @@ describe("a MOVE or a Ctrl+drag COPY writes a constant's stored value too (same 
     await act(async () => {
       await hook.moveCells({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, type: "cells" }, 5, 0);
     });
-    expect(writes()).toEqual([{ row: 5, col: 0, value: "1.23" }]);
+    expect(writes()).toEqual([
+      {
+        row: 5,
+        col: 0,
+        value: "1.23",
+        moved: { sheetIndex: 0, row: 0, col: 0 },
+        source: { sheetIndex: 0, row: 0, col: 0, unshifted: true },
+      },
+    ]);
+  });
+});
+
+// BUG-0652 follow-up (lane dtfollow). A live data table's body cell holds the
+// `=TABLE(..)` marker, which the backend refuses as a pasted formula ("That
+// function isn't valid."), so a copy of it pasted nothing. Excel [LIVE, Excel 16
+// over COM, 2026-11-05, dtfollow/probe1.ps1]: Paste, Paste Special Formulas and
+// Values of a body cell all write its VALUE; the whole table pastes its formula
+// row shifted and its body as values; a Ctrl+drag copy likewise.
+// SABOTAGE: make `copiedCell` (core/lib/dataTableCopy.ts) return the cell as it is.
+describe("a copy of a data table's body pastes its values", () => {
+  it("Copy + Paste of the formula row and a body row: the formula shifts, the body cell is its value", async () => {
+    put(0, { display: "2", formula: "=B1", styleIndex: 0, type: "number", value: 2 });
+    put(1, { display: "10", formula: "=TABLE(,A1)", styleIndex: 3, type: "number", value: 10 });
+    await copyAndPaste(2);
+    expect(firstBatch(), "COPIED THE MARKER: the body cell must paste as its value").toEqual([
+      { row: 5, col: 0, value: "=B1@5,0", styleIndex: 0, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } },
+      { row: 5, col: 1, value: "10", styleIndex: 3, invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 1 } },
+    ]);
+    expect(getInternalClipboard()?.cells[0][1]?.formula ?? null, "every paste kind reads the clipboard's cells").toBeNull();
+    expect(sys.written.at(-1), "other programs get the body's value, not its marker").toBe("=B1\t10");
+  });
+
+  it("a Ctrl+drag copy of a body cell writes its value", async () => {
+    put(0, { display: "14", formula: "=TABLE(;A1)", styleIndex: 0, type: "number", value: 14 });
+    await act(async () => {
+      await hook.copyCellsDrag({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, type: "cells" }, 5, 0);
+    });
+    const batched = api.updateCellsBatch.mock.calls.flatMap((c) => c[0] as Update[]);
+    expect(batched).toEqual([{ row: 5, col: 0, value: "14", invariant: true, pasted: true, source: { sheetIndex: 0, row: 0, col: 0 } }]);
+  });
+
+  it("a CUT keeps the marker, so the backend refuses the move as Excel refuses it", async () => {
+    put(0, { display: "10", formula: "=TABLE(,A1)", styleIndex: 0, type: "number", value: 10 });
+    await copyAndPaste(1, true);
+    expect(firstBatch()[0]?.value).toBe("=TABLE(,A1)");
+  });
+});
+
+// NEW-drag-move-whole-table. Excel moves a whole data table with Cut + Paste
+// [LIVE, dtfollow/probe1.ps1], and the backend moves it when ONE batch claims
+// every cell of its range by one offset (`data_tables::whole_table_moves`). A
+// drag move wrote one cell at a time with no claims, so the table's marker was
+// refused as a typed formula ("That function isn't valid."); a row or column
+// move sent its batch with no claims. And the old body is emptied IN the batch
+// (NEW-clear-cell-datatable-gate), so the source clear -- which Excel's rule
+// refuses on part of a table -- never meets it.
+// SABOTAGE: drop `moved` from moveCells' writes -- fails at "NO CLAIM"; drop
+// its vacated-body loop -- fails at "OLD BODY LEFT"; drop `moved` from
+// moveRows -- fails at "ROW MOVE UNCLAIMED"; drop the cut's vacated-body loop
+// in `paste` -- fails at "CUT LEFT THE OLD BODY".
+describe("a move of a whole data table claims every cell and empties the old body in one batch", () => {
+  /** The table A1:B3 in miniature: empty corner A1, formula B1, inputs A2:A3, body B2:B3. */
+  function table(): void {
+    model.cells.set("0,1", { display: "2", formula: "=C9", styleIndex: 0, type: "number", value: 2 });
+    model.cells.set("1,0", { display: "5", formula: null, styleIndex: 0, type: "number", value: 5 });
+    model.cells.set("2,0", { display: "7", formula: null, styleIndex: 0, type: "number", value: 7 });
+    model.cells.set("1,1", { display: "10", formula: "=TABLE(,Z1)", styleIndex: 0, type: "number", value: 10 });
+    model.cells.set("2,1", { display: "14", formula: "=TABLE(,Z1)", styleIndex: 0, type: "number", value: 14 });
+  }
+  type Claimed = { row: number; col: number; value: string; moved?: { sheetIndex: number; row: number; col: number } };
+  const batched = (): Claimed[] => api.updateCellsBatch.mock.calls.flatMap((c) => c[0] as Claimed[]);
+
+  it("a drag move: one batch, a claim per written cell, the vacated body emptied", async () => {
+    table();
+    await act(async () => {
+      await hook.moveCells({ startRow: 0, startCol: 0, endRow: 2, endCol: 1, type: "cells" }, 5, 0);
+    });
+    expect(api.updateCellsBatch).toHaveBeenCalledTimes(1);
+    expect(api.updateCell, "a cell of the block was written on its own").not.toHaveBeenCalled();
+    const writes = batched();
+    const dest = writes.filter((w) => w.row >= 5);
+    expect(dest).toHaveLength(6);
+    for (const w of dest) {
+      expect(w.moved, `NO CLAIM on the write at (${w.row}, ${w.col})`).toEqual({ sheetIndex: 0, row: w.row - 5, col: w.col });
+    }
+    expect(
+      writes.filter((w) => w.row < 5).map((w) => [w.row, w.col, w.value]),
+      "OLD BODY LEFT: the vacated body cells are not emptied in the batch",
+    ).toEqual([
+      [1, 1, ""],
+      [2, 1, ""],
+    ]);
+  });
+
+  it("a row move: every write that moves a standing source carries its claim", async () => {
+    table();
+    await act(async () => {
+      await hook.moveRows(0, 2, 6);
+    });
+    const writes = batched();
+    expect(writes.length).toBeGreaterThan(0);
+    for (const w of writes) {
+      expect(w.moved, `ROW MOVE UNCLAIMED: the write at (${w.row}, ${w.col})`).toEqual({ sheetIndex: 0, row: w.row - 6, col: w.col });
+    }
+  });
+
+  it("a Cut + Paste on one sheet empties the vacated body in its batch", async () => {
+    table();
+    await select(0, 0, 2, 1);
+    await act(async () => {
+      await hook.cut();
+    });
+    sys.text = sys.written.at(-1) ?? null;
+    api.updateCellsBatch.mockClear();
+    await select(5, 0);
+    await act(async () => {
+      await hook.paste();
+    });
+    await settle();
+    expect(
+      firstBatch()
+        .filter((w) => w.row < 5)
+        .map((w) => [w.row, w.col, w.value]),
+      "CUT LEFT THE OLD BODY: the vacated body cells are not emptied in the paste's batch",
+    ).toEqual([
+      [1, 1, ""],
+      [2, 1, ""],
+    ]);
   });
 });

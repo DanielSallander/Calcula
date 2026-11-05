@@ -191,11 +191,41 @@ describe("executeMergeCells", () => {
     expect(cellEventsMock.emitBatch).toHaveBeenCalled();
   });
 
-  it("a refused merge throws a ValidationError", async () => {
+  // BUG-0283 (changed deliberately: this test used to pin the throw). The
+  // backend answers success:false for NOTHING TO MERGE -- one cell, or a block
+  // already merged exactly so -- and Excel's Range("A1").Merge does nothing,
+  // without an error [LIVE, Excel 16]. A real overlap is a thrown refusal in
+  // the backend's own words, passed through.
+  // SABOTAGE: restore the "overlaps an existing merge" throw -> red.
+  it("nothing to merge (one cell, or already that merge) is a silent no-op, as in Excel", async () => {
     const lib = makeLib();
     lib.mergeCells.mockResolvedValueOnce({ success: false, mergedRegions: [], updatedCells: [] });
+    await expect(executeMergeCells(asLib(lib), "s1", 0, 0, 0, 0)).resolves.toBeUndefined();
+    expect(lib.mergeCells).toHaveBeenCalledWith(0, 0, 0, 0, undefined);
+    expect(cellEventsMock.emitBatch).not.toHaveBeenCalled();
+  });
+
+  // Changed deliberately (lane miscb): a range that partly overlaps or
+  // contains merges now merges the UNION, as Excel's Range.Merge does [LIVE]
+  // -- the backend no longer refuses an overlap. The grown merge arrives as an
+  // ordinary success, and the script's write is announced like any other.
+  it("a partial overlap merges the UNION (no refusal), and the grown merge is announced", async () => {
+    const lib = makeLib();
+    lib.mergeCells.mockResolvedValueOnce({
+      success: true,
+      mergedRegions: [{ startRow: 0, startCol: 0, endRow: 3, endCol: 3 }],
+      updatedCells: [{ row: 0, col: 0 }],
+    });
+    await expect(executeMergeCells(asLib(lib), "s1", 0, 0, 2, 2)).resolves.toBeUndefined();
+    expect(lib.mergeCells).toHaveBeenCalledWith(0, 0, 2, 2, undefined);
+    expect(cellEventsMock.emitBatch).toHaveBeenCalled();
+  });
+
+  it("a refusal the backend still gives (a protected sheet) passes through in its own words", async () => {
+    const lib = makeLib();
+    lib.mergeCells.mockRejectedValueOnce(new Error("Cannot merge cells on a protected sheet."));
     await expect(executeMergeCells(asLib(lib), "s1", 0, 0, 2, 2, "Data")).rejects.toThrow(
-      /overlaps an existing merge/,
+      "Cannot merge cells on a protected sheet.",
     );
   });
 });

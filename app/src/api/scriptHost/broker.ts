@@ -92,13 +92,15 @@ export interface ScriptHandle {
    * mount gate said yes, and set here by `buildHandleFromDefinition` alone. The
    * tier stays "restricted" and the origin stays the application's; while
    * `cells` is true the broker also admits the closed set of cell rows in
-   * `explicitRunGrant.ts`. The host switches `cells` off the moment the macro's
-   * setup settles, and the realm stays RUN-ONLY for the rest of its life (no
-   * hooks, no exposed methods, no event subscriptions, no calls into other
-   * scripts, no restricted formatting rows), so no other code can call in and
-   * borrow the access, nor be handed what the run read.
+   * `explicitRunGrant.ts`, and while `formatting` is true its closed set of
+   * formatting rows (owner, 2026-11-04; Rust's `formatAccess`). The host
+   * switches both off the moment the macro's setup settles, and the realm stays
+   * RUN-ONLY for the rest of its life (no hooks, no exposed methods, no event
+   * subscriptions, no calls into other scripts, and no restricted formatting
+   * rows once `formatting` is off), so no other code can call in and borrow the
+   * access, nor be handed what the run read.
    */
-  explicitRun?: { cells: boolean };
+  explicitRun?: { cells: boolean; formatting: boolean };
 }
 
 /** The recognized capability ids. Single source of truth: capabilityIds.ts
@@ -133,8 +135,9 @@ export class BrokerError extends Error {
  * main-thread mount path and the worker host).
  *
  * `grant.explicitRunCells` is the mount admission's answer to "may this run
- * change cells?" (owner decision B), and only the worker host's `mountWorker`
- * passes it. It attaches `explicitRun` ONLY to a DISTRIBUTED handle below the
+ * change cells?" (owner decision B), and `grant.explicitRunFormatting` to "may
+ * it also change how they look?" (owner, 2026-11-04) -- formatting never
+ * without cells -- and only the worker host's `mountWorker` passes them. It attaches `explicitRun` ONLY to a DISTRIBUTED handle below the
  * unlocked tier: local code already has the whole unlocked surface, so a grant
  * for it would mean nothing, and an unlocked distributed handle cannot exist.
  */
@@ -151,7 +154,7 @@ export function buildHandleFromDefinition(
      *  scripts this is the manifest set; for local scripts the source pragmas. */
     declaredCapabilities?: string[];
   },
-  grant?: { explicitRunCells?: boolean },
+  grant?: { explicitRunCells?: boolean; explicitRunFormatting?: boolean },
 ): ScriptHandle {
   const isDistributed = definition.provenance === "distributed";
   // grants is the LIVE per-script set owned by capabilities.ts — so a JIT or
@@ -197,7 +200,7 @@ export function buildHandleFromDefinition(
     grants,
     declaredCapabilities,
     ...(grant?.explicitRunCells === true && isDistributed && definition.accessLevel !== "unlocked"
-      ? { explicitRun: { cells: true } }
+      ? { explicitRun: { cells: true, formatting: grant.explicitRunFormatting === true } }
       : {}),
   };
 }

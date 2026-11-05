@@ -181,6 +181,112 @@ export function layoutRotatedText(args: {
   return { cx, cy, radians: (-degrees * Math.PI) / 180, width, height };
 }
 
+// ---------------------------------------------------------------------------
+// Rotated text on SEVERAL lines: Wrap Text and hard breaks (BUG-0363)
+// ---------------------------------------------------------------------------
+//
+// EXCEL WRAPS ROTATED TEXT ALONG ITS OWN DIRECTION, measured [LIVE] 2026-11-04
+// (Excel 16, fresh hidden instance, new unsaved workbook, Calibri 11, "one two
+// three four five six seven eight" -- 175.5pt on one line):
+//   - Rotate Text Up/Down with Wrap Text: the lines break at the ROW HEIGHT and
+//     stack ACROSS the cell -- column AutoFit gave 117.75pt in a 30pt row and
+//     60.75pt in a 60pt row (one line, wrap off: 18pt whatever the row).
+//   - At 45 degrees the same: 193.5pt in a 30pt row, 90.4pt in a 60pt row, so
+//     the line length is bounded by the row height, along the slant.
+//   - With wrap off the value stays on one line (18pt column at +-90).
+// The painter wraps there now; before, a wrapped rotated value was painted as
+// one long run and cut by the cell.
+//
+// A HARD BREAK breaks a rotated value with Wrap Text off as well. Excel shows
+// such a value on one line, but only because typing Alt+Enter switches Wrap Text
+// ON in Excel; Calcula's editor does not (see the long note in
+// rendering/cells.ts at `breakWithoutWrap`), so the horizontal painter breaks on
+// a hard break either way and rotated text follows the same rule rather than
+// hiding the user's line break in one orientation only.
+
+/**
+ * How long a rotated line may run before Wrap Text breaks it: the content box's
+ * height along the text direction. At +-90 that is the height itself; at an
+ * angle the slant through the height (`height / sin a`).
+ */
+export function rotatedWrapLength(degrees: number, box: OrientationBox): number {
+  const height = box.bottom - box.top;
+  if (Math.abs(degrees) === 90) return height;
+  const sin = Math.sin((Math.abs(degrees) * Math.PI) / 180);
+  return sin > 0 ? height / sin : Number.POSITIVE_INFINITY;
+}
+
+/** One line of a rotated block, in the block's ROTATED frame. */
+export interface RotatedLine {
+  text: string;
+  /** Left end of the line along the text direction (draw with textAlign "left"). */
+  x: number;
+  /** Centre of the line across it (draw with textBaseline "middle"). */
+  y: number;
+}
+
+/** A rotated block: where to translate and rotate, and each line inside it. */
+export interface RotatedBlockPlacement extends RotatedTextPlacement {
+  lines: RotatedLine[];
+}
+
+/**
+ * Where a line sits ALONG the text direction inside its block, from the cell's
+ * vertical alignment: rotated text reads upward at a positive angle, so Bottom
+ * is where a line STARTS; at a negative angle it reads downward and Top is.
+ * Excel anchors every line of the block to the same end (one line: the whole
+ * block, which is what `layoutRotatedText` does).
+ */
+function alongTextAnchor(degrees: number, vAlign: OrientationVAlign | string): "start" | "center" | "end" {
+  if (vAlign === "middle") return "center";
+  const bottom = vAlign !== "top";
+  if (degrees > 0) return bottom ? "start" : "end";
+  return bottom ? "end" : "start";
+}
+
+/**
+ * Place a rotated value of one or more LINES. The block is the widest line by
+ * `lines.length` line pitches, placed in the cell exactly as a single rotated
+ * run is (`layoutRotatedText`: both alignments, anchored, never pre-shortened).
+ * Inside it the first line is the one nearest the text's top -- the LEFT at
+ * Rotate Text Up, the right at Rotate Text Down -- and each line is anchored
+ * along the text by the vertical alignment.
+ *
+ * One line gives exactly the single-run placement: `x = -width / 2, y = 0`.
+ */
+export function layoutRotatedLines(args: {
+  degrees: number;
+  lines: Array<{ text: string; width: number }>;
+  lineHeight: number;
+  box: OrientationBox;
+  hAlign: OrientationHAlign | string;
+  vAlign: OrientationVAlign | string;
+}): RotatedBlockPlacement {
+  const { degrees, lines, lineHeight } = args;
+  const blockWidth = lines.reduce((w, l) => Math.max(w, l.width), 0);
+  const blockHeight = Math.max(1, lines.length) * lineHeight;
+  const block = layoutRotatedText({
+    degrees,
+    textWidth: blockWidth,
+    lineHeight: blockHeight,
+    box: args.box,
+    hAlign: args.hAlign,
+    vAlign: args.vAlign,
+  });
+  const anchor = alongTextAnchor(degrees, args.vAlign);
+  const placed = lines.map((line, i) => ({
+    text: line.text,
+    x:
+      anchor === "start"
+        ? -blockWidth / 2
+        : anchor === "end"
+          ? blockWidth / 2 - line.width
+          : -line.width / 2,
+    y: -blockHeight / 2 + lineHeight * (i + 0.5),
+  }));
+  return { ...block, lines: placed };
+}
+
 /** The columns of a stacked value: one per hard-break segment, split on code points. */
 function stackedColumns(text: string): string[][] {
   // A hard break in stacked text starts a new column to the right. Splitting

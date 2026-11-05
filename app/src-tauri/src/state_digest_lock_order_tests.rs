@@ -9099,7 +9099,7 @@ fn the_move_s_name_relocation_holds_the_registry_until_its_undo_step_is_recorded
 /// routes are pinned by runtime tests in `named_ranges::rename_tests`), so this
 /// reads the crate: no step records the whole list any more.
 ///
-/// SABOTAGE: record `object_scripts_snapshot_bytes` in `delete_table` again --
+/// SABOTAGE: record `object_scripts_snapshot_bytes` in `retire_table_core` again --
 /// this fails naming `tables.rs`.
 #[test]
 fn no_step_records_a_whole_list_object_script_snapshot() {
@@ -9126,8 +9126,10 @@ fn no_step_records_a_whole_list_object_script_snapshot() {
          (`object_scripts_pruned_bytes` / `object_scripts_rebound_bytes`):\n{}",
         offenders.join("\n")
     );
-    // NON-VACUITY: the four recorders this replaced are seen.
-    for (file, at_least) in [("named_ranges.rs", 2), ("tables.rs", 2)] {
+    // NON-VACUITY: the recorders this replaced are seen -- tables.rs's two
+    // (delete_table, convert_to_range) are ONE since both are bodies of
+    // `retire_table_core` (lane tablec, 2026-11-05).
+    for (file, at_least) in [("named_ranges.rs", 2), ("tables.rs", 1)] {
         assert!(
             by_id.get(file).copied().unwrap_or(0) >= at_least,
             "expected {at_least} by-id script records in {file}, saw {:?} -- re-derive this census",

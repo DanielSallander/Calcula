@@ -389,11 +389,46 @@ describe("applyBorderChoice", () => {
     ]);
   });
 
-  it("a neighbour strip longer than the read limit is left alone (a whole column's neighbour)", async () => {
+  // BUG-0369 overrules what this test used to pin ("a whole column's neighbour
+  // is left alone"): Excel 16 [LIVE] 2026-11-04 (lane multiarea probe3) --
+  // A1:A3 and A500000 right-bordered, column B selected, No Border: every one
+  // of A's right lines is gone. The million-cell strip is never READ: its
+  // coincident side is cleared by ONE write over the whole column, which the
+  // backend plans by tiers and applies only where a line changes.
+  it("BUG-0369 the strip beside a WHOLE column is cleared by one write over the line, never read", async () => {
     selectBlock({ startRow: 0, startCol: 1, endRow: BOUNDS.rows - 1, endCol: 1 });
     expect(BOUNDS.rows).toBeGreaterThan(NEIGHBOUR_READ_LIMIT);
-    await applyBorderChoice("left");
+    const formatCalls: Array<[number[], number[], unknown]> = [];
+    lib.applyFormatting.mockImplementation(async (rows: number[], cols: number[], f: unknown) => {
+      formatCalls.push([rows, cols, f]);
+      return { cells: [], styles: [] };
+    });
+    await applyBorderChoice("none");
     expect(log.filter((l) => l.startsWith("read:"))).toEqual([]);
+    // Column A's right side, over EVERY row, in one call (column C's left too).
+    const left = formatCalls.find(([, cols]) => cols.length === 1 && cols[0] === 0);
+    expect(left, JSON.stringify(formatCalls.map(([r, c, f]) => [r.length, c, f]))).toBeDefined();
+    expect(left![0].length).toBe(BOUNDS.rows);
+    expect(left![0][0]).toBe(0);
+    expect(left![0][BOUNDS.rows - 1]).toBe(BOUNDS.rows - 1);
+    expect(left![2]).toEqual({ borderRight: { style: "none", color: AUTOMATIC_LINE_COLOR } });
+    const right = formatCalls.find(([, cols]) => cols.length === 1 && cols[0] === 2);
+    expect(right![2]).toEqual({ borderLeft: { style: "none", color: AUTOMATIC_LINE_COLOR } });
+  });
+
+  it("BUG-0369 a long strip that is NOT a whole line is read in bands, and only its owners are written", async () => {
+    const rows = NEIGHBOUR_READ_LIMIT + 100;
+    selectBlock({ startRow: 0, startCol: 1, endRow: rows - 1, endCol: 1 });
+    styles.set(4, styleWith({ borderRight: THIN_SIDE }));
+    stored = [[NEIGHBOUR_READ_LIMIT + 5, 0, 4]];
+    await applyBorderChoice("left");
+    expect(log.filter((l) => l.startsWith("read:0,0,") || l.startsWith(`read:${NEIGHBOUR_READ_LIMIT},0,`))).toEqual([
+      `read:0,0,${NEIGHBOUR_READ_LIMIT - 1},0`,
+      `read:${NEIGHBOUR_READ_LIMIT},0,${rows - 1},0`,
+    ]);
+    expect(writes()).toContain(
+      `format:${JSON.stringify([[NEIGHBOUR_READ_LIMIT + 5], [0], { borderRight: { style: "none", color: AUTOMATIC_LINE_COLOR } }])}`,
+    );
   });
 
   it("each block of a multi-area selection gets its own preset", async () => {

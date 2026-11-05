@@ -14,14 +14,31 @@
 //     So Excel never draws a centred value with an indent, and an indented
 //     General value is a Left one -- numbers included.
 //   - A Right cell's indent is measured from the RIGHT edge.
-//   - Each level is one fixed step (AutoFit width of "x" in Aptos Narrow 11:
-//     8.625 / 14.25 / 19.875 / 25.5pt for levels 0..3 -- 7.5px a level). The
-//     OOXML spec defines a level as three spaces of the Normal font; Calcula's
-//     step is the 8px it has always used, kept so existing documents do not
-//     move.
+//   - Each level is one fixed step of the NORMAL style's font, whatever the
+//     cell's own font. Re-measured [LIVE] 2026-11-04 (Excel 16, fresh hidden
+//     instance, new unsaved workbook, the Normal style's font set and AutoFit
+//     read back on "x" at levels 0..4):
+//         Aptos Narrow 11   8.625 / 14.25 / 19.875 / 25.5 / 31.125pt -> 5.625pt
+//         Calibri 11        9 / 16.875 / 24.75 / 32.625 / 40.5pt     -> 7.875pt
+//         Arial 11          9 / 18 / 27 / 36 / 45pt                  -> 9pt
+//     and a 22pt cell under each Normal font stepped by the SAME amount (L2-L0
+//     = 2 steps of the Normal font, not of the cell's). Every step is 1.5 x the
+//     Normal font's maximum digit width (Aptos Narrow 5px, Calibri 7px, Arial
+//     8px at 96 dpi): 7.5 / 10.5 / 12px. (The OOXML spec's "three spaces"
+//     does not fit: three Calibri spaces are ~10px.)
+//   - Calcula's Normal font is Calibri 11 (DEFAULT_THEME.cellFontFamily /
+//     cellFontSize), whose maximum digit width is the 7px every column-width
+//     conversion here uses, so a level is 10.5px. It was 8px -- the step of
+//     neither font -- so indent 10 started 25px short of Excel's.
 
-/** Pixels one indent level moves a value, at zoom 1. */
-export const INDENT_PX_PER_LEVEL = 8;
+/** Excel's step per indent level, in maximum-digit widths of the Normal font. */
+export const INDENT_DIGIT_WIDTHS_PER_LEVEL = 1.5;
+
+/** The maximum digit width, in px at 96 dpi, of Calcula's Normal font (Calibri 11). */
+export const NORMAL_FONT_MAX_DIGIT_WIDTH_PX = 7;
+
+/** Pixels one indent level moves a value, at zoom 1 (Calibri 11: 10.5px). */
+export const INDENT_PX_PER_LEVEL = INDENT_DIGIT_WIDTHS_PER_LEVEL * NORMAL_FONT_MAX_DIGIT_WIDTH_PX;
 
 type Side = "left" | "center" | "right";
 

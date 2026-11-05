@@ -104,6 +104,16 @@ describe("measureOptimalColumnWidth: rotated and stacked text", () => {
     );
   });
 
+  it("a hard break in Rotate Text Up needs one line of width PER LINE, as the painter lays it out (BUG-0363)", () => {
+    // Two lines side by side; measured as one run it got one line pitch and the
+    // second line the painter draws was cut.
+    expect(measureOptimalColumnWidth(0, [cell("abcde\nfg", 1)], STYLES, THEME, MIN_WIDTH)).toBe(
+      Math.ceil(2 * LINE_H + PADDING_X * 2 + FIT_MARGIN),
+    );
+    // And the row is as tall as the LONGEST line, not the run-together value.
+    expect(rowHeight([cell("abcde\nfg", 1)])).toBe(Math.ceil(50 + PADDING_Y * 2));
+  });
+
   it("stacked text needs its widest character", () => {
     // Two columns ("ab" / "cd") of 10px glyphs and a quarter-line gap.
     expect(measureOptimalColumnWidth(0, [cell("ab\ncd", 3)], STYLES, THEME, MIN_WIDTH)).toBe(
@@ -118,7 +128,7 @@ describe("AutoFit and the indent, as the painter draws it", () => {
   });
 
   it("a RIGHT-aligned value's indent does", () => {
-    expect(measureOptimalColumnWidth(0, [cell("abc", 6)], STYLES, THEME, MIN_WIDTH)).toBe(30 + 3 * 8 + 6 + 2);
+    expect(measureOptimalColumnWidth(0, [cell("abc", 6)], STYLES, THEME, MIN_WIDTH)).toBe(Math.ceil(30 + 3 * 10.5 + 6 + 2));
   });
 
   it("a centred WRAPPED value wraps at the full width, as the painter wraps it", () => {

@@ -268,7 +268,7 @@ pub(crate) fn recalculate_after_leaving_manual(
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     cube_results: Option<engine::CubePrefetch>,
 ) -> Result<Vec<CellData>, String> {
-    run_calculation_pass_gated(
+    let mut cells = run_calculation_pass_gated(
         CalcScope::Workbook,
         window,
         state,
@@ -282,7 +282,17 @@ pub(crate) fn recalculate_after_leaving_manual(
         false,
         // ...and only while it STILL is, asked under the pass's own grid locks.
         true,
-    )
+    )?;
+    // The live data tables, which the pass leaves to the what-if refresh
+    // (BUG-0652): leaving manual recalculates them, as in Excel.
+    let states = crate::whatif_recalc::WhatIfStates {
+        user_files: user_files_state,
+        pivots: pivot_state,
+        pane_control: pane_control_state,
+        ribbon_filter: ribbon_filter_state,
+    };
+    crate::data_tables::refresh_after_calculation_pass(state, &states, true, &mut cells);
+    Ok(cells)
 }
 
 /// The order mode switches were REQUESTED in (one per `set_calculation_mode`
@@ -1936,7 +1946,7 @@ pub(crate) fn run_calculation_pass_with(
     cube_results: Option<engine::CubePrefetch>,
     manual_document_unedited: bool,
 ) -> Result<Vec<CellData>, String> {
-    run_calculation_pass_gated(
+    let mut cells = run_calculation_pass_gated(
         scope,
         window,
         state,
@@ -1947,7 +1957,20 @@ pub(crate) fn run_calculation_pass_with(
         cube_results,
         manual_document_unedited,
         false,
-    )
+    )?;
+    // THE LIVE DATA TABLES (BUG-0652). The pass answers a `TABLE(..)` body cell
+    // with its stored value; its values are the what-if substitution's, which
+    // needs the input cells written and every lock dropped -- so it runs here,
+    // after the pass, over the tables the pass covered, whatever the mode (F9
+    // and Shift+F9 refresh them under manual calculation, as in Excel).
+    let states = crate::whatif_recalc::WhatIfStates {
+        user_files: user_files_state,
+        pivots: pivot_state,
+        pane_control: pane_control_state,
+        ribbon_filter: ribbon_filter_state,
+    };
+    crate::data_tables::refresh_after_calculation_pass(state, &states, scope == CalcScope::Workbook, &mut cells);
+    Ok(cells)
 }
 
 /// What [`run_calculation_pass_gated`] answers when it was told to run only
@@ -3485,6 +3508,21 @@ fn formula_depends_on_visibility(formula: &str) -> bool {
     upper.contains("SUBTOTAL") || upper.contains("AGGREGATE")
 }
 
+/// Whether some formula on SOME sheet could read row visibility (the same
+/// over-broad prefilter as [`formula_depends_on_visibility`]): the manual-
+/// calculation answer of [`recalc_visibility_dependents_body`]. The active
+/// sheet is read from its mirror. Takes `grid`, `grids`, then `active_sheet`
+/// (reads), and releases them.
+fn visibility_is_read_anywhere(state: &AppState) -> bool {
+    let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    let active = *state.active_sheet.read().unwrap();
+    let reads = |g: &engine::Grid| {
+        g.cells.values().any(|cell| cell.formula_string().is_some_and(|f| formula_depends_on_visibility(&f)))
+    };
+    reads(&grid) || grids.iter().enumerate().any(|(i, g)| i != active && reads(g))
+}
+
 /// Targeted recalc after ROW VISIBILITY changed — hide/unhide, an AutoFilter
 /// applied or cleared, an advanced filter, an outline group collapsed or
 /// expanded, and the undo of any of those.
@@ -3518,7 +3556,50 @@ fn formula_depends_on_visibility(formula: &str) -> bool {
 ///
 /// Callers must hold NO grid or store lock. Honours manual calculation mode,
 /// like every other dependent cascade. Returns the active-sheet cells to apply.
+///
+/// THE LIVE DATA TABLES (NEW-dt-refresh-root) are refreshed at the end
+/// (`data_tables::refresh_after_recalc`), once the pass's guards are dropped:
+/// Excel [LIVE, dtroot/probe1.ps1] refreshes a table whose model reads
+/// `SUBTOTAL(109,..)` when an AutoFilter, a hidden row or a collapsed outline
+/// hides a row of it. Under manual calculation the workbook is left pending
+/// when some SUBTOTAL / AGGREGATE could read the change, and done otherwise,
+/// table or no table (NEW-manual-visibility-pending, see the body).
+/// Their repaints join the returned cells.
 pub(crate) fn recalc_visibility_dependents_core(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    control_states: Option<(
+        &crate::pane_control::PaneControlState,
+        &crate::ribbon_filter::RibbonFilterState,
+    )>,
+) -> Result<Vec<CellData>, String> {
+    let scope = crate::data_tables::begin_recalc();
+    let mut updated_cells = recalc_visibility_dependents_body(state, user_files_state, pivot_state, control_states)?;
+    // MANUAL CALCULATION: the body has already said whether the change is read
+    // (NEW-manual-visibility-pending), so the refresh's own manual answer --
+    // "pending whenever the workbook holds a data table" -- is not asked. A
+    // table's model reads a hidden row only through a SUBTOTAL / AGGREGATE,
+    // which the body's mark covers; Excel [LIVE, dtroot/probe1.ps1 P7 and
+    // backende/probe1.ps1 N3] stays xlDone after hiding a row nothing reads,
+    // table or no table.
+    let automatic = state.calculation_mode.lock().map(|m| *m == "automatic").unwrap_or(true);
+    if !automatic {
+        return Ok(updated_cells);
+    }
+    crate::data_tables::refresh_after_recalc(
+        scope,
+        state,
+        user_files_state,
+        Some(pivot_state),
+        control_states,
+        &mut updated_cells,
+    );
+    Ok(updated_cells)
+}
+
+/// The pass of [`recalc_visibility_dependents_core`], under its own guards.
+fn recalc_visibility_dependents_body(
     state: &AppState,
     user_files_state: &UserFilesState,
     pivot_state: &PivotState,
@@ -3540,6 +3621,20 @@ pub(crate) fn recalc_visibility_dependents_core(
     {
         let calc_mode = state.calculation_mode.lock().unwrap();
         if *calc_mode != "automatic" {
+            drop(calc_mode);
+            // MANUAL CALCULATION (NEW-manual-visibility-pending): the pass is
+            // left for F9, and the workbook SAYS so when a formula reads the
+            // change -- Excel [LIVE, dtroot/probe1.ps1 P6/P7, manual]: an
+            // AutoFilter or a hidden row under `=A1*SUBTOTAL(109,C10:C12)` gave
+            // xlPending, while hiding row 20, which no SUBTOTAL reads, stayed
+            // xlDone even with a data table on the sheet. This returned without
+            // a mark, so a save vouched for a stale SUBTOTAL. The rows that
+            // changed are not passed here, so "reads the change" is the cheap
+            // answer: some SUBTOTAL / AGGREGATE exists on some sheet. A workbook
+            // without one stays done, as Excel's does.
+            if visibility_is_read_anywhere(state) {
+                note_stored_values_may_be_stale(state);
+            }
             return Ok(Vec::new());
         }
     }
@@ -3712,6 +3807,14 @@ pub(crate) fn recalc_visibility_dependents_core(
             let include_cascade_formulas =
                 affected.len() <= crate::commands::data::CASCADE_FORMULA_LIMIT;
 
+            // GETPIVOTDATA's lookup (NEW-getpivotdata-trials), from this
+            // pass's own pivot store, taken only when one evaluates.
+            let lazy = crate::pivot::operations::LazyPivotLookup::new(Some(pivot_state));
+            let lookup = |field: &str, sheet: Option<&str>, r: u32, c: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+                lazy.lookup(field, sheet, r, c, pairs)
+            };
+            let pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>> =
+                Some(&lookup);
             for &(row, col) in &affected {
                 let cell_opt = grid.get_cell(row, col).cloned();
                 if let Some(cell) = cell_opt {
@@ -3732,6 +3835,7 @@ pub(crate) fn recalc_visibility_dependents_core(
                             // preserve-on-no-prefetch invariant), same as the
                             // control-value cascade.
                             None,
+                            pivot_data_fn,
                             None,
                             control_values.as_ref(),
                             &styles,
@@ -3768,6 +3872,7 @@ pub(crate) fn recalc_visibility_dependents_core(
                 &cross_sheet_dependents_map,
                 &user_files,
                 control_values.as_ref().unwrap_or(&no_controls),
+                pivot_data_fn,
                 &styles,
                 &locale,
                 &merge_lookup,

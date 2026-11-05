@@ -2507,7 +2507,7 @@ declare interface ScriptTableHandle {
   getStyle(): Promise<ScriptTableStyle>;
   /** The totals-row configuration (shown + per-column functions). */
   getTotals(): Promise<ScriptTableTotals>;
-  /** Delete this table (the cells and their values are kept). */
+  /** Delete this table: its cells are cleared and references to it become #REF! (`convertToRange()` keeps the cells). */
   delete(): Promise<void>;
 }
 
@@ -3676,6 +3676,36 @@ declare interface UnlockedAPI {
   insertColumns(startCol: number, count: number, sheet?: SheetRef): Promise<void>;
   /** Delete `count` columns from `startCol` (their contents are lost). */
   deleteColumns(startCol: number, count: number, sheet?: SheetRef): Promise<void>;
+  /**
+   * Insert empty cells in a block, shifting the cells there right or down --
+   * Excel's Insert Cells (VBA `Range("B2:C3").Insert Shift:=xlDown`). ACTIVE
+   * sheet only (call setActiveSheet first). A block spanning every column
+   * (row) inserts entire rows (columns), as Excel does. If the shift would cut
+   * a merged block it is refused, nothing changed, unless `unmergeCutMerges`
+   * says to unmerge them (Excel asks the person that question).
+   */
+  insertCells(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    shift: "right" | "down",
+    options?: { unmergeCutMerges?: boolean },
+  ): Promise<void>;
+  /**
+   * Delete a block of cells, shifting the cells beside it left or up -- Excel's
+   * Delete Cells (VBA `Range("B2:C3").Delete Shift:=xlToLeft`); their contents
+   * are lost. ACTIVE sheet only; the same whole-line and merge rules as
+   * insertCells.
+   */
+  deleteCells(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    shift: "left" | "up",
+    options?: { unmergeCutMerges?: boolean },
+  ): Promise<void>;
   /** Merge a rectangle into one cell (only the top-left value survives). */
   mergeCells(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<void>;
   /** Split the merged region containing (row, col) back into single cells. */
@@ -4454,6 +4484,10 @@ declare interface UnlockedAPI {
    *
    * ACTIVE sheet only — a sheet ref naming another one rejects. Resolves to
    * how many cells were written (0 when the band already covers the range).
+   * Merged cells in the filled area that are not the band's own repeated
+   * merges stop the fill before anything is written, as in Excel: "series"
+   * (AutoFill) rejects with "To do this, all the merged cells need to be the
+   * same size."; "copy" (FillDown) writes nothing and resolves to 0.
    */
   fillRange(startRow: number, startCol: number, endRow: number, endCol: number, options?: { direction?: "down" | "up" | "right" | "left"; type?: "copy" | "series"; sourceSize?: number }, sheet?: SheetRef): Promise<{ count: number }>;
 
@@ -4521,7 +4555,7 @@ declare interface UnlockedAPI {
    * another sheet. Resolves to the new table's descriptor.
    */
   createTable(startRow: number, startCol: number, endRow: number, endCol: number, options?: { name?: string; hasHeaders?: boolean }): Promise<ScriptObjectRef>;
-  /** Delete a table (its cells and values are kept). ACTIVE SHEET only. */
+  /** Delete a table: its cells are cleared and references to it become #REF! (Excel's ListObject.Delete). ACTIVE SHEET only. */
   deleteTable(tableId: string): Promise<void>;
   /**
    * Place a picture the workbook ALREADY holds, at an anchor cell on the ACTIVE

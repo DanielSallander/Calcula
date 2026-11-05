@@ -30,6 +30,7 @@ import {
   probeSurface,
   NAMED_SUBTREES,
   OBJECT_TYPE_INTERFACES,
+  type ProbedDoor,
   type ProbedMember,
   type ProbeResult,
 } from "./probeShim";
@@ -81,18 +82,65 @@ function limitText(limits: Record<string, number> | undefined): string {
  * dialog and the transparency panel render, so an author reading a tooltip and
  * a user reading a permission prompt are reading one sentence.
  */
-function policyLines(member: ProbedMember): string[] {
-  if (!member.broker) return [];
-  const policy: MethodPolicy | undefined = ALLOWLIST[member.broker];
-  if (!policy) return [];
-  const lines: string[] = [];
-  lines.push(`Calcula policy (generated): ${policy.desc}.`);
-  const bits = [`broker \`${member.broker}\``];
-  if (member.aspect) bits.push(`aspect \`${member.aspect}\``);
+function reachText(broker: string, aspect: string | undefined, policy: MethodPolicy): string {
+  const bits = [`broker \`${broker}\``];
+  if (aspect) bits.push(`aspect \`${aspect}\``);
   bits.push(`${policy.tier} tier`);
   bits.push(`class ${policy.class}`);
   if (policy.capability) bits.push(`requires the \`${policy.capability}\` capability`);
-  lines.push(`Reach: ${bits.join(", ")}.${limitText(policy.limits)}`);
+  return `${bits.join(", ")}.${limitText(policy.limits)}`;
+}
+
+/** How an author obtains the object a door hands out, for the JSDoc. */
+function doorPhrase(door: ProbedDoor): string {
+  return door.prefix ? `\`${door.prefix}\` on ${door.owner}` : door.owner;
+}
+
+/**
+ * The distinct (broker, aspect) pairs a member dispatches to across its doors,
+ * each with the doors that reach it, in first-seen order. Doors that dispatch
+ * nowhere, or to a broker name with no policy, are dropped.
+ */
+export function doorPolicies(member: ProbedMember): Array<{
+  broker: string;
+  aspect?: string;
+  policy: MethodPolicy;
+  doors: ProbedDoor[];
+}> {
+  const out: Array<{ broker: string; aspect?: string; policy: MethodPolicy; doors: ProbedDoor[] }> = [];
+  for (const door of member.doors) {
+    if (!door.broker) continue;
+    const policy: MethodPolicy | undefined = ALLOWLIST[door.broker];
+    if (!policy) continue;
+    const group = out.find((g) => g.broker === door.broker && g.aspect === door.aspect);
+    if (group) group.doors.push(door);
+    else out.push({ broker: door.broker, ...(door.aspect ? { aspect: door.aspect } : {}), policy, doors: [door] });
+  }
+  return out;
+}
+
+/**
+ * The policy paragraph for one member. A member every door dispatches the same
+ * way reads as it always did; a SHAPE handed out by several doors that reach
+ * different brokers (ScriptRange from a sheet's `range()`, a table's `range()`
+ * and `api.table(id).range()`; BUG-0472) states each door's reach, because the
+ * tier an author needs depends on how they obtained the object.
+ */
+function policyLines(member: ProbedMember): string[] {
+  const groups = doorPolicies(member);
+  if (groups.length === 0) return [];
+  if (groups.length === 1) {
+    const [g] = groups;
+    return [
+      `Calcula policy (generated): ${g.policy.desc}.`,
+      `Reach: ${reachText(g.broker, g.aspect, g.policy)}`,
+    ];
+  }
+  const lines = ["Calcula policy (generated) depends on how the object was obtained:"];
+  for (const g of groups) {
+    const via = [...new Set(g.doors.map(doorPhrase))].join(", ");
+    lines.push(`- Through ${via}: ${g.policy.desc}. Reach: ${reachText(g.broker, g.aspect, g.policy)}`);
+  }
   return lines;
 }
 
@@ -282,17 +330,19 @@ export interface SurfaceMemberRow {
   tier?: string;
   /** The capability the broker demands, when it demands one. */
   capability?: string;
+  /**
+   * The DOOR: the interface whose member handed this object out (the probe's
+   * `ProbedDoor.owner`) -- "SheetContext" for a sheet script's `range()`,
+   * "TableContext" for a table script's, "ScriptTableHandle" for
+   * `api.table().range()`, the context itself for a root member. Present only
+   * on a chain whose doors DISAGREE (`range.setValues` is `sheet.setRangeValues`
+   * through a sheet and `object.setState` through a table): one row per door,
+   * and the validator picks the row whose door the script's own context
+   * reaches. Absent: the chain has one policy wherever it is reached.
+   */
+  via?: string;
 }
 
-/**
- * Collect every probed member that dispatches to an allowlisted broker method.
- *
- * Members with no `broker` are skipped: they read a worker-local mirror and
- * cross no policy boundary, so they are neither capability-bearing nor useful
- * for reach checking. Rows are deduplicated on the whole tuple — the same path
- * is reachable from many interfaces through `extends`, and the validator cares
- * about the path, not which context re-exposes it.
- */
 /**
  * Where each interface hangs off a context root, with call parens erased.
  *
@@ -316,45 +366,77 @@ function ifacePrefixes(): Map<string, string[]> {
   return out;
 }
 
+/**
+ * Every probed member that can be WRITTEN from a context root, as policy rows.
+ *
+ * ONE ROW PER DOOR (BUG-0472): a member reached through several doors carries
+ * each door's own broker, tier and capability. Rows are deduplicated on
+ * (interface, chain, broker, capability) -- the probe sees one door once per
+ * tier and per object type that reaches it -- EXCEPT for a chain whose doors
+ * DISAGREE (`range.setValues` is `sheet.setRangeValues` through a sheet and
+ * `object.setState` through a table; `close` needs `ui.dialog` on a form and
+ * nothing on a panel): those rows also carry the door itself (`via`, the
+ * probe's `ProbedDoor.owner`), one row per door, so the validator can pick
+ * the row for the door the script's own context reaches. A chain whose doors
+ * all agree carries no `via`: its one policy holds wherever it is reached.
+ * Members with no broker are kept (they read a worker-local mirror, but the
+ * reach check must find them). Sorted by chain, then broker, then door.
+ */
 export function collectSurfaceRows(probe: ProbeResult): SurfaceMemberRow[] {
   const prefixes = ifacePrefixes();
-  const seen = new Set<string>();
-  const rows: SurfaceMemberRow[] = [];
+  interface DoorRow { row: SurfaceMemberRow; owner: string }
+  const all: DoorRow[] = [];
   for (const [ifaceName, probed] of [...probe.interfaces].sort((a, b) => a[0].localeCompare(b[0]))) {
     // An interface nothing hangs off a context yields no row: a chain that
     // cannot be written cannot be validated.
     const roots = prefixes.get(ifaceName);
     if (!roots) continue;
     for (const [path, member] of [...probed.members].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const policy: MethodPolicy | undefined = member.broker ? ALLOWLIST[member.broker] : undefined;
-      for (const root of roots) {
-        const chain = root ? `${root}.${path}` : path;
-        // The IFACE is part of the identity, deliberately. The key used to be
-        // chain+broker+capability alone, which collapsed every same-named hook
-        // onto the alphabetically FIRST interface that carried it: the surface
-        // said onSelectionChange belongs to SheetContext only, while the worker
-        // really registers it for slicer, cell and row too — so anything
-        // deriving per-TYPE facts from these rows (objectHooksFor, the prompt's
-        // own-member floor) saw slicer/table/timeline/row as hookless and a
-        // preview never fired their handlers. Validation is untouched: the
-        // validator matches by CHAIN, and duplicate chains across interfaces
-        // were already legal (getCellValue has two owners).
-        const key = `${ifaceName} ${chain} ${member.broker ?? ""} ${policy?.capability ?? ""}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        rows.push({
-          chain,
-          iface: ifaceName,
-          path,
-          ...(member.broker ? { broker: member.broker } : {}),
-          ...(policy ? { tier: policy.tier } : {}),
-          ...(policy?.capability ? { capability: policy.capability } : {}),
+      // A door's prefix is always one of `roots` (the probe enters a named
+      // interface only at its NAMED_SUBTREES path).
+      for (const door of member.doors) {
+        if (!roots.includes(door.prefix)) continue;
+        const policy: MethodPolicy | undefined = door.broker ? ALLOWLIST[door.broker] : undefined;
+        const chain = door.prefix ? `${door.prefix}.${path}` : path;
+        all.push({
+          owner: door.owner,
+          row: {
+            chain,
+            iface: ifaceName,
+            path,
+            ...(door.broker ? { broker: door.broker } : {}),
+            ...(policy ? { tier: policy.tier } : {}),
+            ...(policy?.capability ? { capability: policy.capability } : {}),
+          },
         });
       }
     }
   }
+  const policyOf = (r: SurfaceMemberRow) => `${r.broker ?? ""} ${r.tier ?? ""} ${r.capability ?? ""}`;
+  const policiesByChain = new Map<string, Set<string>>();
+  for (const { row } of all) {
+    const set = policiesByChain.get(row.chain) ?? new Set<string>();
+    set.add(policyOf(row));
+    policiesByChain.set(row.chain, set);
+  }
+  const seen = new Set<string>();
+  const rows: SurfaceMemberRow[] = [];
+  for (const { row, owner } of all) {
+    const ambiguous = (policiesByChain.get(row.chain)?.size ?? 0) > 1;
+    // The IFACE is part of the identity, deliberately: the key used to be
+    // chain+broker+capability alone, which collapsed every same-named hook
+    // onto the alphabetically FIRST interface that carried it (objectHooksFor
+    // then saw slicer/table/timeline/row as hookless).
+    const key = `${row.iface} ${row.chain} ${ambiguous ? owner : ""} ${row.broker ?? ""} ${row.capability ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(ambiguous ? { ...row, via: owner } : row);
+  }
   return rows.sort(
-    (a, b) => a.chain.localeCompare(b.chain) || (a.broker ?? "").localeCompare(b.broker ?? ""),
+    (a, b) =>
+      a.chain.localeCompare(b.chain) ||
+      (a.broker ?? "").localeCompare(b.broker ?? "") ||
+      (a.via ?? "").localeCompare(b.via ?? ""),
   );
 }
 
@@ -368,6 +450,7 @@ function surfacePolicyModule(rows: SurfaceMemberRow[]): string {
     if (r.broker) bits.push(`broker: ${JSON.stringify(r.broker)}`);
     if (r.tier) bits.push(`tier: ${JSON.stringify(r.tier)}`);
     if (r.capability) bits.push(`capability: ${JSON.stringify(r.capability)}`);
+    if (r.via) bits.push(`via: ${JSON.stringify(r.via)}`);
     return `  { ${bits.join(", ")} },`;
   });
   return [
@@ -397,6 +480,14 @@ function surfacePolicyModule(rows: SurfaceMemberRow[]): string {
     "  readonly tier?: string;",
     "  /** The capability the broker demands, when it demands one. */",
     "  readonly capability?: CapabilityId;",
+    "  /**",
+    "   * The DOOR it was reached through: the interface whose member handed the",
+    '   * object out ("SheetContext" for range() on a sheet, "ScriptTableHandle" for',
+    "   * api.table().range()); the context itself for a root member. Present only",
+    "   * on a chain whose doors disagree: one row per door, each door's policy its",
+    "   * own. Absent: the chain has one policy wherever it is reached.",
+    "   */",
+    "  readonly via?: string;",
     "}",
     "",
     "export const SCRIPT_SURFACE: readonly SurfaceMember[] = [",

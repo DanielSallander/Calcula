@@ -596,6 +596,31 @@ describe("the binding bridge", () => {
     ]);
   });
 
+  // rev-backend-5: `locale:changed` fires BEFORE Rust has given every model
+  // engine the new FORMAT culture, so a measure re-read at once could compute
+  // FORMAT text in the old culture with nothing re-reading it after. The
+  // bindings re-resolve at once; the measures wait for the culture walk.
+  it("a locale switch re-reads the bindings at once and the measures only once the FORMAT culture is applied", async () => {
+    await install();
+    events.emitAppEvent(events.AppEvents.LOCALE_CHANGED, {});
+    await settle();
+    expect(sent("list")).toHaveLength(1);
+    expect(sent("resolveAll")).toHaveLength(1);
+    expect(sent("refreshMeasures")).toEqual([]);
+    // The walk's end reaches the bridge through the ONE seam every model
+    // re-query after a locale switch uses (round C, NEW-locale-listener-seam;
+    // the wire name is pinned to Rust's in appLocale.test.ts).
+    const { simulateBiFormatCultureAppliedForTests } = await import("../locale");
+    simulateBiFormatCultureAppliedForTests();
+    await settle();
+    expect(sent("refreshMeasures")).toEqual([{ op: "refreshMeasures", sheetIndex: null }]);
+
+    uninstall();
+    simulateBiFormatCultureAppliedForTests();
+    await settle();
+    expect(sent("refreshMeasures"), "an uninstalled bridge still hears the walk").toHaveLength(1);
+  });
+
   it("bootstrapShell installs the bridge (in CODE, not in a comment)", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");

@@ -488,6 +488,32 @@ pub fn validate_cell_value(
     }
 }
 
+/// The validation RANGE a cell belongs to (its rule and the top-left its
+/// custom formula is written for).
+pub(crate) fn get_validation_range_for_cell(
+    validations: &[ValidationRange],
+    row: u32,
+    col: u32,
+) -> Option<&ValidationRange> {
+    validations
+        .iter()
+        .find(|vr| row >= vr.start_row && row <= vr.end_row && col >= vr.start_col && col <= vr.end_col)
+}
+
+/// A CUSTOM validation formula's value at (`row`, `col`): the formula is its
+/// range's top-left cell's, and this cell reads it moved by its own offset
+/// (NEW-cf-relative-eval). [LIVE, Excel 16, cfeval/probe1.ps1 P11] `=B1>A1` on
+/// B1:B3 holds B2 valid against A2 and B3 invalid against A3.
+fn custom_formula_value(
+    formulas: &crate::conditional_formatting::RuleFormulas,
+    vr: &ValidationRange,
+    formula: &str,
+    row: u32,
+    col: u32,
+) -> CellValue {
+    formulas.value_at(formula, (vr.start_row, vr.start_col), row, col)
+}
+
 /// Get the validation rule for a specific cell.
 pub fn get_validation_for_cell(
     validations: &[ValidationRange],
@@ -592,7 +618,131 @@ pub fn set_data_validation(
     validation: DataValidation,
     sheet_index: Option<usize>,
 ) -> DataValidationResult {
-    let target_sheet = match resolve_validation_sheet(&state, sheet_index) {
+    set_data_validation_impl(&state, &file_state, start_row, start_col, end_row, end_col, validation, sheet_index)
+}
+
+/// What a data validation naming a structured reference is refused with
+/// (NEW-cfdv-structured-refs). The refusal is [LIVE, Excel 16, 2026-11-05,
+/// cfdv/probe1.ps1 C21/C22]: `Validation.Add` refuses a custom formula
+/// `=T1[@A]>1` or `=SUM(T1[A])>0` and a list source `=T1[A]` while it accepts
+/// `=SUM($A$2:$A$3)>0`. COM reports only 0x800A03EC, so the sentence is
+/// Excel's dialog text for a reference a rule cannot hold, not a measured
+/// string. (A list source never reaches here as text: the dialog resolves it
+/// to a range or refuses it first, `listSourceRef.ts`.)
+pub(crate) const DV_STRUCTURED_REFERENCE_REFUSAL: &str =
+    "This type of reference cannot be used in a Data Validation formula. \
+     Change the reference to a single cell, or use the reference with a worksheet function, such as =SUM(A1:E5).";
+
+/// The entry refusal for a validation, before any lock or effect.
+pub(crate) fn validation_entry_refusal(validation: &DataValidation) -> Option<String> {
+    match &validation.rule {
+        DataValidationRule::Custom(rule)
+            if crate::conditional_formatting::formula_names_structured_reference(&rule.formula) =>
+        {
+            Some(DV_STRUCTURED_REFERENCE_REFUSAL.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// A validation through a structural edit (NEW-cfdv-structural-shift; the
+/// Excel rule is stated at `conditional_formatting::rebase_rule_formula`).
+///
+/// * A CUSTOM formula is its range's top-left cell's formula: on the edited
+///   sheet it is re-stated from `new_anchor` (the piece's top-left after the
+///   edit); on any other sheet only references qualified with the edited
+///   sheet move. [LIVE, cfdv/probe1.ps1 V5/V11] `=H2>$D$1` on H2:H10: insert
+///   row 1 -> `=H3>$D$2`, delete row 1 -> `=H1>#REF!`.
+/// * A LIST source is a rectangle on a sheet (`sheet_index`, `None` = the
+///   validation's own) and moves as a reference to it does -- [LIVE, V1-V9]
+///   `=$F$1:$F$5`: insert row 1 -> `$F$2:$F$6`, insert column F ->
+///   `$G$1:$G$5`, delete row 3 -> `$F$1:$F$4`, Insert Cells F1 down ->
+///   `$F$2:$F$6`, `=Other!$A$1:$A$3` follows a row inserted on Other; when
+///   every cell of it is deleted Excel's source reads `=#REF!`, which refuses
+///   every entry -- here an EMPTY list, the rule `sheets::remap_list_sources`
+///   already uses for a source whose sheet is gone.
+///
+/// Returns whether anything changed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rebase_validation_formulas(
+    validation: &mut DataValidation,
+    own_sheet: usize,
+    edited_sheet: usize,
+    old_anchor: (u32, u32),
+    new_anchor: (u32, u32),
+    formula_sheet: &str,
+    edited_sheet_name: &str,
+    band: &crate::commands::structure::structure_cells::BandEdit,
+) -> bool {
+    match &mut validation.rule {
+        DataValidationRule::Custom(rule) => {
+            let next = if own_sheet == edited_sheet {
+                crate::conditional_formatting::rebase_rule_formula(
+                    &rule.formula, old_anchor, new_anchor, formula_sheet, edited_sheet_name, band,
+                )
+            } else {
+                crate::conditional_formatting::shift_rule_formula(&rule.formula, formula_sheet, edited_sheet_name, band)
+            };
+            if next != rule.formula {
+                rule.formula = next;
+                return true;
+            }
+            false
+        }
+        DataValidationRule::List(list) => {
+            let ListSource::Range { sheet_index, start_row, start_col, end_row, end_col } = &mut list.source else {
+                return false;
+            };
+            if sheet_index.unwrap_or(own_sheet) != edited_sheet {
+                return false;
+            }
+            let rect = crate::commands::coord_shift::CellRange {
+                start_row: *start_row,
+                end_row: *end_row,
+                start_col: *start_col,
+                end_col: *end_col,
+            };
+            match band.shift_reference_range(rect) {
+                Some(moved) if moved == rect => false,
+                Some(moved) => {
+                    *start_row = moved.start_row;
+                    *end_row = moved.end_row;
+                    *start_col = moved.start_col;
+                    *end_col = moved.end_col;
+                    true
+                }
+                None => {
+                    list.source = ListSource::Values(Vec::new());
+                    true
+                }
+            }
+        }
+        DataValidationRule::None
+        | DataValidationRule::WholeNumber(_)
+        | DataValidationRule::Decimal(_)
+        | DataValidationRule::Date(_)
+        | DataValidationRule::Time(_)
+        | DataValidationRule::TextLength(_) => false,
+    }
+}
+
+/// Command body over plain references, so the entry refusal's clean document
+/// is unit-testable without a Tauri `State`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn set_data_validation_impl(
+    state: &AppState,
+    file_state: &FileState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    validation: DataValidation,
+    sheet_index: Option<usize>,
+) -> DataValidationResult {
+    if let Some(refusal) = validation_entry_refusal(&validation) {
+        return DataValidationResult { success: false, validation: None, error: Some(refusal) };
+    }
+    let target_sheet = match resolve_validation_sheet(state, sheet_index) {
         Ok(idx) => idx,
         Err(e) => {
             return DataValidationResult { success: false, validation: None, error: Some(e) }
@@ -600,7 +750,7 @@ pub fn set_data_validation(
     };
     // Validation rules are persisted (`workbook.data_validations`) and written
     // only by the save path.
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     let mut validations = state.data_validations.write(&effect).unwrap();
 
     let sheet_validations = validations.entry(target_sheet).or_insert_with(Vec::new);
@@ -746,6 +896,9 @@ pub fn validate_cell(
     // four-second formula would read as a frozen keyboard.
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.read().unwrap();
+    // Defined names a custom formula may read: a snapshot taken and released
+    // BEFORE the grid guards.
+    let named_ranges = state.named_ranges.read().map(|n| (*n).clone()).unwrap_or_default();
     // CANONICAL LOCK ORDER: `grids` first, then everything else. The
     // recalculation pass holds both grid locks and then takes `sheet_names`,
     // and it runs on a background thread, so a reader that holds any other
@@ -754,14 +907,14 @@ pub fn validate_cell(
     let sheet_names = state.sheet_names.read().unwrap();
     let validations = state.data_validations.read().unwrap();
 
-    // Get the validation rule for this cell
-    let validation = if let Some(sheet_validations) = validations.get(&active_sheet) {
-        get_validation_for_cell(sheet_validations, row, col).cloned()
+    // Get the validation range for this cell
+    let vr = if let Some(sheet_validations) = validations.get(&active_sheet) {
+        get_validation_range_for_cell(sheet_validations, row, col).cloned()
     } else {
         None
     };
 
-    let validation = match validation {
+    let vr = match vr {
         Some(v) => v,
         None => {
             return CellValidationResult {
@@ -770,6 +923,7 @@ pub fn validate_cell(
             };
         }
     };
+    let validation = vr.validation.clone();
 
     // Get the cell value
     let cell_value = if active_sheet < grids.len() {
@@ -789,10 +943,12 @@ pub fn validate_cell(
         resolve_list_source(source, grids_ref, sheet_names_ref, active_sheet)
     };
 
-    // Create a formula evaluator for custom validation
-    let formula_eval = |formula: &str| -> CellValue {
-        crate::evaluate_formula_multi_sheet(grids_ref, sheet_names_ref, active_sheet, formula)
-    };
+    // Create a formula evaluator for custom validation: relative to the
+    // range's top-left (NEW-cf-relative-eval).
+    let formulas = crate::conditional_formatting::RuleFormulas::new(
+        grids_ref, sheet_names_ref, active_sheet, Some(&named_ranges),
+    );
+    let formula_eval = |formula: &str| -> CellValue { custom_formula_value(&formulas, &vr, formula, row, col) };
 
     let is_valid = validate_cell_value(&cell_value, &validation, Some(&resolver), Some(&formula_eval));
 
@@ -833,8 +989,16 @@ pub fn get_validation_prompt(
 pub fn get_invalid_cells(
     state: State<AppState>,
 ) -> InvalidCellsResult {
+    get_invalid_cells_on(&state)
+}
+
+/// [`get_invalid_cells`] over a plain reference (tests drive the real body).
+pub(crate) fn get_invalid_cells_on(state: &AppState) -> InvalidCellsResult {
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.read().unwrap();
+    // Defined names a custom formula may read: a snapshot taken and released
+    // BEFORE the grid guards.
+    let named_ranges = state.named_ranges.read().map(|n| (*n).clone()).unwrap_or_default();
     // CANONICAL LOCK ORDER: `grids` first, then everything else. The
     // recalculation pass holds both grid locks and then takes `sheet_names`,
     // and it runs on a background thread, so a reader that holds any other
@@ -856,10 +1020,12 @@ pub fn get_invalid_cells(
                 resolve_list_source(source, grids_ref, sheet_names_ref, active_sheet)
             };
 
-            // Create a formula evaluator for custom validation
-            let formula_eval = |formula: &str| -> CellValue {
-                crate::evaluate_formula_multi_sheet(grids_ref, sheet_names_ref, active_sheet, formula)
-            };
+            // One formula cache for the whole pass: a custom formula is parsed
+            // once, then evaluated per cell relative to its range's top-left
+            // (NEW-cf-relative-eval).
+            let formulas = crate::conditional_formatting::RuleFormulas::new(
+                grids_ref, sheet_names_ref, active_sheet, Some(&named_ranges),
+            );
 
             // Check each validation range
             for vr in sheet_validations {
@@ -870,6 +1036,8 @@ pub fn get_invalid_cells(
                             .get(&(row, col))
                             .map(|c| c.value.clone())
                             .unwrap_or(CellValue::Empty);
+                        let formula_eval =
+                            |formula: &str| -> CellValue { custom_formula_value(&formulas, vr, formula, row, col) };
 
                         if !validate_cell_value(&cell_value, &vr.validation, Some(&resolver), Some(&formula_eval)) {
                             invalid_cells.push((row, col));
@@ -952,6 +1120,9 @@ pub fn validate_pending_value(
 ) -> CellValidationResult {
     let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.read().unwrap();
+    // Defined names a custom formula may read: a snapshot taken and released
+    // BEFORE the grid guards.
+    let named_ranges = state.named_ranges.read().map(|n| (*n).clone()).unwrap_or_default();
     // CANONICAL LOCK ORDER: `grids` first, then everything else. The
     // recalculation pass holds both grid locks and then takes `sheet_names`,
     // and it runs on a background thread, so a reader that holds any other
@@ -960,14 +1131,14 @@ pub fn validate_pending_value(
     let sheet_names = state.sheet_names.read().unwrap();
     let validations = state.data_validations.read().unwrap();
 
-    // Get the validation rule for this cell
-    let validation = if let Some(sheet_validations) = validations.get(&active_sheet) {
-        get_validation_for_cell(sheet_validations, row, col).cloned()
+    // Get the validation range for this cell
+    let vr = if let Some(sheet_validations) = validations.get(&active_sheet) {
+        get_validation_range_for_cell(sheet_validations, row, col).cloned()
     } else {
         None
     };
 
-    let validation = match validation {
+    let vr = match vr {
         Some(v) => v,
         None => {
             return CellValidationResult {
@@ -976,6 +1147,7 @@ pub fn validate_pending_value(
             };
         }
     };
+    let validation = vr.validation.clone();
 
     // Parse the pending value string into a CellValue
     let cell_value = if pending_value.is_empty() {
@@ -1003,10 +1175,12 @@ pub fn validate_pending_value(
         resolve_list_source(source, grids_ref, sheet_names_ref, active_sheet)
     };
 
-    // Create a formula evaluator for custom validation
-    let formula_eval = |formula: &str| -> CellValue {
-        crate::evaluate_formula_multi_sheet(grids_ref, sheet_names_ref, active_sheet, formula)
-    };
+    // Create a formula evaluator for custom validation: relative to the
+    // range's top-left (NEW-cf-relative-eval).
+    let formulas = crate::conditional_formatting::RuleFormulas::new(
+        grids_ref, sheet_names_ref, active_sheet, Some(&named_ranges),
+    );
+    let formula_eval = |formula: &str| -> CellValue { custom_formula_value(&formulas, &vr, formula, row, col) };
 
     let is_valid = validate_cell_value(&cell_value, &validation, Some(&resolver), Some(&formula_eval));
 

@@ -688,3 +688,56 @@ fn len_counts_scalar_values_a_known_divergence_from_excels_utf16_units() {
         "LEN and LEFT must agree about what one character is, whatever unit they use"
     );
 }
+
+// ===========================================================================
+// ROWS / COLUMNS (BUG-0650)
+// ===========================================================================
+
+/// An argument that EVALUATES to an error is the answer; a REFERENCE to a cell
+/// holding one is still a shape. [LIVE, Excel 16, parser lane probe, J2..J14]
+/// `=ROWS(1/0)` #DIV/0!, `=ROWS(#N/A)` #N/A, `=ROWS(NA())` #N/A,
+/// `=COLUMNS(1/0)` #DIV/0!, `=ROWS(SQRT(-1))` #NUM!, `=LET(a,1/0,ROWS(a))`
+/// #DIV/0!, `=LET(a,A1,ROWS(A:R))` #NAME?; `=ROWS(E1)` (E1 = #N/A) 1,
+/// `=LET(a,E1,ROWS(a))` 1, `=ROWS("x")` 1, `=ROWS({1;2;3})` 3. Every one of
+/// the error cases counted 1: the dimensions were read off the expression and
+/// the value was never looked at.
+#[test]
+fn rows_and_columns_answer_an_error_argument_with_the_error() {
+    assert_eq!(eval("=ROWS(1/0)"), EvalResult::Error(CellError::Div0));
+    assert_eq!(eval("=ROWS(#N/A)"), EvalResult::Error(CellError::NA));
+    assert_eq!(eval("=ROWS(NA())"), EvalResult::Error(CellError::NA));
+    assert_eq!(eval("=COLUMNS(1/0)"), EvalResult::Error(CellError::Div0));
+    assert_eq!(eval("=ROWS(SQRT(-1))"), EvalResult::Error(CellError::Num));
+    assert_eq!(eval("=LET(a,1/0,ROWS(a))"), EvalResult::Error(CellError::Div0));
+    assert_eq!(eval("=LET(a,A1,ROWS(A:R))"), EvalResult::Error(CellError::Name));
+    assert_eq!(eval("=ROWS(undefined_name)"), EvalResult::Error(CellError::Name));
+    // Controls: values and references keep their shape.
+    assert_eq!(eval("=ROWS(\"x\")"), EvalResult::Number(1.0));
+    assert_eq!(eval("=ROWS({1;2;3})"), EvalResult::Number(3.0));
+    assert_eq!(eval("=COLUMNS({1,2})"), EvalResult::Number(2.0));
+    assert_eq!(eval("=ROWS(A1:A4)"), EvalResult::Number(4.0));
+}
+
+#[test]
+fn rows_of_a_reference_to_an_error_cell_is_still_its_shape() {
+    // J1 holds a stored #DIV/0!.
+    let g = grid_with_stored_error();
+    assert_eq!(eval_on(&g, "=ROWS(J1)"), EvalResult::Number(1.0));
+    assert_eq!(eval_on(&g, "=COLUMNS(J1:K1)"), EvalResult::Number(2.0));
+    assert_eq!(eval_on(&g, "=LET(a,J1,ROWS(a))"), EvalResult::Number(1.0));
+    assert_eq!(eval_on(&g, "=LET(a,J1,ROWS(a:a))"), EvalResult::Number(1.0));
+}
+
+/// A LET VALUE THAT IS AN ERROR IS BOUND, NOT RETURNED. [LIVE, Excel 16,
+/// parser lane probe 2] `=LET(a,1/0,5)` 5, `=LET(a,1/0,ISERROR(a))` TRUE,
+/// `=LET(a,NA(),IFERROR(a,7))` 7, `=LET(a,E1,b,2,b)` 2 with E1 = #N/A.
+/// `fn_let` returned the first error a value produced, so each answered it.
+#[test]
+fn a_let_binds_an_error_value_instead_of_returning_it() {
+    assert_eq!(eval("=LET(a,1/0,5)"), EvalResult::Number(5.0));
+    assert_eq!(eval("=LET(a,1/0,ISERROR(a))"), EvalResult::Boolean(true));
+    assert_eq!(eval("=LET(a,NA(),IFERROR(a,7))"), EvalResult::Number(7.0));
+    assert_eq!(eval_on(&grid_with_stored_error(), "=LET(a,J1,b,2,b)"), EvalResult::Number(2.0));
+    // Control: an error that IS used is still the answer.
+    assert_eq!(eval("=LET(a,1/0,a+1)"), EvalResult::Error(CellError::Div0));
+}

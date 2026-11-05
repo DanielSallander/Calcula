@@ -2796,11 +2796,49 @@ export interface AuditLog {
   enabled: boolean;
   maxEntries: number;
   entries: AuditEntry[];
+  /**
+   * THIS COMPUTER's append-only trail of audit rows that belong to no open
+   * workbook (BUG-0653: a push whose workbook was replaced by File > Open / New
+   * before it finished). Present only when asked (`includeMachine`). Mirrors
+   * Rust `machine_audit::MachineAuditTrail`.
+   */
+  machine?: MachineAuditTrail;
 }
 
-/** Return the full audit log for the current workbook. */
-export function getAuditLog(): Promise<AuditLog> {
-  return invokeBackend("calp_get_audit_log");
+/** A row of this computer's trail: an audit entry plus the extra fields it carried. */
+export interface MachineAuditEntry extends AuditEntry {
+  /** Why the row is here -- `"documentReplaced"`. */
+  reason?: string;
+  package?: string;
+  version?: string;
+  registry?: string;
+}
+
+/** Mirrors Rust `machine_audit::MachineAuditTrail`. */
+export interface MachineAuditTrail {
+  /** Oldest first, the newest 500 at most. */
+  entries: MachineAuditEntry[];
+  /** Lines the file holds. */
+  total: number;
+  /** Lines that could not be read -- reported, never hidden. */
+  unreadableLines: number;
+  /** Where the trail is, so the user can read it themselves. */
+  path: string;
+  /** Nothing has ever been recorded. */
+  missing: boolean;
+  /** The last write (or read) that failed, "" when none. */
+  lastWriteError: string;
+}
+
+/**
+ * Return the full audit log for the current workbook. With `includeMachine`,
+ * it also carries this computer's trail of rows that belong to no workbook
+ * (`machine`).
+ */
+export function getAuditLog(options?: { includeMachine?: boolean }): Promise<AuditLog> {
+  return options?.includeMachine
+    ? invokeBackend("calp_get_audit_log", { includeMachine: true })
+    : invokeBackend("calp_get_audit_log");
 }
 
 /**

@@ -723,10 +723,24 @@ export function resolveVisualContainer(
   const bgTransparency = pick("background.transparency");
   const shadowTransparency = pick("shadow.transparency");
   const storedGradient = isPlainObject(s?.background) ? (s!.background as Record<string, unknown>).gradient : undefined;
-  const gradient =
-    storedGradient !== undefined && storedGradient !== null && validateVisualGradient(storedGradient) === null
+  // A BOUND SOLID COLOUR paints like a written one (BUG-0510 (2); the
+  // solid-commit rule, round 2 ruling Q9 -- `solidBackgroundPatch` here, Rust
+  // `container_literal::apply_solid_background`): a colour that follows a
+  // formula is a colour to paint, so no stored gradient paints over it and a
+  // background that would resolve hidden shows -- unless its visibility is
+  // itself bound, which then decides. The literal stays untouched in the
+  // record (D invariant 1); only what paints changes. "" and an invalid
+  // colour are no colour: they change nothing here.
+  const boundColour = bound?.get("background.color");
+  const boundSolid =
+    typeof boundColour === "string" && boundColour.trim() !== "" && leafOk("background.color", boundColour);
+  const gradient = boundSolid
+    ? null
+    : storedGradient !== undefined && storedGradient !== null && validateVisualGradient(storedGradient) === null
       ? cloneJson(storedGradient as VisualGradient)
       : cloneJson(defaults.background.gradient);
+  const boundShow = bound?.get("background.show");
+  const showDecidedByBinding = typeof boundShow === "boolean" && leafOk("background.show", boundShow);
 
   return {
     padding: {
@@ -747,7 +761,7 @@ export function resolveVisualContainer(
     },
     spacing,
     background: {
-      show: bool("background.show", defaults.background.show),
+      show: boundSolid && !showDecidedByBinding ? true : bool("background.show", defaults.background.show),
       color: str("background.color", defaults.background.color),
       alpha: typeof bgTransparency === "number" ? 1 - bgTransparency / 100 : defaults.background.alpha,
       gradient: gradient ?? null,
@@ -968,6 +982,37 @@ export const CONTROL_CONTAINER_PROPERTY_KEYS: readonly string[] = Object.freeze(
 export function controlContainerKeyField(key: string): ContainerFieldId | null {
   const i = CONTROL_CONTAINER_PROPERTY_KEYS.indexOf(key);
   return i < 0 ? null : VISUAL_CONTAINER_FIELD_IDS[i];
+}
+
+/**
+ * WHICH `container*` KEYS EACH CONTROL TYPE PAINTS (BUG-0491), as field ids or whole groups ("shadow" = every
+ * `shadow.*` field). Row for row the Rust `visual_format::CONTROL_PAINTED_CONTAINER_FIELDS`, which every control
+ * write door refuses a dead key by (drift-tested both ways, and against the Controls painters:
+ * Controls/__tests__/controlContainerKeysDrift.test.ts). A `container*` key a type has no field for here is DEAD on
+ * it -- nothing paints it -- and a type with no row (a checkbox) has no container at all. A painted kind's
+ * background / border are `fill` / `stroke` / `borderColor` / `strokeWidth`, and a navigator's padding is its
+ * `padding` key: none of those is a `container*` key, so none is listed.
+ */
+export const CONTROL_PAINTED_CONTAINER_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  shape: ["padding", "lockAspect", "title", "subtitle", "divider", "spacing", "background.transparency", "shadow"],
+  textBox: ["padding", "lockAspect", "title", "subtitle", "divider", "spacing", "background.transparency", "shadow"],
+  button: ["lockAspect", "background.transparency", "border.radius", "shadow"],
+  image: ["padding", "lockAspect", "title", "spacing.custom", "spacing.belowTitle", "background.transparency", "border.radius", "shadow"],
+  pageNavigator: ["lockAspect", "title", "spacing.custom", "spacing.belowTitle", "background", "border", "shadow"],
+});
+
+/** Does a control of `controlType` paint `id` from its `container*` key? (Rust `control_paints_container_field`.) */
+export function controlPaintsContainerField(controlType: string, id: ContainerFieldId): boolean {
+  const tokens = Object.prototype.hasOwnProperty.call(CONTROL_PAINTED_CONTAINER_FIELDS, controlType)
+    ? CONTROL_PAINTED_CONTAINER_FIELDS[controlType]
+    : [];
+  return tokens.some((t) => t === id || id.startsWith(`${t}.`));
+}
+
+/** For a `container*` key: whether `controlType` paints it; null for a key that is not a container key. */
+export function controlPaintsContainerKey(controlType: string, key: string): boolean | null {
+  const id = controlContainerKeyField(key);
+  return id === null ? null : controlPaintsContainerField(controlType, id);
 }
 
 /** Control kinds whose background / border are their own paint keys (fill / stroke / borderColor). */

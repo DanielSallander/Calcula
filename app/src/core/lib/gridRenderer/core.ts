@@ -22,26 +22,14 @@ import type {
 } from "../../../core/types";
 import type { GridTheme, RenderState } from "./types";
 import { DEFAULT_THEME } from "./types";
-import { formulaA1ToR1C1 } from "../r1c1";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
 import { drawGridLines, gridlineGeometry } from "./rendering/grid";
-import { hasStyleInterceptors } from "../../../api/styleInterceptors";
 import { formatDateIn, getActiveLocale } from "../locale";
 import {
   drawCellText,
   drawDeferredCellDecorations,
-  collectChromeRects,
-  isCoveredByChrome,
-  resolveEdgeBorders,
-  strokeEdgeBorders,
-  resolveEffectiveStyle,
-  drawOrientedText,
-  paintAccountingValue,
   type DeferredCellDecoration,
 } from "./rendering/cells";
-import { parseTextOrientation } from "./layout/textOrientation";
-import { alignmentWithIndent, effectiveIndentPx, indentedTextBox } from "./layout/cellIndent";
-import { buildMergeSlaveIndex } from "./rendering/mergeIndex";
 import { drawSelection, drawFillPreview, drawClipboardSelection, drawSelectionDragPreview } from "./rendering/selection";
 import { drawSpillBorders } from "./rendering/spillBorder";
 import { drawFormulaReferences } from "./rendering/references";
@@ -55,12 +43,7 @@ import {
 } from "./layout/viewport";
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { effectiveGridConfig, resolveHeaderSizes, rowHeaderGutter, colHeaderGutter } from "./layout/headerVisibility";
-import { buildCellFont, pointsToPixels } from "./fonts";
-import { cellKey } from "../../../core/types";
-import { hasCellDecorations, applyCellDecorations } from "../../../api/cellDecorations";
-import { hasCellTypes, getCellTypeAt, renderCellTypeCell } from "../../../api/cellTypes";
 import { hasGridLayers, paintGridLayers, type GridLayerAnchor, type GridLayerContext } from "../../../api/gridLayers";
-import type { CellDecorationContext } from "../../../api/cellDecorations";
 import { effectiveZ, hasStackingOrder } from "../../../api/gridOverlays";
 import type { ResolvedVisualContainer } from "../../../api/visualContainer";
 import {
@@ -141,32 +124,6 @@ export interface OverlayRegistration {
 // ============================================================================
 // Helper Functions (unchanged)
 // ============================================================================
-
-function getMergedCellWidth(
-  startCol: number,
-  colSpan: number,
-  config: GridConfig,
-  dimensions: DimensionOverrides
-): number {
-  let totalWidth = 0;
-  for (let c = startCol; c < startCol + colSpan; c++) {
-    totalWidth += getColumnWidth(c, config, dimensions);
-  }
-  return totalWidth;
-}
-
-function getMergedCellHeight(
-  startRow: number,
-  rowSpan: number,
-  config: GridConfig,
-  dimensions: DimensionOverrides
-): number {
-  let totalHeight = 0;
-  for (let r = startRow; r < startRow + rowSpan; r++) {
-    totalHeight += getRowHeight(r, config, dimensions);
-  }
-  return totalHeight;
-}
 
 function getOverlayGapsForZone(
   overlayRegionBounds: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>,
@@ -274,7 +231,7 @@ function renderZone(
   if (state.displayGridlines !== false) {
     drawGridLinesZone(state, range, clipX, clipY, clipWidth, clipHeight);
   }
-  const deferred = drawCellTextZone(state, range, clipX, clipY, clipWidth, clipHeight);
+  const deferred = drawCellText(state, { range, clipX, clipY, clipWidth, clipHeight });
   ctx.restore();
   return deferred;
 }
@@ -369,391 +326,12 @@ function drawGridLinesZone(
   }
 }
 
-function drawCellTextZone(
-  state: RenderState,
-  range: VisibleRange,
-  clipX: number,
-  clipY: number,
-  clipWidth: number,
-  clipHeight: number
-): DeferredCellDecoration[] {
-  const { ctx, config, viewport, theme, cells, editing, dimensions, styleCache } = state;
-  const totalRows = config.totalRows || 1000;
-  const totalCols = config.totalCols || 100;
-  const paddingX = 3;
-  // The main painter's vertical text inset (drawCellText's paddingY), used by
-  // rotated and stacked text, which is anchored to the top or bottom edge.
-  const PANE_PADDING_Y = 2;
-
-  // Cell types render as their own content (suppressed in Show Formulas mode,
-  // where the raw value/formula must stay visible). Unlike the main draw path,
-  // this zone path historically skipped empty cells entirely — typed cells
-  // must not be skipped (ghost checkbox, button on an empty cell).
-  const useCellTypes = hasCellTypes() && !state.showFormulas;
-  // CONDITIONAL FORMATTING IN A PANE (BUG-0105). This painter consulted no
-  // interceptors at all, so freezing a pane reverted every conditionally
-  // formatted cell in it to its static style. Hoisted per zone for the same
-  // reason the main painter hoists it per frame: nothing can register or
-  // unregister mid-paint.
-  const useInterceptors = hasStyleInterceptors();
-
-  // DECORATIONS IN A FROZEN OR SPLIT PANE. This painter runs INSTEAD of
-  // drawCellText for every cell of every pane, and it used to run no
-  // "over-selection" decorations at all and to skip empty cells before the
-  // under-selection pass — so freezing the top row made every note triangle,
-  // error triangle and bookmark dot on the sheet disappear, and a note on an
-  // empty cell (the ordinary case) was invisible either way. Excel keeps them.
-  const useDecorations = hasCellDecorations();
-  const useOverSelection = hasCellDecorations("over-selection");
-  const chromeRects = useOverSelection ? collectChromeRects(state) : [];
-  const paneClip = { x: clipX, y: clipY, width: clipWidth, height: clipHeight };
-  const deferred: DeferredCellDecoration[] = [];
-
-  /** Run both anchors for one cell, deferring the chrome-covered ones. The
-   *  cell is taken from the context so the two can never disagree. */
-  const decorate = (context: CellDecorationContext): void => {
-    if (useDecorations) applyCellDecorations(context);
-    if (!useOverSelection) return;
-    if (isCoveredByChrome(chromeRects, context.row, context.col)) {
-      deferred.push({ context, clip: paneClip });
-    } else {
-      applyCellDecorations(context, "over-selection");
-    }
-  };
-
-  const zoneLeft = clipX;
-  const zoneTop = clipY;
-  const zoneRight = clipX + clipWidth;
-  const zoneBottom = clipY + clipHeight;
-  
-  const drawnCells = new Set<string>();
-
-  // C3b: precompute slave->master once (O(cache)) for this zone's draw, instead
-  // of re-scanning the whole cache per visible cell (O(visible x cache), x zones).
-  const mergeIndex = buildMergeSlaveIndex(cells as Map<string, { rowSpan?: number; colSpan?: number }>);
-
-  let baseY = clipY + range.offsetY;
-  for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
-    const rowHeight = getRowHeight(row, config, dimensions);
-    
-    let baseX = clipX + range.offsetX;
-    for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
-      const colWidth = getColumnWidth(col, config, dimensions);
-      const key = cellKey(row, col);
-      
-      if (drawnCells.has(key)) {
-        baseX += colWidth;
-        continue;
-      }
-      
-      const masterKey = mergeIndex.get(key) ?? null;
-      if (masterKey) {
-        drawnCells.add(key);
-        baseX += colWidth;
-        continue;
-      }
-      
-      if (editing && editing.row === row && editing.col === col) {
-        baseX += colWidth;
-        continue;
-      }
-      
-      const cell = cells.get(key);
-      
-      // In Show Formulas mode, use "=formula" for formula cells
-      // (converted to R1C1 notation when that reference style is active).
-      let cellDisplayText = (state.showFormulas && cell?.formula)
-        ? (state.referenceStyle === "R1C1"
-            ? formulaA1ToR1C1(cell.formula, row, col)
-            : cell.formula)
-        : cell?.display ?? "";
-
-      // In Display Zeros = false mode, hide zero values for non-formula cells
-      if (state.displayZeros === false && cell && !cell.formula && cellDisplayText !== "") {
-        const num = Number(cellDisplayText);
-        if (num === 0 && !isNaN(num)) {
-          cellDisplayText = "";
-        }
-      }
-
-      const cellTypeHere = useCellTypes && getCellTypeAt(row, col) !== null;
-
-      if ((!cell || cellDisplayText === "") && !cellTypeHere) {
-        // Nothing of the cell's own to paint — but an indicator belongs to the
-        // CELL, not to its text, and a note on an empty cell is the common
-        // case. Mirrors the main painter's no-data branch (no clip, no style
-        // work): just the decoration hook.
-        if (useDecorations || useOverSelection) {
-          const decoLeft = Math.max(baseX, zoneLeft);
-          const decoTop = Math.max(baseY, zoneTop);
-          const decoRight = Math.min(baseX + colWidth, zoneRight);
-          const decoBottom = Math.min(baseY + rowHeight, zoneBottom);
-          if (decoRight > decoLeft && decoBottom > decoTop) {
-            decorate({
-              ctx, row, col,
-              cellLeft: decoLeft, cellTop: decoTop,
-              cellRight: decoRight, cellBottom: decoBottom,
-              config, viewport, dimensions,
-              display: "",
-              styleIndex: cell?.styleIndex ?? 0,
-              styleCache,
-            });
-          }
-        }
-        // BORDERS ON AN EMPTY CELL (BUG-0102). A bordered empty cell is the
-        // ordinary "draw a box" case, and this branch used to return before any
-        // border work — so freezing a pane erased every such box.
-        {
-          const emptyIdx = cell?.styleIndex ?? 0;
-          const emptyStyle = styleCache.get(emptyIdx) ?? styleCache.get(0);
-          if (emptyStyle) {
-            // A conditional format applies to a BLANK cell too, which is why the
-            // resolve happens on this branch as well as the content one.
-            const effective = resolveEffectiveStyle(
-              "", emptyStyle, emptyIdx, row, col, useInterceptors,
-            );
-            const bg = effective.backgroundColor;
-            if (bg && bg !== "#ffffff" && bg !== "#FFFFFF" && bg !== "transparent") {
-              ctx.fillStyle = bg;
-              ctx.fillRect(baseX, baseY, colWidth, rowHeight);
-            }
-            const edges = resolveEdgeBorders(effective, emptyStyle);
-            if (edges.top || edges.right || edges.bottom || edges.left) {
-              strokeEdgeBorders(ctx, edges, baseX, baseY, baseX + colWidth, baseY + rowHeight);
-            }
-          }
-        }
-        baseX += colWidth;
-        continue;
-      }
-
-      const rowSpan = (cell as { rowSpan?: number } | undefined)?.rowSpan ?? 1;
-      const colSpan = (cell as { colSpan?: number } | undefined)?.colSpan ?? 1;
-      
-      const actualWidth = colSpan > 1 
-        ? getMergedCellWidth(col, colSpan, config, dimensions)
-        : colWidth;
-      const actualHeight = rowSpan > 1
-        ? getMergedCellHeight(row, rowSpan, config, dimensions)
-        : rowHeight;
-      
-      if (rowSpan > 1 || colSpan > 1) {
-        for (let r = row; r < row + rowSpan; r++) {
-          for (let c = col; c < col + colSpan; c++) {
-            drawnCells.add(cellKey(r, c));
-          }
-        }
-      }
-      
-      const cellLeft = Math.max(baseX, zoneLeft);
-      const cellTop = Math.max(baseY, zoneTop);
-      const cellRight = Math.min(baseX + actualWidth, zoneRight);
-      const cellBottom = Math.min(baseY + actualHeight, zoneBottom);
-      
-      if (cellRight <= cellLeft || cellBottom <= cellTop) {
-        baseX += colWidth;
-        continue;
-      }
-      
-      const availableWidth = cellRight - cellLeft - paddingX * 2;
-      
-      if (availableWidth <= 0) {
-        baseX += colWidth;
-        continue;
-      }
-      
-      const styleIndex = cell?.styleIndex ?? 0;
-      const cellStyle = styleCache.get(styleIndex) ?? styleCache.get(0);
-      // The style the cell ACTUALLY shows. One definition, shared with
-      // `drawCellText` — see `resolveEffectiveStyle`.
-      const effective = cellStyle
-        ? resolveEffectiveStyle(cellDisplayText, cellStyle, styleIndex, row, col, useInterceptors)
-        : null;
-      
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
-      ctx.clip();
-      
-      if (effective && effective.backgroundColor &&
-          effective.backgroundColor !== "#ffffff" &&
-          effective.backgroundColor !== "#FFFFFF" &&
-          effective.backgroundColor !== "transparent") {
-        ctx.fillStyle = effective.backgroundColor;
-        ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
-      }
-
-      // BORDERS (BUG-0102). Between background and content, as in the main
-      // painter. The edge RESOLUTION is shared with `drawCellText` rather than
-      // copied — a second copy of a formatting rule drifts on the owner's first
-      // default change, which this repo has already paid for once.
-      //
-      // KNOWN NARROWER THAN THE MAIN PAINTER, and deliberately not papered over:
-      // this painter runs NO style interceptors, so CONDITIONAL FORMATTING does
-      // not reach a frozen or split pane at all — not its fills, not its fonts,
-      // and so not its borders either. That is a bigger sibling defect than the
-      // one fixed here; the empty `{}` below is the honest spelling of "no CF
-      // available at this point", not an oversight. Filed separately.
-      if (cellStyle) {
-        // `effective` first: a conditional format may add or override a border,
-        // and it wins over the static one — the same precedence the main painter
-        // applies. This argument was an empty `{}` while BUG-0105 was open.
-        const edges = resolveEdgeBorders(effective ?? {}, cellStyle);
-        if (edges.top || edges.right || edges.bottom || edges.left) {
-          strokeEdgeBorders(ctx, edges, cellLeft, cellTop, cellRight, cellBottom);
-        }
-      }
-
-      // Draw cell decorations (e.g., sparklines) between background and text,
-      // and capture the indicator chrome for replay above the selection.
-      if (useDecorations || useOverSelection) {
-        decorate({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: cellDisplayText, styleIndex, styleCache });
-      }
-
-      // Cell-type renderer: a typed cell can take over content rendering
-      // entirely (checkbox/progress/button). Handled -> skip the text pass.
-      if (cellTypeHere && renderCellTypeCell({
-        ctx, row, col, cellLeft, cellTop, cellRight, cellBottom,
-        config, viewport, dimensions,
-        display: cell?.display ?? "",
-        styleIndex, styleCache,
-        hasFormula: !!cell?.formula,
-      })) {
-        ctx.restore();
-        baseX += colWidth;
-        continue;
-      }
-
-      // Typed-but-unhandled empty cells have nothing left to draw.
-      if (!cell || cellDisplayText === "") {
-        ctx.restore();
-        baseX += colWidth;
-        continue;
-      }
-
-      const fontWeight = effective?.bold ? "bold" : "normal";
-      const fontStyle = effective?.italic ? "italic" : "normal";
-      const fontSize = effective?.fontSize ?? theme.cellFontSize;
-      const fontFamily = effective?.fontFamily ?? theme.cellFontFamily;
-
-      // fontSize is in POINTS; buildCellFont converts to px (matches drawCellText).
-      ctx.font = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
-      ctx.fillStyle = effective?.textColor ?? theme.cellText;
-      ctx.textBaseline = "middle";
-      const fontSizePx = pointsToPixels(fontSize);
-
-      // ROTATED AND STACKED TEXT IN A PANE. A frozen header row is exactly where
-      // rotated column titles live, and this painter used to draw every value
-      // horizontally whatever its orientation. It now paints through the SAME
-      // helper as the main painter (drawOrientedText), so a value looks the
-      // same on either side of a freeze line.
-      const orientation = parseTextOrientation(cellStyle?.textRotation);
-      if (orientation.kind !== "horizontal") {
-        drawOrientedText(
-          ctx,
-          orientation,
-          cellDisplayText,
-          {
-            left: baseX + paddingX,
-            top: baseY + PANE_PADDING_Y,
-            right: baseX + actualWidth - paddingX,
-            bottom: baseY + actualHeight - PANE_PADDING_Y,
-          },
-          cellStyle?.textAlign ?? "general",
-          cellStyle?.verticalAlign || "bottom",
-          fontSizePx,
-        );
-        ctx.restore();
-        baseX += colWidth;
-        continue;
-      }
-
-      const textY = Math.round(baseY + actualHeight / 2);
-
-      // ACCOUNTING IN A PANE: the runs, not the one-string fallback, through the
-      // main painter's own helper -- a frozen column of amounts used to lose
-      // its alignment (and symbol-after amounts their symbol column).
-      if (cell.accountingLayout && !(state.showFormulas && cell.formula)) {
-        paintAccountingValue(
-          ctx,
-          cell.accountingLayout,
-          cellLeft + paddingX,
-          cellRight - paddingX,
-          textY,
-          cellStyle?.numberFormat ?? "",
-          cell.overflow,
-        );
-        ctx.restore();
-        baseX += colWidth;
-        continue;
-      }
-
-      let textAlign: "left" | "right" | "center" = "left";
-      if (state.showFormulas && cell.formula) {
-        textAlign = "left";
-      } else if (cellStyle?.textAlign === "right") {
-        textAlign = "right";
-      } else if (cellStyle?.textAlign === "center") {
-        textAlign = "center";
-      } else if (cellStyle?.textAlign === "general" || !cellStyle?.textAlign) {
-        const numericPattern = /^-?[\d,]+\.?\d*%?$|^-?\.\d+%?$/;
-        if (numericPattern.test(cellDisplayText.trim())) {
-          textAlign = "right";
-        }
-        // An indented General value is drawn Left, as in the main painter.
-        textAlign = alignmentWithIndent(cellStyle?.textAlign, textAlign, cellStyle?.indent);
-      }
-
-      // THE INDENT IN A PANE (layout/cellIndent.ts, shared with drawCellText):
-      // from the left for Left, from the right edge for Right, none for Center.
-      // This painter used to ignore the indent altogether.
-      const textBox = indentedTextBox(
-        textAlign,
-        cellLeft + paddingX,
-        cellRight - paddingX,
-        effectiveIndentPx(cellStyle?.textAlign, cellStyle?.indent),
-      );
-
-      ctx.textAlign = "left";
-      const textMetrics = ctx.measureText(cellDisplayText);
-      const textWidth = Math.min(textMetrics.width, Math.max(0, textBox.width));
-
-      let drawX = textBox.x;
-      if (textAlign === "right") {
-        drawX = textBox.x + textBox.width - textWidth;
-      } else if (textAlign === "center") {
-        drawX = textBox.x + (textBox.width - textWidth) / 2;
-      }
-
-      ctx.fillText(cellDisplayText, drawX, textY, Math.max(0, textBox.width));
-      
-      if (cellStyle?.underline && cellStyle.underline !== "none") {
-        ctx.beginPath();
-        ctx.strokeStyle = cellStyle?.textColor ?? theme.cellText;
-        ctx.lineWidth = 1;
-        ctx.moveTo(drawX, textY + fontSizePx / 2 + 1);
-        ctx.lineTo(drawX + textWidth, textY + fontSizePx / 2 + 1);
-        ctx.stroke();
-      }
-      
-      if (cellStyle?.strikethrough) {
-        ctx.beginPath();
-        ctx.strokeStyle = cellStyle?.textColor ?? theme.cellText;
-        ctx.lineWidth = 1;
-        ctx.moveTo(drawX, textY);
-        ctx.lineTo(drawX + textWidth, textY);
-        ctx.stroke();
-      }
-      
-      ctx.restore();
-      
-      baseX += colWidth;
-    }
-    baseY += rowHeight;
-  }
-
-  return deferred;
-}
+// THE PANE CELL PAINTER IS `drawCellText` ITSELF (BUG-0362). A frozen or split
+// pane used to be painted by its own copy here, `drawCellTextZone`, which was
+// narrower than the grid's painter (no vertical alignment, no wrap, no '####',
+// no rich text, General alignment by regex). `renderZone` now hands the pane's
+// range and rectangle to the one painter; see `CellPaintPane` in
+// rendering/cells.ts.
 
 // ============================================================================
 // Main Render Function

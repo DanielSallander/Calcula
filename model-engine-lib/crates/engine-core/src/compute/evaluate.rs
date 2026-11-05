@@ -550,7 +550,16 @@ mod tests {
         let result = evaluate_expression(&batch, &expression).await.unwrap();
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result.null_count(), 2); // null propagates
+        // A calculated column is DAX: a BLANK term of `-` reads as 0
+        // (`BLANK() - 10 = -10`; `compute::dax_semantics`), so 20 - BLANK is
+        // 20 and BLANK - 5 is -5. SQL's NULL propagation answered 2 NULLs.
+        assert_eq!(result.null_count(), 0);
+        let values = arrow::compute::cast(&result, &arrow::datatypes::DataType::Float64).unwrap();
+        let values = values
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        assert_eq!(values.values().to_vec(), vec![3.0, 20.0, -5.0]);
     }
 
     #[tokio::test]

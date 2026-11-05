@@ -28,7 +28,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => {}),
 }));
 
-import { insertCellsRange, deleteCellsRange } from "../tauri-api";
+import { insertCellsRange, deleteCellsRange, setGridRecorderHook, type RecordedGridEvent } from "../tauri-api";
 import { AppEvents } from "../../../api/events";
 
 const heard: Array<{ type: string; detail: unknown }> = [];
@@ -87,6 +87,47 @@ describe("insertCellsRange / deleteCellsRange", () => {
     await deleteCellsRange(0, 2, 1048575, 2, "up");
     expect(calls.find((c) => c.cmd === "delete_columns")?.args).toEqual({ col: 2, count: 1 });
     expect(heard.map((h) => h.type)).toContain(AppEvents.COLUMNS_DELETED);
+  });
+
+  // BUG-0358: the macro recorder hears an APPLIED shift -- the block, the
+  // shift, and the person's answer to unmerging -- and nothing for a stop to
+  // ask; a whole-line range is recorded as the row / column edit it is.
+  // SABOTAGE: drop the recordGridEvent call in insertCellsRange -> red.
+  it("BUG-0358 records an applied Insert / Delete Cells for the macro recorder, never a stop to ask", async () => {
+    const recorded: RecordedGridEvent[] = [];
+    setGridRecorderHook((e) => recorded.push(e));
+    try {
+      await insertCellsRange(1, 1, 2, 2, "down");
+      await deleteCellsRange(4, 3, 4, 5, "left", { unmergeCutMerges: true });
+      nextResult = { applied: false, confirm: "This operation will cause some merged cells to unmerge.", wholeLines: false };
+      await insertCellsRange(7, 7, 8, 8, "right");
+      await insertCellsRange(4, 0, 5, 16383, "right");
+    } finally {
+      setGridRecorderHook(null);
+    }
+    expect(recorded).toEqual([
+      { kind: "insertCells", startRow: 1, startCol: 1, endRow: 2, endCol: 2, shift: "down", unmergeCutMerges: false },
+      { kind: "deleteCells", startRow: 4, startCol: 3, endRow: 4, endCol: 5, shift: "left", unmergeCutMerges: true },
+      { kind: "insertRows", startRow: 4, count: 2 },
+    ]);
+  });
+
+  // BUG-0399: the whole-line route has a sheet-size bound of its own -- an
+  // end past the sheet is the sheet's last line, and a coordinate that is no
+  // cell index reaches no backend command at all.
+  it("BUG-0399 a whole-line range running past the sheet is bounded by the sheet", async () => {
+    await insertCellsRange(1048000, 0, 5_000_000, 16383, "down");
+    expect(calls.find((c) => c.cmd === "insert_rows")?.args).toEqual({ row: 1048000, count: 576 });
+    await deleteCellsRange(0, 16000, 1048575, 99_999, "left");
+    expect(calls.find((c) => c.cmd === "delete_columns")?.args).toEqual({ col: 16000, count: 384 });
+  });
+
+  it("BUG-0399 a coordinate that is no cell index of the sheet is refused before any call", async () => {
+    await expect(insertCellsRange(-1, 0, 4, 16383, "down")).rejects.toThrow(/startRow/);
+    await expect(deleteCellsRange(0, 0, 1.5, 2, "up")).rejects.toThrow(/endRow/);
+    await expect(insertCellsRange(2_000_000, 0, 2_000_001, 16383, "down")).rejects.toThrow(/outside the sheet/);
+    await expect(deleteCellsRange(0, Number.NaN, 4, 4, "left")).rejects.toThrow(/startCol/);
+    expect(calls).toEqual([]);
   });
 
   // rust-followup (2026-10-04): the whole-line route moved the backend's row

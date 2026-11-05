@@ -221,7 +221,7 @@ describe("a tiled Paste Special makes a BOUNDED number of backend calls, whateve
     expect(updates.map((u) => [u.row, u.styleIndex])).toEqual([[0, 9], [1, 9], [2, 9]]);
   });
 
-  it("a 2x2 block over 4x4: the number formats go out once per COPIED cell, over its tiles' rows x columns", async () => {
+  it("a 2x2 block over 4x4, every cell one format: the number formats go out in ONE rows x columns call (BUG-0345)", async () => {
     const block = {
       ...(clipOfB1(false) as object),
       cells: [
@@ -235,11 +235,102 @@ describe("a tiled Paste Special makes a BOUNDED number of backend calls, whateve
     await executePasteSpecial(block, sel(0, 7, 3, 10), { pasteAttribute: "valuesAndNumberFormats", operation: "none", skipBlanks: false, transpose: false }, 1000, 100);
     expect(h.batch).toHaveBeenCalledTimes(1);
     expect((h.batch.mock.calls[0][0] as unknown[]).length).toBe(16);
-    expect(vi.mocked(lib.applyFormatting).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      [[0, 2], [7, 9]],
-      [[0, 2], [8, 10]],
-      [[1, 3], [7, 9]],
-      [[1, 3], [8, 10]],
-    ]);
+    // getStyle answers "General" for every style here: one format, one call.
+    expect(vi.mocked(lib.applyFormatting).mock.calls.map((c) => [c[0], c[1]])).toEqual([[[0, 1, 2, 3], [7, 8, 9, 10]]]);
+  });
+
+  it("a 2x2 block of FOUR formats over 4x4: one call per format, each an exact rows x columns product of its cells", async () => {
+    vi.mocked(lib.getStyle).mockImplementation(async (i: number) => ({ numberFormat: `fmt-${i}` }) as never);
+    const block = {
+      ...(clipOfB1(false) as object),
+      cells: [
+        [{ row: 0, col: 1, display: "1", formula: null, styleIndex: 1 }, { row: 0, col: 2, display: "2", formula: null, styleIndex: 2 }],
+        [{ row: 1, col: 1, display: "3", formula: null, styleIndex: 3 }, { row: 1, col: 2, display: "4", formula: null, styleIndex: 4 }],
+      ],
+      values: [[{ type: "number", value: 1 }, { type: "number", value: 2 }], [{ type: "number", value: 3 }, { type: "number", value: 4 }]],
+      sourceSelection: { startRow: 0, startCol: 1, endRow: 1, endCol: 2, type: "cells" },
+      sourceRows: [0, 1],
+    } as never;
+    await executePasteSpecial(block, sel(0, 7, 3, 10), { pasteAttribute: "valuesAndNumberFormats", operation: "none", skipBlanks: false, transpose: false }, 1000, 100);
+    const calls = vi.mocked(lib.applyFormatting).mock.calls.map((c) => [c[0], c[1], (c[2] as { numberFormat: string }).numberFormat]);
+    expect(new Set(calls.map((c) => JSON.stringify(c)))).toEqual(
+      new Set([
+        JSON.stringify([[0, 2], [7, 9], "fmt-1"]),
+        JSON.stringify([[0, 2], [8, 10], "fmt-2"]),
+        JSON.stringify([[1, 3], [7, 9], "fmt-3"]),
+        JSON.stringify([[1, 3], [8, 10], "fmt-4"]),
+      ]),
+    );
+    vi.mocked(lib.getStyle).mockImplementation(async () => ({ numberFormat: "General" }) as never);
+  });
+});
+
+// BUG-0345 (2026-11-04): an UNTILED paste was still one call per cell -- Paste
+// Values over 1,000 cells was 1,000+ calls (updateCell, plus setCellStyle and
+// applyFormatting per cell for the formatting variants). Every sheet-route
+// paste now collects its writes as the tiled one does.
+describe("an UNTILED Paste Special makes a bounded number of backend calls too (BUG-0345)", () => {
+  const N = 1000;
+  /** A copy of A1:A1000: N numbers, each in style 3 (one number format). */
+  function columnOf(n: number): never {
+    const cells = [];
+    const values = [];
+    for (let r = 0; r < n; r++) {
+      cells.push([{ row: r, col: 0, display: String(r), formula: null, styleIndex: 3 }]);
+      values.push([{ type: "number", value: r }]);
+    }
+    return {
+      cells,
+      values,
+      sourceSelection: { startRow: 0, startCol: 0, endRow: n - 1, endCol: 0, type: "cells" },
+      sourceRows: cells.map((_, i) => i),
+      isCut: false,
+      sourceSheetIndex: 0,
+      sourceSheetName: "Sheet1",
+      sourceSheetId: "sheet-a",
+      text: "",
+    } as never;
+  }
+
+  function callCount(): number {
+    let n = h.batch.mock.calls.length;
+    for (const value of Object.values(lib)) {
+      const mock = (value as { mock?: { calls: unknown[] } } | null)?.mock;
+      if (mock && Array.isArray(mock.calls)) n += mock.calls.length;
+    }
+    return n;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  for (const attribute of ["values", "formulas", "all", "valuesAndSourceFormatting", "valuesAndNumberFormats", "formulasAndNumberFormats", "formats", "allExceptBorders"] as const) {
+    it(`${attribute}: A1:A${N} onto B1 -- a handful of calls, never one per cell`, async () => {
+      const ok = await executePasteSpecial(
+        columnOf(N),
+        sel(0, 1, 0, 1),
+        { pasteAttribute: attribute, operation: "none", skipBlanks: false, transpose: false },
+        1_048_576,
+        100,
+      );
+      expect(ok).toBe(true);
+      expect(vi.mocked(lib.updateCell), "a cell was written on its own").not.toHaveBeenCalled();
+      expect(vi.mocked(lib.setCellStyle), "a style was written cell by cell").not.toHaveBeenCalled();
+      expect(vi.mocked(lib.getCell), "a destination was read cell by cell").not.toHaveBeenCalled();
+      expect(callCount(), `${attribute} made a call per cell`).toBeLessThanOrEqual(12);
+      if (attribute !== "formats") {
+        expect(h.batch, "the content was not ONE batch").toHaveBeenCalledTimes(1);
+        expect((h.batch.mock.calls[0][0] as unknown[]).length).toBe(N);
+      }
+    });
+  }
+
+  it("Paste Link of A1:A1000 onto B1: every link in ONE batch", async () => {
+    const { executePasteLink } = await import("../pasteSpecialExecute");
+    expect(await executePasteLink(columnOf(N), sel(0, 1, 0, 1), 1_048_576, 100)).toBe(true);
+    expect(h.batch).toHaveBeenCalledTimes(1);
+    expect((h.batch.mock.calls[0][0] as unknown[]).length).toBe(N);
+    expect(callCount()).toBeLessThanOrEqual(12);
   });
 });

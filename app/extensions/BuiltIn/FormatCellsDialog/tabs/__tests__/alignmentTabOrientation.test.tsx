@@ -185,3 +185,39 @@ describe("AlignmentTab: Indent", () => {
     expect(useFormatCellsStore.getState().indent).toBe(1);
   });
 });
+
+// BUG-0366, Excel 16 [LIVE] 2026-11-04 (lane multiarea probe2/3): an indent and
+// an orientation ANGLE never coexist. IndentLevel 2 then Orientation 45 reads
+// back horizontal; Orientation 90 then IndentLevel 1 reads back horizontal;
+// vertical (stacked) text keeps its indent either way.
+describe("AlignmentTab: an indent greys the angles (BUG-0366)", () => {
+  it("with an indent the five angles and the Degrees field are disabled; the stacked box is not", async () => {
+    await render();
+    await act(async () => useFormatCellsStore.setState({ indent: 2, textAlign: "left" }));
+    for (const deg of [90, 45, 0, -45, -90]) {
+      expect(byTestId<HTMLButtonElement>(`fc-orientation-${deg}`).disabled).toBe(true);
+    }
+    expect(byTestId<HTMLInputElement>("fc-orientation-degrees").disabled).toBe(true);
+    expect(byTestId<HTMLButtonElement>("fc-orientation-stacked").disabled).toBe(false);
+    await click(byTestId("fc-orientation-45"));
+    expect(rotation(), "a disabled angle sets nothing").toBe("none");
+  });
+
+  it("setting an indent on an angled cell takes the angle back to horizontal", async () => {
+    await render();
+    await act(async () => useFormatCellsStore.setState({ textRotation: "rotate90", textAlign: "left", indent: 0 }));
+    await click(byTestId("fc-indent-increase"));
+    expect(useFormatCellsStore.getState().indent).toBe(1);
+    expect(rotation()).toBe("none");
+  });
+
+  it("stacked text keeps its indent, and no indent leaves the angles enabled", async () => {
+    await render();
+    await act(async () => useFormatCellsStore.setState({ textRotation: "vertical", textAlign: "left", indent: 0 }));
+    await click(byTestId("fc-indent-increase"));
+    expect(rotation()).toBe("vertical");
+    await click(byTestId("fc-indent-decrease"));
+    expect(byTestId<HTMLButtonElement>("fc-orientation-45").disabled).toBe(false);
+    expect(byTestId<HTMLInputElement>("fc-orientation-degrees").disabled).toBe(false);
+  });
+});

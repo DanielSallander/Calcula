@@ -6848,7 +6848,60 @@ pub(crate) fn clear_pivot_filter_local(
 }
 
 
-/// Sorts a pivot field by labels.
+/// The VALUE sort a [`SortPivotFieldRequest`] asks for (BUG-0459), or
+/// `None` for a label sort. Excel's `PivotField.AutoSort(order, "Sum of
+/// Amount", PivotLine)`: the data field by NAME, and the line of the other
+/// axis by its items' member KEYS (`ValueSort`).
+///
+/// Refuses, with the reason the user sees: a name no value field carries
+/// (compared as written or with a model measure's outer `[...]` stripped), a
+/// field that is not on rows or columns, a GROUPED field (a date level, a
+/// number bin or a manual group is a virtual field the definition does not
+/// list -- sorting those by value is not built), and a line member the cache
+/// cannot name.
+pub(crate) fn value_sort_of_request(
+    definition: &PivotDefinition,
+    cache: &PivotCache,
+    request: &SortPivotFieldRequest,
+) -> Result<Option<pivot_engine::ValueSort>, String> {
+    let Some(name) = request.values_hierarchy.as_deref() else {
+        return Ok(None);
+    };
+    let strip = |s: &str| -> String {
+        let t = s.trim();
+        t.strip_prefix('[').and_then(|r| r.strip_suffix(']')).unwrap_or(t).to_string()
+    };
+    let value_field = definition
+        .value_fields
+        .iter()
+        .find(|v| v.name == name)
+        .or_else(|| definition.value_fields.iter().find(|v| strip(&v.name) == strip(name)))
+        .map(|v| v.name.clone())
+        .ok_or_else(|| format!("This PivotTable has no value field named '{}'.", name))?;
+    if request.field_index >= cache.fields.len() {
+        return Err("Sorting a grouped field by its values is not available yet.".to_string());
+    }
+    let on_axis = definition
+        .row_fields
+        .iter()
+        .chain(definition.column_fields.iter())
+        .any(|f| f.source_index == request.field_index);
+    if !on_axis {
+        return Err("Only a row or column field can be sorted by values.".to_string());
+    }
+    let scope = match &request.scope_group_path {
+        Some(path) => path
+            .iter()
+            .map(|&(field, id)| cache.get_field(field).map(|fc| fc.member_key(id)))
+            .collect::<Option<Vec<String>>>()
+            .ok_or_else(|| "The PivotTable changed; the clicked value's column no longer exists.".to_string())?,
+        None => request.pivot_item_scope.clone().unwrap_or_default(),
+    };
+    Ok(Some(pivot_engine::ValueSort { value_field, scope }))
+}
+
+/// Sorts a pivot field by labels, or by the values of a data field along one
+/// line of the other axis (`values_hierarchy`, BUG-0459).
 #[tauri::command]
 pub fn sort_pivot_field(
     state: State<AppState>,
@@ -6870,6 +6923,22 @@ pub fn sort_pivot_field(
         request.sort_by
     );
 
+    // The value sort is decided -- and refused -- under a READ guard, before
+    // `pivot_write` mints the document effect, so a refusal leaves the
+    // document clean. It is plain data (a value field's name and member
+    // keys): a pivot edited between the two guards is still sorted safely --
+    // a name or key it no longer has sorts by label (`ValueSort`).
+    let value_sort = {
+        let tables = pivot_state
+            .pivot_tables
+            .read()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        let (definition, cache) = tables
+            .get(&request.pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+        value_sort_of_request(definition, cache, &request)?
+    };
+
     let (effect, mut pivot_tables) = pivot_write(&state, &pivot_state, &file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
@@ -6880,15 +6949,18 @@ pub fn sort_pivot_field(
         SortBy::Descending => pivot_engine::SortOrder::Descending,
     };
 
-    // Update sort order for matching fields
+    // Update sort order for matching fields. A label sort clears a standing
+    // value sort (Excel: AutoSort by the field's own name).
     for field in &mut definition.row_fields {
         if field.source_index == request.field_index {
             field.sort_order = sort_order;
+            field.value_sort = value_sort.clone();
         }
     }
     for field in &mut definition.column_fields {
         if field.source_index == request.field_index {
             field.sort_order = sort_order;
+            field.value_sort = value_sort.clone();
         }
     }
 
@@ -7955,15 +8027,27 @@ fn build_bi_detail_request(
 }
 
 /// Convert one drillthrough cell (an `Option<String>` from `batches_to_result`)
-/// into a grid `CellValue`: nulls become empty, numeric text becomes a number,
-/// everything else stays text.
-fn detail_value_to_cell(value: Option<String>) -> engine::CellValue {
+/// into a grid `CellValue` by its column's declared kind: nulls become empty;
+/// a number column's machine text becomes a number, and a non-finite one
+/// (`inf`, `-inf`, `NaN`) `#NUM!`, as Excel shows it
+/// (`bi::member::grid_number_value`); a TEXT column stays text ("00123", or a
+/// name "Nan", which `str::parse::<f64>` reads as NaN); any other column keeps
+/// the old reading, a number when its text parses as one.
+fn detail_value_to_cell(value: Option<String>, kind: crate::bi::member::BiColumnKind) -> engine::CellValue {
+    use crate::bi::member::{machine_number_cell_value, BiColumnKind};
     match value {
         None => engine::CellValue::Empty,
-        Some(s) => match s.parse::<f64>() {
-            Ok(n) => engine::CellValue::Number(n),
-            Err(_) => engine::CellValue::Text(s),
-        },
+        Some(s) => {
+            let number_kind = match kind {
+                BiColumnKind::Text => None,
+                BiColumnKind::Number => Some(BiColumnKind::Number),
+                _ => Some(BiColumnKind::Unknown),
+            };
+            match number_kind.and_then(|k| machine_number_cell_value(&s, k)) {
+                Some(v) => v,
+                None => engine::CellValue::Text(s),
+            }
+        }
     }
 }
 
@@ -8260,10 +8344,16 @@ pub(crate) async fn drill_through_to_sheet_core(
         };
         let result = crate::bi::commands::batches_to_result(&batches);
         headers = result.columns;
+        let kinds = result.column_kinds;
         row_data = result
             .rows
             .into_iter()
-            .map(|r| r.into_iter().map(detail_value_to_cell).collect())
+            .map(|r| {
+                r.into_iter()
+                    .enumerate()
+                    .map(|(c, v)| detail_value_to_cell(v, kinds.get(c).copied().unwrap_or_default()))
+                    .collect()
+            })
             .collect();
     }
 
@@ -8518,6 +8608,40 @@ pub(crate) fn adopt_model_number_formats(
             }
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod detail_value_to_cell_tests {
+    use super::detail_value_to_cell;
+    use crate::bi::member::BiColumnKind;
+    use engine::{CellError, CellValue};
+
+    #[test]
+    fn a_drill_through_cell_is_written_by_its_column_kind() {
+        // NEW-bi-nonfinite-cells: a non-finite number (the host's machine
+        // text "inf" / "-inf" / "NaN") is #NUM!, as Excel shows a data-model
+        // measure's 1/0, -1/0 and 0/0 [LIVE]; it was `Number(inf)`.
+        let num = |s: &str| detail_value_to_cell(Some(s.to_string()), BiColumnKind::Number);
+        for s in ["inf", "-inf", "NaN"] {
+            assert_eq!(num(s), CellValue::Error(CellError::Num), "{s}");
+        }
+        assert_eq!(num("1234.5"), CellValue::Number(1234.5));
+        // A text column stays text: a name "Nan" or a code "00123" is not a
+        // number (`str::parse::<f64>` reads both as one).
+        let text = |s: &str| detail_value_to_cell(Some(s.to_string()), BiColumnKind::Text);
+        assert_eq!(text("Nan"), CellValue::Text("Nan".to_string()));
+        assert_eq!(text("00123"), CellValue::Text("00123".to_string()));
+        // Other kinds keep the old reading; NULL is empty.
+        assert_eq!(
+            detail_value_to_cell(Some("2024-01-15".to_string()), BiColumnKind::Date),
+            CellValue::Text("2024-01-15".to_string())
+        );
+        assert_eq!(
+            detail_value_to_cell(Some("7".to_string()), BiColumnKind::Unknown),
+            CellValue::Number(7.0)
+        );
+        assert_eq!(detail_value_to_cell(None, BiColumnKind::Number), CellValue::Empty);
     }
 }
 
@@ -13612,5 +13736,136 @@ mod synthetic_total_request_tests {
         let update = fn_body(&commands, "update_bi_pivot_fields_unrecorded");
         assert!(update.contains("synthetic_total_row_field()"), "update_bi_pivot_fields_unrecorded no longer places the marked synthetic row");
         assert!(!update.contains("PivotField::new(0, \"Total\""), "update_bi_pivot_fields_unrecorded builds an UNMARKED Total row again");
+    }
+}
+
+#[cfg(test)]
+mod value_sort_request_tests {
+    //! BUG-0459: what a sort request with `values_hierarchy` stores on the
+    //! definition (`value_sort_of_request`), and that the stored sort reorders
+    //! the calculated view as live Excel 16 does.
+    use super::*;
+    use engine::CellValue;
+
+    /// Region / Product / Year / Amount -- the [LIVE] probe's table.
+    fn probe() -> (PivotDefinition, PivotCache) {
+        let mut def = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Region".into()), PivotField::new(1, "Product".into())];
+        def.column_fields = vec![PivotField::new(2, "Year".into())];
+        def.value_fields = vec![ValueField::new(3, "Sum of Amount".into(), AggregationType::Sum)];
+        let mut cache = PivotCache::new(def.id, 4);
+        for (i, name) in ["Region", "Product", "Year", "Amount"].iter().enumerate() {
+            cache.set_field_name(i, name.to_string());
+        }
+        let rows: &[(&str, &str, &str, f64)] = &[
+            ("East", "A", "2023", 10.0),
+            ("East", "A", "2024", 50.0),
+            ("East", "B", "2023", 30.0),
+            ("East", "B", "2024", 5.0),
+            ("East", "C", "2023", 20.0),
+            ("East", "C", "2024", 20.0),
+            ("West", "A", "2023", 5.0),
+            ("West", "B", "2023", 40.0),
+            ("West", "C", "2024", 70.0),
+            ("West", "D", "2023", 30.0),
+            ("West", "E", "2023", 30.0),
+        ];
+        for (i, (r, p, y, a)) in rows.iter().enumerate() {
+            cache.add_record(
+                i as u32,
+                &[
+                    CellValue::Text(r.to_string()),
+                    CellValue::Text(p.to_string()),
+                    CellValue::Text(y.to_string()),
+                    CellValue::Number(*a),
+                ],
+            );
+        }
+        (def, cache)
+    }
+
+    fn request(field_index: usize, name: Option<&str>) -> SortPivotFieldRequest {
+        SortPivotFieldRequest {
+            pivot_id: identity::EntityId::ZERO,
+            field_index,
+            sort_by: SortBy::Descending,
+            values_hierarchy: name.map(str::to_string),
+            pivot_item_scope: None,
+            scope_group_path: None,
+        }
+    }
+
+    /// The (field, member) of a header cell labelled `label` in `view`.
+    fn header_member(view: &PivotView, label: &str) -> (usize, u32) {
+        view.cells
+            .iter()
+            .flatten()
+            .find(|c| c.formatted_value == label && !c.group_path.is_empty())
+            .and_then(|c| c.group_path.last().copied())
+            .unwrap_or_else(|| panic!("no header {label}"))
+    }
+
+    fn row_labels(view: &PivotView) -> String {
+        view.rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| matches!(d.row_type, pivot_engine::PivotRowType::Data | pivot_engine::PivotRowType::Subtotal))
+            .map(|(_, cells)| cells[0].formatted_value.clone())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn a_label_sort_asks_for_no_value_sort() {
+        let (def, cache) = probe();
+        assert_eq!(value_sort_of_request(&def, &cache, &request(1, None)), Ok(None));
+    }
+
+    #[test]
+    fn the_clicked_columns_path_becomes_member_keys_and_the_view_sorts_as_excel() {
+        let (mut def, mut cache) = probe();
+        let before = pivot_engine::calculate_pivot(&def, &mut cache);
+        // The 2023 column's item, as the clicked cell's groupPath names it.
+        let year_2023 = header_member(&before, "2023");
+        let mut req = request(1, Some("Sum of Amount"));
+        req.scope_group_path = Some(vec![year_2023]);
+        let sort = value_sort_of_request(&def, &cache, &req).unwrap().expect("a value sort");
+        assert_eq!(sort.value_field, "Sum of Amount");
+        assert_eq!(sort.scope, vec!["2023".to_string()]);
+        // Stored as the command stores it: [LIVE] L1, West B 40, E 30, D 30, A 5, C (none).
+        def.row_fields[1].sort_order = pivot_engine::SortOrder::Descending;
+        def.row_fields[1].value_sort = Some(sort);
+        let view = pivot_engine::calculate_pivot(&def, &mut cache);
+        assert_eq!(row_labels(&view), "East|B|C|A|West|B|E|D|A|C");
+    }
+
+    #[test]
+    fn a_bracketed_model_name_and_an_explicit_key_scope_are_accepted() {
+        let (mut def, cache) = probe();
+        def.value_fields[0].name = "[Revenue]".into();
+        let mut req = request(1, Some("Revenue"));
+        req.pivot_item_scope = Some(vec!["2024".into()]);
+        let sort = value_sort_of_request(&def, &cache, &req).unwrap().unwrap();
+        assert_eq!(sort.value_field, "[Revenue]", "stored under the value field's own name");
+        assert_eq!(sort.scope, vec!["2024".to_string()]);
+    }
+
+    #[test]
+    fn refusals_name_their_reason() {
+        let (mut def, cache) = probe();
+        let err = value_sort_of_request(&def, &cache, &request(1, Some("Nope"))).unwrap_err();
+        assert!(err.contains("no value field named 'Nope'"), "{err}");
+        // Amount is not on rows or columns.
+        let err = value_sort_of_request(&def, &cache, &request(3, Some("Sum of Amount"))).unwrap_err();
+        assert!(err.contains("row or column field"), "{err}");
+        // A grouped (virtual) field index past the source columns.
+        let err = value_sort_of_request(&def, &cache, &request(9, Some("Sum of Amount"))).unwrap_err();
+        assert!(err.contains("grouped field"), "{err}");
+        // A clicked member the cache cannot name.
+        def.row_fields[1].value_sort = None;
+        let mut req = request(1, Some("Sum of Amount"));
+        req.scope_group_path = Some(vec![(42, 0)]);
+        let err = value_sort_of_request(&def, &cache, &req).unwrap_err();
+        assert!(err.contains("no longer exists"), "{err}");
     }
 }

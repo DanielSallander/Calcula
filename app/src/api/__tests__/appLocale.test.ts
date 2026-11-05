@@ -26,6 +26,9 @@ import {
   monthName,
   quarterLabel,
   LOCALE_CHANGED_EVENT,
+  BI_FORMAT_CULTURE_APPLIED_EVENT,
+  onBiFormatCultureApplied,
+  getBiFormatCultureGeneration,
   resetAppLocaleInitForTests,
 } from "../locale";
 import { AppEvents } from "../events";
@@ -62,6 +65,7 @@ const SV = {
 };
 
 let eventHandler: ((e: { payload: unknown }) => void) | null = null;
+let cultureHandler: ((e: { payload: unknown }) => void) | null = null;
 
 beforeEach(() => {
   resetActiveLocaleForTests();
@@ -69,9 +73,46 @@ beforeEach(() => {
   invokeMock.mockReset();
   listenMock.mockReset();
   eventHandler = null;
+  cultureHandler = null;
   listenMock.mockImplementation(async (name: string, cb: (e: { payload: unknown }) => void) => {
     if (name === LOCALE_CHANGED_EVENT) eventHandler = cb;
+    if (name === BI_FORMAT_CULTURE_APPLIED_EVENT) cultureHandler = cb;
     return () => {};
+  });
+});
+
+// NEW-locale-listener-seam (round C): `locale:changed` fires BEFORE Rust has
+// given every model engine the new DAX FORMAT culture, so a listener that
+// re-queries a model on it alone can keep FORMAT text in the old culture. The
+// ONE seam every such listener waits for re-dispatches Rust's walk-ended event
+// in this window, counting it first so a cache keyed by the locale id can tell
+// the re-read from a question already answered.
+describe("onBiFormatCultureApplied (the end of Rust's FORMAT-culture walk)", () => {
+  it("re-dispatches bi:format-culture-applied, counting the generation BEFORE it announces", async () => {
+    invokeMock.mockResolvedValue(DE);
+    await initAppLocale();
+    expect(cultureHandler, "initAppLocale does not follow the culture walk's end").toBeTypeOf("function");
+    const seen: number[] = [];
+    const off = onBiFormatCultureApplied(() => seen.push(getBiFormatCultureGeneration()));
+    const before = getBiFormatCultureGeneration();
+    cultureHandler!({ payload: null });
+    expect(seen).toEqual([before + 1]);
+    // LOCALE_CHANGED alone is not the walk's end.
+    window.dispatchEvent(new CustomEvent(AppEvents.LOCALE_CHANGED, { detail: SV }));
+    expect(seen).toHaveLength(1);
+    off();
+    cultureHandler!({ payload: null });
+    expect(seen, "an unsubscribed listener still hears the walk").toHaveLength(1);
+    expect(getBiFormatCultureGeneration()).toBe(before + 2);
+  });
+
+  it("the wire name is Rust's", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const rust = fs.readFileSync(path.resolve(__dirname, "../../../src-tauri/src/bi/commands.rs"), "utf8");
+    expect(rust).toContain(
+      `pub(crate) const FORMAT_CULTURE_APPLIED_EVENT: &str = "${BI_FORMAT_CULTURE_APPLIED_EVENT}";`,
+    );
   });
 });
 
@@ -112,8 +153,12 @@ describe("initAppLocale", () => {
     expect(a).toBe(b);
     await a;
     expect(invokeMock).toHaveBeenCalledTimes(1);
-    expect(listenMock).toHaveBeenCalledTimes(1);
-    expect(listenMock.mock.calls[0][0]).toBe("locale:changed");
+    // One listener per Rust event: the locale, and the end of the engines'
+    // FORMAT-culture walk (round C) -- never a second set.
+    expect(listenMock.mock.calls.map((c) => c[0])).toEqual([
+      "locale:changed",
+      "bi:format-culture-applied",
+    ]);
   });
 
   it("a locale:changed event updates getAppLocale and announces LOCALE_CHANGED once", async () => {

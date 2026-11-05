@@ -20,11 +20,15 @@ const api = vi.hoisted(() => ({
   beginUndoTransaction: vi.fn(),
   commitUndoTransaction: vi.fn(),
   cancelUndoTransaction: vi.fn(),
+  beginUndoSavepoint: vi.fn(),
+  rollBackToUndoSavepoint: vi.fn(),
 }));
 const dialogs = vi.hoisted(() => ({ alertAsync: vi.fn(), confirmAsync: vi.fn() }));
+const moved = vi.hoisted(() => ({ announceRolledBackRestore: vi.fn() }));
 
 vi.mock("../../tauri-api", () => api);
 vi.mock("../../dialogs", () => dialogs);
+vi.mock("../../cellsMoved", () => moved);
 
 import type { Selection } from "../../../types";
 import {
@@ -65,6 +69,9 @@ beforeEach(() => {
   api.beginUndoTransaction.mockResolvedValue(41);
   api.commitUndoTransaction.mockResolvedValue(undefined);
   api.cancelUndoTransaction.mockResolvedValue(undefined);
+  api.beginUndoSavepoint.mockResolvedValue({ ticket: null, savepoint: { transaction: 41, changes: 0 } });
+  api.rollBackToUndoSavepoint.mockResolvedValue({ success: true, updatedCells: [] });
+  moved.announceRolledBackRestore.mockReset();
   dialogs.alertAsync.mockReturnValue(Promise.resolve());
   afterChange.mockResolvedValue(undefined);
 });
@@ -202,7 +209,32 @@ describe("refusals reach the user", () => {
     expect(afterChange).not.toHaveBeenCalled();
   });
 
-  it("refused LATER: what landed is committed (so Ctrl+Z takes it back), shown, and repainted", async () => {
+  // rev-dt2-2. Excel [LIVE, dtrefresh/probe4.ps1]: rows 3 and 10 selected with
+  // a data table on K1:L4 -- Insert / Delete Sheet Rows changed NOTHING, row 10
+  // included. The blocks run bottom-up, so row 10 had landed when row 3 was
+  // refused; it stayed inserted.
+  //
+  // SABOTAGE: skip the take-back in runRowColumnGesture -- fails at the
+  // rollBackToUndoSavepoint expectation.
+  it("refused LATER: the block that landed is taken back -- all or nothing, as Excel", async () => {
+    api.insertRows.mockResolvedValueOnce([]).mockRejectedValueOnce("Can't change part of a data table.");
+    await runRowColumnGesture("insertRow", host(sel(9, 0, 9, 0, [{ startRow: 2, startCol: 0, endRow: 2, endCol: 0 }])));
+    expect(api.insertRows.mock.calls).toEqual([
+      [9, 1],
+      [2, 1],
+    ]);
+    expect(api.beginUndoSavepoint).toHaveBeenCalledTimes(1);
+    expect(api.rollBackToUndoSavepoint).toHaveBeenCalledWith({ transaction: 41, changes: 0 });
+    expect(moved.announceRolledBackRestore).toHaveBeenCalledTimes(1);
+    // The step holds nothing of the gesture's any more: cancelled, not committed.
+    expect(api.cancelUndoTransaction).toHaveBeenCalledWith(41);
+    expect(api.commitUndoTransaction).not.toHaveBeenCalled();
+    expect(dialogs.alertAsync).toHaveBeenCalledWith("Can't change part of a data table.");
+    expect(afterChange).not.toHaveBeenCalled();
+  });
+
+  it("refused LATER and the take-back refused: what landed is committed (so Ctrl+Z takes it back), shown, and repainted", async () => {
+    api.rollBackToUndoSavepoint.mockResolvedValue({ success: false, updatedCells: [], refusal: "the step moved" });
     api.deleteRows.mockResolvedValueOnce([]).mockRejectedValueOnce("A PivotTable is in the way.");
     await runRowColumnGesture("deleteRow", host(sel(4, 0, 4, 0, [{ startRow: 1, startCol: 0, endRow: 1, endCol: 0 }])));
     // A cancel would DROP the undo record of the row already deleted and leave
@@ -210,6 +242,15 @@ describe("refusals reach the user", () => {
     expect(api.commitUndoTransaction).toHaveBeenCalledWith(41);
     expect(api.cancelUndoTransaction).not.toHaveBeenCalled();
     expect(dialogs.alertAsync).toHaveBeenCalledWith("A PivotTable is in the way.");
+    expect(afterChange).toHaveBeenCalledWith("deleteRow", [{ start: 4, count: 1 }]);
+  });
+
+  it("no savepoint can be named (a granted run holds the step): the old commit path", async () => {
+    api.beginUndoSavepoint.mockResolvedValue({ ticket: null, savepoint: null, refused: "a run holds it" });
+    api.deleteRows.mockResolvedValueOnce([]).mockRejectedValueOnce("A PivotTable is in the way.");
+    await runRowColumnGesture("deleteRow", host(sel(4, 0, 4, 0, [{ startRow: 1, startCol: 0, endRow: 1, endCol: 0 }])));
+    expect(api.rollBackToUndoSavepoint).not.toHaveBeenCalled();
+    expect(api.commitUndoTransaction).toHaveBeenCalledWith(41);
     expect(afterChange).toHaveBeenCalledWith("deleteRow", [{ start: 4, count: 1 }]);
   });
 });

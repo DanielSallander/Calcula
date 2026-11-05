@@ -23,9 +23,10 @@ use crate::manifest::{
     CANVAS_WALLPAPER_FEATURE, RIBBON_FILTER_VISUAL_TARGETS_FEATURE, SHEET_DEFAULT_SIZES_FEATURE,
     CALCULATION_MODE_FEATURE,
     CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION,
-    OBJECT_BINDINGS_FEATURE, OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PIVOT_STYLE_FEATURE, VISUAL_CONTAINER_FEATURE,
-    SPARKLINE_GROUP_AREAS_FEATURE,
+    OBJECT_BINDINGS_FEATURE, OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PIVOT_STYLE_FEATURE, PIVOT_VALUE_SORT_FEATURE, VISUAL_CONTAINER_FEATURE,
+    SPARKLINE_GROUP_AREAS_FEATURE, TABLE_TOTALS_ROW_LABEL_FEATURE,
     CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION,
+    DATA_TABLE_FEATURE, DATA_TABLE_MIN_FORMAT_VERSION,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
     SPILL_EXTENT_MIN_FORMAT_VERSION,
@@ -79,8 +80,31 @@ fn workbook_carries_a_visual_container(workbook: &Workbook) -> bool {
         })
 }
 
+/// Is a saved formula a LIVE DATA TABLE's body marker (`TABLE(row, col)`)?
+/// See DATA_TABLE_MIN_FORMAT_VERSION. The cheap text test first, so an
+/// ordinary formula is never parsed here.
+fn is_data_table_formula(formula: &str) -> bool {
+    let text = formula.trim_start().trim_start_matches('=').trim_start();
+    if !text.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("TABLE(")) {
+        return false;
+    }
+    let with_eq = format!("={}", text);
+    parser::parse(&with_eq).is_ok_and(|ast| engine::data_table::is_table_call(&ast))
+}
+
 /// Does a sheet's opaque sparkline blob hold a group with more than one AREA
 /// (a non-empty `moreAreas`)? See SPARKLINE_GROUP_AREAS_FEATURE.
+/// Whether a saved pivot definition sorts some row or column field by value
+/// (a non-null `value_sort` on a `row_fields` / `column_fields` entry).
+fn pivot_definition_sorts_by_value(definition: &serde_json::Value) -> bool {
+    ["row_fields", "column_fields"].iter().any(|zone| {
+        definition
+            .get(zone)
+            .and_then(|v| v.as_array())
+            .is_some_and(|fields| fields.iter().any(|f| f.get("value_sort").is_some_and(|v| !v.is_null())))
+    })
+}
+
 fn sparkline_blob_has_areas(groups_json: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(groups_json).ok().is_some_and(|v| {
         v.as_array().is_some_and(|groups| {
@@ -225,6 +249,18 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if workbook.calculation_incomplete {
         manifest.features.push(CALCULATION_INCOMPLETE_FEATURE.to_string());
         stamp_feature_format_version(&mut manifest, CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION);
+    }
+    // LIVE DATA TABLES (BUG-0652): an older reader would keep each body cell's
+    // saved value forever under an `=TABLE(..)` formula -- a stale body shown
+    // as live (see DATA_TABLE_MIN_FORMAT_VERSION). Only when some cell holds
+    // the marker.
+    if workbook
+        .sheets
+        .iter()
+        .any(|s| s.cells.values().any(|c| c.formula.as_deref().is_some_and(is_data_table_formula)))
+    {
+        manifest.features.push(DATA_TABLE_FEATURE.to_string());
+        stamp_feature_format_version(&mut manifest, DATA_TABLE_MIN_FORMAT_VERSION);
     }
     // The calculation mode (Excel's calcMode="manual"): a feature id and NO
     // version link -- an older reader loses the mode, it is not misled about a
@@ -382,6 +418,13 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if workbook.sparklines.iter().any(|s| sparkline_blob_has_areas(&s.groups_json)) {
         manifest.features.push(SPARKLINE_GROUP_AREAS_FEATURE.to_string());
     }
+    // A hidden totals row's remembered LABEL: a feature id and DELIBERATELY NO
+    // version link -- an older reader drops it and the constant does not come
+    // back, a visible loss, never a lie (see TABLE_TOTALS_ROW_LABEL_FEATURE).
+    // Declared only when some column carries one; it rides the table record.
+    if workbook.tables.iter().any(|t| t.columns.iter().any(|c| c.totals_row_label.is_some())) {
+        manifest.features.push(TABLE_TOTALS_ROW_LABEL_FEATURE.to_string());
+    }
     // The VISUAL CONTAINER (D-FORMAT) and the persisted PIVOT STYLE: feature
     // ids and DELIBERATELY NO version link -- an older reader drops a border,
     // a title, a shadow or a gallery style, a visible cosmetic loss, never a
@@ -397,6 +440,11 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         .any(|d| d.definition.get("style").is_some_and(|v| !v.is_null()))
     {
         manifest.features.push(PIVOT_STYLE_FEATURE.to_string());
+    }
+    // A pivot field sorted by VALUE (BUG-0459): a feature id, no version link
+    // -- an older reader shows label order (see PIVOT_VALUE_SORT_FEATURE).
+    if workbook.pivot_definitions.iter().any(|d| pivot_definition_sorts_by_value(&d.definition)) {
+        manifest.features.push(PIVOT_VALUE_SORT_FEATURE.to_string());
     }
     // Object property BINDINGS (D-BIND): a feature id AND a version link. The
     // literal stays on each object's own record, so an older reader that
@@ -3083,7 +3131,52 @@ mod tests {
             assert!(earlier < FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION, "{earlier}");
         }
         assert!(FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION < CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION);
-        assert_eq!(CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
+        assert!(CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION < DATA_TABLE_MIN_FORMAT_VERSION);
+        assert_eq!(DATA_TABLE_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
+    }
+
+    /// A workbook whose Sheet1 holds a live one-variable data table: the body
+    /// L2:L3 is `=TABLE(,A1)` with its last computed values.
+    fn with_data_table() -> Workbook {
+        let mut workbook = make_test_workbook();
+        for (row, value) in [(1u32, 10.0), (2, 14.0)] {
+            workbook.sheets[0].cells.insert(
+                (row, 11),
+                SavedCell {
+                    value: SavedCellValue::Number(value),
+                    formula: Some("=TABLE(,A1)".to_string()),
+                    style_index: 0,
+                    rich_text: None,
+                    spill: None,
+                },
+            );
+        }
+        workbook
+    }
+
+    /// BUG-0652: a LIVE DATA TABLE links the format version (13) and declares
+    /// its feature id, and only when some cell holds the `TABLE(..)` marker --
+    /// an older reader would keep the saved body forever under its formula (a
+    /// stale body shown as live). The body round-trips with formula and value.
+    ///
+    /// SABOTAGE: drop the data-table stamp in `write_calcula_bytes` -- fails
+    /// at "NO LINK".
+    #[test]
+    fn a_live_data_table_links_the_format_version() {
+        let plain = manifest_of(&write_calcula_bytes(&make_test_workbook()).unwrap());
+        assert!(plain.format_version < DATA_TABLE_MIN_FORMAT_VERSION, "a workbook without a table stays lower");
+        assert!(!plain.features.iter().any(|f| f == DATA_TABLE_FEATURE));
+
+        let bytes = write_calcula_bytes(&with_data_table()).unwrap();
+        let manifest = manifest_of(&bytes);
+        assert_eq!(manifest.format_version, DATA_TABLE_MIN_FORMAT_VERSION, "NO LINK: a data table did not raise the version");
+        assert!(manifest.features.iter().any(|f| f == DATA_TABLE_FEATURE), "{:?}", manifest.features);
+
+        let back = read_calcula_bytes(&bytes).unwrap();
+        let l2 = back.sheets[0].cells.get(&(1, 11)).expect("L2 round-trips");
+        assert_eq!(l2.formula.as_deref(), Some("=TABLE(,A1)"));
+        assert!(matches!(l2.value, SavedCellValue::Number(n) if n == 10.0));
+        assert!(is_data_table_formula("=TABLE(A1,D1)") && !is_data_table_formula("=TABLES(A1)"));
     }
 
     /// A split ALONE stamps it too: the split is as unrecoverable as the zoom.
@@ -3356,6 +3449,7 @@ mod tests {
                     totals_row_function: "none".to_string(),
                     totals_row_formula: None,
                     calculated_formula: None,
+                    totals_row_label: None,
                 },
                 persistence::SavedTableColumn {
                     id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
@@ -3363,6 +3457,7 @@ mod tests {
                     totals_row_function: "sum".to_string(),
                     totals_row_formula: None,
                     calculated_formula: None,
+                    totals_row_label: None,
                 },
             ],
             style_options: persistence::SavedTableStyleOptions {
@@ -3388,6 +3483,59 @@ mod tests {
         assert_eq!(loaded.tables[0].sheet_id, sheet_id);
         assert_eq!(loaded.tables[0].columns.len(), 2);
         assert_eq!(loaded.tables[0].style_options.banded_rows, true);
+    }
+
+    /// NEW-totals-label-persist: a hidden totals row's remembered LABEL rides
+    /// the table record and declares a manifest FEATURE ID, with NO link in the
+    /// format-version chain -- an older reader drops it and the constant does
+    /// not come back, a visible loss, never a lie. A table without one
+    /// declares nothing.
+    /// SABOTAGE (cfeval-feature): the declaration's push removed.
+    #[test]
+    fn a_totals_row_label_declares_a_feature_id_but_never_raises_the_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let written = |label: Option<&str>, file: &str| {
+            let mut workbook = make_test_workbook();
+            let sheet_id = workbook.sheets[0].id;
+            workbook.tables.push(persistence::SavedTable {
+                id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+                name: "T".to_string(),
+                sheet_id,
+                start_row: 0,
+                start_col: 0,
+                end_row: 2,
+                end_col: 0,
+                columns: vec![persistence::SavedTableColumn {
+                    id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+                    name: "V".to_string(),
+                    totals_row_function: "none".to_string(),
+                    totals_row_formula: None,
+                    calculated_formula: None,
+                    totals_row_label: label.map(str::to_string),
+                }],
+                style_options: persistence::SavedTableStyleOptions {
+                    banded_rows: true,
+                    banded_columns: false,
+                    header_row: true,
+                    total_row: false,
+                    first_column: false,
+                    last_column: false,
+                    show_filter_button: true,
+                },
+                style_name: "TableStyleMedium2".to_string(),
+            });
+            let path = dir.path().join(file);
+            write_calcula(&workbook, &path).unwrap();
+            let loaded = read_calcula(&path).unwrap();
+            let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+            (manifest, loaded)
+        };
+        let (plain, _) = written(None, "plain.cala");
+        let (labelled, loaded) = written(Some("7"), "label.cala");
+        assert!(!plain.features.iter().any(|f| f == TABLE_TOTALS_ROW_LABEL_FEATURE), "{:?}", plain.features);
+        assert!(labelled.features.iter().any(|f| f == TABLE_TOTALS_ROW_LABEL_FEATURE), "{:?}", labelled.features);
+        assert_eq!(labelled.format_version, plain.format_version, "a label must never raise the format version");
+        assert_eq!(loaded.tables[0].columns[0].totals_row_label.as_deref(), Some("7"));
     }
 
     #[test]
@@ -4149,23 +4297,28 @@ mod tests {
         assert!(err.starts_with("charts.json in this file could not be read"), "{err}");
     }
 
-    /// v13 -- one above this build -- is refused through the reader gate,
+    /// v14 -- one above this build -- is refused through the reader gate,
     /// while a v10 file (a binding), a v11 file (a floating grid that hides
-    /// a row) and a v12 file (an incomplete calculation) open.
+    /// a row), a v12 file (an incomplete calculation) and a v13 file (a live
+    /// data table) open.
     #[test]
-    fn a_v13_file_is_refused() {
-        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 13);
+    fn a_v14_file_is_refused() {
+        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 14);
         let workbook = make_test_workbook();
         let bytes = write_calcula_bytes(&workbook).unwrap();
-        let v12 = rewrite_archive(&bytes, |name, content| {
+        let v14 = rewrite_archive(&bytes, |name, content| {
             (name == "manifest.json").then(|| {
                 let mut m: Manifest = serde_json::from_slice(content).unwrap();
-                m.format_version = 13;
+                m.format_version = 14;
                 serde_json::to_vec_pretty(&m).unwrap()
             })
         });
-        let err = read_calcula_bytes(&v12).unwrap_err();
+        let err = read_calcula_bytes(&v14).unwrap_err();
         assert!(err.to_string().contains("Unsupported format version"), "got: {err}");
+
+        let bytes = write_calcula_bytes(&with_data_table()).unwrap();
+        assert_eq!(manifest_of(&bytes).format_version, 13);
+        assert!(read_calcula_bytes(&bytes).is_ok());
 
         let mut with_binding = make_test_workbook();
         with_binding.object_bindings = vec![binding("chart", "c", "/spec/title", "=A1")];
@@ -4438,6 +4591,32 @@ mod tests {
     ///
     /// SABOTAGE: stamp a version beside either push, or drop a source from
     /// `workbook_carries_a_visual_container`.
+    /// BUG-0459: a pivot field sorted by VALUE declares `pivot_value_sort` and
+    /// never raises the version (an older reader shows label order: a visible
+    /// loss); the sort survives the archive. A null or absent sort declares
+    /// nothing.
+    ///
+    /// SABOTAGE: drop the push, or read a zone other than row/column fields.
+    #[test]
+    fn pivot_value_sort_declares_a_feature_id_but_never_raises_the_version() {
+        let sort = serde_json::json!({"value_field": "Sum of Amount", "scope": ["2023"]});
+        let with_sort = |zone: &str, value: serde_json::Value| {
+            let mut wb = make_test_workbook();
+            let mut pivot = a_pivot(None, None);
+            pivot.definition[zone] = serde_json::json!([{"source_index": 1, "name": "Product", "value_sort": value}]);
+            wb.pivot_definitions = vec![pivot];
+            wb
+        };
+        let (rows, loaded) = written_manifest(&with_sort("row_fields", sort.clone()));
+        let (cols, _) = written_manifest(&with_sort("column_fields", sort.clone()));
+        let (none, _) = written_manifest(&with_sort("row_fields", serde_json::Value::Null));
+        assert!(declares(&rows, PIVOT_VALUE_SORT_FEATURE), "{:?}", rows.features);
+        assert!(declares(&cols, PIVOT_VALUE_SORT_FEATURE), "{:?}", cols.features);
+        assert!(!declares(&none, PIVOT_VALUE_SORT_FEATURE), "{:?}", none.features);
+        assert_eq!(rows.format_version, none.format_version, "a value sort must never raise the format version");
+        assert_eq!(loaded.pivot_definitions[0].definition["row_fields"][0]["value_sort"], sort);
+    }
+
     #[test]
     fn visual_container_and_pivot_style_declare_feature_ids_but_never_raise_the_version() {
         let container = a_container();

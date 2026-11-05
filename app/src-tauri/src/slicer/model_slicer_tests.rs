@@ -4585,3 +4585,106 @@ async fn a_pivot_write_joining_a_step_that_wrote_its_cell_undoes_to_the_steps_st
 // DC-9 re-fold. A child module, so it reuses `Fx` and the helpers above.
 #[path = "canvas_interactions_refold_tests.rs"]
 mod canvas_interactions_refold_tests;
+
+/// BUG-0523: a worksheet table "Amounts" at A1:A4 (header "Amount", then
+/// 1234.5, 99 and 1234.5 again, all formatted `#,##0.0`) owning the sheet's
+/// AutoFilter, unfiltered, and a TABLE slicer on it with `selected`.
+fn seed_numeric_table(fx: &Fx, selected: Option<&[&str]>) -> (EntityId, EntityId) {
+    let seed = test_seed_effect();
+    let style = engine::CellStyle::new()
+        .with_number_format(engine::NumberFormat::Number { decimal_places: 1, use_thousands_separator: true });
+    let style_index = fx.state.style_registry.write(&seed).unwrap().get_or_create(style);
+    {
+        let mut grids = fx.state.grids.write(&seed).unwrap();
+        let mut grid = fx.state.grid.write(&seed).unwrap();
+        let header = engine::Cell::new_text("Amount".to_string());
+        grids[0].set_cell(0, 0, header.clone());
+        grid.set_cell(0, 0, header);
+        for (row, n) in [(1u32, 1234.5), (2, 99.0), (3, 1234.5)] {
+            let cell = engine::Cell { value: engine::CellValue::Number(n), ast: None, style_index, rich_text: None };
+            grids[0].set_cell(row, 0, cell.clone());
+            grid.set_cell(row, 0, cell);
+        }
+    }
+    let af = crate::autofilter::AutoFilter::new(0, 0, 3, 0);
+    let table = crate::tables::Table {
+        id: new_id(),
+        name: "Amounts".to_string(),
+        sheet_index: 0,
+        start_row: 0,
+        start_col: 0,
+        end_row: 3,
+        end_col: 0,
+        columns: vec![crate::tables::TableColumn::new(new_id(), "Amount".to_string())],
+        style_options: Default::default(),
+        style_name: "TableStyleMedium2".to_string(),
+        auto_filter_id: Some(af.id),
+    };
+    fx.state.auto_filters.write(&seed).unwrap().insert(0, af);
+    fx.state.tables.write(&seed).unwrap().entry(0).or_default().insert(table.id, table.clone());
+
+    let mut s = slicer_on(0, table.id, "Amount", selected);
+    s.source_type = SlicerSourceType::Table;
+    s.connected_sources = vec![SlicerConnection { source_type: SlicerSourceType::Table, source_id: table.id }];
+    let slicer_id = s.id;
+    fx.slicer.slicers.write(&seed).unwrap().insert(slicer_id, s);
+    (table.id, slicer_id)
+}
+
+fn set_app_locale(fx: &Fx, id: &str) {
+    *fx.state.locale.lock().unwrap() = engine::LocaleSettings::from_locale_id(id);
+}
+
+/// The table filter's value list and hidden rows.
+fn numeric_filter(fx: &Fx) -> (Vec<String>, Vec<u32>) {
+    let filters = fx.state.auto_filters.read().unwrap();
+    let af = &filters[&0];
+    let values = af.column_filters.get(&0).map(|c| c.criteria.values.clone()).unwrap_or_default();
+    let mut hidden: Vec<u32> = af.hidden_rows.iter().copied().collect();
+    hidden.sort();
+    (values, hidden)
+}
+
+/// BUG-0523. A TABLE slicer's items are keyed by the cell's INVARIANT value
+/// and labelled with its display text, so a selection made under one app
+/// locale is still the same selection under another: the item stays
+/// selected, and the table is filtered by the texts the cells show NOW.
+/// It used to key by display text, so "1.234,5" chosen under de-DE matched
+/// no item under sv-SE and the table came back unfiltered.
+#[tokio::test]
+async fn a_table_slicer_selection_survives_an_app_locale_switch() {
+    let fx = Fx::new(0).await;
+    set_app_locale(&fx, "de-DE");
+    let (_table, slicer) = seed_numeric_table(&fx, None);
+
+    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, slicer, None)
+        .await
+        .unwrap();
+    let shape: Vec<(String, String)> = items.iter().map(|i| (i.key.clone(), i.label.clone())).collect();
+    assert_eq!(
+        shape,
+        vec![("99".to_string(), "99,0".to_string()), ("1234.5".to_string(), "1.234,5".to_string())],
+        "keys invariant, labels in the app locale, one item per value, numbers ascending"
+    );
+
+    // Select 1234.5 the way the slicer sends it: by KEY.
+    table_click(&fx, slicer, Some(&["1234.5"]), FilterGestureStep::Own).await;
+    assert_eq!(numeric_filter(&fx), (vec!["1.234,5".to_string()], vec![2]), "filtered by the de-DE display text");
+
+    // The app locale changes. The stored selection is still the 1234.5 item.
+    set_app_locale(&fx, "sv-SE");
+    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, slicer, None)
+        .await
+        .unwrap();
+    let selected: Vec<(String, bool)> = items.iter().map(|i| (i.label.clone(), i.selected)).collect();
+    let sv_label = items.iter().find(|i| i.key == "1234.5").map(|i| i.label.clone()).expect("the 1234.5 item");
+    assert_ne!(sv_label, "1.234,5", "fixture: sv-SE writes the number differently");
+    assert!(
+        items.iter().any(|i| i.key == "1234.5" && i.selected) && items.iter().any(|i| i.key == "99" && !i.selected),
+        "the selection made under de-DE no longer matches its item under sv-SE: {selected:?}"
+    );
+
+    // Clicking again filters by the text the cells show under sv-SE.
+    table_click(&fx, slicer, Some(&["1234.5"]), FilterGestureStep::Own).await;
+    assert_eq!(numeric_filter(&fx), (vec![sv_label], vec![2]), "the table filter must use today's display text");
+}

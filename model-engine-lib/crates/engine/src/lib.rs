@@ -99,11 +99,15 @@ mod direct_query_second_column_tests;
 #[cfg(test)]
 mod calc_group_tests;
 #[cfg(test)]
+mod case_null_condition_tests;
+#[cfg(test)]
 mod calculated_column_tests;
 #[cfg(test)]
 mod clear_reset_tests;
 #[cfg(test)]
 mod context_column_tests;
+#[cfg(test)]
+mod dax_blank_tests;
 #[cfg(test)]
 mod derived_measure_tests;
 #[cfg(test)]
@@ -118,6 +122,8 @@ mod gvar_tests;
 mod having_tests;
 #[cfg(test)]
 mod in_filter_tests;
+#[cfg(test)]
+mod keep_scope_tests;
 #[cfg(test)]
 mod materialize_tests;
 #[cfg(test)]
@@ -192,6 +198,7 @@ pub use engine_core::compute::script::{
 pub use engine_core::compute::udf::{
     create_udf, ColumnarValue, ScalarUDF, UdfRegistry, Volatility,
 };
+pub use engine_core::compute::format_string::{format_value, FormatCulture, FormatValue};
 pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::rest::{authority_of, is_loopback_host, require_same_authority};
 pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
@@ -315,6 +322,12 @@ pub struct Engine {
     /// default. Never part of the model (a malicious model cannot raise its
     /// own budget).
     script_sandbox_config: ScriptSandboxConfig,
+    /// The culture DAX `FORMAT` writes in (BUG-0522): host session state
+    /// (Calcula passes its APP locale), never part of the model. Baked into
+    /// the built-in `calcula_format` UDF of the effective registry, whose
+    /// version is the culture's identity -- so changing it changes every
+    /// query-cache key. See [`Engine::set_format_culture`].
+    format_culture: engine_core::compute::format_string::FormatCulture,
     /// The active security roles, if any. Set by the host **after**
     /// authenticating the user (see [`Engine::set_active_role`] /
     /// [`Engine::set_active_roles`]). With one role, every query is restricted to
@@ -444,33 +457,34 @@ fn fold_const_scalar(expr: &Expression) -> Option<Expression> {
         Expression::BinaryOp { left, op, right } => {
             let lf = fold_const_scalar(left)?;
             let rf = fold_const_scalar(right)?;
-            // SQL NULL arithmetic: any Blank (NULL) operand yields Blank — the
-            // same result the executor produces when the Blank is substituted
-            // into the RETURN and rendered (`NULL op x = NULL`). This keeps a
-            // Blank earlier-GVAR consistent whether it lands in a later GVAR
+            // DAX BLANK arithmetic (`BLANK + 5 = 5`, `BLANK * 5 = BLANK`,
+            // `5 / 0 = Infinity`) — the same table the executor's SQL
+            // implements when the Blank is substituted into the RETURN and
+            // rendered (`engine_core::compute::dax_semantics`), so a Blank
+            // earlier-GVAR answers the same whether it lands in a later GVAR
             // binding (here) or in the RETURN.
-            if matches!(lf, Expression::Blank) || matches!(rf, Expression::Blank) {
-                return Some(Expression::Blank);
-            }
-            let (l, r) = (const_f64(&lf)?, const_f64(&rf)?);
-            let v = match op {
-                ArithmeticOp::Add => l + r,
-                ArithmeticOp::Subtract => l - r,
-                ArithmeticOp::Multiply => l * r,
-                ArithmeticOp::Divide => {
-                    if r == 0.0 {
-                        return Some(Expression::Blank);
-                    }
-                    l / r
+            let number = |e: &Expression| -> Option<Option<f64>> {
+                if matches!(e, Expression::Blank) {
+                    Some(None)
+                } else {
+                    const_f64(e).map(Some)
                 }
             };
-            Some(Expression::LiteralFloat(v))
+            let (l, r) = (number(&lf)?, number(&rf)?);
+            match engine_core::compute::dax_semantics::arithmetic_f64(l, *op, r) {
+                Some(v) => Some(Expression::LiteralFloat(v)),
+                None => Some(Expression::Blank),
+            }
         }
         Expression::SafeDivide {
             numerator,
             denominator,
             alternate,
         } => {
+            // DAX decides a BLANK numerator FIRST: `DIVIDE(BLANK(), 0, 7)` is
+            // BLANK, not the alternate ([LIVE] Excel 16's data model, the
+            // Power BI DAX engine); the SQL renders the same rule
+            // (`engine_core::compute::dax_semantics::safe_divide_sql`).
             let n = fold_const_scalar(numerator)?;
             if matches!(n, Expression::Blank) {
                 return Some(Expression::Blank);
@@ -1309,9 +1323,22 @@ fn build_effective_registry(
     model: &DataModel,
     native: &UdfRegistry,
     config: &ScriptSandboxConfig,
+    format_culture: &engine_core::compute::format_string::FormatCulture,
 ) -> (Arc<UdfRegistry>, Option<EngineError>) {
     let mut effective = native.clone();
     let mut first_error: Option<EngineError> = None;
+
+    // The built-in DAX FORMAT (BUG-0522), unless a host deliberately
+    // registered its own `calcula_format` natively. Its version is the
+    // culture's identity, so a culture change changes the cache identity.
+    if native.get(engine_core::compute::format_string::FORMAT_UDF_NAME).is_none() {
+        if let Err(e) = effective.register(
+            engine_core::compute::format_string::format_udf(format_culture.clone()),
+            format_culture.identity(),
+        ) {
+            first_error = Some(e);
+        }
+    }
 
     for function in model.script_functions() {
         // A script name that collides with a native UDF is ambiguous — the
@@ -1396,7 +1423,8 @@ impl Engine {
         model.resolve_measure_home_tables();
         let native = Arc::new(UdfRegistry::new());
         let config = ScriptSandboxConfig::default();
-        let (effective, script_build_error) = build_effective_registry(&model, &native, &config);
+        let format_culture = engine_core::compute::format_string::FormatCulture::default();
+        let (effective, script_build_error) = build_effective_registry(&model, &native, &config, &format_culture);
         Self {
             model,
             registry: SourceRegistry::new(),
@@ -1411,6 +1439,7 @@ impl Engine {
             udfs: native,
             effective_udfs: effective,
             script_sandbox_config: config,
+            format_culture,
             script_build_error,
             active_roles: Vec::new(),
             user_identity: None,
@@ -1769,6 +1798,30 @@ impl Engine {
         // version that feeds the query-cache key.
         self.query_cache.lock().invalidate_all();
         Ok(())
+    }
+
+    /// Set the culture DAX `FORMAT(value, format_string)` writes in
+    /// (BUG-0522): separators, currency, the named date/time patterns and the
+    /// calendar names. Host session state, like the active role -- Calcula
+    /// passes its APP locale, so a measure that formats itself agrees with
+    /// every other number the app shows. The default is
+    /// [`FormatCulture::en_us`](engine_core::compute::format_string::FormatCulture::en_us).
+    ///
+    /// A change rebuilds the effective UDF registry (the built-in
+    /// `calcula_format` carries the culture) and invalidates the query cache;
+    /// setting the culture it already has does nothing.
+    pub fn set_format_culture(&mut self, culture: engine_core::compute::format_string::FormatCulture) {
+        if self.format_culture == culture {
+            return;
+        }
+        self.format_culture = culture;
+        self.rebuild_effective_udfs();
+        self.query_cache.lock().invalidate_all();
+    }
+
+    /// The culture DAX `FORMAT` writes in (see [`Engine::set_format_culture`]).
+    pub fn format_culture(&self) -> &engine_core::compute::format_string::FormatCulture {
+        &self.format_culture
     }
 
     /// Names of all registered (native) UDFs, sorted.
@@ -2651,7 +2704,7 @@ impl Engine {
     /// UDFs, and sandbox config, capturing any deferred script error.
     fn rebuild_effective_udfs(&mut self) {
         let (effective, error) =
-            build_effective_registry(&self.model, &self.udfs, &self.script_sandbox_config);
+            build_effective_registry(&self.model, &self.udfs, &self.script_sandbox_config, &self.format_culture);
         self.effective_udfs = effective;
         self.script_build_error = error;
     }

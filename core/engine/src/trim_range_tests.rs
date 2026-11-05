@@ -303,6 +303,45 @@ fn the_dot_survives_a_sheet_prefix() {
     assert_eq!(num(&g, "=ROWS($A$1:.$A$8)"), 4.0, "absolute markers too");
 }
 
+/// BUG-0647. A ROW range's LEADING dot sits between a digit and the colon, so
+/// the number reader took it as a decimal point: `=SUM(1.:3)` was stored as
+/// `SUM(1:3)` and `=SUM(2.:.3)` as `SUM(2:.3)` -- the trim silently lost on
+/// entry. [LIVE, Excel 16] keeps both: `SUM(1.:3)` is saved
+/// `SUM(_xlfn._TRO_LEADING(1:3))`, `SUM(2.:.3)` `SUM(_xlfn._TRO_ALL(2:3))`,
+/// and the formula bar shows each as typed.
+#[test]
+fn a_row_ranges_leading_dot_is_the_trim_not_a_decimal_point() {
+    let cases = [
+        ("=SUM(1.:3)", "=SUM(TRIMRANGE(1:3,1,1))"),
+        ("=SUM(2.:.3)", "=SUM(TRIMRANGE(2:3,3,3))"),
+        ("=SUM($1.:3)", "=SUM(TRIMRANGE($1:3,1,1))"),
+        ("=SUM(Sheet1!1.:3)", "=SUM(TRIMRANGE(Sheet1!1:3,1,1))"),
+    ];
+    for (dotted, spelled) in cases {
+        assert_eq!(
+            parser::parse(dotted).expect("dotted form parses"),
+            parser::parse(spelled).expect("function form parses"),
+            "{} should be {}",
+            dotted,
+            spelled
+        );
+    }
+    for source in ["SUM(1.:3)", "SUM(2.:.3)", "SUM($1.:3)"] {
+        let rendered = crate::ast_render::render_formula(
+            &parser::parse(&format!("={}", source)).expect("parses"),
+        );
+        assert_eq!(rendered, source, "`{}` must render back as itself", source);
+    }
+    // The value: row 1 is blank, so the leading trim drops it.
+    let mut g = Grid::new();
+    g.set_cell(1, 0, Cell::new_number(1.0));
+    g.set_cell(2, 0, Cell::new_number(2.0));
+    assert_eq!(num(&g, "=ROWS(1.:3)"), 2.0, "the blank first row is trimmed");
+    assert_eq!(num(&g, "=ROWS(1:3)"), 3.0, "control: no dot, no trim");
+    // A decimal point in front of anything but a colon is still one.
+    assert_eq!(num(&g, "=1.5+1"), 2.5);
+}
+
 #[test]
 fn the_dot_form_round_trips_through_the_renderer() {
     // The parser lowers the dot to a function call, so without the renderer's

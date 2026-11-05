@@ -17,7 +17,8 @@
 //              numbers stops it too;
 //            - when there is nothing numeric above (only blanks to the top, or
 //              text first), look LEFT by the same rule;
-//            - when the numbers above include SUBTOTALS (=SUM(...) cells), the
+//            - when the numbers above include SUBTOTALS (=SUM(...) or
+//              =SUBTOTAL(...) cells), the
 //              guess is those subtotals, nearest first: =SUM(A6,A3);
 //            - nothing either way: =SUM() with the caret between the brackets.
 //          A RANGE selected -- Excel writes the totals at once:
@@ -31,12 +32,27 @@
 //              BELOW each column -- in the first row (or column) beyond the
 //              selection that is entirely empty, so one occupied cell moves the
 //              whole row of totals;
-//            - a selection of EMPTY cells next to numbers gives each cell its
-//              own one-cell guess, written directly; a selection with no
-//              numbers to total at all opens the one-cell edit instead.
+//            - a selection of EMPTY cells next to numbers takes the ACTIVE
+//              cell's one-cell guess, filled relatively into every cell and
+//              written directly (BUG-0397, measured 2026-11-04); when the
+//              active cell has no guess, or the selection has no numbers to
+//              total at all, the one-cell edit opens instead.
 //          SEVERAL areas (Ctrl+click; Go To Special > Blanks then Alt+=): each
 //            area by the rules above, in selection order, all in one undo
 //            step -- planAutoSumAreas, at the end of this file.
+//          A SHEET IN FILTER MODE (rev-ui-3) -- an AutoFilter with criteria
+//            applied, even criteria that hide nothing, or an in-place Advanced
+//            Filter -- turns Sum into =SUBTOTAL(9,...), which leaves the
+//            filtered-out rows out of the total: every Sum this file writes or
+//            guesses, anywhere on the sheet (inside the filtered range, in other
+//            columns, below it, row totals, the corner, one-cell edits, the
+//            relative fill). Average, Count Numbers, Max and Min keep their own
+//            names. Rows hidden by hand or by a collapsed outline, a filter
+//            whose buttons show but which filters nothing, and a filter on
+//            another sheet do not switch it. A SUBTOTAL above counts as a
+//            subtotal for the guess, as a SUM does (=SUM(A6,A3) over two
+//            =SUBTOTAL(9,..) cells). Measured live, Excel 16, 2026-11-05, lane
+//            uic probe1 / probe2 (S1..S22, Q1..Q7).
 //          Deliberate differences: the edit opens on Core's ACTIVE cell even
 //          where Excel moves it (a selection whose numbers are only in its last
 //          cell); the guessed range is not in Excel's "point mode" (dragging
@@ -62,6 +78,9 @@ export interface AutoSumCellReader {
   read(range: CellRange): Promise<TypedCellData[]>;
   /** The used extent of the sheet (rows/columns beyond it are empty). */
   usedRange(): Promise<{ endRow: number; endCol: number; empty: boolean }>;
+  /** Whether the sheet is in FILTER MODE (Excel's Worksheet.FilterMode): Sum
+   *  is then written as SUBTOTAL(9,...). Absent: never (an object's cells). */
+  filterMode?(): Promise<boolean>;
 }
 
 export type AutoSumPlan =
@@ -106,8 +125,53 @@ export function rangeRef(r: CellRange): string {
   return r.startRow === r.endRow && r.startCol === r.endCol ? a : `${a}:${cellRef(r.endRow, r.endCol)}`;
 }
 
-function formulaOf(fn: AutoSumFn, refs: readonly string[], separator: string): string {
+/** Whether (row, col) lies inside `r`. */
+function activeInside(r: CellRange, row: number, col: number): boolean {
+  return row >= r.startRow && row <= r.endRow && col >= r.startCol && col <= r.endCol;
+}
+
+function lettersToCol(letters: string): number {
+  let col = 0;
+  for (const ch of letters) col = col * 26 + (ch.charCodeAt(0) - 64);
+  return col - 1;
+}
+
+/**
+ * `ref` ("A1" or "A1:B3", the planner's own relative spelling) moved by
+ * (`dRow`, `dCol`), as a relative fill moves it. A reference pushed off the
+ * sheet is "#REF!", as Excel writes it.
+ */
+export function shiftRef(ref: string, dRow: number, dCol: number): string {
+  const ends = ref.split(":").map((end) => {
+    const m = /^([A-Z]+)(\d+)$/.exec(end);
+    if (!m) return null;
+    const row = Number(m[2]) - 1 + dRow;
+    const col = lettersToCol(m[1]) + dCol;
+    if (row < 0 || row > MAX_ROW || col < 0 || col > MAX_COL) return null;
+    return cellRef(row, col);
+  });
+  if (ends.some((end) => end === null)) return "#REF!";
+  return ends.join(":");
+}
+
+/** SUBTOTAL's function number for the sum Excel's AutoSum writes on a
+ *  filtered sheet (9: the filtered-out rows are left out). */
+const SUBTOTAL_SUM_CODE = "9";
+
+/**
+ * The total's formula. `filtered` is filteredSum's answer: a Sum on a sheet in
+ * filter mode, written SUBTOTAL(9, ...), which leaves the filtered-out rows out
+ * (Excel [LIVE]); the other functions keep their own names there.
+ */
+function formulaOf(fn: AutoSumFn, refs: readonly string[], separator: string, filtered: boolean): string {
+  if (filtered) return `=SUBTOTAL(${[SUBTOTAL_SUM_CODE, ...refs].join(separator)})`;
   return `=${fn}(${refs.join(separator)})`;
+}
+
+/** Whether `fn` is written as a SUBTOTAL on this sheet (see formulaOf). */
+async function filteredSum(fn: AutoSumFn, reader: AutoSumCellReader): Promise<boolean> {
+  if (fn !== "SUM" || !reader.filterMode) return false;
+  return reader.filterMode();
 }
 
 // ============================================================================
@@ -125,7 +189,9 @@ function kindOf(cell: TypedCellData | undefined): Kind {
   return "text";
 }
 
-const SUBTOTAL = /^=\s*SUM\s*\(/i;
+/** A cell holding a total: a SUM, or the SUBTOTAL a filtered sheet's AutoSum
+ *  writes -- Excel takes both as subtotals (Q3 [LIVE], function 9). */
+const SUBTOTAL = /^=\s*(?:SUM|SUBTOTAL)\s*\(/i;
 
 class CellMap {
   private readonly cells = new Map<string, TypedCellData>();
@@ -251,7 +317,7 @@ async function editPlan(
   listSeparator: string,
 ): Promise<Extract<AutoSumPlan, { kind: "edit" }>> {
   const refs = (await guessSingleCell(row, col, reader)) ?? [];
-  const formula = formulaOf(fn, refs, listSeparator);
+  const formula = formulaOf(fn, refs, listSeparator, await filteredSum(fn, reader));
   return { kind: "edit", row, col, formula, caret: formula.length - 1 };
 }
 
@@ -342,6 +408,7 @@ export async function planAutoSum(
   const activeRow = selection.endRow;
   const activeCol = selection.endCol;
   let rng = normalise(selection);
+  const filtered = await filteredSum(fn, reader);
 
   if (rng.startRow === rng.endRow && rng.startCol === rng.endCol) {
     return editPlan(fn, activeRow, activeCol, reader, listSeparator);
@@ -365,18 +432,28 @@ export async function planAutoSum(
 
   // No number anywhere in the selection.
   if (!hasNumberIn(map, rng)) {
-    if (isEmptyIn(map, rng)) {
-      // Empty cells beside numbers: each gets its own one-cell guess (M16, M17).
-      const writes: Array<{ row: number; col: number; formula: string }> = [];
-      if ((rng.endRow - rng.startRow + 1) * (rng.endCol - rng.startCol + 1) <= 1000) {
+    if (isEmptyIn(map, rng) && activeInside(rng, activeRow, activeCol)) {
+      // EMPTY cells beside numbers (M16, M17, BUG-0397): the ACTIVE cell's
+      // one-cell guess, FILLED RELATIVELY into every cell of the selection --
+      // what Excel writes, measured live (Excel 16, 2026-11-04, lane multiarea
+      // probe1): A5:A7 numbers, A8:A9 selected with A8 active writes A8
+      // =SUM(A5:A7) and A9 =SUM(A6:A8) (never A9's own =SUM(A5:A8)); with A9
+      // active, A9 =SUM(A5:A8) and A8 =SUM(A4:A7). Text over A and numbers
+      // over B, A4:B4 selected: B4 active writes A4 =SUM(A1:A3) AND B4
+      // =SUM(B1:B3) (the fill reaches A4 over its text); A4 active -- no guess
+      // there -- OPENS AN EDIT and writes nothing. Each cell used to get its
+      // own guess, so the second case wrote B4 alone.
+      const refs = await guessSingleCell(activeRow, activeCol, reader);
+      if (refs) {
+        const writes: Array<{ row: number; col: number; formula: string }> = [];
         for (let row = rng.startRow; row <= rng.endRow; row++) {
           for (let col = rng.startCol; col <= rng.endCol; col++) {
-            const refs = await guessSingleCell(row, col, reader);
-            if (refs) writes.push({ row, col, formula: formulaOf(fn, refs, ",") });
+            const shifted = refs.map((ref) => shiftRef(ref, row - activeRow, col - activeCol));
+            writes.push({ row, col, formula: formulaOf(fn, shifted, ",", filtered) });
           }
         }
+        return { kind: "write", writes, selection: rng };
       }
-      if (writes.length > 0) return { kind: "write", writes, selection: rng };
     }
     return editPlan(fn, activeRow, activeCol, reader, listSeparator);
   }
@@ -396,7 +473,7 @@ export async function planAutoSum(
 
   const writes: Array<{ row: number; col: number; formula: string }> = [];
   const total = (row: number, col: number, over: CellRange): void => {
-    writes.push({ row, col, formula: formulaOf(fn, [rangeRef(over)], ",") });
+    writes.push({ row, col, formula: formulaOf(fn, [rangeRef(over)], ",", filtered) });
   };
 
   const lastRowEmpty =
@@ -511,6 +588,7 @@ function withWrites(
       }
       return { endRow, endCol, empty: false };
     },
+    filterMode: reader.filterMode ? () => reader.filterMode!() : undefined,
   };
 }
 
@@ -548,6 +626,7 @@ export async function planAutoSumAreas(
     return plan.kind === "write" ? { kind: "write", writes: plan.writes, selections: [plan.selection] } : plan;
   }
 
+  const filtered = await filteredSum(fn, reader);
   // Nothing written yet, so the active cell's own guess, against the sheet.
   const activeEdit = () => editPlan(fn, main.endRow, main.endCol, reader, listSeparator);
   const written = new Map<string, { row: number; col: number; formula: string }>();
@@ -561,7 +640,7 @@ export async function planAutoSumAreas(
       written.set(`${rng.startRow},${rng.startCol}`, {
         row: rng.startRow,
         col: rng.startCol,
-        formula: formulaOf(fn, refs, ","),
+        formula: formulaOf(fn, refs, ",", filtered),
       });
       selections.push(rng);
       continue;

@@ -1264,6 +1264,9 @@ export {
   setLocale,
   getSupportedLocales,
   onLocaleChanged,
+  onBiFormatCultureApplied,
+  getBiFormatCultureGeneration,
+  BI_FORMAT_CULTURE_APPLIED_EVENT,
   decimalSeparator,
   listSeparator,
   formatNumber,
@@ -1700,6 +1703,7 @@ export type {
   AutoFitContributor,
   AutoFitColumnContribution,
   AutoFitRowContribution,
+  AutoFitRowSpan,
 } from "./autoFitContributors";
 
 export type {
@@ -3142,6 +3146,9 @@ export {
   controlContainerKey,
   controlContainerKeyField,
   checkControlContainerValue,
+  CONTROL_PAINTED_CONTAINER_FIELDS,
+  controlPaintsContainerField,
+  controlPaintsContainerKey,
 } from "./visualContainer";
 
 export type {

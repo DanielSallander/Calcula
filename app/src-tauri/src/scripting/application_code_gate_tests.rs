@@ -1168,17 +1168,23 @@ fn the_click_and_the_mount_phase_deserialize_from_the_wire_the_page_sends() {
     ] {
         assert_eq!(serde_json::from_value::<MountGatePhase>(serde_json::json!(wire)).unwrap(), phase, "{wire}");
     }
-    // THE ANSWER the page reads (owner decision B, F3): `cellAccess` and
-    // `grantId` by these names, or the page's grant never switches on (an
-    // absent field is no grant) and its report names no grant.
+    // THE ANSWER the page reads (owner decision B, F3): `cellAccess`,
+    // `formatAccess` (owner, 2026-11-04) and `grantId` by these names, or the
+    // page's grant never switches on (an absent field is no grant) and its
+    // report names no grant.
     assert_eq!(
-        serde_json::to_value(MountGateAnswer { recheck_while_running: true, cell_access: true, grant_id: Some(7) })
-            .unwrap(),
-        serde_json::json!({ "recheckWhileRunning": true, "cellAccess": true, "grantId": 7 })
+        serde_json::to_value(MountGateAnswer {
+            recheck_while_running: true,
+            cell_access: true,
+            format_access: true,
+            grant_id: Some(7)
+        })
+        .unwrap(),
+        serde_json::json!({ "recheckWhileRunning": true, "cellAccess": true, "formatAccess": true, "grantId": 7 })
     );
     assert_eq!(
         serde_json::to_value(MountGateAnswer::admitted(false)).unwrap(),
-        serde_json::json!({ "recheckWhileRunning": false, "cellAccess": false, "grantId": null })
+        serde_json::json!({ "recheckWhileRunning": false, "cellAccess": false, "formatAccess": false, "grantId": null })
     );
     // THE CLAIM the page sends: the three pass doors, by these names; a view
     // bookmark (a module-runtime door only) or an unknown door is a wire error,
@@ -1557,6 +1563,7 @@ fn a_persons_run_is_granted_cell_access_at_run_admitted_and_the_run_row_names_th
     for phase in [MountGatePhase::RunCheck, MountGatePhase::Mount] {
         let answer = ask(phase, None, Some(&dialog)).expect("approved");
         assert!(!answer.cell_access && answer.grant_id.is_none(), "{phase:?} granted cell access");
+        assert!(!answer.format_access, "{phase:?} granted formatting");
     }
     assert_eq!(grants.waiting(), 0, "a grant was opened before the run was admitted");
     assert!(run_rows(&wc.state).is_empty());
@@ -1564,17 +1571,20 @@ fn a_persons_run_is_granted_cell_access_at_run_admitted_and_the_run_row_names_th
     // Admitted: granted, with the id of a grant now waiting for its report.
     let answer = ask(MountGatePhase::RunAdmitted, None, Some(&dialog)).expect("admitted");
     assert!(answer.cell_access, "a person's admitted run was not granted cell access");
+    // ...and formatting with it (owner, 2026-11-04), decided by Rust.
+    assert!(answer.format_access, "a person's admitted run was not granted formatting");
     let grant_id = answer.grant_id.expect("a granted run names its grant");
     assert_eq!(grants.waiting(), 1);
     let ran = run_rows(&wc.state);
     assert_eq!(ran.len(), 1);
     assert_eq!(ran[0].extra["cellAccess"], true);
+    assert_eq!(ran[0].extra["formatAccess"], true);
     assert_eq!(ran[0].extra["startedBy"], "you");
     assert_eq!(ran[0].extra["door"], "macrosDialog");
     assert_eq!(ran[0].extra["grantId"], grant_id);
     assert!(
         ran[0].description.contains(
-            "you started it from Developer > Macros > Run, so it could read and change cells on any sheet"
+            "you started it from Developer > Macros > Run, so it could read and change cells, and how they look, on any sheet"
         ),
         "{}",
         ran[0].description
@@ -1613,6 +1623,9 @@ fn a_run_without_a_persons_door_is_recorded_as_restricted_and_says_why() {
     )
     .expect("admitted, restricted");
     assert!(!answer.cell_access && answer.grant_id.is_none());
+    // ...and no formatting either (owner, 2026-11-04): a run a script starts
+    // never gets the grant, in either half.
+    assert!(!answer.format_access, "a script-started run was granted formatting");
     // A claim that contradicts the trigger: the Macros dialog naming a button.
     let dialog = claim(ExplicitRunDoor::MacrosDialog);
     let answer = mount_run_gate(
@@ -1620,13 +1633,14 @@ fn a_run_without_a_persons_door_is_recorded_as_restricted_and_says_why() {
         MountGatePhase::RunAdmitted, Some(ExplicitRunAsk { claim: &dialog, grants: &grants }),
     )
     .expect("admitted, restricted");
-    assert!(!answer.cell_access, "a contradiction was granted");
+    assert!(!answer.cell_access && !answer.format_access, "a contradiction was granted");
     assert_eq!(grants.waiting(), 0, "a grant was opened for a run that has none");
 
     let ran = run_rows(&wc.state);
     assert_eq!(ran.len(), 2);
     for row in &ran {
         assert_eq!(row.extra["cellAccess"], false);
+        assert!(row.extra.get("formatAccess").is_none(), "a restricted run's row claims formatting");
         assert_eq!(row.extra["startedBy"], "script");
         assert!(row.extra.get("grantId").is_none() && row.extra.get("door").is_none());
         assert!(row.description.contains("restricted, without cell access, because"), "{}", row.description);

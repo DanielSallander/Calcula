@@ -49,7 +49,7 @@ const S9 = "Home formatting door: migrates in S9";
 const NO_TARGET: Record<string, string> = {
   // ---- Migrated in S9, keeping one refusing door ----
   "src/core/hooks/useGridKeyboard.ts":
-    "the format keys, Ctrl+Alt+V and Delete resolve a target (TARGET); Ctrl+; / Ctrl+Shift+:, F11 and Space keep refusing (Core's own cell paths, Insert tab, cell types)",
+    "the format keys and Delete resolve a target (TARGET); Ctrl+; / Ctrl+Shift+:, F11 and Space keep refusing (Core's own cell paths, Insert tab, cell types); Ctrl+Alt+V is the keybinding registry's (Paste Special's own door asks)",
   // ---- Migrated in S11, keeping one refusing door ----
   "extensions/BuiltIn/StandardMenus/selectionDoors.ts":
     "Go To Special resolves a target (TARGET); Insert > Table keeps refusing (an Insert-tab door, and a floating grid holds no table)",

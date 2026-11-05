@@ -66,6 +66,12 @@ fn clear_model() -> DataModel {
             parse_measure("DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], CLEAR(Product)))")
                 .unwrap(),
         ))
+        // A second share measure (a bare division, no DIVIDE): BUG-0444's
+        // two-subqueries-in-one-query case.
+        .add_measure(expression_measure(
+            "ShareRatio",
+            parse_measure("SUM(Sales[amount]) / SUM(Sales[amount], RESET())").unwrap(),
+        ))
         .add_measure(expression_measure(
             "GrandTotal",
             parse_measure("SUM(Sales[amount], RESET())").unwrap(),
@@ -353,7 +359,8 @@ async fn clear_dimension_broadcasts_grand_total() {
 #[tokio::test]
 async fn compound_percent_of_grand_total_via_reset() {
     // `DIVIDE(SUM(x), SUM(x, RESET()))` — the RESET grand total is rendered as
-    // an uncorrelated scalar subquery, so the ratio is each product's share of
+    // a one-row cross-joined total (`hoist_clear_scalars`, BUG-0444), so the
+    // ratio is each product's share of
     // 190 (no longer a silent 1.0, and not a DataFusion window-nesting error).
     let engine = clear_engine();
     let batches = engine
@@ -735,3 +742,295 @@ async fn percent_of_parent_partitions_by_category() {
     // The two Bikes products' shares sum to 1.0 within their category.
     assert!((pct["Road"] + pct["Trail"] - 1.0).abs() < 1e-9);
 }
+
+/// Group a batch by an Int64 column (a FACT key such as `prod_id`).
+fn grouped_i64(batches: &[RecordBatch], key_col: &str, measure_col: &str) -> HashMap<i64, f64> {
+    let mut out = HashMap::new();
+    for b in batches {
+        let g = b
+            .column(col_idx(b, key_col))
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("i64 group column")
+            .clone();
+        let m = b.column(col_idx(b, measure_col));
+        for row in 0..b.num_rows() {
+            out.insert(g.value(row), as_f64(m.as_ref(), row));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn compound_reset_share_groups_by_a_fact_column() {
+    // BUG-0444: `DIVIDE(SUM(x), SUM(x, RESET()))` grouped by a column OF THE
+    // FACT TABLE (here Sales[prod_id]) failed with DataFusion's
+    // "No field named __scalar_sq_1.__clear_scalar" -- the RESET scalar
+    // subquery and the outer query both read `FROM sales`, and grouping by a
+    // fact column made the decorrelated subquery's alias collide. Per prod_id:
+    // 1 -> 130, 2 -> 60; grand total 190.
+    let engine = clear_engine();
+    let req = QueryRequest {
+        measures: vec!["Revenue".into(), "PctOfTotal".into()],
+        group_by: vec![ColumnRef::new("Sales", "prod_id")],
+        ..Default::default()
+    };
+    let batches = engine
+        .query(req)
+        .await
+        .expect("a compound RESET share must group by a fact column");
+    let pct = grouped_i64(&batches, "prod_id", "PctOfTotal");
+    assert!(
+        (pct[&1] - 130.0 / 190.0).abs() < 1e-9,
+        "prod 1 share should be 130/190, got {}",
+        pct[&1]
+    );
+    assert!(
+        (pct[&2] - 60.0 / 190.0).abs() < 1e-9,
+        "prod 2 share should be 60/190, got {}",
+        pct[&2]
+    );
+}
+
+#[tokio::test]
+async fn compound_reset_share_groups_by_fact_and_dimension_columns() {
+    // BUG-0444, mixed axis: a fact column AND a dimension column on the same
+    // axis. Each (prod_id, name) row is still its share of the 190 total.
+    let engine = clear_engine();
+    let req = QueryRequest {
+        measures: vec!["PctOfTotal".into()],
+        group_by: vec![
+            ColumnRef::new("Product", "name"),
+            ColumnRef::new("Sales", "prod_id"),
+        ],
+        ..Default::default()
+    };
+    let batches = engine
+        .query(req)
+        .await
+        .expect("a compound RESET share must group by fact + dimension columns");
+    let pct = grouped(&batches, "PctOfTotal");
+    assert!((pct["Bikes"] - 130.0 / 190.0).abs() < 1e-9, "Bikes {}", pct["Bikes"]);
+    assert!(
+        (pct["Helmets"] - 60.0 / 190.0).abs() < 1e-9,
+        "Helmets {}",
+        pct["Helmets"]
+    );
+}
+
+#[tokio::test]
+async fn two_compound_reset_shares_group_by_a_fact_column() {
+    // BUG-0444: two share measures in ONE query (each its own grand-total
+    // subquery) grouped by a fact column.
+    let engine = clear_engine();
+    let req = QueryRequest {
+        measures: vec!["ShareRatio".into(), "PctOfTotal".into()],
+        group_by: vec![ColumnRef::new("Sales", "prod_id")],
+        ..Default::default()
+    };
+    let batches = engine
+        .query(req)
+        .await
+        .expect("two compound RESET shares must group by a fact column");
+    let ratio = grouped_i64(&batches, "prod_id", "ShareRatio");
+    let pct = grouped_i64(&batches, "prod_id", "PctOfTotal");
+    for (k, want) in [(1_i64, 130.0 / 190.0), (2, 60.0 / 190.0)] {
+        assert!((ratio[&k] - want).abs() < 1e-9, "ShareRatio {k}: {}", ratio[&k]);
+        assert!((pct[&k] - want).abs() < 1e-9, "PctOfTotal {k}: {}", pct[&k]);
+    }
+}
+
+#[tokio::test]
+async fn bare_division_reset_share_groups_by_a_fact_column() {
+    // BUG-0444 isolation: ONE grand-total subquery, no DIVIDE repetition.
+    let engine = clear_engine();
+    let req = QueryRequest {
+        measures: vec!["ShareRatio".into()],
+        group_by: vec![ColumnRef::new("Sales", "prod_id")],
+        ..Default::default()
+    };
+    let batches = engine
+        .query(req)
+        .await
+        .expect("a bare-division RESET share must group by a fact column");
+    let ratio = grouped_i64(&batches, "prod_id", "ShareRatio");
+    assert!((ratio[&1] - 130.0 / 190.0).abs() < 1e-9, "{}", ratio[&1]);
+    assert!((ratio[&2] - 60.0 / 190.0).abs() < 1e-9, "{}", ratio[&2]);
+}
+
+fn format_engine() -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Product",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one("Sales_Product", "Sales", "prod_id", "Product", "id"))
+        .add_measure(expression_measure(
+            "Fmt",
+            parse_measure("FORMAT(SUM(Sales[amount]) * 10, \"#,0.00\")").unwrap(),
+        ))
+        .add_measure(expression_measure(
+            "FmtCurrency",
+            parse_measure("FORMAT(SUM(Sales[amount]) * 10, \"Currency\")").unwrap(),
+        ))
+        .add_measure(expression_measure(
+            "FmtPct",
+            parse_measure("FORMAT(SUM(Sales[amount]) / 190, \"0.0%\")").unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Product", 0, SourceBinding::new("public", "product"));
+    let base = clear_engine();
+    for table in ["Sales", "Product"] {
+        let batch = base.cache.get(table).expect("fixture batch").clone();
+        engine.cache.store(table, batch).unwrap();
+    }
+    engine
+}
+
+fn grouped_text(batches: &[RecordBatch], measure_col: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for b in batches {
+        let g = b.column(col_idx(b, "name"));
+        let m = b.column(col_idx(b, measure_col));
+        let m = arrow::compute::cast(m, &ArrowType::Utf8).unwrap();
+        let m = m.as_any().downcast_ref::<StringArray>().unwrap().clone();
+        for row in 0..b.num_rows() {
+            let key = if let Some(a) = g.as_any().downcast_ref::<StringArray>() {
+                a.value(row).to_string()
+            } else if let Some(a) = g.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+                let values = a.values().as_any().downcast_ref::<StringArray>().unwrap();
+                values.value(a.key(row).unwrap()).to_string()
+            } else {
+                panic!("unexpected group array type: {:?}", g.data_type());
+            };
+            out.insert(key, m.value(row).to_string());
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn dax_format_writes_the_format_string_in_the_engines_culture() {
+    // BUG-0522: FORMAT compiled to SQL TO_CHAR, which does not read DAX's
+    // format strings at all. Bikes 130 * 10 = 1300, Helmets 600.
+    let mut engine = format_engine();
+    let req = QueryRequest {
+        measures: vec!["Fmt".into(), "FmtCurrency".into(), "FmtPct".into()],
+        group_by: vec![ColumnRef::new("Product", "name")],
+        ..Default::default()
+    };
+    let batches = engine.query(req.clone()).await.expect("FORMAT under en-US");
+    let fmt = grouped_text(&batches, "Fmt");
+    assert_eq!(fmt["Bikes"], "1,300.00");
+    assert_eq!(fmt["Helmets"], "600.00");
+    assert_eq!(grouped_text(&batches, "FmtCurrency")["Bikes"], "$1,300.00");
+    assert_eq!(grouped_text(&batches, "FmtPct")["Bikes"], "68.4%");
+
+    // The same engine under sv-SE: the cache must not serve the en-US text.
+    engine.set_format_culture(crate::FormatCulture::sv_se());
+    let batches = engine.query(req).await.expect("FORMAT under sv-SE");
+    assert_eq!(grouped_text(&batches, "Fmt")["Bikes"], "1\u{a0}300,00");
+    assert_eq!(grouped_text(&batches, "FmtCurrency")["Bikes"], "1\u{a0}300,00\u{a0}kr");
+    assert_eq!(grouped_text(&batches, "FmtPct")["Bikes"], "68,4%");
+}
+
+
+/// One ungrouped measure's answer over `engine`, as text (`None` = NULL).
+async fn scalar_text(engine: &Engine, measure: &str) -> Result<Option<String>, String> {
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec![measure.into()],
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1, "{measure}: one row");
+    let column = batches[0].column(0);
+    Ok((!column.is_null(0)).then(|| arrow::util::display::array_value_to_string(column, 0).unwrap()))
+}
+
+#[tokio::test]
+async fn a_reset_total_over_an_empty_fact_table_is_blank() {
+    // rev-backend-7: `hoist_clear_scalars` (BUG-0444) moved a compound
+    // measure's RESET total into `FROM fact CROSS JOIN (one row)`, which has
+    // NO rows when the fact table is empty, so an ungrouped query reads the
+    // total as NULL (BLANK) where the inline subquery read the empty set's
+    // COUNT, 0. BLANK is kept: it is DAX's answer (COUNTROWS of an empty
+    // table is BLANK, and BLANK / BLANK is BLANK), and the 0 made the share
+    // 0 / 0 -- an integer divide-by-zero that failed the whole query.
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_measure(expression_measure(
+            "RowShare",
+            parse_measure("COUNTROWS(Sales) / COUNTROWS(Sales, RESET())").unwrap(),
+        ))
+        .add_measure(expression_measure(
+            "RowShareDivide",
+            parse_measure("DIVIDE(COUNTROWS(Sales), COUNTROWS(Sales, RESET()))").unwrap(),
+        ))
+        .add_measure(expression_measure(
+            "AmountShare",
+            parse_measure("SUM(Sales[amount]) / SUM(Sales[amount], RESET())").unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine
+        .cache
+        .store(
+            "Sales",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("prod_id", ArrowType::Int64, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(Vec::<i64>::new())),
+                    Arc::new(Float64Array::from(Vec::<f64>::new())),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        scalar_text(&engine, "RowShare").await,
+        Ok(None),
+        "COUNTROWS(Sales) / COUNTROWS(Sales, RESET()) over an empty table is BLANK"
+    );
+    assert_eq!(scalar_text(&engine, "RowShareDivide").await, Ok(None), "DIVIDE of the same is BLANK");
+    assert_eq!(scalar_text(&engine, "AmountShare").await, Ok(None), "a SUM share is BLANK too");
+}
+

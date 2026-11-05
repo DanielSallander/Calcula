@@ -827,9 +827,32 @@ export function isFormatLineRect(
   return exceptions < selected && exceptions <= ALMOST_WHOLE_EXCEPTION_LIMIT;
 }
 
-/** A format / clear rectangle: [startRow, startCol, endRow, endCol, sheetIndex?],
- *  bounded as the section comment above says. */
-export const vFormatRangeRef: Validator = ([startRow, startCol, endRow, endCol, sheetIndex]) => {
+/**
+ * THE RESTRICTED TIER'S BOUND for a format or clear rectangle that is NOT whole
+ * lines (BUG-0659): the same 100,000 cells as every other restricted range call.
+ *
+ * WHY THE TIERS DIFFER. A whole-line rectangle is written as one row / column
+ * format per line, O(lines), so it stays unbounded at both tiers (VBA's
+ * `Columns("C").ClearFormats` in a distributed macro). Any OTHER rectangle is
+ * written cell by cell: every position becomes a stored cell AND an undo entry,
+ * and the undo history keeps a hundred steps. At the backend's own 4,000,000
+ * a restricted script -- an application's code, which the person did not
+ * write -- could keep 400 million undo entries alive in a loop with no rate
+ * limit (a standing script's calls are a step each; a granted macro run's are
+ * one step bounded only by its 10-second deadline), which takes the whole
+ * session down. At 100,000 the same loop holds 10 million. The user's OWN code
+ * (the unlocked tier) keeps the backend's bound: that is the person spending
+ * their own memory. A per-minute limit was considered and not taken: a bound per
+ * call is what bounds the memory a step holds, and a rate limit would refuse the
+ * same work depending on how fast the machine is.
+ */
+export const MAX_RESTRICTED_FORMAT_RECT_CELLS = MAX_RANGE_CELLS;
+
+/** The format / clear rectangle check, against `maxCells` for non-line rectangles. */
+function checkFormatRect(
+  [startRow, startCol, endRow, endCol, sheetIndex]: unknown[],
+  maxCells: number,
+): true | string {
   if (!isCellCoord(startRow)) return "startRow must be a non-negative integer";
   if (!isCellCoord(startCol)) return "startCol must be a non-negative integer";
   if (!isCellCoord(endRow)) return "endRow must be a non-negative integer";
@@ -838,14 +861,24 @@ export const vFormatRangeRef: Validator = ([startRow, startCol, endRow, endCol, 
   if (r1 < r0) return "endRow must be >= startRow";
   if (c1 < c0) return "endCol must be >= startCol";
   const cells = (r1 - r0 + 1) * (c1 - c0 + 1);
-  if (cells > MAX_FORMAT_RECT_CELLS && !isFormatLineRect(r0, c0, r1, c1)) {
+  if (cells > maxCells && !isFormatLineRect(r0, c0, r1, c1)) {
     return (
-      `range too large: ${cells} cells (max ${MAX_FORMAT_RECT_CELLS}, ` +
+      `range too large: ${cells} cells (max ${maxCells}, ` +
       "unless it is whole rows or whole columns)"
     );
   }
   return checkOptionalSheetRef(sheetIndex);
-};
+}
+
+/** A format / clear rectangle: [startRow, startCol, endRow, endCol, sheetIndex?],
+ *  bounded as the section comment above says (the UNLOCKED rows). */
+export const vFormatRangeRef: Validator = (args) => checkFormatRect(args, MAX_FORMAT_RECT_CELLS);
+
+/** The same rectangle at the RESTRICTED tier's bound (`MAX_RESTRICTED_FORMAT_RECT_CELLS`):
+ *  the `sheet.*` format rows, and -- through `explicitRunArgsRefusal` -- an
+ *  application macro's granted run. Whole lines stay unbounded. */
+export const vFormatRangeRefRestricted: Validator = (args) =>
+  checkFormatRect(args, MAX_RESTRICTED_FORMAT_RECT_CELLS);
 
 /** Bulk range WRITE args: [startRow, startCol, values, sheetIndex?]. `values` is
  *  a rows x cols grid of cell values (string | number | boolean | null)
@@ -1318,9 +1351,11 @@ export function checkFormatObject(
   return true;
 }
 
-/** setRangeFormat args: [startRow, startCol, endRow, endCol, format, sheetIndex?]. */
+/** setRangeFormat args: [startRow, startCol, endRow, endCol, format, sheetIndex?].
+ *  The RESTRICTED row's validator, so its non-line rectangles take the
+ *  restricted bound (`vFormatRangeRefRestricted`, BUG-0659). */
 export const vRangeFormat: Validator = ([startRow, startCol, endRow, endCol, format, sheetIndex]) => {
-  const rect = vFormatRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  const rect = vFormatRangeRefRestricted([startRow, startCol, endRow, endCol, sheetIndex]);
   if (rect !== true) return rect;
   return checkFormatObject(format);
 };
@@ -1787,6 +1822,43 @@ export const vConsolidate: Validator = ([params]) => {
 
 /** The most rows/columns one insert/delete call may move. */
 export const MAX_STRUCTURAL_COUNT = 1_000_000;
+
+/**
+ * api.insertCells / api.deleteCells args (BUG-0358; VBA's `Range.Insert Shift`
+ * / `Range.Delete Shift`): [startRow, startCol, endRow, endCol, shift,
+ * options?]. `shift` is "right" | "down" for an insert and "left" | "up" for a
+ * delete; `options` is `{ unmergeCutMerges?: boolean }` -- the answer to
+ * Excel's "This operation will cause some merged cells to unmerge" question,
+ * which a script cannot be asked. The ACTIVE sheet only (the backend command
+ * has no sheet parameter).
+ */
+function cellShiftValidator(shifts: readonly string[]): Validator {
+  return ([startRow, startCol, endRow, endCol, shift, options]) => {
+    if (!isCellCoord(startRow)) return "startRow must be a non-negative integer";
+    if (!isCellCoord(startCol)) return "startCol must be a non-negative integer";
+    if (!isCellCoord(endRow)) return "endRow must be a non-negative integer";
+    if (!isCellCoord(endCol)) return "endCol must be a non-negative integer";
+    if ((endRow as number) < (startRow as number)) return "endRow must be >= startRow";
+    if ((endCol as number) < (startCol as number)) return "endCol must be >= startCol";
+    if (typeof shift !== "string" || !shifts.includes(shift)) {
+      return `shift must be one of: ${shifts.join(", ")}`;
+    }
+    if (options === undefined || options === null) return true;
+    if (typeof options !== "object" || Array.isArray(options)) {
+      return "options must be an object { unmergeCutMerges? }";
+    }
+    for (const [key, value] of Object.entries(options as Record<string, unknown>)) {
+      if (key !== "unmergeCutMerges") return `unknown option "${key}" (allowed: unmergeCutMerges)`;
+      if (typeof value !== "boolean") return "unmergeCutMerges must be a boolean";
+    }
+    return true;
+  };
+}
+
+/** api.insertCells args (see `cellShiftValidator`). */
+export const vInsertCells: Validator = cellShiftValidator(["right", "down"]);
+/** api.deleteCells args (see `cellShiftValidator`). */
+export const vDeleteCells: Validator = cellShiftValidator(["left", "up"]);
 
 /** insertRows / deleteRows / insertColumns / deleteColumns args:
  *  [start, count, sheetIndex?]. */
@@ -5780,6 +5852,17 @@ export function checkShapeSetProperty(aspectArgs: unknown): true | string {
   // huge value is refused by size first. "" clears to the family default.
   const containerWhy = checkControlContainerValue(name, value);
   if (containerWhy !== null) return containerWhy;
+  // NOT HERE: whether a `container*` key is one the control PAINTS depends on
+  // the control's TYPE (@api/visualContainer CONTROL_PAINTED_CONTAINER_FIELDS,
+  // BUG-0491): a Page Navigator's container IS `containerBackgroundColor`,
+  // while on a shape it is a dead second spelling of `fill`; a button paints
+  // no title and no padding, a shape no corner radius. Every container key is
+  // painted by SOME type, so a stateless validator -- which cannot see the
+  // instance -- has nothing it could refuse for every type. The Rust door every
+  // route converges on (`controls::dead_container_key`, at
+  // set_control_property_core -- what shape.setProperty and property.set
+  // reach -- the create door, the Format pane batch and a binding's set)
+  // refuses them at every tier, naming the real key where one exists.
   return true;
 }
 

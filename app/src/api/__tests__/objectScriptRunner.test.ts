@@ -787,8 +787,10 @@ describe("an explicit run of an application's macro (owner decision B)", () => {
   const CELLS_ONLY =
     'async function m(api) { await api.beginBatch("M"); await api.setCellValue(0, 0, "OWNER-B"); await api.commitBatch(); }\n' +
     "function setup(context) { if (!context.api) return; return m(context.api); }\n";
+  // Sorting is outside the grant (cells and, since 2026-11-04, formatting);
+  // the name is kept from when formatting was outside it too.
   const FORMATS =
-    'async function m(api) { await api.setCellValue(0, 0, "OWNER-B"); await api.setRangeFormat(0, 0, 0, 0, { bold: true }); }\n' +
+    'async function m(api) { await api.setCellValue(0, 0, "OWNER-B"); await api.sortRange(0, 0, 4, 0, [{ column: 0 }]); }\n' +
     "function setup(context) { return m(context.api); }\n";
 
   it("(a)+(c) forwards the SAME pass to the mount, at the restricted tier", async () => {
@@ -824,7 +826,7 @@ describe("an explicit run of an application's macro (owner decision B)", () => {
     } catch (err) {
       message = err instanceof Error ? err.message : String(err);
     }
-    expect(message).toContain("api.setRangeFormat");
+    expect(message).toContain("api.sortRange");
     expect(message).toContain("Nothing was changed");
     expect(message).toContain('"Sales"');
     expect(hostMountScript).not.toHaveBeenCalled();
@@ -836,7 +838,7 @@ describe("an explicit run of an application's macro (owner decision B)", () => {
     expect(invokeBackend).toHaveBeenCalledWith("audit_explicit_run_refusal", {
       scriptId: "macro-f",
       source: FORMATS,
-      methods: ["api.setRangeFormat"],
+      methods: ["api.sortRange"],
     });
     expect(message, "a recorded refusal claimed it was not recorded").not.toContain("could not be recorded");
   });

@@ -14,7 +14,15 @@ import {
 import { useGridState, useGridDispatch, stopEditing } from "../../state";
 import { setGlobalEditingValue, resetArrowRefState } from "../../hooks/useEditing";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
-import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
+import {
+  updateCellsBatch,
+  beginUndoTransaction,
+  commitUndoTransaction,
+  cancelUndoTransaction,
+  getMergedRegions,
+  shiftFormulasBatch,
+  getRangeCellsTyped,
+} from "../../lib/tauri-api";
 import {
   ownUndoTransaction,
   type OwnedUndoTransaction,
@@ -22,6 +30,9 @@ import {
 } from "../../lib/undoTransactionOwnership";
 import { cellEvents } from "../../lib/cellEvents";
 import { checkRangeGuards } from "../../lib/editGuards";
+import { selectionBlocks, boundingBox } from "../../lib/merge/mergeGeometry";
+import { ctrlEnterCells, ctrlEnterFill } from "../../lib/ctrlEnterFill";
+import { isActiveSheetFilterMode } from "../../../api/autoFilterService";
 import { refuseIfSelectionOwned, setGridCellEditorOpener, setGridCellTextCommitter } from "../../lib/selectionOwner";
 import {
   beginEditorOpen,
@@ -426,23 +437,29 @@ export function useSpreadsheetEditing({
     // Capture the value before canceling the edit
     const fillValue = editing.value;
 
-    // Determine the selection bounds
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
+    // EVERY AREA of the selection (BUG-0396). Excel fills each block of a
+    // Ctrl+click / Go To Special selection, not only the main one, and a
+    // FORMULA is entered RELATIVE TO THE ACTIVE CELL in every cell -- measured
+    // live (Excel 16, 2026-11-04, lane multiarea probe2): "=B1" Ctrl+Enter over
+    // A1:A2, C3, E5:F5 with A1 active writes A1 =B1, A2 =B2, C3 =D3, E5 =F5,
+    // F5 =G5; with C3 active, C3 =B1 and A1 / A2 =#REF! (off the sheet). It
+    // used to fill the main block alone, with the same text in every cell.
+    const blocks = selectionBlocks(selection);
+    const single =
+      blocks.length === 1 && blocks[0].startRow === blocks[0].endRow && blocks[0].startCol === blocks[0].endCol;
 
-    // ASK THE RANGE GUARDS FIRST. The fill below is a bulk write that bypasses
-    // the commit guards, and the backend batch path SKIPS a guarded cell
-    // silently -- so a guarded selection used to lose the typed value with no
-    // draft, no marker and no message. A guard that allows a single-cell EDIT
-    // but not a bulk write (a writeback cell collects one answer at a time)
-    // gets the value through the normal commit, where its commit guard runs;
-    // anything else refused keeps the editor open and says why.
-    const fillGuard = checkRangeGuards(minRow, minCol, maxRow, maxCol, "other");
-    if (fillGuard?.blocked) {
-      const single = minRow === maxRow && minCol === maxCol;
-      if (single && !checkRangeGuards(minRow, minCol, maxRow, maxCol, "edit")?.blocked) {
+    // ASK THE RANGE GUARDS FIRST, for every block. The fill below is a bulk
+    // write that bypasses the commit guards, and the backend batch path SKIPS
+    // a guarded cell silently -- so a guarded selection used to lose the typed
+    // value with no draft, no marker and no message. A guard that allows a
+    // single-cell EDIT but not a bulk write (a writeback cell collects one
+    // answer at a time) gets the value through the normal commit, where its
+    // commit guard runs; anything else refused keeps the editor open and says
+    // why -- and writes NO block, as Excel refuses the whole entry.
+    for (const b of blocks) {
+      const fillGuard = checkRangeGuards(b.startRow, b.startCol, b.endRow, b.endCol, "other");
+      if (!fillGuard?.blocked) continue;
+      if (single && !checkRangeGuards(b.startRow, b.startCol, b.endRow, b.endCol, "edit")?.blocked) {
         // Excel's Ctrl+Enter on one cell: commit and stay.
         const ok = await handleCommitEdit();
         if (ok) focusContainerRef.current?.focus();
@@ -460,18 +477,30 @@ export function useSpreadsheetEditing({
     // batch it joins, and the script closes that step (wave E, Y7).
     let tx: OwnedUndoTransaction | null = null;
     try {
-      const updates: CellUpdateInput[] = [];
-      for (let row = minRow; row <= maxRow; row++) {
-        for (let col = minCol; col <= maxCol; col++) {
-          updates.push({ row, col, value: fillValue });
-        }
-      }
+      // Which cells (rev-ui-4, Excel [LIVE]): a merged area's top-left cell
+      // only, and -- while the sheet is in filter mode -- none on a hidden
+      // row or column (core/lib/ctrlEnterFill.ts).
+      const box = boundingBox(blocks);
+      const [merges, filterMode] = await Promise.all([
+        box ? getMergedRegions(box) : Promise.resolve([]),
+        isActiveSheetFilterMode(),
+      ]);
+      const cells = ctrlEnterCells(blocks, {
+        merges,
+        hiddenRows: filterMode ? state.dimensions.hiddenRows ?? null : null,
+        hiddenCols: filterMode ? state.dimensions.hiddenCols ?? null : null,
+      });
 
-      tx = ownUndoTransaction(await beginUndoTransaction(`Fill ${updates.length} cells`), UNDO_CLOSES);
-      const updatedCells = await updateCellsBatch(updates);
+      tx = ownUndoTransaction(await beginUndoTransaction(`Fill ${cells.length} cells`), UNDO_CLOSES);
+      // The ACTIVE cell's entry decides what every cell gets (rev-ui-5).
+      const updatedCells = await ctrlEnterFill(fillValue, cells, { row: editing.row, col: editing.col }, {
+        write: (updates) => updateCellsBatch(updates),
+        shift: (inputs) => shiftFormulasBatch(inputs),
+        typeAt: async (row, col) => (await getRangeCellsTyped(row, col, row, col))[0]?.type ?? "empty",
+      });
       await tx.commit();
 
-      console.log(`[useSpreadsheetEditing] Ctrl+Enter filled ${updates.length} cells, ${updatedCells.length} updated`);
+      console.log(`[useSpreadsheetEditing] Ctrl+Enter filled ${cells.length} cells, ${updatedCells.length} updated`);
 
       // Emit a single event to trigger canvas refresh
       if (updatedCells.length > 0) {
@@ -494,7 +523,7 @@ export function useSpreadsheetEditing({
     }
 
     focusContainerRef.current?.focus();
-  }, [editing, selection, cancelEdit, handleCommitEdit, focusContainerRef]);
+  }, [editing, selection, state.dimensions, cancelEdit, handleCommitEdit, focusContainerRef]);
 
   // Handler for arrow key cell reference navigation in formula mode
   const handleArrowKeyReference = useCallback(

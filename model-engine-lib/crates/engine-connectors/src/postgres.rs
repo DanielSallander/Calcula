@@ -953,15 +953,23 @@ mod pg_dialect {
                     Some(a) => expr_to_sql_with_clear(a, table_map, group_by)?,
                     None => "NULL".to_string(),
                 };
-                Ok(format!(
-                    "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
+                Ok(engine_core::compute::dax_semantics::safe_divide_sql(
+                    &n,
+                    &d,
+                    &alt,
+                    "DOUBLE PRECISION",
                 ))
             }
-            Expression::BinaryOp { left, op, right } => {
-                let l = expr_to_sql_with_clear(left, table_map, group_by)?;
-                let r = expr_to_sql_with_clear(right, table_map, group_by)?;
-                Ok(format!("({l} {} {r})", op.as_sql()))
-            }
+            // DAX BLANK arithmetic (`engine_core::compute::dax_semantics`);
+            // PostgreSQL's float division by zero is an error, so the zero
+            // denominator is guarded.
+            Expression::BinaryOp { .. } => engine_core::compute::dax_semantics::render_binary(
+                expr,
+                engine_core::compute::dax_semantics::DivideStyle::Guarded {
+                    cast: "DOUBLE PRECISION",
+                },
+                &mut |e| expr_to_sql_with_clear(e, table_map, group_by),
+            ),
             Expression::If {
                 condition,
                 then_expr,
@@ -1132,12 +1140,16 @@ mod tests {
         );
 
         let sql = pg_dialect::expr_to_sql(&expr, &table_map).unwrap();
+        // Re-pinned for DAX's BLANK semantics (round C): a count is BLANK,
+        // never 0 (`NULLIF(COUNT(..), 0)`), DIVIDE answers its alternate
+        // for a zero OR BLANK denominator (`COALESCE(d, 0) = 0`), and a BLANK
+        // measure-level value compares as 0 against a number.
         assert_eq!(
             sql,
-            "CASE WHEN (SUM(CASE WHEN \"production_product\".\"category\" = 'O''Brien' \
-             THEN \"amount\" END) > 1000) THEN 'it''s high' \
-             ELSE CASE WHEN COUNT(\"id\") = 0 THEN NULL \
-             ELSE CAST(SUM(\"amount\") AS DOUBLE PRECISION) / COUNT(\"id\") END END"
+            "CASE WHEN (COALESCE(SUM(CASE WHEN \"production_product\".\"category\" = 'O''Brien' \
+             THEN \"amount\" END), 0) > 1000) THEN 'it''s high' \
+             ELSE CASE WHEN COALESCE(NULLIF(COUNT(\"id\"), 0), 0) = 0 THEN NULL \
+             ELSE (CAST(SUM(\"amount\") AS DOUBLE PRECISION) / NULLIF(COUNT(\"id\"), 0)) END END"
         );
     }
 
@@ -1178,6 +1190,31 @@ mod tests {
         let sql = pg_dialect::expr_to_sql(&expr, &table_map).unwrap();
         assert!(sql.contains("'x''); DROP TABLE t; --'"), "{sql}");
         assert!(!sql.contains("= 'x');"), "{sql}");
+    }
+
+    #[test]
+    fn pg_join_expression_counts_only_the_rows_a_keep_keeps() {
+        // Open-ledger round D (NEW-countrows-keep-pushdown): the pushed
+        // `COUNTROWS(Sales, KEEP(...))` rendered a plain COUNT(*), counting
+        // every row. Through the connector's join-expression door.
+        use engine_core::compute::parser::parse_measure_expression;
+        use sql_builder::ExpressionDialect;
+
+        let expr = parse_measure_expression(
+            "COUNTROWS(Sales, KEEP(Products, Products[category] = \"Bikes\"))",
+        )
+        .unwrap();
+        let table_map = vec![
+            ("Sales".to_string(), "fact_sales".to_string()),
+            ("Products".to_string(), "product".to_string()),
+        ];
+        let sql = PostgresDialect
+            .render_join_expression(&expr, &table_map, &[])
+            .unwrap();
+        assert_eq!(
+            sql,
+            "SUM(CASE WHEN \"product\".\"category\" = 'Bikes' THEN 1 END)"
+        );
     }
 
     #[test]

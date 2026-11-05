@@ -307,7 +307,8 @@ function interpreterReachSubject(macros: boolean, buttons: boolean, objectScript
  * What an application's macro WRITTEN AS AN OBJECT SCRIPT (the Macro
  * Recorder's default) may do once approved -- owner decision B: when YOU run
  * it, from one of the doors that carry a person's pass, it may also read and
- * change the cells of any sheet, and nothing more; a run that stops part-way
+ * change the cells of any sheet and how they look (owner, 2026-11-04), and
+ * nothing more; a run that stops part-way
  * is undone whole (follow-up F9); started by another script it keeps only what
  * every restricted script has. Every clause is a statement about the code
  * (scriptHost/explicitRunGrant.ts, host.ts), and the doors named are the ones
@@ -330,11 +331,11 @@ export function describeObjectScriptMacroReach(objectScriptMacros: number, macro
     `${subject}: ${runs} once, in a restricted space of its own, not in Calcula's interpreter. ` +
     `When you run ${one} yourself -- from Developer ▸ Macros ▸ Run, by clicking a button that ` +
     "runs it, or from the command line -- it may also read and change the cells of any sheet " +
-    "in this workbook (filling a range also copies the formatting of the cells it fills from, " +
-    "as a module macro's fill does), and nothing more: no other formatting, no sheet " +
-    "structure, no files, no other macros. If it stops part-way, every change it made is " +
-    "undone. Started by another script, it has only what every restricted script has: the " +
-    "sheet on screen."
+    "in this workbook and how they look (fonts, colours, number formats, borders, cell styles " +
+    "and the size of rows and columns), and nothing more: it cannot lock or unlock cells, " +
+    "hide or show rows, change the sheets' structure, or reach files or other macros. If it " +
+    "stops part-way, every change it made is undone. Started by another script, it has only " +
+    "what every restricted script has: the sheet on screen."
   );
 }
 
@@ -462,7 +463,8 @@ export default function ScriptConsentDialog({
   // Which of those macros are WRITTEN AS OBJECT SCRIPTS (the Macro Recorder's
   // default, `runtime=objectScript`): they do not run in the interpreter the
   // macro paragraph describes, and since owner decision B a run YOU start may
-  // change the cells of any sheet -- so they get a paragraph of their own.
+  // change the cells of any sheet, and how they look -- so they get a
+  // paragraph of their own.
   const objectScriptMacroIdSet = new Set((data?.objectScriptMacroIds as string[] | undefined) ?? []);
   const objectScriptMacroCount = moduleScriptIds.filter((id) => objectScriptMacroIdSet.has(id)).length;
   const runtimeMacroCount = moduleScriptNames.length - objectScriptMacroCount;
@@ -1052,7 +1054,7 @@ export default function ScriptConsentDialog({
 
                     A macro WRITTEN AS AN OBJECT SCRIPT is not on that surface: it
                     runs in a restricted worker realm, and owner decision B gives a
-                    run YOU start cell access on any sheet and nothing more. It gets
+                    run YOU start cell access and formatting on any sheet and nothing more. It gets
                     its own paragraph below; this one then names the runtime it
                     describes, and is left out when no macro runs there. */}
                 {(runtimeMacroCount > 0 || buttonActions.length > 0) && (

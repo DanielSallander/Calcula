@@ -1666,27 +1666,35 @@ export async function canEditCell(
  * call (the backend's `can_edit_cell` with `cells`): the answer names the first
  * refused cell in list order. An empty list makes no call and can edit.
  * @param cells - The cells, 0-based
+ * @param opts - `target`: the cells are a floating grid's OWN cells, asked of
+ *   its backing cells' lock flags under its HOST's protection (BUG-0655);
+ *   without it, the active sheet's cells.
  */
 export async function canEditCells(
   cells: ReadonlyArray<{ row: number; col: number }>,
+  opts?: CellTargetOptions,
 ): Promise<ProtectionCheckResult> {
   if (cells.length === 0) return { canEdit: true };
   return invoke<ProtectionCheckResult>("can_edit_cell", {
     row: 0,
     col: 0,
     cells: cells.map((c) => ({ row: c.row, col: c.col })),
+    ...cellTargetArg("can_edit_cell", opts),
   });
 }
 
 /**
  * Check if a specific action can be performed.
  * @param action - Action name (e.g., "formatCells", "insertRows")
+ * @param opts - `target`: the action on a floating grid's cells, asked of its
+ *   HOST's protection (BUG-0655); without it, the active sheet's.
  * @returns Check result with reason if blocked
  */
 export async function canPerformAction(
-  action: string
+  action: string,
+  opts?: CellTargetOptions,
 ): Promise<ProtectionCheckResult> {
-  return invoke<ProtectionCheckResult>("can_perform_action", { action });
+  return invoke<ProtectionCheckResult>("can_perform_action", { action, ...cellTargetArg("can_perform_action", opts) });
 }
 
 /**
@@ -2335,7 +2343,24 @@ export interface CellConditionalFormat {
   row: number;
   col: number;
   format: ConditionalFormat;
+  /**
+   * A data bar's LENGTH, 0..1 of the cell's bar area: from the axis when
+   * `dataBarAxis` is set, else from the start edge (left; right under
+   * right-to-left).
+   */
   dataBarPercent?: number;
+  /**
+   * Where a data bar's AXIS sits, 0..1 of the bar area from its start edge.
+   * Absent when no axis is drawn (no negatives under Automatic, or axis None).
+   */
+  dataBarAxis?: number;
+  /** The value is negative: the bar runs from the axis toward the start edge, in the negative colours. */
+  dataBarNegative?: boolean;
+  /**
+   * The rule shows its glyph only: a data bar's Show Bar Only or an icon set's
+   * Show Icon Only. The cell's value is not painted.
+   */
+  hideValue?: boolean;
   iconIndex?: number;
   /**
    * WHICH icon set `iconIndex` belongs to, resolved by the backend from the rule
@@ -2612,6 +2637,9 @@ export interface TableColumn {
   totalsRowFunction: TotalsRowFunction;
   totalsRowFormula?: string;
   calculatedFormula?: string;
+  /** Excel's `totalsRowLabel`: the constant a column with no totals function
+   *  showed when its totals row was last hidden, put back when it is shown. */
+  totalsRowLabel?: string;
 }
 
 /**

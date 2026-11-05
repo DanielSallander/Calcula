@@ -113,6 +113,8 @@ const PINNED: ReadonlyArray<{ rust: string; ts: string; fields: string[]; option
   { rust: "pub struct MeasureFieldInfo", ts: "export interface BiMeasureFieldInfo", fields: ["format_string"], optional: true },
   // P2 S7: the member shape on pivot headers and filter lists.
   { rust: "pub struct PivotCellData", ts: "export interface PivotCellData", fields: ["member"], optional: true },
+  // Open-ledger round D: which non-finite number a "#NUM!" value cell holds.
+  { rust: "pub struct PivotCellData", ts: "export interface PivotCellData", fields: ["non_finite"], optional: true },
   { rust: "pub struct FilterRowData", ts: "export interface FilterRowData", fields: ["members", "selected_values"], optional: false },
   {
     rust: "pub struct FieldUniqueValuesResponse",

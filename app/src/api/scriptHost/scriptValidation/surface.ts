@@ -195,11 +195,12 @@ export function surfaceScopeFor(objectType?: string): SurfaceScope {
 }
 
 /**
- * chain -> the capabilities calling it can require.
- *
- * DELIBERATELY NOT SCOPED. What the broker demands is a property of the MEMBER,
- * not of the object it hangs off, and L2's asymmetry (§11.2) rests on never
- * talking an author out of a declaration it cannot prove wrong.
+ * chain -> the capabilities calling it can require, through ANY door: the union
+ * over every row of the chain. What the validator asks is the DOOR-scoped
+ * answer, `capabilitiesForDoor` below -- a chain whose doors disagree has one
+ * row per door, and the union would demand of a panel script's `close()` the
+ * `ui.dialog` only a form's needs. L2's asymmetry (§11.2) still holds: a
+ * declaration the scan cannot match is a notice, never a rejection.
  */
 const CAPABILITY_BY_CHAIN: ReadonlyMap<string, ReadonlySet<CapabilityId>> = (() => {
   const out = new Map<string, Set<CapabilityId>>();
@@ -243,6 +244,69 @@ export function capabilitiesFor(chain: string): ReadonlySet<CapabilityId> {
 
 export function surfaceMember(chain: string): SurfaceMember | undefined {
   return SCRIPT_SURFACE.find((m) => m.chain === chain);
+}
+
+// ---------------------------------------------------------------------------
+// The DOOR a chain is reached through (BUG-0472's rows, used)
+// ---------------------------------------------------------------------------
+
+/** chain -> every row for it, in emitted order. */
+const ROWS_BY_CHAIN: ReadonlyMap<string, readonly SurfaceMember[]> = (() => {
+  const out = new Map<string, SurfaceMember[]>();
+  for (const m of SCRIPT_SURFACE) {
+    const list = out.get(m.chain) ?? [];
+    list.push(m);
+    out.set(m.chain, list);
+  }
+  return out;
+})();
+
+/** The interfaces a scope reaches: its own context, the base, and every sub-interface its chains hang off. */
+const REACHED_IFACES = new WeakMap<SurfaceScope, ReadonlySet<string>>();
+function reachedIfaces(scope: SurfaceScope): ReadonlySet<string> {
+  const cached = REACHED_IFACES.get(scope);
+  if (cached) return cached;
+  const out = new Set<string>(["BaseObjectContext"]);
+  if (scope.iface) out.add(scope.iface);
+  // A ROOT row's iface is a context: only the scope's own counts (a table
+  // script's `range` must not bring SheetContext in through SheetContext's row
+  // of the same name). A sub-object's iface is reached when its chain is.
+  for (const m of SCRIPT_SURFACE) {
+    if (m.chain !== m.path && scope.chains.has(m.chain)) out.add(m.iface);
+  }
+  REACHED_IFACES.set(scope, out);
+  return out;
+}
+
+/**
+ * The rows for `chain` that THIS scope's door reaches. A chain whose doors
+ * disagree has one row per door (`via`, generated/scriptSurfacePolicy.ts): a
+ * SHEET script's `range.setValues` is `sheet.setRangeValues`, a TABLE script's
+ * is `object.setState`, and a FORM script's `close` needs `ui.dialog` while a
+ * PANEL script's needs nothing. Reading the first row for every scope gave a
+ * panel script's `close()` a capability error it does not have. An unnarrowed
+ * scope (no object type) keeps every row; a narrowed one that reaches none of
+ * the doors (a probe/table mismatch) keeps every row too, the fail-open
+ * direction for a linter.
+ */
+export function rowsForDoor(chain: string, scope: SurfaceScope): readonly SurfaceMember[] {
+  const rows = ROWS_BY_CHAIN.get(chain) ?? [];
+  if (!scope.narrowed || rows.every((m) => m.via === undefined)) return rows;
+  const reached = reachedIfaces(scope);
+  const mine = rows.filter((m) => m.via === undefined || reached.has(m.via));
+  return mine.length > 0 ? mine : rows;
+}
+
+/** The capabilities calling `chain` requires THROUGH THE DOOR `scope` reaches. */
+export function capabilitiesForDoor(chain: string, scope: SurfaceScope): ReadonlySet<CapabilityId> {
+  const out = new Set<CapabilityId>();
+  for (const m of rowsForDoor(chain, scope)) if (m.capability) out.add(m.capability);
+  return out;
+}
+
+/** The row `chain` dispatches through in `scope` (its broker and tier), or undefined. */
+export function surfaceMemberForDoor(chain: string, scope: SurfaceScope): SurfaceMember | undefined {
+  return rowsForDoor(chain, scope)[0];
 }
 
 // ---------------------------------------------------------------------------

@@ -81,7 +81,10 @@ fn a_spill_reference_reached_through_a_defined_name_follows_the_array() {
 
     // A name whose definition is the spill reference itself. Written straight
     // into the store, the way `d2_named_range_tests` does: the CRUD commands
-    // take `State<..>` and cannot run in-process.
+    // take `State<..>` and cannot run in-process. ABSOLUTE, `$A$1#`: a
+    // relative `A1#` means the cell that USES the name, as in Excel
+    // (NEW-relative-name-anchor) -- from C1 that is `C1#`, not the array at
+    // A1. This wrote `=A1#` while a name's `A1` meant A1 from every cell.
     wb.state
         .named_ranges
         .write(&crate::document_effect::test_seed_effect())
@@ -91,7 +94,7 @@ fn a_spill_reference_reached_through_a_defined_name_follows_the_array() {
             crate::named_ranges::NamedRange {
                 name: "Spilled".to_string(),
                 sheet_index: None,
-                refers_to: "=A1#".to_string(),
+                refers_to: "=$A$1#".to_string(),
                 comment: None,
                 folder: None,
             },

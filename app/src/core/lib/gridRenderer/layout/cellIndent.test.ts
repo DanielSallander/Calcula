@@ -39,6 +39,15 @@ describe("alignmentWithIndent", () => {
   });
 });
 
+describe("the indent step (BUG-0364)", () => {
+  it("is 1.5 maximum digit widths of the Normal font: 10.5px for Calibri 11 [LIVE]", () => {
+    // Excel 16, 2026-11-04: Calibri 11 AutoFit of "x" grows 7.875pt (10.5px) a
+    // level; Aptos Narrow 5.625pt (7.5px), Arial 9pt (12px) -- 1.5 x MDW each.
+    expect(INDENT_PX_PER_LEVEL).toBe(10.5);
+    expect(effectiveIndentPx("left", 10)).toBe(105);
+  });
+});
+
 describe("effectiveIndentPx", () => {
   it("is one step per level for Left, Right and General", () => {
     expect(effectiveIndentPx("left", 2)).toBe(2 * INDENT_PX_PER_LEVEL);

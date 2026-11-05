@@ -250,36 +250,31 @@ fn fold(expr: &Expression) -> Result<FoldValue, String> {
         Expression::BinaryOp { left, op, right } => {
             let l = fold(left)?;
             let r = fold(right)?;
-            // NULL propagates through arithmetic (SQL semantics).
-            if l == FoldValue::Blank || r == FoldValue::Blank {
+            // DAX BLANK arithmetic (`BLANK + 5 = 5`, `BLANK * 5 = BLANK`,
+            // `5 / BLANK = Infinity`): the same table the SQL renderers
+            // implement, see `compute::dax_semantics`.
+            let number = |v: &FoldValue| -> Result<Option<f64>, String> {
+                match v {
+                    FoldValue::Blank => Ok(None),
+                    other => other
+                        .as_f64()
+                        .map(Some)
+                        .ok_or_else(|| "non-numeric arithmetic".to_string()),
+                }
+            };
+            let (a, b) = (number(&l)?, number(&r)?);
+            let Some(v) = crate::compute::dax_semantics::arithmetic_f64(a, *op, b) else {
                 return Ok(FoldValue::Blank);
-            }
-            let (a, b) = match (l.as_f64(), r.as_f64()) {
-                (Some(a), Some(b)) => (a, b),
-                _ => return Err("non-numeric arithmetic".to_string()),
             };
-            // Integer-preserving where exact; division always floats, and
-            // division by zero folds to BLANK (the format-string caller
-            // treats BLANK as "fall back").
-            let float = |v: f64| -> FoldValue {
-                match (&l, &r) {
-                    (FoldValue::Int(_), FoldValue::Int(_)) if v.fract() == 0.0 => {
-                        FoldValue::Int(v as i64)
-                    }
-                    _ => FoldValue::Float(v),
-                }
-            };
+            // Integer-preserving where exact (a BLANK operand reads as the
+            // integer 0); division always floats. A division by zero is
+            // +/-Infinity or NaN, which the format-string caller cannot use
+            // as a format and so treats as "fall back".
+            let int_like = |x: &FoldValue| matches!(x, FoldValue::Int(_) | FoldValue::Blank);
             Ok(match op {
-                ArithmeticOp::Add => float(a + b),
-                ArithmeticOp::Subtract => float(a - b),
-                ArithmeticOp::Multiply => float(a * b),
-                ArithmeticOp::Divide => {
-                    if b == 0.0 {
-                        FoldValue::Blank
-                    } else {
-                        FoldValue::Float(a / b)
-                    }
-                }
+                ArithmeticOp::Divide => FoldValue::Float(v),
+                _ if int_like(&l) && int_like(&r) && v.fract() == 0.0 => FoldValue::Int(v as i64),
+                _ => FoldValue::Float(v),
             })
         }
         Expression::SafeDivide {

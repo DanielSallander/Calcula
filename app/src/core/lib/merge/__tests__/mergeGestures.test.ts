@@ -131,7 +131,7 @@ describe("the data-loss warning", () => {
 
     await runMergeGesture("mergeCenter", host(sel(0, 0, 0, 2)));
 
-    expect(realMerges()).toEqual([[0, 0, 0, 2, undefined, { across: false, absorb: true, keepFirstValue: true }]]);
+    expect(realMerges()).toEqual([[0, 0, 0, 2, undefined, { across: false }]]);
     expect(api.applyFormatting).toHaveBeenCalledWith([0], [0, 1, 2], { textAlign: "center" });
     expect(api.beginUndoTransaction).toHaveBeenCalledTimes(1);
     expect(api.beginUndoTransaction).toHaveBeenCalledWith("Merge & Center");
@@ -183,7 +183,7 @@ describe("Merge & Center is a toggle", () => {
 describe("Merge Across, Merge Cells, Unmerge Cells", () => {
   it("Merge Across is ONE across call per block and one undo step, with no alignment", async () => {
     await runMergeGesture("mergeAcross", host(sel(0, 0, 2, 2)));
-    expect(realMerges()).toEqual([[0, 0, 2, 2, undefined, { across: true, absorb: true, keepFirstValue: true }]]);
+    expect(realMerges()).toEqual([[0, 0, 2, 2, undefined, { across: true }]]);
     expect(api.beginUndoTransaction).toHaveBeenCalledTimes(1);
     expect(api.beginUndoTransaction).toHaveBeenCalledWith("Merge Across");
     expect(api.commitUndoTransaction).toHaveBeenCalledTimes(1);
@@ -278,15 +278,17 @@ describe("refusals", () => {
 });
 
 describe("the value rule, the alignment bound, the finish", () => {
-  it("a moved value keeps its readers: references are re-pointed in the same step", async () => {
+  // NEW-merge-first-value: the BACKEND moves the value and re-points its
+  // readers inside the merge's own step, for every merge door (a script's
+  // plain Range.Merge included). A second re-pointing from here would find
+  // the readers already on the top-left cell and turn them into #REF!.
+  it("a moved value keeps its readers: the backend re-points them, the gesture never does it twice", async () => {
     api.mergeCells.mockImplementation(async (_sr: number, _sc: number, _er: number, _ec: number, _s: unknown, o: { probe?: boolean }) =>
       o?.probe ? result() : result({ movedCells: [{ fromRow: 0, fromCol: 1, toRow: 0, toCol: 0 }] }),
     );
     await runMergeGesture("mergeCells", host(sel(0, 0, 0, 2)));
-    expect(api.relocateCellReferences).toHaveBeenCalledWith(0, 1, 0, 1, 0, 0);
-    expect(api.relocateCellReferences.mock.invocationCallOrder[0]).toBeLessThan(
-      api.commitUndoTransaction.mock.invocationCallOrder[0],
-    );
+    expect(api.relocateCellReferences).not.toHaveBeenCalled();
+    expect(api.commitUndoTransaction).toHaveBeenCalledWith(7);
   });
 
   it("centres only the top-left cell of a block bigger than the bound (whole columns)", async () => {

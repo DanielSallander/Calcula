@@ -12,7 +12,7 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, scrollBy } from "../state/gridActions";
-import { getCell, getViewportCells, updateCellsBatch, beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction } from "../lib/tauri-api";
+import { getCell, getViewportCells, updateCellsBatch, beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction, getMergedRegions } from "../lib/tauri-api";
 import { ownUndoTransaction, type UndoTransactionCloses } from "../lib/undoTransactionOwnership";
 import { cellEvents, cellToChange } from "../lib/cellEvents";
 import type { Selection, GridConfig } from "../types";
@@ -22,6 +22,7 @@ import { checkRangeGuards } from "../lib/editGuards";
 import { DEFAULT_AUTO_SCROLL_CONFIG } from "./useMouseSelection/constants";
 import { getGridRegions } from "../../api/gridOverlays";
 import {
+  fillMergeRefusal,
   planFillLine,
   processPendingFills,
   replicateMergeRegions,
@@ -475,6 +476,28 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }
     }
 
+    // Excel refuses a fill over merged cells that are not the source's own
+    // pattern, before anything is written (`fillMergeRefusal`).
+    if (finalRange) {
+      const refusal = fillMergeRefusal(
+        await getMergedRegions(),
+        { startRow: selMinRow, startCol: selMinCol, endRow: selMaxRow, endCol: selMaxCol },
+        {
+          startRow: Math.min(finalRange.startRow, finalRange.endRow),
+          startCol: Math.min(finalRange.startCol, finalRange.endCol),
+          endRow: Math.max(finalRange.startRow, finalRange.endRow),
+          endCol: Math.max(finalRange.startCol, finalRange.endCol),
+        },
+        fillState.direction,
+      );
+      if (refusal) {
+        void alertAsync(refusal);
+        setFillState({ isDragging: false, direction: null, targetRow: 0, targetCol: 0, previewRange: null });
+        dragStartRef.current = null;
+        return;
+      }
+    }
+
     const tx = ownUndoTransaction(await beginUndoTransaction("Fill series"), UNDO_CLOSES);
     try {
       // OPTIMIZATION: Fetch all source cells in a single IPC call
@@ -710,6 +733,18 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
     }
 
     console.log("[FillHandle] autoFillToEdge: Filling down to row", edgeRow);
+
+    // The same merge refusal as a drag fill (`fillMergeRefusal`).
+    const mergeRefusal = fillMergeRefusal(
+      await getMergedRegions(),
+      { startRow: selMinRow, startCol: selMinCol, endRow: selMaxRow, endCol: selMaxCol },
+      { startRow: selMinRow, startCol: selMinCol, endRow: edgeRow, endCol: selMaxCol },
+      "down",
+    );
+    if (mergeRefusal) {
+      void alertAsync(mergeRefusal);
+      return;
+    }
 
     const tx = ownUndoTransaction(await beginUndoTransaction("Auto-fill to edge"), UNDO_CLOSES);
     try {

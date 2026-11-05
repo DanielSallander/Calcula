@@ -74,6 +74,9 @@ pub mod eval_budget;
 pub mod commands;
 pub mod formula;
 pub mod logging;
+/// BUG-0098 diagnostic: a main-thread heartbeat and the in-flight command
+/// registry, so a stall is named in the backend log while it happens.
+pub mod command_watchdog;
 pub mod sheets;
 pub mod floating_range;
 pub mod cell_target;
@@ -188,6 +191,9 @@ pub mod calp_collection;
 pub mod library_commands;
 pub mod extension_install;
 pub mod extension_audit;
+// This computer's append-only trail of collaboration audit rows that belong to
+// no open workbook (a push whose workbook was replaced mid-push). BUG-0653.
+pub mod machine_audit;
 pub mod calp_registry;
 pub mod managed_policy;
 pub mod state_digest;
@@ -398,6 +404,11 @@ mod formula_serialisation_tests;
 
 #[cfg(test)]
 mod state_digest_lock_order_tests;
+
+/// Lane namese: a relative defined name means the cell that uses it, and a
+/// bare table name is the whole table.
+#[cfg(test)]
+mod namese_tests;
 
 // ============================================================================
 // APPLICATION STATE
@@ -1832,6 +1843,49 @@ pub fn stored_ast_references(
     extract_all_references(&expanded, grid)
 }
 
+/// The rectangle (0-based, inclusive) `start:end` spans when both halves are
+/// plain cells or cell ranges on one sheet -- the shape a resolved
+/// `Table1[a]:Table1[c]` has (BUG-0646). `None` for a NAME half (a LET binding
+/// the extractor cannot see) or two different sheets (the evaluator's #VALUE!).
+fn static_reference_span(
+    sheet: &Option<String>,
+    start: &ParserExpr,
+    end: &ParserExpr,
+) -> Option<(Option<String>, u32, u32, u32, u32)> {
+    fn rect(e: &ParserExpr) -> Option<(Option<String>, u32, u32, u32, u32)> {
+        match e {
+            ParserExpr::CellRef { sheet, col, row, .. } => {
+                let (r, c) = (row.saturating_sub(1), col_letter_to_index(col));
+                Some((sheet.clone(), r, r, c, c))
+            }
+            ParserExpr::Range { sheet, start, end, .. } => match (start.as_ref(), end.as_ref()) {
+                (
+                    ParserExpr::CellRef { col: c1, row: r1, .. },
+                    ParserExpr::CellRef { col: c2, row: r2, .. },
+                ) => {
+                    let (r1, r2) = (r1.saturating_sub(1), r2.saturating_sub(1));
+                    let (c1, c2) = (col_letter_to_index(c1), col_letter_to_index(c2));
+                    Some((sheet.clone(), r1.min(r2), r1.max(r2), c1.min(c2), c1.max(c2)))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    let (sa, r1, r2, c1, c2) = rect(start)?;
+    let (sb, q1, q2, d1, d2) = rect(end)?;
+    let same = match (&sa, &sb) {
+        (None, None) => true,
+        (Some(a), Some(b)) => identity::sheet_names_equal(a, b),
+        _ => false,
+    };
+    if !same {
+        return None;
+    }
+    let qualifier = sheet.clone().or(sa);
+    Some((qualifier, r1.min(q1), r2.max(q2), c1.min(d1), c2.max(d2)))
+}
+
 fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut ExtractedRefs) {
     match expr {
         ParserExpr::Literal(_) => {}
@@ -1871,6 +1925,23 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             } else {
                 extract_references_recursive(start, grid, refs);
                 extract_references_recursive(end, grid, refs);
+                // `Table1[a]:Table1[c]` (BUG-0646): the evaluator reads the
+                // RECTANGLE spanning both halves, so every cell of it is a
+                // precedent -- the halves alone would miss column b.
+                if let Some((qualifier, r1, r2, c1, c2)) = static_reference_span(sheet, start, end) {
+                    for r in r1..=r2 {
+                        for c in c1..=c2 {
+                            match &qualifier {
+                                Some(name) => {
+                                    refs.cross_sheet_cells.insert((name.clone(), r, c));
+                                }
+                                None => {
+                                    refs.cells.insert((r, c));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         // A QUALIFIED whole column (`Sheet2!G:G`) is a read of THAT sheet's
@@ -1931,6 +2002,14 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
         ParserExpr::UnaryOp { operand, .. } => {
             extract_references_recursive(operand, grid, refs);
         }
+        // A LIVE DATA TABLE's body marker (`TABLE(row_input, col_input)`,
+        // `engine::data_table`) reads NOTHING through the dependency graph: its
+        // value is the what-if refresh's to compute (`data_tables`), never the
+        // cascade's. Registering every body cell as a reader of the input cell
+        // made each of the refresh's own trials -- a write of that input --
+        // cascade through the whole body and its readers: O(n^2) evaluations
+        // for an n-row table on every edit (rev-dt-4).
+        ParserExpr::FunctionCall { .. } if engine::data_table::is_table_call(expr) => {}
         ParserExpr::FunctionCall { args, .. } => {
             for arg in args {
                 extract_references_recursive(arg, grid, refs);
@@ -2013,10 +2092,47 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
 ///
 /// Circular references are detected via the `visited` set. If a name refers to
 /// itself (directly or indirectly), the NamedRef is replaced with an error literal.
+///
+/// THE NAME'S TEXT AS WRITTEN, anchored at A1: a relative reference in a
+/// `refers_to` keeps its literal cell. That is right only where nothing USES the
+/// name from a cell -- a chart series, an object property binding, a colour
+/// scale's threshold. Every formula that lives in a cell resolves through
+/// [`resolve_names_in_ast_at`] with that cell, because a relative name means
+/// the cell it is used in (NEW-relative-name-anchor).
 pub fn resolve_names_in_ast(
     ast: &ParserExpr,
     named_ranges: &HashMap<String, named_ranges::NamedRange>,
     current_sheet_index: usize,
+    visited: &mut HashSet<String>,
+) -> ParserExpr {
+    resolve_names_in_ast_at(ast, named_ranges, current_sheet_index, (0, 0), visited)
+}
+
+/// [`resolve_names_in_ast`] for a formula USED AT the cell `at` (0-based row,
+/// column).
+///
+/// A DEFINED NAME'S RELATIVE REFERENCES MEAN THE CELL THAT USES IT
+/// (NEW-relative-name-anchor). Excel keeps a `refers_to` in the file as text
+/// relative to A1, and reads it from the using cell: [LIVE, Excel 16, lane
+/// formd, SCRATCH/formd/n1.txt] with `rel` = `Sheet1!A1`, `=ROW(rel)*1000+
+/// COLUMN(rel)` in J11 is 11010, `relmix` = `Sheet1!$A1` in J12 is $A12 and
+/// `SUM(relrng)` with `relrng` = `Sheet1!A1:B2` in J14 sums J14:K15; [LIVE, lane
+/// namese, SCRATCH/namese/p1.txt] a name used INSIDE another name is relative
+/// to the same using cell (`relin` = `rel`, `rel` = `Sheet1!D1`: in J14
+/// `=ROW(relin)*1000+COLUMN(relin)` is 14013, M14), and so is a name in a
+/// conditional-format or validation rule (relative to each cell it is applied
+/// to). Calcula spliced the text unchanged, so `rel` meant A1 from every cell.
+///
+/// Each name's tree is anchored ONCE, when it is spliced, and BEFORE the names
+/// inside it are resolved: a nested name is spliced (and anchored) by the
+/// recursion itself, so anchoring the outer tree afterwards would move the
+/// inner one twice. The cell's own references never move: only a name's tree
+/// is anchored.
+pub fn resolve_names_in_ast_at(
+    ast: &ParserExpr,
+    named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    current_sheet_index: usize,
+    at: (u32, u32),
     visited: &mut HashSet<String>,
 ) -> ParserExpr {
     match ast {
@@ -2051,13 +2167,16 @@ pub fn resolve_names_in_ast(
                 Some(nr) => {
                     // Parse the refers_to formula
                     match parse_formula(&nr.refers_to) {
-                        Ok(sub_ast) => {
+                        Ok(mut sub_ast) => {
+                            // The name's relative references mean THIS cell.
+                            parser::anchor_name_references(&mut sub_ast, at.0, at.1);
                             // Recursively resolve names in the sub-AST
                             visited.insert(key.clone());
-                            let resolved = resolve_names_in_ast(
+                            let resolved = resolve_names_in_ast_at(
                                 &sub_ast,
                                 named_ranges,
                                 current_sheet_index,
+                                at,
                                 visited,
                             );
                             visited.remove(&key);
@@ -2080,13 +2199,13 @@ pub fn resolve_names_in_ast(
         ParserExpr::ColumnRef { .. } => ast.clone(),
         ParserExpr::RowRef { .. } => ast.clone(),
         ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
-            left: Box::new(resolve_names_in_ast(left, named_ranges, current_sheet_index, visited)),
+            left: Box::new(resolve_names_in_ast_at(left, named_ranges, current_sheet_index, at, visited)),
             op: *op,
-            right: Box::new(resolve_names_in_ast(right, named_ranges, current_sheet_index, visited)),
+            right: Box::new(resolve_names_in_ast_at(right, named_ranges, current_sheet_index, at, visited)),
         },
         ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
             op: *op,
-            operand: Box::new(resolve_names_in_ast(operand, named_ranges, current_sheet_index, visited)),
+            operand: Box::new(resolve_names_in_ast_at(operand, named_ranges, current_sheet_index, at, visited)),
         },
         ParserExpr::FunctionCall { func, args, .. } => {
             // For LAMBDA and LET, parameter name positions must NOT be resolved
@@ -2109,7 +2228,7 @@ pub fn resolve_names_in_ast(
                     // Body: resolve names EXCEPT parameter names
                     let body = args.last().unwrap();
                     resolved_args.push(resolve_names_in_ast_with_shadows(
-                        body, named_ranges, current_sheet_index, visited, &param_names,
+                        body, named_ranges, current_sheet_index, at, visited, &param_names,
                     ));
                     ParserExpr::FunctionCall {
                         func: func.clone(),
@@ -2135,7 +2254,7 @@ pub fn resolve_names_in_ast(
                         } else {
                             // Value and body positions: resolve with shadows
                             resolved_args.push(resolve_names_in_ast_with_shadows(
-                                arg, named_ranges, current_sheet_index, visited, &let_names,
+                                arg, named_ranges, current_sheet_index, at, visited, &let_names,
                             ));
                         }
                     }
@@ -2166,10 +2285,11 @@ pub fn resolve_names_in_ast(
                                 })
                             });
                         if let Some(nr) = nr {
-                            if let Ok(sub_ast) = parse_formula(&nr.refers_to) {
+                            if let Ok(mut sub_ast) = parse_formula(&nr.refers_to) {
+                                parser::anchor_name_references(&mut sub_ast, at.0, at.1);
                                 visited.insert(key.clone());
-                                let resolved_callee = resolve_names_in_ast(
-                                    &sub_ast, named_ranges, current_sheet_index, visited,
+                                let resolved_callee = resolve_names_in_ast_at(
+                                    &sub_ast, named_ranges, current_sheet_index, at, visited,
                                 );
                                 visited.remove(&key);
                                 // Build __INVOKE__(displayName, resolved_lambda, arg1, ...).
@@ -2183,8 +2303,8 @@ pub fn resolve_names_in_ast(
                                     resolved_callee,
                                 ];
                                 for a in args {
-                                    invoke_args.push(resolve_names_in_ast(
-                                        a, named_ranges, current_sheet_index, visited,
+                                    invoke_args.push(resolve_names_in_ast_at(
+                                        a, named_ranges, current_sheet_index, at, visited,
                                     ));
                                 }
                                 return ParserExpr::FunctionCall {
@@ -2199,7 +2319,7 @@ pub fn resolve_names_in_ast(
                         func: func.clone(),
                         args: args
                             .iter()
-                            .map(|a| resolve_names_in_ast(a, named_ranges, current_sheet_index, visited))
+                            .map(|a| resolve_names_in_ast_at(a, named_ranges, current_sheet_index, at, visited))
                             .collect(),
                         ref_site_id: Default::default(),
                     }
@@ -2208,41 +2328,41 @@ pub fn resolve_names_in_ast(
         }
         ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
-            start: Box::new(resolve_names_in_ast(start, named_ranges, current_sheet_index, visited)),
-            end: Box::new(resolve_names_in_ast(end, named_ranges, current_sheet_index, visited)),
+            start: Box::new(resolve_names_in_ast_at(start, named_ranges, current_sheet_index, at, visited)),
+            end: Box::new(resolve_names_in_ast_at(end, named_ranges, current_sheet_index, at, visited)),
             ref_site_id: Default::default(),
         },
         // 3D cross-sheet reference: recurse into inner reference
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
-            reference: Box::new(resolve_names_in_ast(reference, named_ranges, current_sheet_index, visited)),
+            reference: Box::new(resolve_names_in_ast_at(reference, named_ranges, current_sheet_index, at, visited)),
             ref_site_id: Default::default(),
         },
         // TableRef is resolved separately by resolve_table_refs_in_ast — pass through
         ParserExpr::TableRef { .. } => ast.clone(),
         ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
-            target: Box::new(resolve_names_in_ast(target, named_ranges, current_sheet_index, visited)),
-            index: Box::new(resolve_names_in_ast(index, named_ranges, current_sheet_index, visited)),
+            target: Box::new(resolve_names_in_ast_at(target, named_ranges, current_sheet_index, at, visited)),
+            index: Box::new(resolve_names_in_ast_at(index, named_ranges, current_sheet_index, at, visited)),
         },
         ParserExpr::ArrayLiteral { rows } => ParserExpr::ArrayLiteral {
-            rows: rows.iter().map(|r| r.iter().map(|e| resolve_names_in_ast(e, named_ranges, current_sheet_index, visited)).collect()).collect(),
+            rows: rows.iter().map(|r| r.iter().map(|e| resolve_names_in_ast_at(e, named_ranges, current_sheet_index, at, visited)).collect()).collect(),
         },
         ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
-            elements: elements.iter().map(|e| resolve_names_in_ast(e, named_ranges, current_sheet_index, visited)).collect(),
+            elements: elements.iter().map(|e| resolve_names_in_ast_at(e, named_ranges, current_sheet_index, at, visited)).collect(),
         },
         ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
             entries: entries.iter().map(|(k, v)| (
-                resolve_names_in_ast(k, named_ranges, current_sheet_index, visited),
-                resolve_names_in_ast(v, named_ranges, current_sheet_index, visited),
+                resolve_names_in_ast_at(k, named_ranges, current_sheet_index, at, visited),
+                resolve_names_in_ast_at(v, named_ranges, current_sheet_index, at, visited),
             )).collect(),
         },
         ParserExpr::SpillRef { cell, .. } => ParserExpr::SpillRef {
-            cell: Box::new(resolve_names_in_ast(cell, named_ranges, current_sheet_index, visited)),
+            cell: Box::new(resolve_names_in_ast_at(cell, named_ranges, current_sheet_index, at, visited)),
             ref_site_id: Default::default(),
         },
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
-            operand: Box::new(resolve_names_in_ast(operand, named_ranges, current_sheet_index, visited)),
+            operand: Box::new(resolve_names_in_ast_at(operand, named_ranges, current_sheet_index, at, visited)),
         },
     }
 }
@@ -2255,6 +2375,7 @@ fn resolve_names_in_ast_with_shadows(
     ast: &ParserExpr,
     named_ranges: &HashMap<String, named_ranges::NamedRange>,
     current_sheet_index: usize,
+    at: (u32, u32),
     visited: &mut HashSet<String>,
     shadows: &[String],
 ) -> ParserExpr {
@@ -2266,19 +2387,19 @@ fn resolve_names_in_ast_with_shadows(
                 return ast.clone();
             }
             // Otherwise, delegate to the normal resolver
-            resolve_names_in_ast(ast, named_ranges, current_sheet_index, visited)
+            resolve_names_in_ast_at(ast, named_ranges, current_sheet_index, at, visited)
         }
         ParserExpr::Literal(_) | ParserExpr::CellRef { .. }
         | ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. }
         | ParserExpr::TableRef { .. } => ast.clone(),
         ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
-            left: Box::new(resolve_names_in_ast_with_shadows(left, named_ranges, current_sheet_index, visited, shadows)),
+            left: Box::new(resolve_names_in_ast_with_shadows(left, named_ranges, current_sheet_index, at, visited, shadows)),
             op: *op,
-            right: Box::new(resolve_names_in_ast_with_shadows(right, named_ranges, current_sheet_index, visited, shadows)),
+            right: Box::new(resolve_names_in_ast_with_shadows(right, named_ranges, current_sheet_index, at, visited, shadows)),
         },
         ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
             op: *op,
-            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, visited, shadows)),
+            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, at, visited, shadows)),
         },
         ParserExpr::FunctionCall { func, args, .. } => {
             // For nested LAMBDA/LET inside a shadowed context, extend shadows
@@ -2295,7 +2416,7 @@ fn resolve_names_in_ast_with_shadows(
                         resolved_args.push(p_arg.clone());
                     }
                     resolved_args.push(resolve_names_in_ast_with_shadows(
-                        args.last().unwrap(), named_ranges, current_sheet_index, visited, &inner_shadows,
+                        args.last().unwrap(), named_ranges, current_sheet_index, at, visited, &inner_shadows,
                     ));
                     ParserExpr::FunctionCall { func: func.clone(), args: resolved_args, ref_site_id: Default::default() }
                 }
@@ -2313,7 +2434,7 @@ fn resolve_names_in_ast_with_shadows(
                             resolved_args.push(arg.clone());
                         } else {
                             resolved_args.push(resolve_names_in_ast_with_shadows(
-                                arg, named_ranges, current_sheet_index, visited, &inner_shadows,
+                                arg, named_ranges, current_sheet_index, at, visited, &inner_shadows,
                             ));
                         }
                     }
@@ -2339,10 +2460,11 @@ fn resolve_names_in_ast_with_shadows(
                                     })
                                 });
                             if let Some(nr) = nr {
-                                if let Ok(sub_ast) = parse_formula(&nr.refers_to) {
+                                if let Ok(mut sub_ast) = parse_formula(&nr.refers_to) {
+                                    parser::anchor_name_references(&mut sub_ast, at.0, at.1);
                                     visited.insert(key.clone());
                                     let resolved_callee = resolve_names_in_ast_with_shadows(
-                                        &sub_ast, named_ranges, current_sheet_index, visited, shadows,
+                                        &sub_ast, named_ranges, current_sheet_index, at, visited, shadows,
                                     );
                                     visited.remove(&key);
                                     // See the non-shadowed branch: a leading display-name
@@ -2353,7 +2475,7 @@ fn resolve_names_in_ast_with_shadows(
                                     ];
                                     for a in args {
                                         invoke_args.push(resolve_names_in_ast_with_shadows(
-                                            a, named_ranges, current_sheet_index, visited, shadows,
+                                            a, named_ranges, current_sheet_index, at, visited, shadows,
                                         ));
                                     }
                                     return ParserExpr::FunctionCall {
@@ -2367,7 +2489,7 @@ fn resolve_names_in_ast_with_shadows(
                     }
                     ParserExpr::FunctionCall {
                         func: func.clone(),
-                        args: args.iter().map(|a| resolve_names_in_ast_with_shadows(a, named_ranges, current_sheet_index, visited, shadows)).collect(),
+                        args: args.iter().map(|a| resolve_names_in_ast_with_shadows(a, named_ranges, current_sheet_index, at, visited, shadows)).collect(),
                         ref_site_id: Default::default(),
                     }
                 },
@@ -2375,38 +2497,38 @@ fn resolve_names_in_ast_with_shadows(
         }
         ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
-            start: Box::new(resolve_names_in_ast_with_shadows(start, named_ranges, current_sheet_index, visited, shadows)),
-            end: Box::new(resolve_names_in_ast_with_shadows(end, named_ranges, current_sheet_index, visited, shadows)),
+            start: Box::new(resolve_names_in_ast_with_shadows(start, named_ranges, current_sheet_index, at, visited, shadows)),
+            end: Box::new(resolve_names_in_ast_with_shadows(end, named_ranges, current_sheet_index, at, visited, shadows)),
             ref_site_id: Default::default(),
         },
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
-            reference: Box::new(resolve_names_in_ast_with_shadows(reference, named_ranges, current_sheet_index, visited, shadows)),
+            reference: Box::new(resolve_names_in_ast_with_shadows(reference, named_ranges, current_sheet_index, at, visited, shadows)),
             ref_site_id: Default::default(),
         },
         ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
-            target: Box::new(resolve_names_in_ast_with_shadows(target, named_ranges, current_sheet_index, visited, shadows)),
-            index: Box::new(resolve_names_in_ast_with_shadows(index, named_ranges, current_sheet_index, visited, shadows)),
+            target: Box::new(resolve_names_in_ast_with_shadows(target, named_ranges, current_sheet_index, at, visited, shadows)),
+            index: Box::new(resolve_names_in_ast_with_shadows(index, named_ranges, current_sheet_index, at, visited, shadows)),
         },
         ParserExpr::ArrayLiteral { rows } => ParserExpr::ArrayLiteral {
-            rows: rows.iter().map(|r| r.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, current_sheet_index, visited, shadows)).collect()).collect(),
+            rows: rows.iter().map(|r| r.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, current_sheet_index, at, visited, shadows)).collect()).collect(),
         },
         ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
-            elements: elements.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, current_sheet_index, visited, shadows)).collect(),
+            elements: elements.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, current_sheet_index, at, visited, shadows)).collect(),
         },
         ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
             entries: entries.iter().map(|(k, v)| (
-                resolve_names_in_ast_with_shadows(k, named_ranges, current_sheet_index, visited, shadows),
-                resolve_names_in_ast_with_shadows(v, named_ranges, current_sheet_index, visited, shadows),
+                resolve_names_in_ast_with_shadows(k, named_ranges, current_sheet_index, at, visited, shadows),
+                resolve_names_in_ast_with_shadows(v, named_ranges, current_sheet_index, at, visited, shadows),
             )).collect(),
         },
         ParserExpr::SpillRef { cell, .. } => ParserExpr::SpillRef {
-            cell: Box::new(resolve_names_in_ast_with_shadows(cell, named_ranges, current_sheet_index, visited, shadows)),
+            cell: Box::new(resolve_names_in_ast_with_shadows(cell, named_ranges, current_sheet_index, at, visited, shadows)),
             ref_site_id: Default::default(),
         },
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
-            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, visited, shadows)),
+            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, at, visited, shadows)),
         },
     }
 }
@@ -2476,6 +2598,17 @@ fn resolve_table_refs_now(
     col: u32,
     sheet_names: &[String],
 ) -> ParserExpr {
+    // A bare table name a defined name's definition brought in (`Data` =
+    // `=Tbl`): the whole table, as `name_resolution::eval_ast` reads it.
+    let bare = {
+        let table_names_map = state.table_names.read().unwrap();
+        ast_names_a_table(ast, &table_names_map).then(|| {
+            let mut tree = ast.clone();
+            bind_bare_table_names(&mut tree, &table_names_map, &|_| false);
+            tree
+        })
+    };
+    let ast = bare.as_ref().unwrap_or(ast);
     if !ast_has_table_refs(ast) {
         return ast.clone();
     }
@@ -2513,8 +2646,11 @@ fn resolve_spill_refs_at_entry(
     if !ast_has_spill_refs(ast) {
         return ast.clone();
     }
+    // `a#` with `a` bound to a cell is that cell's spill (BUG-0646).
+    let mut bound = ast.clone();
+    parser::bind_spill_anchor_names(&mut bound);
     let spill_ranges_map = state.spill_ranges.read().unwrap();
-    let r = resolve_spill_refs_in_ast(ast, &spill_ranges_map, sheet_index, sheet_names);
+    let r = resolve_spill_refs_in_ast(&bound, &spill_ranges_map, sheet_index, sheet_names);
     drop(spill_ranges_map);
     r
 }
@@ -2545,6 +2681,19 @@ pub fn split_entered_formula(
     // live map on every later evaluation.
     let mut stored = parsed.clone();
 
+    // BUG-0649. A bare `C`, `R`, `RC`, `R2C`, `R1C1` that no LET / LAMBDA
+    // binds is Excel's R1C1 reference relative to THIS cell, rewritten to its
+    // A1 form at entry as Excel does (`=LET(a,1,a+C)` in J5 is `a+J:J`). A
+    // name the workbook defines in that spelling is left alone.
+    {
+        let named_ranges_map = state.named_ranges.read().unwrap();
+        let defined = |name: &str| {
+            let key = name_resolution::name_key(name);
+            named_ranges_map.values().any(|nr| name_resolution::name_key(&nr.name) == key)
+        };
+        parser::resolve_r1c1_names(&mut stored, row, col, &defined);
+    }
+
     // The lexer UPPERCASES bare identifiers, which never showed while the name
     // was expanded away at entry. Now that the cell keeps it, put the name back
     // in the capitalisation the Name Manager holds — cosmetic only (every lookup
@@ -2552,6 +2701,12 @@ pub fn split_entered_formula(
     {
         let named_ranges_map = state.named_ranges.read().unwrap();
         name_resolution::restamp_name_casing(&mut stored, &named_ranges_map);
+        // A bare table name is the whole table, stored `Tbl[]` (shown `Tbl`)
+        // so every table walk sees it (NEW-bare-table-name). Names before
+        // tables: the canonical order `restamp_workbook_name_casing` takes.
+        let table_names_map = state.table_names.read().unwrap();
+        let defined = |name: &str| named_ranges_map.contains_key(&name_resolution::name_key(name));
+        bind_bare_table_names(&mut stored, &table_names_map, &defined);
     }
     // Same argument, one authority over: the lexer shouts a table name and
     // `parse_bracket_content` shouts the column, so `Sales[Amount]` would be
@@ -2575,8 +2730,14 @@ pub fn split_entered_formula(
         let spliced = if needs_names {
             let named_ranges_map = state.named_ranges.read().unwrap();
             let mut visited = HashSet::new();
-            let out =
-                resolve_names_in_ast(&stored, &named_ranges_map, sheet_index, &mut visited);
+            // At THIS cell: a relative name means the cell it is used in.
+            let out = resolve_names_in_ast_at(
+                &stored,
+                &named_ranges_map,
+                sheet_index,
+                (row, col),
+                &mut visited,
+            );
             drop(named_ranges_map);
             out
         } else {
@@ -2690,6 +2851,50 @@ pub struct TableRefContext<'a> {
     /// anywhere. This is what lets the resolution QUALIFY the range when the
     /// table lives elsewhere.
     pub sheet_names: &'a [String],
+}
+
+/// A BARE TABLE NAME IS THE WHOLE TABLE (NEW-bare-table-name): every name in
+/// `ast` that no LET / LAMBDA of the formula binds, that is no defined name
+/// (`is_defined_name`), and that names a table, becomes
+/// `Tbl[]` (`TableSpecifier::Whole`, the data body). Returns whether anything
+/// changed.
+///
+/// [LIVE, Excel 16, lane namese, SCRATCH/namese/p1.txt, table Tbl of 3 rows x
+/// 2 columns] `=ROWS(Tbl)` is 3, `=SUM(Tbl)` 9, `=Tbl` spills the 3 x 2 body,
+/// and the cell shows `=ROWS(Tbl)` and is filed `ROWS(Tbl[])`; `=LET(Tbl,5,Tbl)`
+/// is 5 (the binding wins); a defined name `Tbl` beside the table is refused
+/// ("A table with that name already exists"), as Calcula refuses it both ways.
+/// Calcula read the bare name as an undefined NAME: `#NAME?`.
+///
+/// Called at ENTRY (`split_entered_formula`), so the stored formula holds the
+/// table reference every table walk sees -- the resize edge (`table_deps`),
+/// a rename, Convert to Range -- and at EVALUATION (`name_resolution::eval_ast`),
+/// for a bare name that only appears once a defined name is expanded
+/// (`Data` = `=Tbl`) or that was stored before the table existed.
+pub fn bind_bare_table_names(
+    ast: &mut ParserExpr,
+    table_names: &tables::TableNameRegistry,
+    is_defined_name: &dyn Fn(&str) -> bool,
+) -> bool {
+    if table_names.is_empty() {
+        return false;
+    }
+    parser::replace_unbound_names(ast, &|name| {
+        if !table_names.contains_key(&tables::table_name_key(name)) || is_defined_name(name) {
+            return None;
+        }
+        Some(ParserExpr::TableRef {
+            table_name: name.to_string(),
+            specifier: ParserTableSpecifier::Whole,
+            ref_site_id: Default::default(),
+        })
+    })
+}
+
+/// The read-only gate of [`bind_bare_table_names`] for a STORED tree.
+pub fn ast_names_a_table(ast: &ParserExpr, table_names: &tables::TableNameRegistry) -> bool {
+    !table_names.is_empty()
+        && parser::any_unbound_name(ast, &|name| table_names.contains_key(&tables::table_name_key(name)))
 }
 
 /// Resolves all `TableRef` nodes in a parser AST by converting them to
@@ -2870,6 +3075,18 @@ fn rename_walk(
     }
 }
 
+/// A table region the table does not have -- `[#Headers]` with the header
+/// row off, `[#Totals]` with no totals row, alone or with a column. [LIVE,
+/// Excel 16, 2026-11-05, tablefix-probe/probe1.ps1] Excel answers `#REF!`:
+/// `ROWS(TK[#Headers])`, `TK[[#Headers],[Col1]]` and `ROWS(TK[#Totals])` are
+/// `#REF!`, `ISREF(..)` FALSE and `ERROR.TYPE(..)` 4; turning the row on
+/// makes the same formula a reference again (it resolves on every
+/// calculation). This used to be an unknown NAME, which the user saw as
+/// `#NAME?` (NEW-headerless-headers-ref).
+fn missing_table_region() -> ParserExpr {
+    ParserExpr::Literal(ParserValue::Error("#REF!".to_string()))
+}
+
 /// Resolves a single TableRef node to CellRef/Range based on table metadata.
 fn resolve_single_table_ref(
     table_name: &str,
@@ -2933,7 +3150,8 @@ fn resolve_single_table_ref(
         ParserTableSpecifier::AllRows => {
             make_range(qualifier, table.start_row, table.start_col, table.end_row, table.end_col)
         }
-        ParserTableSpecifier::DataRows => {
+        // The WHOLE table (`Tbl`, `Tbl[]`) reads the data body, as `[#Data]` does.
+        ParserTableSpecifier::DataRows | ParserTableSpecifier::Whole => {
             make_range(qualifier, table.data_start_row(), table.start_col, table.data_end_row(), table.end_col)
         }
         ParserTableSpecifier::Headers => {
@@ -2941,20 +3159,76 @@ fn resolve_single_table_ref(
                 make_range(qualifier, table.start_row, table.start_col, table.start_row, table.end_col)
             } else {
                 // No header row — return error
-                ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string(), ref_site_id: Default::default() }
+                missing_table_region()
             }
         }
         ParserTableSpecifier::Totals => {
             if table.style_options.total_row {
                 make_range(qualifier, table.end_row, table.start_col, table.end_row, table.end_col)
             } else {
-                ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string(), ref_site_id: Default::default() }
+                missing_table_region()
+            }
+        }
+        // BUG-0643: `[[#Headers],[#Data]]` / `[[#Data],[#Totals]]` -- the
+        // whole table width over the pair's rows.
+        ParserTableSpecifier::HeadersAndData | ParserTableSpecifier::DataAndTotals => {
+            match special_region_rows(&table, specifier) {
+                Some((first, last)) => make_range(qualifier, first, table.start_col, last, table.end_col),
+                None => ParserExpr::NamedRef {
+                    name: format!("_UNRESOLVED_SPECIAL_{}", table.name),
+                    ref_site_id: Default::default(),
+                },
             }
         }
         ParserTableSpecifier::SpecialColumn(special_spec, col_name) => {
             resolve_special_column(&table, special_spec, col_name, qualifier)
         }
+        ParserTableSpecifier::SpecialColumnRange(special_spec, start_col, end_col) => {
+            resolve_special_column_range(&table, special_spec, start_col, end_col, qualifier)
+        }
     }
+}
+
+/// The table rows (0-based, inclusive) a special region covers, or `None`
+/// when the table has no such row (`#Headers` with the header row off,
+/// `#Totals` with no totals row -- Excel's `#REF!`).
+///
+/// A PAIR reads whichever of its rows the table has [LIVE, Excel 16, parser
+/// lane probe]: `ROWS(T[[#Headers],[#Data]])` over a 3-row table whose header
+/// row is OFF is 3, and `ROWS(T[[#Data],[#Totals]])` over a 5-row table with no
+/// totals row is 5 -- never an error, because the data body is always there.
+fn special_region_rows(table: &tables::Table, special: &ParserTableSpecifier) -> Option<(u32, u32)> {
+    match special {
+        ParserTableSpecifier::AllRows => Some((table.start_row, table.end_row)),
+        ParserTableSpecifier::DataRows | ParserTableSpecifier::Whole => Some((table.data_start_row(), table.data_end_row())),
+        ParserTableSpecifier::Headers => table.style_options.header_row.then_some((table.start_row, table.start_row)),
+        ParserTableSpecifier::Totals => table.style_options.total_row.then_some((table.end_row, table.end_row)),
+        ParserTableSpecifier::HeadersAndData => Some((table.start_row, table.data_end_row())),
+        ParserTableSpecifier::DataAndTotals => Some((table.data_start_row(), table.end_row)),
+        _ => None,
+    }
+}
+
+/// Resolves `[[#Headers],[p]:[q]]` / `[[#Headers],[#Data],[p]:[q]]`: the special
+/// region's rows over a COLUMN SPAN [LIVE, Excel 16: ROWS 1 and 5, COLUMNS 2].
+fn resolve_special_column_range(
+    table: &tables::Table,
+    special: &ParserTableSpecifier,
+    start_col: &str,
+    end_col: &str,
+    sheet: Option<String>,
+) -> ParserExpr {
+    let (Some(a), Some(b)) = (table.get_column_index(start_col), table.get_column_index(end_col)) else {
+        return ParserExpr::NamedRef {
+            name: format!("_UNRESOLVED_{}_RANGE", table.name),
+            ref_site_id: Default::default(),
+        };
+    };
+    let Some((first, last)) = special_region_rows(table, special) else {
+        return missing_table_region();
+    };
+    let (lo, hi) = (a.min(b) as u32, a.max(b) as u32);
+    make_range(sheet, first, table.start_col + lo, last, table.start_col + hi)
 }
 
 /// Finds a table by name using the name registry, WITH the sheet it lives on.
@@ -3173,14 +3447,14 @@ fn resolve_special_column(
             if table.style_options.header_row {
                 make_range(sheet, table.start_row, abs_col, table.start_row, abs_col)
             } else {
-                ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string(), ref_site_id: Default::default() }
+                missing_table_region()
             }
         }
         ParserTableSpecifier::Totals => {
             if table.style_options.total_row {
                 make_range(sheet, table.end_row, abs_col, table.end_row, abs_col)
             } else {
-                ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string(), ref_site_id: Default::default() }
+                missing_table_region()
             }
         }
         ParserTableSpecifier::AllRows => {
@@ -3188,6 +3462,16 @@ fn resolve_special_column(
         }
         ParserTableSpecifier::DataRows => {
             make_range(sheet, table.data_start_row(), abs_col, table.data_end_row(), abs_col)
+        }
+        // BUG-0643: `[[#Headers],[#Data],[Col]]` / `[[#Data],[#Totals],[Col]]`.
+        ParserTableSpecifier::HeadersAndData | ParserTableSpecifier::DataAndTotals => {
+            match special_region_rows(table, special) {
+                Some((first, last)) => make_range(sheet, first, abs_col, last, abs_col),
+                None => ParserExpr::NamedRef {
+                    name: format!("_UNRESOLVED_SPECIAL_{}", table.name),
+                    ref_site_id: Default::default(),
+                },
+            }
         }
         _ => ParserExpr::NamedRef {
             name: format!("_UNRESOLVED_SPECIAL_{}", table.name),
@@ -3280,11 +3564,18 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
 /// order without it).
 /// - A 3D reference with ONE endpoint on the deleted sheet keeps the rest of
 ///   its range: the endpoint moves inward to its neighbour in the range
-///   (Excel's rule -- `SUM(Mid:Data!B1)` becomes `SUM(Mid:Mid!B1)`).
+///   (Excel's rule -- `SUM(Mid:Data:Last!B1)`-style spans keep spanning, and a
+///   span left with ONE sheet is that sheet's plain reference: `SUM(Mid:Data!B1)`
+///   becomes `SUM(Mid!B1)`).
 /// - Any other reference to the deleted sheet (a plain one, or a 3D reference
-///   that names only it) returns None: the formula becomes #REF!.
-/// Returns Some(new_formula) if the formula was modified, None if it should become #REF!,
-/// or the original formula unchanged if no reference to the sheet was affected.
+///   that names only it) keeps its cell part and reads `#REF!` where the sheet
+///   was: `=Data!A1` becomes `=#REF!A1`, `=SUM(Data!A1:A3)+1`
+///   `=SUM(#REF!A1:A3)+1` (Excel [LIVE, Excel 16, 2026-11-05,
+///   sheetspill/probe1.ps1]; `parser::ast::REF_ERROR_SHEET`). The formula is
+///   KEPT, and evaluates `#REF!`.
+/// Returns Some(new_formula) if the formula was modified, or the original
+/// formula unchanged if no reference to the sheet was affected; `None` is no
+/// longer produced for a reference (only callers of other repairs use it).
 ///
 /// THE POSITION IS REQUIRED. Without it the endpoint's neighbour was guessed as
 /// the workbook's FIRST sheet (a deleted start) or LAST sheet (a deleted end),
@@ -3326,30 +3617,36 @@ fn repair_3d_refs_on_delete_with(
         Err(_) => return Some(formula.to_string()),
     };
 
-    let (new_ast, had_ref_error) =
+    // A reference to the deleted sheet keeps its formula and reads `#REF!`
+    // where the sheet was (`=#REF!A1`), so the repair never answers `None`
+    // for one: the cell keeps its formula, and its VALUE is what the
+    // recalculation (or, under manual calculation, F9) makes of it.
+    let (new_ast, _reads_ref_error) =
         repair_3d_delete_recursive(&ast, deleted_name, deleted_index, sheet_names_after);
-    if had_ref_error {
-        return None; // Entire formula becomes #REF!
-    }
 
     let new_formula = format!("={}", expression_to_formula(&new_ast));
     Some(unchanged_or(formula, &ast, new_formula))
 }
 
 /// The same delete for formula TEXT kept IN PLACE -- a conditional-format,
-/// validation or control formula, an override's CURRENT text -- where a cell
-/// would become `#REF!` whole: the cells' 3D rule first (an endpoint on the
-/// deleted sheet moves inward, [`repair_3d_refs_on_delete_at`]), then every
-/// reference still naming the deleted sheet becomes `#REF!` where it stands
-/// (the `.calp` gone-walker, as Excel writes a rule: `=A1>#REF!`). `None` when
-/// the text names no deleted sheet or does not parse; a leading `=` is kept
-/// exactly when the input had one.
+/// validation or control formula, an override's CURRENT text: the cells' own
+/// rule ([`repair_3d_refs_on_delete_at`]), so a rule reads exactly as a cell
+/// does -- an endpoint on the deleted sheet moves inward, and every other
+/// reference to it keeps its cell part behind `#REF!`, as Excel writes a rule
+/// [LIVE, Excel 16, 2026-11-05, sheetspill/probe1.ps1]: a conditional format
+/// `=A1>Sheet2!$B$1` becomes `=A1>#REF!$B$1`, a list validation
+/// `=Sheet2!$A$1:$A$3` becomes `=#REF!$A$1:$A$3`. `None` when the text names no
+/// deleted sheet or does not parse; a leading `=` is kept exactly when the
+/// input had one.
 ///
-/// Before this, those stores went through the gone-walker alone, which turns
-/// a 3D reference with ANY endpoint gone into `#REF!`: a conditional format
-/// read `=SUM(#REF!)>0` beside its cell's `SUM(Mid:Mid!B1)`, and an override's
-/// current text -- written over the cell at the next refresh -- broke a
-/// working formula (`sheet_structure_repair_tests`).
+/// Before this, those stores went through the `.calp` gone-walker, which then
+/// turned the whole reference into `#REF!` (`=A1>#REF!`; it now writes this
+/// function's `#REF!A1` for a plain reference) and still turns a 3D reference
+/// with ANY endpoint gone into `#REF!` where the span was (it knows no tab
+/// order to move an endpoint inward): a conditional format read `=SUM(#REF!)>0` beside
+/// its cell's `SUM(Mid!B1)`, and an override's current text -- written over the
+/// cell at the next refresh -- broke a working formula
+/// (`sheet_structure_repair_tests`).
 pub fn repair_formula_text_on_delete_at(
     formula: &str,
     deleted_name: &str,
@@ -3357,13 +3654,7 @@ pub fn repair_formula_text_on_delete_at(
     sheet_names_after: &[String],
 ) -> Option<String> {
     let ast = parse_formula(formula).ok()?;
-    // The walk returns the tree with every movable endpoint moved and every
-    // other reference to the deleted sheet exactly as it was (its error flag
-    // is for the whole-cell caller above and is not needed here).
-    let (mut repaired, _) = repair_3d_delete_recursive(&ast, deleted_name, Some(deleted_index), sheet_names_after);
-    calp::sheet_renames::SheetRenames::default()
-        .with_gone([deleted_name])
-        .rename_expression(&mut repaired);
+    let (repaired, _) = repair_3d_delete_recursive(&ast, deleted_name, Some(deleted_index), sheet_names_after);
     let rendered = expression_to_formula(&repaired);
     if rendered == expression_to_formula(&ast) {
         return None;
@@ -3415,8 +3706,13 @@ fn repair_3d_delete_recursive(
             let end_is_deleted = identity::sheet_name_key(end_sheet) == del_upper;
 
             if start_is_deleted && end_is_deleted {
-                // Both bookends are the deleted sheet — #REF!
-                return (ast.clone(), true);
+                // Both bookends are the deleted sheet: the reference keeps its
+                // cell part and reads `#REF!` where the sheets were, as a plain
+                // reference to it does (`ref_error_reference`).
+                return match ref_error_reference(reference) {
+                    Some(gone) => (gone, true),
+                    None => (ParserExpr::Literal(parser::ast::Value::Error("#REF!".to_string())), true),
+                };
             }
 
             // The endpoint that STAYS takes the workbook's spelling when its
@@ -3458,15 +3754,30 @@ fn repair_3d_delete_recursive(
             match (new_start, new_end) {
                 (Some(s), Some(e)) => {
                     let (new_ref, err) = repair_3d_delete_recursive(reference, deleted_name, deleted_index, sheet_names_after);
-                    if err { return (ast.clone(), true); }
+                    // A span the delete SHRANK to one sheet is that sheet's plain
+                    // reference: Excel [LIVE, Excel 16, 2026-11-05,
+                    // sheetspill/probe1.ps1] turns `=SUM(Sheet2:Sheet3!A1)` into
+                    // `=SUM(Sheet3!A1)` when Sheet2 is deleted (and keeps
+                    // `=SUM(Sheet3:Sheet4!A1)` a span). An untouched span that
+                    // happens to name one sheet twice is left as it was.
+                    let shrank = start_is_deleted || end_is_deleted;
+                    if shrank && identity::sheet_name_key(&s) == identity::sheet_name_key(&e) {
+                        if let Some(single) = with_sheet_qualifier(&new_ref, &s) {
+                            return (single, err);
+                        }
+                    }
                     (ParserExpr::Sheet3DRef {
                         start_sheet: s,
                         end_sheet: e,
                         reference: Box::new(new_ref),
                         ref_site_id: Default::default(),
-                    }, false)
+                    }, err)
                 }
-                _ => (ast.clone(), true), // Can't find replacement — #REF!
+                // No sheet left in the span: `#REF!` where the sheets were.
+                _ => match ref_error_reference(reference) {
+                    Some(gone) => (gone, true),
+                    None => (ParserExpr::Literal(parser::ast::Value::Error("#REF!".to_string())), true),
+                },
             }
         }
         ParserExpr::BinaryOp { left, op, right } => {
@@ -3494,7 +3805,7 @@ fn repair_3d_delete_recursive(
         }
         ParserExpr::Range { sheet, start, end, .. } => {
             if names_deleted_sheet(sheet, deleted_name) {
-                return (ast.clone(), true);
+                return (ref_error_reference(ast).unwrap_or_else(|| ast.clone()), true);
             }
             let (new_start, s_err) = repair_3d_delete_recursive(start, deleted_name, deleted_index, sheet_names_after);
             let (new_end, e_err) = repair_3d_delete_recursive(end, deleted_name, deleted_index, sheet_names_after);
@@ -3515,12 +3826,18 @@ fn repair_3d_delete_recursive(
         // reported the local A1 instead of `#REF!` and saved that number to
         // disk. The rename twin (`repair_3d_rename_recursive`) has always
         // handled all four; the asymmetry between the two was the tell.
+        //
+        // The reference KEEPS ITS CELL PART and reads `#REF!` where the sheet
+        // was -- `=Sheet2!A1` becomes `=#REF!A1` -- as Excel writes it
+        // (`ref_error_reference`). It used to turn the whole CELL into a #REF!
+        // constant: the formula was lost, and under manual calculation the cell
+        // showed #REF! at once where Excel keeps the old value until F9.
         ParserExpr::CellRef { sheet, .. }
         | ParserExpr::ColumnRef { sheet, .. }
         | ParserExpr::RowRef { sheet, .. }
             if names_deleted_sheet(sheet, deleted_name) =>
         {
-            (ast.clone(), true)
+            (ref_error_reference(ast).unwrap_or_else(|| ast.clone()), true)
         }
 
         // THE WRAPPERS (wave C, W8 -- the delete twin of wave B's B3). Each
@@ -3611,6 +3928,46 @@ fn names_deleted_sheet(sheet: &Option<String>, deleted_name: &str) -> bool {
     sheet
         .as_ref()
         .is_some_and(|s| identity::sheet_names_equal(s, deleted_name))
+}
+
+/// `reference` (a cell, range, column or row reference) with its sheet
+/// replaced by the deleted-sheet marker, `parser::ast::REF_ERROR_SHEET` --
+/// Excel's `#REF!A1`, `#REF!A1:A3`, `#REF!A:A`, `#REF!1:1`. A range's end
+/// corner that carries its own qualifier (`Sheet2!A1:Sheet2!A3`) gets the
+/// marker too. `None` for any other node.
+fn ref_error_reference(reference: &ParserExpr) -> Option<ParserExpr> {
+    let gone = || Some(parser::ast::REF_ERROR_SHEET.to_string());
+    let mut out = reference.clone();
+    match &mut out {
+        ParserExpr::CellRef { sheet, .. }
+        | ParserExpr::ColumnRef { sheet, .. }
+        | ParserExpr::RowRef { sheet, .. } => *sheet = gone(),
+        ParserExpr::Range { sheet, start, end, .. } => {
+            *sheet = gone();
+            for corner in [start, end] {
+                if let ParserExpr::CellRef { sheet: corner_sheet @ Some(_), .. } = corner.as_mut() {
+                    *corner_sheet = gone();
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
+}
+
+/// The inner reference of a 3D span with `sheet` as its plain qualifier: a
+/// span the delete shrank to ONE sheet, which Excel writes as that sheet's
+/// reference. `None` when the inner node is not a plain reference.
+fn with_sheet_qualifier(reference: &ParserExpr, sheet_name: &str) -> Option<ParserExpr> {
+    let mut out = reference.clone();
+    match &mut out {
+        ParserExpr::CellRef { sheet, .. }
+        | ParserExpr::ColumnRef { sheet, .. }
+        | ParserExpr::RowRef { sheet, .. }
+        | ParserExpr::Range { sheet, .. } => *sheet = Some(sheet_name.to_string()),
+        _ => return None,
+    }
+    Some(out)
 }
 
 /// The sheet a 3D reference's DELETED endpoint moves to: its neighbour inside
@@ -3879,7 +4236,9 @@ impl std::fmt::Display for FormulaRepairRefusal {
 enum PlannedRepair {
     /// Replace the cell's AST with this already-parsed tree.
     Rewrite(Box<ParserExpr>),
-    /// The formula's reference is gone: the cell becomes `#REF!`.
+    /// The repair asked for the whole cell to become a `#REF!` constant. No
+    /// sheet operation asks for it any more (a deleted sheet's references keep
+    /// their formula, `=#REF!A1`); kept for a caller-supplied repair.
     RefError,
 }
 
@@ -3944,7 +4303,11 @@ fn plan_formula_repair(
                         }
                     }
                 }
-                // Formula should become #REF!
+                // The repair declares the whole cell `#REF!`. The sheet DELETE
+                // never does any more -- its references keep their formula and
+                // read `#REF!` where the sheet was (`=#REF!A1`,
+                // `repair_3d_refs_on_delete_at`) -- so this is left for a
+                // caller-supplied repair that still asks for it.
                 None => plan.push((sheet_index, row, col, PlannedRepair::RefError)),
             }
         }
@@ -3975,11 +4338,16 @@ pub fn check_formulas_repairable(
 /// and the offending cell is returned. A caller that has already mutated other
 /// state must undo that mutation, or refuse before it makes it — see
 /// `check_formulas_repairable`.
+///
+/// Answers how many formula cells the repair rewrote: `delete_sheet` under
+/// MANUAL calculation marks the workbook pending only when one was (Excel
+/// leaves a workbook whose formulas never named the deleted sheet calculated).
 pub fn repair_all_formulas(
     grids: &mut [Grid],
     repair_fn: &dyn Fn(&str) -> Option<String>,
-) -> Result<(), FormulaRepairRefusal> {
+) -> Result<usize, FormulaRepairRefusal> {
     let plan = plan_formula_repair(grids, &[], repair_fn)?;
+    let rewritten = plan.len();
     for (sheet_index, row, col, outcome) in plan {
         let Some(grid) = grids.get_mut(sheet_index) else { continue };
         let Some(cell) = grid.cells.get_mut(&(row, col)) else { continue };
@@ -3991,7 +4359,7 @@ pub fn repair_all_formulas(
             }
         }
     }
-    Ok(())
+    Ok(rewritten)
 }
 
 pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue {
@@ -5565,7 +5933,9 @@ pub fn run() {
         // Transport bookkeeping, not document state: nothing here persists.
         .manage(ai::runtime::RuntimeState::new())
         .manage(managed_policy::ManagedAppearanceState(std::sync::Mutex::new(appearance_policy)))
-        .invoke_handler(tauri::generate_handler![
+        // `command_watchdog::timed` only registers the command name while the
+        // generated handler runs (BUG-0098); dispatch itself is unchanged.
+        .invoke_handler(command_watchdog::timed::<tauri::Wry, _>(tauri::generate_handler![
             // Grid commands
             commands::get_viewport_cells,
             commands::get_spill_ranges,
@@ -6537,7 +6907,7 @@ pub fn run() {
             managed_policy::get_effective_appearance_policy,
             managed_policy::refresh_managed_appearance,
             managed_policy::publish_skin_pack,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
@@ -6569,6 +6939,10 @@ pub fn run() {
     // (`object-bindings:changed`). Without it the store and its values still
     // work but the frontend is never told a binding set or value moved.
     object_bindings::install_bindings_announcer(app.handle().clone());
+
+    // BUG-0098: log when the main thread stops running queued tasks, and which
+    // command is in the handler at the time. Read-only; see command_watchdog.rs.
+    command_watchdog::start(app.handle());
 
     app.run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {

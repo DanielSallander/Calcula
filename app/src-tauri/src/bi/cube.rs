@@ -122,6 +122,7 @@ pub async fn cube_prefetch(
                 invariant: None,
                 pasted: None,
                 moved: None,
+                source: None,
             }],
             CubeWriteDoor::Edit,
         ),
@@ -820,6 +821,9 @@ pub(crate) fn cube_err_message(e: CubeError) -> String {
         CubeError::Value => "Invalid member expression".to_string(),
         CubeError::NotAvailable => "No data available".to_string(),
         CubeError::Reference => "Invalid reference".to_string(),
+        CubeError::Num => "The measure's value is not a finite number (Infinity or NaN, \
+                           shown as #NUM! in a cell)"
+            .to_string(),
         CubeError::Refused => "Refused by the model's security: the active \"view as\" role \
                               denies an object this formula reads"
             .to_string(),
@@ -1105,11 +1109,22 @@ fn parse_pending_write(
         Some(idx) => styles.get(idx).number_format.clone(),
         None => crate::entry_format_at(grid, styles, u.row, u.col),
     };
-    let ladder_format = if u.is_paste() { None } else { Some(&target_format) };
-    Some(if u.invariant.unwrap_or(false) {
-        crate::parse_cell_input_invariant_in_format(&u.value, locale, ladder_format)
+    // A PASTE is not an ENTRY (NEW-cube-pending-ladder): the batch reads a
+    // pasted write -- `pasted`, or one it resolves from its paste `source` --
+    // through `engine::typed_entry::parse_pasted_input*`, which skips the Text
+    // rung AND the entry checks (`parser::check_entered_formula`), so a pasted
+    // CUBE formula that typing would keep as text is a FORMULA there and must
+    // be pre-fetched. The batch parses a resolved source's own text, which
+    // this predicts from `value`; the kind of the write is the same.
+    let pasted = u.is_paste() || u.source.is_some();
+    Some(if pasted && (u.invariant.unwrap_or(false) || u.source.is_some()) {
+        engine::typed_entry::parse_pasted_input_invariant(&u.value, locale)
+    } else if pasted {
+        engine::typed_entry::parse_pasted_input(&u.value, locale).0
+    } else if u.invariant.unwrap_or(false) {
+        crate::parse_cell_input_invariant_in_format(&u.value, locale, Some(&target_format))
     } else {
-        crate::parse_cell_input_in_format(&u.value, locale, ladder_format).0
+        crate::parse_cell_input_in_format(&u.value, locale, Some(&target_format)).0
     })
 }
 
@@ -1964,10 +1979,7 @@ async fn resolve_set_members(
                             }
                         }
                     }
-                    pairs.sort_by(|a, b| {
-                        let o = a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal);
-                        if sort_order == 2 { o.reverse() } else { o }
-                    });
+                    sort_members_by_value(&mut pairs, sort_order == 2);
                     return Ok(pairs
                         .into_iter()
                         .map(|(m, _)| format!("{}[{}]={}", table, column, m))
@@ -1987,6 +1999,36 @@ async fn resolve_set_members(
         }
         MemberExpr::Measure(_) => Err(CubeError::Value),
     }
+}
+
+/// Order a CUBESET's members by their sort-by value (`descending` for
+/// sort_order 2), in a TOTAL order: a BLANK value is read as 0 by the caller,
+/// and NaN (a measure's `0/0`) sorts above +Infinity, so it is last ascending
+/// and first descending -- PostgreSQL's and IEEE 754 `totalOrder`'s place for
+/// it. Ties keep the model's member order (the sort is stable).
+///
+/// Why not Excel's place: [LIVE] Excel 16's data model (MDX ORDER over the
+/// DAX engine), values a=5, b=NaN, c=+Inf, d=-Inf, e=1, f=BLANK: ascending
+/// a, b, d, f, e, c and descending c, a, b, e, f, d. NaN compares equal to
+/// everything there, so it stays beside its neighbour in the model's order
+/// and even drags 5 in front of -Infinity -- no consistent order reproduces
+/// that, and the old `partial_cmp`-or-Equal comparator that imitated it is not
+/// a total order, which Rust's `sort_by` may answer with a panic (1.81+). The
+/// same probe confirms BLANK sorts as 0 (f between -Infinity and 1 both ways).
+fn sort_members_by_value(pairs: &mut [(String, f64)], descending: bool) {
+    fn key_cmp(a: f64, b: f64) -> std::cmp::Ordering {
+        match (a.is_nan(), b.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            // Not NaN: `partial_cmp` is total here, and -0 equals 0.
+            (false, false) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    }
+    pairs.sort_by(|a, b| {
+        let o = key_cmp(a.1, b.1);
+        if descending { o.reverse() } else { o }
+    });
 }
 
 async fn resolve_cube_ranked_member(
@@ -2204,12 +2246,45 @@ async fn resolve_cube_member_property(
         .first()
         .and_then(|r| r.first())
         .and_then(|o| o.clone());
+    let kind = result.column_kinds.first().copied().unwrap_or_default();
     match cell {
-        Some(s) => match s.parse::<f64>() {
-            Ok(n) if n.is_finite() => Ok(CubeCallResult::Number(n)),
-            _ => Ok(CubeCallResult::Text(s)),
+        Some(s) => match cube_number(&s, kind)? {
+            Some(n) => Ok(CubeCallResult::Number(n)),
+            None => Ok(CubeCallResult::Text(s)),
         },
         None => Err(CubeError::NotAvailable),
+    }
+}
+
+/// A BI result cell read as a CUBE number: `Ok(Some(n))` for a finite
+/// number, `Ok(None)` for a cell that is not a number (text), and
+/// `Err(CubeError::Num)` -- `#NUM!` -- for DAX's special values `+Infinity`,
+/// `-Infinity` and `NaN`, which a cell cannot hold.
+///
+/// THE RULE ([LIVE], 2026-11-05): Excel 16's CUBEVALUE over a data-model
+/// measure `1/0`, `-1/0` or `0/0` shows `#NUM!` for all three, and a
+/// data-model PivotTable's value cell does too (never `#DIV/0!`, never the
+/// word). Power BI's visuals show the words "Infinity" / "-Infinity" / "NaN"
+/// instead; the grid follows Excel. The engine renders a non-finite Float64 as
+/// Rust's `inf` / `-inf` / `NaN` (`bi::commands::arrow_value_to_string`); a
+/// NUMBER column is read through the parse, and an untyped column
+/// ([`super::member::BiColumnKind::Unknown`], a hand-built result) only for
+/// those exact spellings, so a text property that happens to read "NaN" or
+/// "Infinity" stays text.
+fn cube_number(cell: &str, kind: super::member::BiColumnKind) -> Result<Option<f64>, CubeError> {
+    use super::member::BiColumnKind;
+    let parsed = match kind {
+        BiColumnKind::Number => cell.parse::<f64>().ok(),
+        BiColumnKind::Unknown => cell
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() || matches!(cell, "inf" | "-inf" | "NaN")),
+        _ => cell.parse::<f64>().ok().filter(|n| n.is_finite()),
+    };
+    match parsed {
+        Some(n) if n.is_finite() => Ok(Some(n)),
+        Some(_) => Err(CubeError::Num),
+        None => Ok(None),
     }
 }
 
@@ -2363,17 +2438,18 @@ async fn query_scalar(
         .iter()
         .position(|c| c == measure)
         .unwrap_or(0);
-    result
+    let cell = result
         .rows
         .first()
         .and_then(|r| r.get(idx))
         .and_then(|o| o.as_ref())
-        .and_then(|s| s.parse::<f64>().ok())
-        // Non-finite (NaN/Inf, e.g. a divide-by-zero measure) cannot cross the
-        // JSON IPC boundary; surface it as no-data rather than corrupting the
-        // whole CubePrefetch payload.
-        .filter(|v| v.is_finite())
-        .ok_or(CubeError::NotAvailable)
+        .ok_or(CubeError::NotAvailable)?;
+    let kind = result.column_kinds.get(idx).copied().unwrap_or_default();
+    // DAX's +/-Infinity and NaN (a measure `1/0`, `0/0`) are `#NUM!`, as
+    // Excel's CUBEVALUE shows them ([`cube_number`]); they never cross the
+    // JSON IPC boundary as numbers (serde_json cannot carry them), and they
+    // are not "no data" (`#N/A`), which this answered before round D.
+    cube_number(cell, kind)?.ok_or(CubeError::NotAvailable)
 }
 
 /// Distinct, non-empty values of a column (members of a level).
@@ -2644,8 +2720,18 @@ fn compute_status(value: f64, goal: f64, bands: &[(f64, i32)]) -> i32 {
             -1
         };
     }
+    // A TOTAL order (a `partial_cmp`-or-Equal comparator is not one once a
+    // threshold is NaN, which `sort_by` may answer with a panic since Rust
+    // 1.81): ascending by threshold, every NaN threshold LAST, whatever its
+    // sign bit. No ratio reaches a NaN threshold (`ratio >= NaN` is false), so
+    // a NaN band never sets the status, and the lowest band is a number's.
     let mut sorted: Vec<&(f64, i32)> = bands.iter().collect();
-    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| match (a.0.is_nan(), b.0.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => a.0.total_cmp(&b.0),
+    });
     let mut status = sorted.first().map(|b| b.1).unwrap_or(-1);
     for (thr, st) in &sorted {
         if ratio >= *thr {
@@ -2653,6 +2739,29 @@ fn compute_status(value: f64, goal: f64, bands: &[(f64, i32)]) -> i32 {
         }
     }
     status
+}
+
+#[cfg(test)]
+mod compute_status_tests {
+    use super::compute_status;
+
+    /// NEW-kpi-band-sort: the bands sort in a total order with NaN last, so
+    /// a NaN threshold neither panics the sort nor sets the status.
+    #[test]
+    fn a_nan_band_threshold_sorts_last_and_never_matches() {
+        let bands = [(0.9, 0), (f64::NAN, 7), (1.0, 1), (-f64::NAN, 8), (0.0, -1)];
+        assert_eq!(compute_status(95.0, 100.0, &bands), 0, "0.95 is in the 0.9 band");
+        assert_eq!(compute_status(120.0, 100.0, &bands), 1, "1.2 is in the 1.0 band");
+        assert_eq!(compute_status(10.0, 100.0, &bands), -1, "0.1 is in the 0.0 band");
+        // Below every band: the LOWEST numeric band, never a NaN one.
+        assert_eq!(compute_status(-50.0, 100.0, &bands), -1);
+        // Many NaNs among numbers, in every order: deterministic, no panic.
+        let mut many: Vec<(f64, i32)> = (0..40)
+            .map(|i| if i % 3 == 0 { (f64::NAN, 9) } else { (f64::from(i) / 40.0, i) })
+            .collect();
+        many.reverse();
+        assert_eq!(compute_status(50.0, 100.0, &many), 20, "0.5 reaches the 20/40 band");
+    }
 }
 
 fn format_scalar(n: f64) -> String {
@@ -2770,6 +2879,34 @@ fn object_deps_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sorted_cubeset_orders_nan_and_the_infinities_totally() {
+        // NEW-rankedmember-nan: values a=5, b=NaN, c=+Inf, d=-Inf, e=1 and
+        // f=BLANK (read as 0, as Excel sorts it [LIVE]). NaN sorts above
+        // +Infinity: last ascending, first descending, every time.
+        let members = || -> Vec<(String, f64)> {
+            [("a", 5.0), ("b", f64::NAN), ("c", f64::INFINITY), ("d", f64::NEG_INFINITY), ("e", 1.0), ("f", 0.0)]
+                .into_iter()
+                .map(|(m, v)| (m.to_string(), v))
+                .collect()
+        };
+        let order = |descending: bool| -> Vec<String> {
+            let mut pairs = members();
+            sort_members_by_value(&mut pairs, descending);
+            pairs.into_iter().map(|(m, _)| m).collect()
+        };
+        assert_eq!(order(false), ["d", "f", "e", "a", "c", "b"]);
+        assert_eq!(order(true), ["b", "c", "a", "e", "f", "d"]);
+        // The order does not depend on where NaN starts: the old
+        // `partial_cmp`-or-Equal comparator left it wherever it was and moved
+        // its neighbours with it.
+        let mut moved = members();
+        moved.rotate_left(1);
+        sort_members_by_value(&mut moved, false);
+        let names: Vec<&str> = moved.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(names, ["d", "f", "e", "a", "c", "b"]);
+    }
 
     #[test]
     fn parses_measure() {
@@ -3068,6 +3205,83 @@ mod integration_tests {
         (bi, id)
     }
 
+    /// The fixture model plus three measures answering DAX's special values:
+    /// `x / 0` is +Infinity, `-x / 0` -Infinity, `0 / 0` NaN.
+    fn build_model_with_special_values() -> DataModel {
+        let special = |name: &str, text: &str| {
+            bi_engine::expression_measure(name, bi_engine::parse_measure(text).unwrap())
+        };
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("country", DataType::String),
+                        Column::new("amount", DataType::Float64),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .add_measure(special("PosInf", "SUM(Sales[amount]) / 0"))
+            .add_measure(special("NegInf", "(0 - SUM(Sales[amount])) / 0"))
+            .add_measure(special(
+                "NotANumber",
+                "(SUM(Sales[amount]) - SUM(Sales[amount])) / 0",
+            ))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_measure_s_infinity_or_nan_is_num_in_a_cube_cell() {
+        // NEW-bi-nonfinite-display. [LIVE] Excel 16 (2026-11-05): CUBEVALUE
+        // over a data-model measure 1/0, -1/0 or 0/0 shows #NUM! for all
+        // three, and so does a data-model PivotTable's value cell. Calcula
+        // answered #N/A ("no data") -- and CUBEMEMBERPROPERTY the TEXT "inf".
+        use engine::CellError;
+        let (bi, id) = state_from(build_model_with_special_values(), None, [11u8; 16]).await;
+        for m in ["PosInf", "NegInf", "NotANumber"] {
+            assert_eq!(
+                query_scalar(&bi, &id, m, &[]).await.unwrap_err(),
+                CubeError::Num,
+                "{m}"
+            );
+        }
+        assert_eq!(CubeError::Num.to_cell_error(), CellError::Num);
+        // A script is told, not handed "(no value)".
+        assert_eq!(
+            script_cube_value(&bi, "Sales", &["[PosInf]".to_string()])
+                .await
+                .unwrap_err(),
+            CubeError::Num
+        );
+        assert_ne!(
+            cube_err_message(CubeError::Num),
+            cube_err_message(CubeError::NotAvailable)
+        );
+        // Positive control: a finite measure on the same model answers.
+        assert_eq!(query_scalar(&bi, &id, "Revenue", &[]).await.unwrap(), 225.0);
+    }
+
+    #[test]
+    fn only_a_number_column_s_special_values_are_num() {
+        use crate::bi::member::BiColumnKind;
+        assert_eq!(cube_number("inf", BiColumnKind::Number), Err(CubeError::Num));
+        assert_eq!(cube_number("-inf", BiColumnKind::Number), Err(CubeError::Num));
+        assert_eq!(cube_number("NaN", BiColumnKind::Number), Err(CubeError::Num));
+        assert_eq!(cube_number("12.5", BiColumnKind::Number), Ok(Some(12.5)));
+        // A TEXT property that reads like a special value is text.
+        assert_eq!(cube_number("NaN", BiColumnKind::Text), Ok(None));
+        assert_eq!(cube_number("Infinity", BiColumnKind::Text), Ok(None));
+        // An untyped column: only the engine's own spellings.
+        assert_eq!(cube_number("inf", BiColumnKind::Unknown), Err(CubeError::Num));
+        assert_eq!(cube_number("Infinity", BiColumnKind::Unknown), Ok(None));
+        assert_eq!(cube_number("7", BiColumnKind::Unknown), Ok(Some(7.0)));
+        assert_eq!(cube_number("abc", BiColumnKind::Unknown), Ok(None));
+    }
+
     #[tokio::test]
     async fn a_security_refusal_is_never_reported_as_no_value() {
         // A CUBE cell reads #N/A either way — Excel's semantics, and a cell has
@@ -3337,6 +3551,7 @@ mod integration_tests {
             invariant: Some(true),
             pasted: None,
             moved: None,
+            source: None,
         }
     }
 
@@ -3569,6 +3784,7 @@ mod integration_tests {
             invariant: None,
             pasted: None,
             moved: None,
+            source: None,
         }];
         rt.block_on(build_cube_prefetch(
             &host.state,
@@ -3843,6 +4059,7 @@ mod integration_tests {
                 invariant: Some(true),
                 pasted: None,
                 moved: None,
+                source: None,
             },
             write(0, 1, r#"=CUBEVALUE(A1,"[Revenue]")"#),
         ];
@@ -3928,6 +4145,15 @@ mod integration_tests {
             Case { value: "0012", invariant: true, explicit_text: true, preformatted_text: false, pasted: true },
             Case { value: "=1+1", invariant: false, explicit_text: false, preformatted_text: true, pasted: true },
             Case { value: "TRUE", invariant: true, explicit_text: false, preformatted_text: true, pasted: true },
+            // NEW-cube-pending-ladder: a PASTED formula the entry checks refuse
+            // (a LET name declared twice -- typed, it stays TEXT) is the copied
+            // cell's own formula, stored as one; the pre-fetch's parse
+            // predicted text and skipped its cube calls.
+            // SABOTAGE (backende-cube): parse a pasted write through the typed
+            // ladder again -- fails here, "None = a formula" vs Text.
+            Case { value: "=LET(a,1,a,2,a)", invariant: true, explicit_text: false, preformatted_text: false, pasted: true },
+            // Control: TYPED, the same text is refused at entry and kept as text.
+            Case { value: "=LET(a,1,a,2,a)", invariant: true, explicit_text: false, preformatted_text: false, pasted: false },
         ];
         for case in cases {
             let host = Host::new(1);
@@ -3946,6 +4172,7 @@ mod integration_tests {
                 invariant: Some(case.invariant),
                 pasted: case.pasted.then_some(true),
                 moved: None,
+                source: None,
             };
             // A formula's VALUE is not the parse's to predict (the write
             // evaluates it): what must agree is THAT it is a formula.

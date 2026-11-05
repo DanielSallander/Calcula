@@ -356,6 +356,9 @@ pub fn recalc_control_dependents(
     ribbon_filter_state: State<'_, RibbonFilterState>,
     changed_names: Option<Vec<String>>,
 ) -> Result<Vec<CellData>, String> {
+    // A LIVE DATA TABLE whose model reads a control's value follows it under
+    // automatic calculation, as after any edit (BUG-0652, rev-dt2-1): the core
+    // refreshes the tables at its end (NEW-dt-refresh-root).
     recalc_control_dependents_core(
         &state,
         &user_files_state,
@@ -400,7 +403,40 @@ pub fn recalc_control_dependents(
 /// Returns the updated active-sheet cells (plus cleared/created spill cells,
 /// plus forward-propagated cross-sheet cells tagged `sheet_index: Some(..)`)
 /// for the frontend to apply like `update_cell` results.
+///
+/// THE LIVE DATA TABLES (NEW-dt-refresh-root) are refreshed at the end, once
+/// the pass's guards are dropped (`data_tables::refresh_after_recalc`); their
+/// repaints join the returned cells.
 pub(crate) fn recalc_control_dependents_core(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &PaneControlState,
+    ribbon_filter_state: &RibbonFilterState,
+    changed_names: Option<Vec<String>>,
+) -> Result<Vec<CellData>, String> {
+    let scope = crate::data_tables::begin_recalc();
+    let mut cells = recalc_control_dependents_body(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        changed_names,
+    )?;
+    crate::data_tables::refresh_after_recalc(
+        scope,
+        state,
+        user_files_state,
+        Some(pivot_state),
+        Some((pane_control_state, ribbon_filter_state)),
+        &mut cells,
+    );
+    Ok(cells)
+}
+
+/// The pass of [`recalc_control_dependents_core`], under its own guards.
+fn recalc_control_dependents_body(
     state: &AppState,
     user_files_state: &UserFilesState,
     pivot_state: &crate::pivot::PivotState,
@@ -648,6 +684,12 @@ pub(crate) fn recalc_control_dependents_core(
         // PERF-20: same wide-cascade formula trim as update_cell's cascade.
         let include_cascade_formulas =
             affected.len() <= crate::commands::data::CASCADE_FORMULA_LIMIT;
+        // GETPIVOTDATA's lookup (NEW-getpivotdata-trials), from this pass's
+        // pivot store, taken only when one evaluates.
+        let lazy_pivots = crate::pivot::operations::LazyPivotLookup::new(Some(pivot_state));
+        let pivot_lookup = |field: &str, sheet: Option<&str>, r: u32, c: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+            lazy_pivots.lookup(field, sheet, r, c, pairs)
+        };
 
         for &(row, col) in &affected {
             let cell_opt = grid.get_cell(row, col).cloned();
@@ -671,6 +713,7 @@ pub(crate) fn recalc_control_dependents_core(
                         // control's new value in an argument is a changed
                         // argument, answered only if it was served before).
                         None,
+                        Some(&pivot_lookup),
                         // No CUBE prefetch: cube-bearing dependents follow the
                         // same rule through preserved_cube_value (#N/A).
                         None,
@@ -711,6 +754,7 @@ pub(crate) fn recalc_control_dependents_core(
             &cross_sheet_dependents_map,
             &user_files,
             &control_values,
+            Some(&pivot_lookup),
             &styles,
             &locale,
             &merge_lookup,

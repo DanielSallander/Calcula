@@ -33,9 +33,18 @@ fn state_with_sheets(names: &[&str]) -> crate::AppState {
 }
 
 fn granted(grants: &ExplicitRunGrants, door: ExplicitRunDoor) -> u64 {
+    granted_with(grants, door, true)
+}
+
+/// A grant whose run had FORMATTING too (`formatting`), or cell access only.
+fn granted_with(grants: &ExplicitRunGrants, door: ExplicitRunDoor, formatting: bool) -> u64 {
     grants
-        .open(GrantedRun { application: APP.to_string(), macro_id: MACRO.to_string(), door, button: None })
+        .open(GrantedRun { application: APP.to_string(), macro_id: MACRO.to_string(), door, button: None, formatting })
         .expect("a grant")
+}
+
+fn formats(sheet: usize, changes: u32, (r0, r1, c0, c1): (u32, u32, u32, u32)) -> ExplicitRunSheetFormats {
+    ExplicitRunSheetFormats { sheet, changes, first_row: r0, last_row: r1, first_col: c0, last_col: c1 }
 }
 
 fn sheet(sheet: usize, cells: u32, (r0, r1, c0, c1): (u32, u32, u32, u32)) -> ExplicitRunSheetWrites {
@@ -51,6 +60,7 @@ fn report(grant_id: u64, sheets: Vec<ExplicitRunSheetWrites>) -> ExplicitRunWrit
         counts_capped: false,
         others_undone: 0,
         sheets,
+        formats: Vec::new(),
     }
 }
 
@@ -298,6 +308,12 @@ fn the_report_deserializes_from_the_wire_the_page_sends_and_refuses_extra_fields
     with_others["othersUndone"] = serde_json::json!(3);
     let parsed: ExplicitRunWritesReport = serde_json::from_value(with_others).unwrap();
     assert_eq!(parsed.others_undone, 3);
+    // `formats` is optional on the wire (a run that formatted nothing sends none).
+    let mut with_formats = wire.clone();
+    with_formats["formats"] =
+        serde_json::json!([{ "sheet": 0, "changes": 2, "firstRow": 0, "lastRow": 1048575, "firstCol": 2, "lastCol": 2 }]);
+    let parsed: ExplicitRunWritesReport = serde_json::from_value(with_formats).unwrap();
+    assert_eq!(parsed.formats, vec![formats(0, 2, (0, 1_048_575, 2, 2))]);
     let mut extra = wire;
     extra["application"] = serde_json::json!("someone-else");
     assert!(
@@ -496,7 +512,11 @@ fn a_run_that_never_wrote_and_did_not_complete_leaves_a_row() {
     assert_eq!(row.extra["cellsModified"], 0);
     assert!(row.extra.get("sheet").is_none(), "a row that changed nothing names a sheet");
     assert!(
-        row.description.contains("which you started from its button, changed no cells: it stopped before it finished, or never started"),
+        // The grant covered formatting (owner, 2026-11-04), so the row says it
+        // changed neither.
+        row.description.contains(
+            "which you started from its button, changed no cells and no formatting: it stopped before it finished, or never started"
+        ),
         "{}",
         row.description
     );
@@ -538,6 +558,140 @@ fn a_rollback_that_took_back_other_changes_says_how_many() {
         "{}",
         rows[0].description
     );
+}
+
+// ============================================================================
+// Formatting (owner, 2026-11-04)
+// ============================================================================
+
+/// WHAT A GRANTED RUN FORMATTED is on the trail like the cells it wrote: one
+/// always-on `ScriptExecuted` row per formatted sheet, naming the grant's
+/// application, macro and door, the number of formatting changes and the range
+/// in whole-line words where it is whole lines -- never a cell count of a
+/// million for one whole-column format.
+///
+/// SABOTAGE: drop the `for f in &report.formats` loop -> no formatting row.
+#[test]
+fn a_granted_runs_formatting_is_recorded_per_sheet_with_its_range() {
+    let state = state_with_sheets(&["Sheet1", "Sheet2"]);
+    let grants = ExplicitRunGrants::default();
+    let id = granted(&grants, ExplicitRunDoor::CommandLine);
+    let mut r = report(id, vec![sheet(0, 1, (0, 0, 0, 0))]);
+    r.formats = vec![formats(0, 3, (0, 1_048_575, 2, 3)), formats(1, 1, (4, 6, 0, 16_383))];
+    assert_eq!(audit_explicit_run_writes_core(&state, &grants, &r), Ok(3));
+    let rows = executed(&state);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let format_rows: Vec<_> = rows.iter().filter(|row| row.extra.get("formatting") == Some(&serde_json::json!(true))).collect();
+    assert_eq!(format_rows.len(), 2, "{rows:?}");
+    let first = format_rows[0];
+    assert_eq!(first.extra["surface"], "object-script");
+    assert_eq!(first.extra["surfaceId"], MACRO);
+    assert_eq!(first.extra["application"], APP);
+    assert_eq!(first.extra["door"], "commandLine");
+    assert_eq!(first.extra["startedBy"], "you");
+    assert_eq!(first.extra["formatAccess"], true);
+    assert_eq!(first.extra["grantId"], id);
+    assert_eq!(first.extra["sheet"], 0);
+    assert_eq!(first.extra["formatChanges"], 3);
+    assert_eq!(first.extra["lastRow"], 1_048_575);
+    assert!(first.extra.get("cellsModified").is_none(), "a format row counts cells");
+    assert!(
+        first.description.contains("changed the formatting of Sheet1!C:D (3 formatting changes)"),
+        "{}",
+        first.description
+    );
+    assert!(
+        format_rows[1].description.contains("changed the formatting of Sheet2!5:7 (1 formatting change)"),
+        "{}",
+        format_rows[1].description
+    );
+    assert_eq!(grants.waiting(), 0);
+
+    // A run that ONLY formatted still leaves its rows (it changed no cell).
+    let only = granted(&grants, ExplicitRunDoor::MacrosDialog);
+    let mut r = report(only, Vec::new());
+    r.formats = vec![formats(0, 1, (1, 2, 1, 2))];
+    assert_eq!(audit_explicit_run_writes_core(&state, &grants, &r), Ok(1));
+    let last = executed(&state).pop().unwrap();
+    assert!(last.description.contains("changed the formatting of Sheet1!B2:C3"), "{}", last.description);
+}
+
+/// FORMATTING ONLY FROM A GRANT THAT HAD IT (Rust co-decides): a report that
+/// names formatting under a cells-only grant is refused BEFORE the grant is
+/// taken -- and the right report then still finds it.
+///
+/// SABOTAGE: drop the `peek_formatting` check -> the formatting is recorded.
+#[test]
+fn formatting_reported_under_a_cells_only_grant_is_refused_and_keeps_the_grant() {
+    let state = state_with_sheets(&["Sheet1"]);
+    let grants = ExplicitRunGrants::default();
+    let id = granted_with(&grants, ExplicitRunDoor::MacrosDialog, false);
+    let mut claims_more = report(id, vec![sheet(0, 1, (0, 0, 0, 0))]);
+    claims_more.formats = vec![formats(0, 1, (0, 0, 0, 0))];
+    let err = audit_explicit_run_writes_core(&state, &grants, &claims_more).expect_err("cells only");
+    assert!(err.contains("cell access only"), "{err}");
+    assert!(executed(&state).is_empty(), "something was recorded");
+    assert_eq!(grants.waiting(), 1, "the refused report spent the grant");
+    assert_eq!(audit_explicit_run_writes_core(&state, &grants, &report(id, vec![sheet(0, 1, (0, 0, 0, 0))])), Ok(1));
+    // The run row's wording for such a grant says nothing of formatting.
+    let mut never = report(granted_with(&grants, ExplicitRunDoor::Button, false), Vec::new());
+    never.completed = false;
+    audit_explicit_run_writes_core(&state, &grants, &never).unwrap();
+    let row = executed(&state).pop().unwrap();
+    assert!(row.description.contains("changed no cells: it stopped"), "{}", row.description);
+}
+
+/// A malformed formatting entry is refused before its grant is taken: a sheet
+/// twice, inverted bounds, bounds past the sheet, a change count of zero.
+#[test]
+fn a_malformed_formatting_report_is_refused_and_does_not_spend_the_grant() {
+    let state = state_with_sheets(&["Sheet1"]);
+    let grants = ExplicitRunGrants::default();
+    let id = granted(&grants, ExplicitRunDoor::MacrosDialog);
+    for bad in [
+        vec![formats(0, 1, (0, 0, 0, 0)), formats(0, 1, (1, 1, 1, 1))],
+        vec![formats(0, 1, (2, 1, 0, 0))],
+        vec![formats(0, 1, (0, 1_048_576, 0, 0))],
+        vec![formats(0, 1, (0, 0, 0, 16_384))],
+        vec![formats(0, 0, (0, 0, 0, 0))],
+    ] {
+        let mut r = report(id, Vec::new());
+        r.formats = bad.clone();
+        assert!(audit_explicit_run_writes_core(&state, &grants, &r).is_err(), "{bad:?}");
+        assert_eq!(grants.waiting(), 1, "{bad:?} spent the grant");
+    }
+    assert!(executed(&state).is_empty());
+}
+
+/// THE MODULE RUNTIME'S FORMATTING (owner, 2026-11-04): the interpreter's one
+/// formatting op queues a deferred named style; each is recorded on the trail,
+/// on the sheet the run had switched to when it queued it.
+///
+/// SABOTAGE: stop following `ActivateSheet` in `record_queued_formatting` -> the
+/// second style is recorded on Sheet1.
+#[test]
+fn a_module_runs_queued_named_styles_are_recorded_on_the_sheet_they_land_on() {
+    use script_engine::types::DeferredAction;
+    let state = state_with_sheets(&["Sheet1", "Sheet2"]);
+    let actions = vec![
+        DeferredAction::ApplyNamedStyle { name: "Good".into(), row: 0, col: 0, end_row: None, end_col: None },
+        DeferredAction::ActivateSheet { sheet_index: 1 },
+        DeferredAction::Calculate,
+        DeferredAction::ApplyNamedStyle { name: "Total".into(), row: 4, col: 3, end_row: Some(2), end_col: Some(1) },
+    ];
+    let written = super::super::commands::record_queued_formatting(&state, "run_script", "report.js", 0, &actions);
+    assert_eq!(written, 2);
+    let rows = executed(&state);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].extra["sheet"], 0);
+    assert_eq!(rows[0].extra["namedStyle"], "Good");
+    assert_eq!(rows[0].extra["formatting"], true);
+    assert!(rows[0].description.contains("applied the cell style 'Good' to Sheet1!A1"), "{}", rows[0].description);
+    assert_eq!(rows[1].extra["sheet"], 1);
+    assert_eq!((rows[1].extra["firstRow"].clone(), rows[1].extra["lastCol"].clone()), (2.into(), 3.into()));
+    assert!(rows[1].description.contains("'Total' to Sheet2!B3:D5"), "{}", rows[1].description);
+    assert_eq!(rows[1].extra["surface"], "run_script");
+    assert_eq!(rows[1].extra["surfaceId"], "report.js");
 }
 
 // ============================================================================

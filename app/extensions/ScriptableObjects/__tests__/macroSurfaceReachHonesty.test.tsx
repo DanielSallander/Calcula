@@ -338,7 +338,8 @@ describe("the prompt says what Allow cannot cover", () => {
 // OWNER DECISION B, follow-up F4: a macro WRITTEN AS AN OBJECT SCRIPT (the
 // Macro Recorder's default) does not run in the interpreter the paragraph
 // above describes. It runs in a restricted worker realm, and a run YOU start
-// may also change the cells of any sheet -- and nothing more. The screen says
+// may also change the cells of any sheet, and how they look (owner,
+// 2026-11-04) -- and nothing more. The screen says
 // exactly that, names exactly the doors that carry a person's pass, and never
 // tells such a macro it "is not an object script".
 // ===========================================================================
@@ -351,8 +352,8 @@ describe("a macro written as an OBJECT SCRIPT gets its own paragraph (owner deci
   it("says what a run YOU start may do -- the cells of any sheet, and nothing more -- and that a part-way run is undone", () => {
     const text = render(OBJECT_SCRIPT_MACRO_ONLY);
     expect(text).toContain("This macro is written as an object script");
-    expect(text).toContain("it may also read and change the cells of any sheet in this workbook");
-    expect(text).toContain("no other formatting, no sheet structure, no files, no other macros");
+    expect(text).toContain("it may also read and change the cells of any sheet in this workbook and how they look");
+    expect(text).toContain("it cannot lock or unlock cells, hide or show rows, change the sheets' structure, or reach files or other macros");
     expect(text).toContain("If it stops part-way, every change it made is undone.");
     expect(text).toContain("Started by another script, it has only what every restricted script has: the sheet on screen.");
   });
@@ -445,8 +446,8 @@ describe("a macro written as an OBJECT SCRIPT gets its own paragraph (owner deci
     for (const door of doors) {
       if (minted.has(door)) expect(noteYours, door).toContain(PHRASE[door]);
     }
-    expect(note).toContain("no other formatting, no sheet structure, no files, no other macros");
-    expect(sentence).toContain("no other formatting, no sheet structure, no files, no other macros");
+    expect(note).toContain("it cannot lock or unlock cells, hide or show rows, change the sheets' structure");
+    expect(sentence).toContain("it cannot lock or unlock cells, hide or show rows, change the sheets' structure");
   });
 
   // THE "UNDONE" CLAUSE IS A STATEMENT ABOUT THE HOST: a granted run that does

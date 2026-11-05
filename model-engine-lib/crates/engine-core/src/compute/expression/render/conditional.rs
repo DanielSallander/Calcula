@@ -1,18 +1,22 @@
 //! Conditional-aggregation rendering: aggregate operands wrapped in
 //! `CASE WHEN condition THEN operand END` and qualified with a fact table.
 //!
-//! This mode backs [`Expression::to_case_when_sql`]. The arm set and
-//! fallback behavior intentionally mirror the pre-unification implementation
-//! byte-for-byte: nodes without an explicit arm (notably comparisons and
-//! logical AND/OR) fall back to plain rendering, so aggregates beneath them
-//! are *not* CASE-WHEN-wrapped.
+//! This mode backs [`Expression::to_case_when_sql`]. Every node that can hold
+//! a measure-level aggregate recurses, so the condition reaches each one --
+//! including comparisons, AND / OR, SWITCH and IN, which fell back to plain
+//! rendering (dropping the condition) until the open-ledger round E. Leaves
+//! (literals, column references) fall back to plain rendering. Every `CASE`
+//! condition goes through
+//! [`Dialect::case_condition`]: in the DataFusion dialect a NULL condition is
+//! FALSE (`COALESCE(c, FALSE)`, open-ledger round D).
 
 use crate::compute::aggregate::AggregateOp;
+use crate::compute::dax_semantics;
 use crate::compute::expression::Expression;
 use crate::compute::sql_util::quote_ident_double;
 use crate::error::{EngineError, EngineResult};
 
-use super::{Dialect, SqlRenderer};
+use super::{Dialect, Semantics, SqlRenderer};
 
 impl<D: Dialect> SqlRenderer<'_, D> {
     pub(super) fn render_conditional(
@@ -27,21 +31,26 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                     // COUNT(*) with condition → SUM(CASE WHEN condition THEN 1 END).
                     // Handled before rendering the operand: COUNTROWS carries a
                     // bare table reference, which is not renderable as scalar SQL.
-                    self.dialect
-                        .render_aggregate_case_when(operation, condition, "")?
+                    let sql = self
+                        .dialect
+                        .render_aggregate_case_when(operation, condition, "")?;
+                    self.measure_aggregate_case_when(operation, sql, condition, "")
                 }
                 _ => {
                     let qualified = self.render_operand(operand, fact_table)?;
-                    self.dialect
-                        .render_aggregate_case_when(operation, condition, &qualified)?
+                    let sql = self
+                        .dialect
+                        .render_aggregate_case_when(operation, condition, &qualified)?;
+                    // A DAX count of nothing is BLANK (`NULLIF(count, 0)`);
+                    // DISTINCTCOUNT counts BLANK as a value.
+                    self.measure_aggregate_case_when(operation, sql, condition, &qualified)
                 }
             },
             // Compound expressions: recurse into sub-expressions so CASE WHEN
             // is applied to each leaf aggregate independently.
-            Expression::BinaryOp { left, op, right } => {
-                let l = self.render_conditional(left, condition, fact_table)?;
-                let r = self.render_conditional(right, condition, fact_table)?;
-                format!("({l} {} {r})", op.as_sql())
+            // DAX BLANK arithmetic: see `compute::dax_semantics`.
+            Expression::BinaryOp { .. } => {
+                self.render_arithmetic(expr, &mut |e| self.render_conditional(e, condition, fact_table))?
             }
             Expression::SafeDivide {
                 numerator,
@@ -54,8 +63,7 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                     Some(a) => self.render_conditional(a, condition, fact_table)?,
                     None => "NULL".to_string(),
                 };
-                let cast = self.dialect.divide_cast();
-                format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS {cast}) / {d} END")
+                dax_semantics::safe_divide_sql(&n, &d, &alt, self.dialect.divide_cast())
             }
             Expression::ScalarFunc { function, args } => {
                 let mapped = args
@@ -94,7 +102,8 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 percentile,
             } => {
                 let qualified = self.render_operand(operand, fact_table)?;
-                let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
+                let case_expr =
+                    format!("CASE WHEN {} THEN {qualified} END", self.case_cond(condition));
                 let p = self.render_plain(percentile)?;
                 self.dialect.percentile(&p, &case_expr)?
             }
@@ -113,11 +122,89 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 let c = self.render_conditional(cond_expr, condition, fact_table)?;
                 let t = self.render_conditional(then_expr, condition, fact_table)?;
                 let e = self.render_conditional(else_expr, condition, fact_table)?;
-                format!("CASE WHEN {c} THEN {t} ELSE {e} END")
+                format!(
+                    "CASE WHEN {} THEN {t} ELSE {e} END",
+                    self.case_cond_of(cond_expr, &c)
+                )
             }
             Expression::IsBlank(inner) => {
                 let i = self.render_conditional(inner, condition, fact_table)?;
                 format!("({i} IS NULL)")
+            }
+            // A measure-level comparison / AND / OR / SWITCH / IN: every
+            // aggregate in an operand takes the condition. These fell back to
+            // plain rendering until the open-ledger round E, so
+            // `IF(SUM(x, KEEP(...)) > SUM(y), ...)` compared the UNFILTERED
+            // sum (NEW-keep-in-if-condition).
+            Expression::Comparison { left, op, right } => {
+                let mut l = self.render_conditional(left, condition, fact_table)?;
+                let mut r = self.render_conditional(right, condition, fact_table)?;
+                // DAX compares a BLANK as 0 / "" / FALSE against a literal of
+                // that type (mirrors the plain renderer).
+                if self.semantics == Semantics::Dax {
+                    l = dax_semantics::comparison_operand(l, left, right);
+                    r = dax_semantics::comparison_operand(r, right, left);
+                }
+                format!("({l} {} {r})", op.as_sql())
+            }
+            Expression::And(left, right) => {
+                let l = self.render_conditional(left, condition, fact_table)?;
+                let r = self.render_conditional(right, condition, fact_table)?;
+                format!("({l} AND {r})")
+            }
+            Expression::Or(left, right) => {
+                let l = self.render_conditional(left, condition, fact_table)?;
+                let r = self.render_conditional(right, condition, fact_table)?;
+                format!("({l} OR {r})")
+            }
+            Expression::Switch {
+                expr: subject,
+                cases,
+                default,
+            } => {
+                let mut s = self.render_conditional(subject, condition, fact_table)?;
+                // SWITCH compares with `=` (mirrors the plain renderer).
+                if self.semantics == Semantics::Dax {
+                    if let Some((first, _)) = cases.first() {
+                        let zero = dax_semantics::blank_compares_as(first);
+                        if zero.is_some()
+                            && cases
+                                .iter()
+                                .all(|(v, _)| dax_semantics::blank_compares_as(v) == zero)
+                        {
+                            s = dax_semantics::comparison_operand(s, subject, first);
+                        }
+                    }
+                }
+                let mut sql = format!("CASE {s}");
+                for (val, result) in cases {
+                    sql.push_str(&format!(
+                        " WHEN {} THEN {}",
+                        self.render_conditional(val, condition, fact_table)?,
+                        self.render_conditional(result, condition, fact_table)?
+                    ));
+                }
+                if let Some(d) = default {
+                    sql.push_str(&format!(
+                        " ELSE {}",
+                        self.render_conditional(d, condition, fact_table)?
+                    ));
+                }
+                sql.push_str(" END");
+                sql
+            }
+            Expression::InList {
+                expr: subject,
+                values,
+                negated,
+            } => {
+                let s = self.render_conditional(subject, condition, fact_table)?;
+                let vals = values
+                    .iter()
+                    .map(|v| self.render_conditional(v, condition, fact_table))
+                    .collect::<EngineResult<Vec<String>>>()?;
+                let keyword = if *negated { "NOT IN" } else { "IN" };
+                format!("{s} {keyword} ({})", vals.join(", "))
             }
             Expression::Not(inner) => {
                 let i = self.render_conditional(inner, condition, fact_table)?;
@@ -147,12 +234,14 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             }
             Expression::HasOneValue { column } => {
                 let qualified = self.qualify_if_bare(column, fact_table)?;
-                let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
+                let case_expr =
+                    format!("CASE WHEN {} THEN {qualified} END", self.case_cond(condition));
                 format!("(COUNT(DISTINCT {case_expr}) = 1)")
             }
             Expression::SelectedValue { column, alternate } => {
                 let qualified = self.qualify_if_bare(column, fact_table)?;
-                let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
+                let case_expr =
+                    format!("CASE WHEN {} THEN {qualified} END", self.case_cond(condition));
                 let alt = match alternate {
                     Some(a) => self.render_conditional(a, condition, fact_table)?,
                     None => "NULL".to_string(),
@@ -164,8 +253,9 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             Expression::FirstValue { column, order_by } => {
                 let qualified_col = self.qualify_if_bare(column, fact_table)?;
                 let qualified_order = self.qualify_if_bare(order_by, fact_table)?;
-                let case_col = format!("CASE WHEN {condition} THEN {qualified_col} END");
-                let case_order = format!("CASE WHEN {condition} THEN {qualified_order} END");
+                let when = self.case_cond(condition);
+                let case_col = format!("CASE WHEN {when} THEN {qualified_col} END");
+                let case_order = format!("CASE WHEN {when} THEN {qualified_order} END");
                 format!("FIRST_VALUE({case_col} ORDER BY {case_order})")
             }
             Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
@@ -208,7 +298,10 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 condition: cond_expr,
             } => {
                 let c = self.render_conditional(cond_expr, condition, fact_table)?;
-                format!("SUM(CASE WHEN {c} THEN 1 ELSE 0 END)")
+                format!(
+                    "SUM(CASE WHEN {} THEN 1 ELSE 0 END)",
+                    self.case_cond_of(cond_expr, &c)
+                )
             }
             Expression::ListAgg { column, delimiter } => {
                 let col = self.render_conditional(column, condition, fact_table)?;
@@ -236,8 +329,8 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                     .collect::<EngineResult<Vec<String>>>()?;
                 format!("{}({})", name.to_lowercase(), mapped.join(", "))
             }
-            // For leaf expressions (literals, column refs, comparisons, ...),
-            // fall back to plain rendering.
+            // For leaf expressions (literals, column refs, ...), fall back to
+            // plain rendering.
             _ => self.render_plain(expr)?,
         })
     }
@@ -263,10 +356,8 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 let tbl = table_or_var.to_lowercase();
                 format!("{tbl}.{}", quote_ident_double(column))
             }
-            Expression::BinaryOp { left, op, right } => {
-                let l = self.render_operand(left, fact_table)?;
-                let r = self.render_operand(right, fact_table)?;
-                format!("({l} {} {r})", op.as_sql())
+            Expression::BinaryOp { .. } => {
+                self.render_arithmetic(operand, &mut |e| self.render_operand(e, fact_table))?
             }
             Expression::ScalarFunc { function, args } => {
                 let mapped = args
@@ -285,6 +376,9 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                     .collect::<EngineResult<Vec<String>>>()?;
                 format!("{}({})", name.to_lowercase(), mapped.join(", "))
             }
+            // A KEEP left in an aggregate operand (`SUM(KEEP(x, ...))`): its
+            // context is the caller's condition; qualify what it wraps.
+            Expression::Keep { expr: inner, .. } => self.render_operand(inner, fact_table)?,
             Expression::If {
                 condition,
                 then_expr,
@@ -293,7 +387,10 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 let c = self.render_operand(condition, fact_table)?;
                 let t = self.render_operand(then_expr, fact_table)?;
                 let e = self.render_operand(else_expr, fact_table)?;
-                format!("CASE WHEN {c} THEN {t} ELSE {e} END")
+                format!(
+                    "CASE WHEN {} THEN {t} ELSE {e} END",
+                    self.case_cond_of(condition, &c)
+                )
             }
             // For literals and other leaf nodes, plain rendering (no
             // qualification needed).

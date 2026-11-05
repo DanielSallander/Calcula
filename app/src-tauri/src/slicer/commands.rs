@@ -1078,16 +1078,23 @@ pub(crate) fn filter_slicer_tables(
                 target.column_index,
             ),
             Some(selected) => {
-                let is_blank = |v: &String| v.is_empty() || v == "(Blanks)";
-                crate::autofilter::set_column_values_on_sheet(
-                    state,
-                    file_state,
-                    target.sheet,
-                    target.filter_id,
-                    target.column_index,
-                    selected.iter().filter(|v| !is_blank(v)).cloned().collect(),
-                    selected.iter().any(is_blank),
-                )
+                // The selection is member KEYS (BUG-0523); the AutoFilter
+                // matches display text, so the keys become the texts their
+                // cells show now -- in this table, with its own formats.
+                let is_blank = |v: &String| v.is_empty() || v == "(Blanks)" || pivot_engine::is_blank_member_key(v);
+                let keys: Vec<String> = selected.iter().filter(|v| !is_blank(v)).cloned().collect();
+                match table_display_texts_for_keys(state, table_id, &slicer.field_name, &keys) {
+                    Ok(texts) => crate::autofilter::set_column_values_on_sheet(
+                        state,
+                        file_state,
+                        target.sheet,
+                        target.filter_id,
+                        target.column_index,
+                        texts,
+                        selected.iter().any(is_blank),
+                    ),
+                    Err(message) => Err(message),
+                }
             }
         };
         match written {
@@ -1289,7 +1296,9 @@ pub async fn set_slicer_item_selected(
     // Phase 2: its full item list.
     let all_items: Vec<String> = match slicer.source_type {
         SlicerSourceType::Table => {
-            get_table_column_values(&state, slicer.cache_source_id, &slicer.field_name).unwrap_or_default()
+            get_table_column_values(&state, slicer.cache_source_id, &slicer.field_name)
+                .map(|members| members.into_iter().map(|m| m.key).collect())
+                .unwrap_or_default()
         }
         SlicerSourceType::Pivot => get_pivot_field_members(
             &pivot_state,
@@ -1904,17 +1913,15 @@ pub(crate) async fn get_slicer_items_core(
         None
     };
 
-    // THE member shape: a table source's items are their display text (key =
-    // label, DC2 -- AutoFilter matches display text); a pivot source's are
-    // its cache members (invariant key, app-locale label).
+    // THE member shape: a table source's items are keyed by the cell's
+    // INVARIANT value (`table_member_key`, BUG-0523) and labelled with its
+    // display text; a pivot source's are its cache members (invariant key,
+    // app-locale label).
     let unique_values: Option<Vec<MemberRef>> = if pinned_bi.is_some() {
         None // fetched async in phase 2
     } else {
         Some(match slicer.source_type {
-            SlicerSourceType::Table => get_table_column_values(state, reference_source_id, &slicer.field_name)?
-                .into_iter()
-                .map(MemberRef::verbatim)
-                .collect(),
+            SlicerSourceType::Table => get_table_column_values(state, reference_source_id, &slicer.field_name)?,
             SlicerSourceType::Pivot => {
                 get_pivot_field_members(pivot_state, reference_source_id, &slicer.field_name, &display_locale)?
             }
@@ -2058,8 +2065,41 @@ fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
     false
 }
 
-/// Get unique values from a table column.
-fn get_table_column_values(state: &AppState, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
+/// THE member KEY of a table cell in a TABLE slicer (BUG-0523): the value's
+/// INVARIANT spelling (`format_cell_value_simple` -- "1234.5", a date's serial,
+/// TRUE/FALSE, the error code, the text itself), never its display text. The
+/// selection is stored by key, so it survives a change of the app locale or of
+/// the column's number format; the slicer SHOWS the display text (the label),
+/// and the table is filtered through AutoFilter by the display texts the
+/// selected keys have NOW ([`table_display_texts_for_keys`]) -- AutoFilter
+/// itself keeps Excel's display-text matching. `""` is the blank member.
+pub(crate) fn table_member_key(value: &engine::CellValue) -> String {
+    crate::format_cell_value_simple(value)
+}
+
+/// Excel's ascending item order for a slicer over mixed values: numbers
+/// (by value), then text (case-insensitively), then TRUE/FALSE, then errors.
+fn table_member_order(a: &engine::CellValue, b: &engine::CellValue) -> std::cmp::Ordering {
+    use engine::CellValue as V;
+    let rank = |v: &V| match v {
+        V::Number(_) => 0,
+        V::Text(_) => 1,
+        V::Boolean(_) => 2,
+        _ => 3,
+    };
+    match (a, b) {
+        (V::Number(x), V::Number(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (V::Text(x), V::Text(y)) => x.to_lowercase().cmp(&y.to_lowercase()).then_with(|| x.cmp(y)),
+        (V::Boolean(x), V::Boolean(y)) => x.cmp(y),
+        _ => rank(a).cmp(&rank(b)).then_with(|| table_member_key(a).cmp(&table_member_key(b))),
+    }
+}
+
+/// The members of a table column, as a TABLE slicer lists them: one per
+/// distinct KEY ([`table_member_key`]), labelled with the display text (app
+/// locale, the cell's number format) of the column's first cell holding it,
+/// in Excel's ascending order. Blank cells are not listed.
+fn get_table_column_values(state: &AppState, source_id: identity::EntityId, field_name: &str) -> Result<Vec<MemberRef>, String> {
     // CANONICAL LOCK ORDER: `grids` first (see the note in
     // `state_digest_lock_order_tests`). The recalculation pass holds both grid
     // locks and then takes `tables` on a background thread.
@@ -2094,26 +2134,77 @@ fn get_table_column_values(state: &AppState, source_id: identity::EntityId, fiel
     }
     let grid = &grids[table.sheet_index];
 
-    let mut seen = HashMap::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut members: Vec<(engine::CellValue, MemberRef)> = Vec::new();
     for row in data_start_row..=table.end_row {
-        let value = if let Some(cell) = grid.cells.get(&(row, abs_col)) {
-            let style = style_registry.get(grid.effective_style_index(row, abs_col));
-            format_cell_value(&cell.value, style, &locale)
-        } else {
-            String::new()
-        };
-        if !value.is_empty() {
-            seen.entry(value).or_insert(());
+        let Some(cell) = grid.cells.get(&(row, abs_col)) else { continue };
+        let key = table_member_key(&cell.value);
+        if key.is_empty() || seen.contains(&key) {
+            continue;
         }
+        let style = style_registry.get(grid.effective_style_index(row, abs_col));
+        let label = format_cell_value(&cell.value, style, &locale);
+        seen.insert(key.clone());
+        members.push((cell.value.clone(), MemberRef { key, label }));
     }
 
-    let mut values: Vec<String> = seen.into_keys().collect();
-    values.sort();
-    Ok(values)
+    members.sort_by(|(a, _), (b, _)| table_member_order(a, b));
+    Ok(members.into_iter().map(|(_, m)| m).collect())
 }
 
-/// Get values from a table column that still have data given cross-slicer filters.
-/// Scans the table rows and checks each row against filters from sibling slicers.
+/// The display texts (app locale, each cell's own number format) the cells of
+/// table `table_id`'s column `field_name` show for the member KEYS `keys`
+/// (BUG-0523), each once, in row order: what a table slicer's selection
+/// writes into the table's AutoFilter, whose value lists match display text
+/// (Excel's AutoFilter semantics). A key no cell holds any more contributes
+/// nothing. The blank member is the caller's (`includeBlanks`).
+///
+/// LOCKS: `grids`, `style_registry`, `tables`, `locale` -- the order
+/// [`get_table_column_values`] takes -- all released on return.
+pub(crate) fn table_display_texts_for_keys(
+    state: &AppState,
+    table_id: identity::EntityId,
+    field_name: &str,
+    keys: &[String],
+) -> Result<Vec<String>, String> {
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
+    let style_registry = state.style_registry.read().map_err(|e| e.to_string())?;
+    let tables = state.tables.read().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
+    let table = tables
+        .values()
+        .flat_map(|sheet_tables| sheet_tables.values())
+        .find(|t| t.id == table_id)
+        .ok_or_else(|| "its table is no longer in the workbook".to_string())?;
+    let col_offset = table
+        .columns
+        .iter()
+        .position(|c| c.name == field_name)
+        .ok_or_else(|| format!("the table has no column \"{field_name}\""))?;
+    let abs_col = table.start_col + col_offset as u32;
+    let data_start_row = if table.style_options.header_row { table.start_row + 1 } else { table.start_row };
+    let grid = grids.get(table.sheet_index).ok_or_else(|| "Invalid sheet index".to_string())?;
+    let wanted: std::collections::HashSet<&str> = keys.iter().map(String::as_str).collect();
+    let mut out: Vec<String> = Vec::new();
+    for row in data_start_row..=table.end_row {
+        let Some(cell) = grid.cells.get(&(row, abs_col)) else { continue };
+        let key = table_member_key(&cell.value);
+        if key.is_empty() || !wanted.contains(key.as_str()) {
+            continue;
+        }
+        let style = style_registry.get(grid.effective_style_index(row, abs_col));
+        let text = format_cell_value(&cell.value, style, &locale);
+        if !out.contains(&text) {
+            out.push(text);
+        }
+    }
+    Ok(out)
+}
+
+/// The member KEYS of a table column that still have data given cross-slicer
+/// filters: scans the table rows and keeps a row when it passes every
+/// sibling slicer's selection -- matched by KEY ([`table_member_key`],
+/// BUG-0523), as the sibling slicers store theirs.
 fn get_table_available_values(
     state: &AppState,
     source_id: identity::EntityId,
@@ -2124,9 +2215,7 @@ fn get_table_available_values(
     // `state_digest_lock_order_tests`). The recalculation pass holds both grid
     // locks and then takes `tables` on a background thread.
     let grids = state.grids.read().unwrap();
-    let style_registry = state.style_registry.read().unwrap();
     let tables = state.tables.read().unwrap();
-    let locale = state.locale.lock().unwrap();
 
     let table = tables
         .values()
@@ -2165,30 +2254,23 @@ fn get_table_available_values(
     }
     let grid = &grids[table.sheet_index];
 
+    let key_at = |row: u32, col: u32| -> String {
+        grid.cells.get(&(row, col)).map(|cell| table_member_key(&cell.value)).unwrap_or_default()
+    };
+
     let mut available = std::collections::HashSet::new();
 
     for row in data_start_row..=table.end_row {
         // Check if this row passes all sibling filters
-        let passes = filter_cols.iter().all(|(col, allowed)| {
-            let value = if let Some(cell) = grid.cells.get(&(row, *col)) {
-                let style = style_registry.get(grid.effective_style_index(row, *col));
-                format_cell_value(&cell.value, style, &locale)
-            } else {
-                String::new()
-            };
-            allowed.contains(&value)
-        });
+        let passes = filter_cols
+            .iter()
+            .all(|(col, allowed)| selection_holds_item(allowed, &key_at(row, *col)));
 
         if passes {
-            // This row passes all sibling filters — record the target column value
-            let value = if let Some(cell) = grid.cells.get(&(row, target_abs_col)) {
-                let style = style_registry.get(grid.effective_style_index(row, target_abs_col));
-                format_cell_value(&cell.value, style, &locale)
-            } else {
-                String::new()
-            };
-            if !value.is_empty() {
-                available.insert(value);
+            // This row passes all sibling filters — record the target column key
+            let key = key_at(row, target_abs_col);
+            if !key.is_empty() {
+                available.insert(key);
             }
         }
     }

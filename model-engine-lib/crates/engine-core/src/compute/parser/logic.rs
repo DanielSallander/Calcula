@@ -187,7 +187,7 @@ mod tests {
             parse_measure_expression(r#"IF(SUM(Sales[amount]) > 1000, "High", "Low")"#).unwrap();
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "CASE WHEN (SUM(\"amount\") > 1000) THEN 'High' ELSE 'Low' END"
+            "CASE WHEN COALESCE((COALESCE(SUM(\"amount\"), 0) > 1000), FALSE) THEN 'High' ELSE 'Low' END"
         );
         assert!(expr.has_aggregate());
     }
@@ -214,7 +214,7 @@ mod tests {
         )
         .unwrap();
         let sql = expr.to_sql_string().unwrap();
-        assert!(sql.contains("CASE SUM(\"status\")"));
+        assert!(sql.contains("CASE COALESCE(SUM(\"status\"), 0)"));
         assert!(sql.contains("WHEN 1 THEN 'Active'"));
         assert!(sql.contains("WHEN 2 THEN 'Inactive'"));
         assert!(sql.contains("ELSE 'Unknown'"));
@@ -226,7 +226,7 @@ mod tests {
         let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("CASE WHEN"));
         assert!(sql.contains("= 0"));
-        assert!(sql.contains("CAST(SUM(\"revenue\") AS DOUBLE) / COUNT(\"orders\")"));
+        assert!(sql.contains("CAST(SUM(\"revenue\") AS DOUBLE) / NULLIF(COUNT(\"orders\"), 0)"));
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod tests {
                 .unwrap();
         let sql = expr.to_sql_string().unwrap();
         assert!(sql.starts_with("CASE WHEN"));
-        assert!(sql.contains("COUNT(\"b\") > 0"));
+        assert!(sql.contains("COALESCE(NULLIF(COUNT(\"b\"), 0), 0) > 0"));
     }
 
     // --- Logical function tests ---
@@ -289,8 +289,8 @@ mod tests {
         let expr = parse_measure_expression("IF(AND(SUM(t[a]) > 0, SUM(t[b]) > 0), 1, 0)").unwrap();
         let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("AND"));
-        assert!(sql.contains("SUM(\"a\") > 0"));
-        assert!(sql.contains("SUM(\"b\") > 0"));
+        assert!(sql.contains("COALESCE(SUM(\"a\"), 0) > 0"));
+        assert!(sql.contains("COALESCE(SUM(\"b\"), 0) > 0"));
     }
 
     #[test]

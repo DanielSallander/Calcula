@@ -30,6 +30,20 @@ impl Expression {
         SqlRenderer::new(DataFusionDialect, &BareQualifier).render(self)
     }
 
+    /// [`Expression::to_sql_string`] with SQL's (Power Query M's) rules for a
+    /// missing value instead of DAX's: `null + 5` is `null` and a count of
+    /// nothing is `0` (see [`SqlRenderer::with_relational_semantics`]). The
+    /// rendering of a table transformation's row formula.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Expression::to_sql_string`].
+    pub fn to_relational_sql_string(&self) -> EngineResult<String> {
+        SqlRenderer::new(DataFusionDialect, &BareQualifier)
+            .with_relational_semantics()
+            .render(self)
+    }
+
     /// Render this expression as a DataFusion SQL fragment, qualifying each
     /// column reference to the table it belongs to.
     ///
@@ -86,7 +100,7 @@ mod tests {
         let expr = col("revenue").subtract(col("cost")).divide(col("quantity"));
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "((\"revenue\" - \"cost\") / \"quantity\")"
+            "(CAST(CASE WHEN \"revenue\" IS NULL AND \"cost\" IS NULL THEN NULL ELSE (COALESCE(\"revenue\", 0) - COALESCE(\"cost\", 0)) END AS DOUBLE) / CAST(COALESCE(\"quantity\", 0) AS DOUBLE))"
         );
     }
 
@@ -110,16 +124,17 @@ mod tests {
         let expr = agg(AggregateOp::Sum, col("amount")).divide(agg(AggregateOp::Count, col("id")));
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "(SUM(\"amount\") / COUNT(\"id\"))"
+            "(CAST(SUM(\"amount\") AS DOUBLE) / CAST(COALESCE(NULLIF(COUNT(\"id\"), 0), 0) AS DOUBLE))"
         );
     }
 
     #[test]
     fn distinct_count_sql() {
         let expr = agg(AggregateOp::DistinctCount, col("product_id"));
+        // DAX DISTINCTCOUNT counts BLANK as one value (round D).
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "COUNT(DISTINCT \"product_id\")"
+            "NULLIF((COUNT(DISTINCT \"product_id\") + MAX(CASE WHEN (\"product_id\") IS NULL THEN 1 ELSE 0 END)), 0)"
         );
     }
 
@@ -200,7 +215,7 @@ mod tests {
         // Bindings are inlined: actual → SUM("amount"), total → SUM("amount")
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "(SUM(\"amount\") / SUM(\"amount\"))"
+            "(CAST(SUM(\"amount\") AS DOUBLE) / CAST(COALESCE(SUM(\"amount\"), 0) AS DOUBLE))"
         );
     }
 
@@ -263,7 +278,12 @@ mod tests {
     #[test]
     fn comparison_sql() {
         let expr = compare(col("amount"), ComparisonOp::GreaterThan, lit_int(100));
-        assert_eq!(expr.to_sql_string().unwrap(), "(\"amount\" > 100)");
+        // DAX reads a BLANK row as 0 against a number literal, at row level too
+        // (open-ledger round D, `dax_semantics::comparison_operand`).
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "(COALESCE(\"amount\", 0) > 100)"
+        );
     }
 
     #[test]
@@ -272,13 +292,16 @@ mod tests {
         let b = compare(col("y"), ComparisonOp::LessThan, lit_int(10));
         assert_eq!(
             and(a.clone(), b.clone()).to_sql_string().unwrap(),
-            "((\"x\" > 0) AND (\"y\" < 10))"
+            "((COALESCE(\"x\", 0) > 0) AND (COALESCE(\"y\", 0) < 10))"
         );
         assert_eq!(
             or(a.clone(), b.clone()).to_sql_string().unwrap(),
-            "((\"x\" > 0) OR (\"y\" < 10))"
+            "((COALESCE(\"x\", 0) > 0) OR (COALESCE(\"y\", 0) < 10))"
         );
-        assert_eq!(not(a).to_sql_string().unwrap(), "(NOT (\"x\" > 0))");
+        assert_eq!(
+            not(a).to_sql_string().unwrap(),
+            "(NOT (COALESCE(\"x\", 0) > 0))"
+        );
     }
 
     #[test]
@@ -294,7 +317,7 @@ mod tests {
         );
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "CASE WHEN (SUM(\"amount\") > 1000) THEN 'High' ELSE 'Low' END"
+            "CASE WHEN COALESCE((COALESCE(SUM(\"amount\"), 0) > 1000), FALSE) THEN 'High' ELSE 'Low' END"
         );
     }
 
@@ -310,7 +333,8 @@ mod tests {
         );
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "CASE \"status\" WHEN 1 THEN 'Active' WHEN 2 THEN 'Inactive' ELSE 'Unknown' END"
+            // A BLANK subject matches a 0 case (DAX), so it reads as 0.
+            "CASE COALESCE(\"status\", 0) WHEN 1 THEN 'Active' WHEN 2 THEN 'Inactive' ELSE 'Unknown' END"
         );
     }
 
@@ -319,7 +343,7 @@ mod tests {
         let expr = switch(col("status"), vec![(lit_int(1), lit_str("Active"))], None);
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "CASE \"status\" WHEN 1 THEN 'Active' END"
+            "CASE COALESCE(\"status\", 0) WHEN 1 THEN 'Active' END"
         );
     }
 
@@ -332,7 +356,7 @@ mod tests {
         );
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "CASE WHEN COUNT(\"orders\") = 0 THEN NULL ELSE (CAST(SUM(\"revenue\") AS DOUBLE) / COUNT(\"orders\")) END"
+            "CASE WHEN COALESCE(NULLIF(COUNT(\"orders\"), 0), 0) = 0 THEN NULL ELSE (CAST(SUM(\"revenue\") AS DOUBLE) / NULLIF(COUNT(\"orders\"), 0)) END"
         );
     }
 
@@ -341,7 +365,9 @@ mod tests {
         let expr = safe_divide(col("a"), col("b"), Some(lit_int(0)));
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "CASE WHEN \"b\" = 0 THEN 0 ELSE (CAST(\"a\" AS DOUBLE) / \"b\") END"
+            // DAX: a BLANK numerator is BLANK even over a zero denominator
+            // (`DIVIDE(BLANK(), 0, 0)` is BLANK -- `dax_semantics::safe_divide_sql`).
+            "CASE WHEN \"a\" IS NULL THEN NULL WHEN COALESCE(\"b\", 0) = 0 THEN 0 ELSE (CAST(\"a\" AS DOUBLE) / \"b\") END"
         );
     }
 
@@ -354,7 +380,7 @@ mod tests {
     #[test]
     fn count_rows_sql() {
         let expr = count_rows();
-        assert_eq!(expr.to_sql_string().unwrap(), "COUNT(*)");
+        assert_eq!(expr.to_sql_string().unwrap(), "NULLIF(COUNT(*), 0)");
         assert!(expr.is_simple_aggregate());
     }
 
@@ -406,7 +432,8 @@ mod tests {
         let b = compare(col("y"), ComparisonOp::LessThan, lit_int(10));
         assert_eq!(
             xor(a, b).to_sql_string().unwrap(),
-            "(((\"x\" > 0) AND NOT (\"y\" < 10)) OR (NOT (\"x\" > 0) AND (\"y\" < 10)))"
+            "(((COALESCE(\"x\", 0) > 0) AND NOT (COALESCE(\"y\", 0) < 10)) OR \
+             (NOT (COALESCE(\"x\", 0) > 0) AND (COALESCE(\"y\", 0) < 10)))"
         );
     }
 
@@ -437,7 +464,7 @@ mod tests {
         );
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "CASE WHEN (SUM(\"amount\") > 1000) THEN 'it''s high' \
+            "CASE WHEN COALESCE((COALESCE(SUM(\"amount\"), 0) > 1000), FALSE) THEN 'it''s high' \
              ELSE (SUM(\"amount\") * 0.5) END"
         );
     }

@@ -68,7 +68,14 @@ import { ALLOWLIST, thinAppEventForScripts, thinWorkbookPathDetail } from "./all
 // only reason this design was chosen over VBA's UserInterfaceOnly flag.
 import { appendAudit } from "./auditRing";
 import type { CapabilityId } from "./capabilityIds";
-import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS, checkCellWriteValue, vFormatRangeRef } from "./validators";
+import {
+  MAX_RANGE_CELLS,
+  MAX_FILE_TEXT_CHARS,
+  checkCellWriteValue,
+  vFormatRangeRef,
+  vFormatRangeRefRestricted,
+} from "./validators";
+import { EXPLICIT_RUN_FORMAT_WRITES, EXPLICIT_RUN_LINE_SIZE_METHODS } from "./explicitRunGrant";
 import type { PickerTextEncoding } from "../filesystem";
 // The sheet-switch seam's "follow the backend's answer" (BUG-0464), shared with
 // the command line. Imported statically: its own grid reach is loaded on use.
@@ -231,6 +238,7 @@ import { showToast } from "../notifications";
 // The fill-handle's own machinery (drag parity for api.fillRange): SHARED with
 // core/hooks/useFillHandle so a script fill and a drag fill cannot diverge.
 import {
+  fillMergeRefusal,
   fillNumberOf,
   fillPatternFor,
   processPendingFills,
@@ -548,10 +556,37 @@ interface GrantedSheetWrites {
   lastCol: number;
 }
 
+/**
+ * What a granted run FORMATTED on one sheet (owner, 2026-11-04): how many
+ * formatting calls, the bounding box of everything they reached (a row or
+ * column size reaches the whole line), and the rectangles themselves -- capped
+ * at `GRANTED_RUN_FORMAT_RECT_CAP` -- so a rollback can tell the run's own
+ * formatted cells from somebody else's (`countOthersUndone`).
+ */
+interface GrantedSheetFormats {
+  changes: number;
+  firstRow: number;
+  lastRow: number;
+  firstCol: number;
+  lastCol: number;
+  readonly rects: Array<readonly [number, number, number, number]>;
+}
+
+/** Rectangles kept per sheet; beyond this the sheet's bounds stand in for them. */
+const GRANTED_RUN_FORMAT_RECT_CAP = 1024;
+
+/** Last 0-based row / column of a sheet (validators.ts SHEET_LAST_*_INDEX). */
+const GRANTED_RUN_LAST_ROW = 1_048_575;
+const GRANTED_RUN_LAST_COL = 16_383;
+
 interface GrantedRunWrites {
   readonly grantId: number;
   readonly scriptName: string;
   readonly sheets: Map<number, GrantedSheetWrites>;
+  /** What it formatted, per sheet (`noteGrantedRunFormat`). */
+  readonly formats: Map<number, GrantedSheetFormats>;
+  /** Some sheet's rectangles passed the cap: its bounds stand in for them. */
+  formatRectsCapped: boolean;
   countsCapped: boolean;
   /** Calls of the run that failed: a cell counted for one may not have changed. */
   failedCalls: number;
@@ -592,6 +627,8 @@ function openGrantedRunWrites(scriptId: string, grantId: number, scriptName: str
     grantId,
     scriptName,
     sheets: new Map(),
+    formats: new Map(),
+    formatRectsCapped: false,
     countsCapped: false,
     failedCalls: 0,
     inFlight: new Set(),
@@ -754,13 +791,16 @@ function countOthersUndone(writes: GrantedRunWrites, taken: unknown): number {
     if (!Number.isSafeInteger(sheet) || !Number.isSafeInteger(row) || !Number.isSafeInteger(col)) continue;
     const mine = writes.sheets.get(sheet as number);
     const isMine =
-      mine !== undefined &&
-      (mine.cells.has(`${row}:${col}`) ||
-        (writes.countsCapped &&
-          (row as number) >= mine.firstRow &&
-          (row as number) <= mine.lastRow &&
-          (col as number) >= mine.firstCol &&
-          (col as number) <= mine.lastCol));
+      (mine !== undefined &&
+        (mine.cells.has(`${row}:${col}`) ||
+          (writes.countsCapped &&
+            (row as number) >= mine.firstRow &&
+            (row as number) <= mine.lastRow &&
+            (col as number) >= mine.firstCol &&
+            (col as number) <= mine.lastCol))) ||
+      // A cell the run FORMATTED is its own too: a format is recorded for undo
+      // as the cell's previous state, exactly like a value.
+      formattedByRun(writes, sheet as number, row as number, col as number);
     if (!isMine) others += 1;
   }
   return others;
@@ -805,6 +845,47 @@ function noteGrantedRunWrite(scriptId: string, sheetIndex: number, row: number, 
   sheet.lastCol = Math.max(sheet.lastCol, col);
   if (sheet.cells.size < GRANTED_RUN_DISTINCT_CELL_CAP) sheet.cells.add(key);
   else if (!sheet.cells.has(key)) writes.countsCapped = true;
+}
+
+/** Whether the run formatted (sheet, row, col): inside one of its rectangles there. */
+function formattedByRun(writes: GrantedRunWrites, sheet: number, row: number, col: number): boolean {
+  const formats = writes.formats.get(sheet);
+  if (formats === undefined) return false;
+  const inside = (r0: number, c0: number, r1: number, c1: number): boolean =>
+    row >= r0 && row <= r1 && col >= c0 && col <= c1;
+  if (writes.formatRectsCapped) return inside(formats.firstRow, formats.firstCol, formats.lastRow, formats.lastCol);
+  return formats.rects.some(([r0, c0, r1, c1]) => inside(r0, c0, r1, c1));
+}
+
+/**
+ * One formatting call of a granted run, on `sheet` (true index): the
+ * rectangles it reached (a size change reaches its whole line) -- recorded
+ * whether the call succeeded or failed part-way (rev-sec-4), since a failed
+ * call may already have formatted part of them. Read by the report
+ * (`formats`: one change per call; the formatting doors do not say how many
+ * cells actually changed) and by the rollback's attribution.
+ */
+function noteGrantedRunFormat(
+  scriptId: string,
+  sheet: number,
+  rects: ReadonlyArray<readonly [number, number, number, number]>,
+): void {
+  const writes = grantedRunWrites.get(scriptId);
+  if (!writes || rects.length === 0) return;
+  let entry = writes.formats.get(sheet);
+  for (const [r0, c0, r1, c1] of rects) {
+    if (entry === undefined) {
+      entry = { changes: 0, firstRow: r0, lastRow: r1, firstCol: c0, lastCol: c1, rects: [] };
+      writes.formats.set(sheet, entry);
+    }
+    entry.firstRow = Math.min(entry.firstRow, r0);
+    entry.lastRow = Math.max(entry.lastRow, r1);
+    entry.firstCol = Math.min(entry.firstCol, c0);
+    entry.lastCol = Math.max(entry.lastCol, c1);
+    if (entry.rects.length < GRANTED_RUN_FORMAT_RECT_CAP) entry.rects.push([r0, c0, r1, c1]);
+    else writes.formatRectsCapped = true;
+  }
+  if (entry !== undefined) entry.changes += 1;
 }
 
 /** A call the granted realm made while its run lasted: the report waits for it. */
@@ -903,6 +984,17 @@ async function reportGrantedRunWrites(
       firstCol: s.firstCol,
       lastCol: s.lastCol,
     }));
+  // What it FORMATTED (owner, 2026-11-04), per sheet, sent only when it did.
+  const formats = [...writes.formats.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([sheet, f]) => ({
+      sheet,
+      changes: f.changes,
+      firstRow: f.firstRow,
+      lastRow: f.lastRow,
+      firstCol: f.firstCol,
+      lastCol: f.lastCol,
+    }));
   const report = {
     grantId: writes.grantId,
     completed,
@@ -912,6 +1004,7 @@ async function reportGrantedRunWrites(
     failedCalls: writes.failedCalls,
     countsCapped: writes.countsCapped,
     sheets,
+    ...(formats.length > 0 ? { formats } : {}),
     // ...and what ELSE the rollback took back: cells somebody else wrote while
     // the run lasted (review of M6b). Sent only when there were any.
     ...(othersUndone > 0 ? { othersUndone } : {}),
@@ -1605,6 +1698,12 @@ interface MountAdmission {
    * exactly when `explicitRunCells` is false.
    */
   readonly explicitRunGrantId: number | null;
+  /**
+   * ...and it may also change how cells look on any sheet (owner, 2026-11-04):
+   * Rust said `formatAccess` beside `cellAccess`. Never true without
+   * `explicitRunCells`; an older backend that says nothing is no formatting.
+   */
+  readonly explicitRunFormatting: boolean;
 }
 
 /**
@@ -1729,6 +1828,11 @@ interface MountGateAnswer {
    * on `runAdmitted`, and only for the claim it was shown. Absent = no grant.
    */
   cellAccess?: boolean;
+  /**
+   * ...and change how cells look on any sheet (owner, 2026-11-04). Only ever
+   * true beside `cellAccess`. Absent = no formatting.
+   */
+  formatAccess?: boolean;
   /** The grant's id, which the run's one write report presents (F15). */
   grantId?: number | null;
 }
@@ -1742,7 +1846,7 @@ interface MountGateVerdict {
    * for every other answer, including a `cellAccess` with no usable id (a
    * grant whose writes could not be put on the trail is no grant).
    */
-  readonly cellGrant: { readonly grantId: number } | null;
+  readonly cellGrant: { readonly grantId: number; readonly formatting: boolean } | null;
 }
 
 /**
@@ -1811,7 +1915,7 @@ async function requireDistributedMountConsent(
         answer?.cellAccess === true &&
         typeof grantId === "number" &&
         Number.isSafeInteger(grantId)
-          ? { grantId }
+          ? { grantId, formatting: answer?.formatAccess === true }
           : null,
     };
   } catch (err) {
@@ -1919,6 +2023,7 @@ async function admitMount(definition: HostMountDefinition): Promise<MountAdmissi
     recheckWhileRunning,
     explicitRunCells: cellGrant !== null,
     explicitRunGrantId: cellGrant?.grantId ?? null,
+    explicitRunFormatting: cellGrant?.formatting === true,
   });
 }
 
@@ -2174,7 +2279,10 @@ async function mountWorker(
   // person running the macro again, so they mount without it.
   const grantCells = admission.explicitRunCells && !spentCellGrants.has(admission);
   if (admission.explicitRunCells) spentCellGrants.add(admission);
-  const handle = buildHandleFromDefinition(definition, { explicitRunCells: grantCells });
+  const handle = buildHandleFromDefinition(definition, {
+    explicitRunCells: grantCells,
+    explicitRunFormatting: grantCells && admission.explicitRunFormatting,
+  });
   const worker = spawnWorker();
   const mw: MountedWorker = {
     worker,
@@ -4351,16 +4459,36 @@ function handleDebugMessage(mw: MountedWorker, msg: Extract<W2H, { t: `debug${st
 // Worker message wiring
 // ============================================================================
 
+/**
+ * The run-only realms (an explicit run's, owner decision B) whose "mounted" has
+ * ARRIVED (rev-sec-5): their run is over the moment setup settled. A call such
+ * a realm posts after that -- from a timer or an un-awaited promise -- is no
+ * part of the run, and is refused at once; the grant flags themselves are
+ * turned off only once the calls the run made BEFORE "mounted" have passed the
+ * standing gate (they are the run's, and keep its grant).
+ */
+const runOnlyRealmsPastTheirRun = new WeakSet<MountedWorker>();
+
+/** The refusal of a run-only realm's call made after its run ended. */
+export const RUN_ONLY_CALL_AFTER_THE_RUN =
+  "This macro's run is over (its setup finished), so a call it makes afterwards is not part of the run and is refused.";
+
 function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) => void): void {
   mw.worker.onmessage = (e: MessageEvent<W2H>) => {
     const msg = e.data;
     switch (msg.t) {
       case "mounted": {
+        // SYNCHRONOUSLY, on arrival (rev-sec-5): from here on, a call this
+        // run-only realm posts is not part of its run (see the "call" case).
+        if (mw.handle.explicitRun) runOnlyRealmsPastTheirRun.add(mw);
         const deliver = () => {
           // CELL ACCESS LASTS EXACTLY AS LONG AS THE RUN (owner decision B): it
           // ends when setup settles. A call held at the standing gate above has
           // already passed the broker's check by the time this runs.
-          if (mw.handle.explicitRun) mw.handle.explicitRun.cells = false;
+          if (mw.handle.explicitRun) {
+            mw.handle.explicitRun.cells = false;
+            mw.handle.explicitRun.formatting = false;
+          }
           // ...and what the run wrote goes on the trail (F15), once its calls
           // have finished. After the held calls were handed on, so none is lost.
           endGrantedRun(mw.definition.id, msg.ok);
@@ -4381,6 +4509,17 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
         break;
       }
       case "call":
+        // A run-only realm's call after its run ended is refused, never
+        // admitted on a grant that is about to expire (rev-sec-5).
+        if (runOnlyRealmsPastTheirRun.has(mw)) {
+          post(mw, {
+            t: "callResult",
+            callId: msg.callId,
+            ok: false,
+            error: { code: "PermissionDenied", message: RUN_ONLY_CALL_AFTER_THE_RUN },
+          });
+          break;
+        }
         // A granted run's report waits for every call it made (F15).
         noteGrantedRunCall(mw.definition.id, handleCall(mw, msg.callId, msg.method, msg.args));
         break;
@@ -4918,7 +5057,7 @@ async function handleCall(mw: MountedWorker, callId: number, method: string, arg
     // same call below. Distributed scripts are not JIT-prompted — they acquire
     // capabilities only through package consent (Phase 4.2).
     await maybeRequestCapabilityGrant(mw, method, args);
-    const pending = brokerCall(mw.handle, method, args, () => executeImpl(mw, method, args));
+    const pending = brokerCall(mw.handle, method, args, () => executeAccountingGrantedRun(mw, method, args));
     // Handed to the broker: its synchronous part (a toast, a log line) has run.
     letMountedThrough();
     const value = await pending;
@@ -4934,6 +5073,183 @@ async function handleCall(mw: MountedWorker, callId: number, method: string, arg
         : { code: "HostError" as const, message: err instanceof Error ? err.message : String(err) };
     post(mw, { t: "callResult", callId, ok: false, error });
   }
+}
+
+// ============================================================================
+// A granted run's FORMATTING (owner, 2026-11-04)
+// ============================================================================
+// The broker has already admitted the call (the policy runs before this
+// executor). For a realm whose formatting grant is live, three things happen
+// around the ordinary executor, and nothing else changes:
+//   1. a line resize that would reach a HIDDEN line is refused
+//      (`grantedRunResizeRefusal`): Excel shows a hidden row you give a
+//      height -- also one a filter hid -- which is visibility, not formatting;
+//   2. the restricted bound for a non-line rectangle is asserted once more
+//      host-side (BUG-0659; the policy said it first);
+//   3. what the call formatted is recorded for the run's ONE report
+//      (`noteGrantedRunFormat`), against the sheet resolved BEFORE it ran.
+// The undo side needs nothing here: every formatting command joins the run's
+// open step, so the savepoint takes formatting back with the cells.
+
+async function executeAccountingGrantedRun(mw: MountedWorker, method: string, args: unknown[]): Promise<unknown> {
+  const writes = grantedRunWrites.get(mw.definition.id);
+  if (
+    writes === undefined ||
+    writes.ended ||
+    mw.handle.explicitRun?.formatting !== true ||
+    !EXPLICIT_RUN_FORMAT_WRITES.has(method)
+  ) {
+    return executeImpl(mw, method, args);
+  }
+  const lib = await getLib();
+  const footprint = await grantedRunFormatFootprint(lib, method, args);
+  // A clear of contents only: cell access, counted by `recordScriptWrite`.
+  if (footprint === null) return executeImpl(mw, method, args);
+  if (EXPLICIT_RUN_LINE_SIZE_METHODS.has(method)) {
+    const refusal = await grantedRunResizeRefusal(lib, method, footprint);
+    if (refusal !== null) throw new BrokerError("PermissionDenied", refusal);
+  } else {
+    for (const [r0, c0, r1, c1] of footprint.rects) assertRestrictedFormatRangeSize(r0, c0, r1, c1);
+  }
+  // ON THE REPORT WHETHER IT SUCCEEDED OR NOT (rev-sec-4): a formatting call
+  // makes several backend calls (`applyRangeFormat` two to four), so one that
+  // fails part-way has still formatted part of its footprint -- kept by the
+  // run's step until a rollback takes it back -- and a rollback must count
+  // those cells as the run's own, never as somebody else's.
+  try {
+    return await executeImpl(mw, method, args);
+  } finally {
+    noteGrantedRunFormat(mw.definition.id, footprint.sheet, footprint.rects);
+  }
+}
+
+/** What one formatting call reaches: its sheet (true index), its axis and rectangles. */
+export interface GrantedFormatFootprint {
+  readonly sheet: number;
+  readonly axis: "cells" | "rows" | "columns";
+  readonly rects: ReadonlyArray<readonly [number, number, number, number]>;
+}
+
+/**
+ * The footprint of a granted run's formatting call, resolved BEFORE it runs;
+ * null for a clear of contents only (cell access, counted by
+ * `recordScriptWrite`) and for a method that formats nothing. A sheet ref that
+ * does not resolve answers the active sheet: the executor then refuses it with
+ * its own sentence, and nothing is recorded. Exported for tests.
+ */
+export async function grantedRunFormatFootprint(
+  lib: Pick<Awaited<ReturnType<typeof getLib>>, "getActiveSheet" | "getSheets">,
+  method: string,
+  args: readonly unknown[],
+): Promise<GrantedFormatFootprint | null> {
+  const num = (i: number): number => args[i] as number;
+  const rect = (r0: number, c0: number, r1: number, c1: number): readonly [number, number, number, number] => [
+    Math.min(r0, r1),
+    Math.min(c0, c1),
+    Math.max(r0, r1),
+    Math.max(c0, c1),
+  ];
+  const sheetOf = async (ref: unknown): Promise<number> => {
+    if (ref === undefined || ref === null) return lib.getActiveSheet();
+    try {
+      const { sheets } = await lib.getSheets();
+      return resolveSheetRefIn(sheets, ref as number | string, method);
+    } catch {
+      return lib.getActiveSheet();
+    }
+  };
+  const runs = (value: unknown): Array<[number, number]> =>
+    Array.isArray(value) ? (value as Array<[number, number]>) : [];
+  // An if-chain, not a switch: the dispatcher's own case arms are located by
+  // source tests (applicationParity.test.ts), and a second arm spelled the
+  // same way above them would be found first.
+  const cells = (sheet: number, at: number): GrantedFormatFootprint => ({
+    sheet,
+    axis: "cells",
+    rects: [rect(num(at), num(at + 1), num(at + 2), num(at + 3))],
+  });
+  // [r0, c0, r1, c1, format, sheet?]
+  if (method === "api.setRangeFormat") return cells(await sheetOf(args[5]), 0);
+  // [name, r0, c0, r1, c1, sheet?]
+  if (method === "api.applyNamedStyle") return cells(await sheetOf(args[5]), 1);
+  // [r0, c0, r1, c1, sheet?]
+  if (method === "api.clearRangeFormat") return cells(await sheetOf(args[4]), 0);
+  if (method === "api.clearRange") {
+    // [r0, c0, r1, c1, options?, sheet?]
+    const options = args[4] as { applyTo?: unknown } | null | undefined;
+    if ((options?.applyTo ?? "all") === "contents") return null;
+    return cells(await sheetOf(args[5]), 0);
+  }
+  // Clamped to the sheet on screen.
+  if (method === "sheet.setRangeFormat" || method === "sheet.clearRangeFormat") {
+    return cells(await lib.getActiveSheet(), 0);
+  }
+  // Sizes are ACTIVE-SHEET commands (the executor refuses another sheet).
+  const lines = async (
+    axis: "rows" | "columns",
+    spans: ReadonlyArray<readonly [number, number]>,
+  ): Promise<GrantedFormatFootprint> => ({
+    sheet: await lib.getActiveSheet(),
+    axis,
+    rects: spans.map(([a, b]) =>
+      axis === "rows" ? rect(a, 0, b, GRANTED_RUN_LAST_COL) : rect(0, a, GRANTED_RUN_LAST_ROW, b),
+    ),
+  });
+  if (method === "api.setRowHeight") return lines("rows", [[num(0), num(0)]]);
+  if (method === "api.setColumnWidth") return lines("columns", [[num(0), num(0)]]);
+  if (method === "api.setRowHeights") return lines("rows", runs(args[0]));
+  if (method === "api.setColumnWidths") return lines("columns", runs(args[0]));
+  if (method === "api.autoFitRows") return lines("rows", [[num(0), num(1)]]);
+  if (method === "api.autoFitColumns") return lines("columns", [[num(0), num(1)]]);
+  return null;
+}
+
+/**
+ * Why a granted run may not make this resize, or null: it reaches a line that
+ * is HIDDEN now -- by hand, by a filter or by a collapsed outline group. Excel
+ * shows a hidden row you give a height (`api.setRowHeight` follows it), which
+ * would turn the person's hidden rows -- and a filter's -- visible: that is
+ * which lines are SHOWN, not how cells look, and it stays outside the grant.
+ * Exported for tests.
+ */
+export async function grantedRunResizeRefusal(
+  lib: Pick<Awaited<ReturnType<typeof getLib>>, "getHiddenRowsInfo" | "getHiddenColsInfo">,
+  method: string,
+  footprint: GrantedFormatFootprint,
+): Promise<string | null> {
+  const rows = footprint.axis === "rows";
+  const info = rows ? await lib.getHiddenRowsInfo(footprint.sheet) : await lib.getHiddenColsInfo(footprint.sheet);
+  const spans = footprint.rects.map(([r0, c0, r1, c1]): [number, number] => (rows ? [r0, r1] : [c0, c1]));
+  const hidden = (info.effective ?? []).find((line) => spans.some(([a, b]) => line >= a && line <= b));
+  if (hidden === undefined) return null;
+  const what = rows ? `row ${hidden + 1}` : `column ${columnLetters(hidden)}`;
+  return (
+    `${method}: ${what} is hidden, and an application's macro that you run may size rows and ` +
+    "columns but not show hidden ones -- a hidden line given a size is shown again. Leave the " +
+    "hidden lines out of the call."
+  );
+}
+
+/** A 0-based column index in letters (0 -> A). */
+function columnLetters(index: number): string {
+  let n = index + 1;
+  let out = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+/**
+ * The host-side twin of the RESTRICTED tier's format-rectangle bound
+ * (`vFormatRangeRefRestricted`, BUG-0659): the `sheet.*` format rows and a
+ * granted run's formatting. Whole lines stay unbounded.
+ */
+function assertRestrictedFormatRangeSize(startRow: number, startCol: number, endRow: number, endCol: number): void {
+  const verdict = vFormatRangeRefRestricted([startRow, startCol, endRow, endCol]);
+  if (verdict !== true) throw new BrokerError("ValidationError", verdict);
 }
 
 /**
@@ -5616,6 +5932,19 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         start,
         count,
         sheetRef,
+      );
+      return undefined;
+    }
+    case "api.insertCells":
+    case "api.deleteCells": {
+      const [startRow, startCol, endRow, endCol, shift, options] = args as [
+        number, number, number, number, string, ({ unmergeCutMerges?: boolean } | null)?,
+      ];
+      const lib = await getLib();
+      await executeCellShift(
+        lib,
+        method === "api.insertCells" ? "insert" : "delete",
+        startRow, startCol, endRow, endCol, shift, options ?? undefined,
       );
       return undefined;
     }
@@ -6892,6 +7221,8 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // to the script's sheet), appearance instead of content.
       const [startRow, startCol, endRow, endCol, format, sheetRef] = args as
         [number, number, number, number, FormattingOptions, (number | string)?];
+      // The RESTRICTED bound for a rectangle that is not whole lines (BUG-0659).
+      assertRestrictedFormatRangeSize(startRow, startCol, endRow, endCol);
       const lib = await getLib();
       const target = await clampSheetIndex(lib, handle, sheetRef, "setRangeFormat");
       await applyRangeFormat(lib, target, startRow, startCol, endRow, endCol, format);
@@ -6900,6 +7231,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "sheet.clearRangeFormat": {
       const [startRow, startCol, endRow, endCol, sheetRef] = args as
         [number, number, number, number, (number | string)?];
+      assertRestrictedFormatRangeSize(startRow, startCol, endRow, endCol); // BUG-0659
       const lib = await getLib();
       const target = await clampSheetIndex(lib, handle, sheetRef, "clearRangeFormat");
       await clearRangeFormat(lib, target, startRow, startCol, endRow, endCol);
@@ -9639,6 +9971,25 @@ export async function fillRangeFromScript(
   else if (direction === "right") srcEndCol = startCol + sourceSize - 1;
   else srcStartCol = endCol - sourceSize + 1;
 
+  // MERGED CELLS IN THE WAY, asked BEFORE anything is written -- the drag's
+  // own rule (`fillMergeRefusal`, NEW-script-fill-merge): a destination that
+  // holds a merge which is not the band's own repeated pattern. This used to
+  // write the cells and then replicate the band's merges over whatever merges
+  // stood there. Excel [LIVE, Excel 16 COM, 2026-11-05, pastec/probe-fill2.ps1]:
+  // `AutoFill` (the drag, and `type: "series"`) refuses with "To do this, all
+  // the merged cells need to be the same size.", changing nothing; `FillDown`
+  // (`type: "copy"`) over the same merges raises nothing and changes nothing
+  // -- so a copy fill answers `{ count: 0 }`. A granted application macro's
+  // fill (`moduleParity`) is held to it too: the rule decides whether a cell
+  // is written at all, which is cell access, not structure.
+  const srcBox = { startRow: srcStartRow, startCol: srcStartCol, endRow: srcEndRow, endCol: srcEndCol };
+  const targetBox = { startRow, startCol, endRow, endCol };
+  const mergeRefusal = fillMergeRefusal(await lib.getMergedRegions(), srcBox, targetBox, direction);
+  if (mergeRefusal !== null) {
+    if (fillType === "copy") return { count: 0 };
+    throw new Error(mergeRefusal);
+  }
+
   // Fetch the band once (values + formulas + style indexes), like completeFill.
   const sourceCells = await lib.getViewportCells(srcStartRow, srcStartCol, srcEndRow, srcEndCol);
   const cellMap = new Map<string, string>();
@@ -9765,8 +10116,6 @@ export async function fillRangeFromScript(
     return { row: w.row, col: w.col, value: w.value, styleIndex: u?.styleIndex };
   });
 
-  const srcBox = { startRow: srcStartRow, startCol: srcStartCol, endRow: srcEndRow, endCol: srcEndCol };
-  const targetBox = { startRow, startCol, endRow, endCol };
   await withScriptUndoBatch(lib, `Fill ${batchUpdates.length} cells`, async () => {
     if (updates.length > 0) {
       const changed = await lib.updateCellsBatch(updates);
@@ -12352,6 +12701,44 @@ export async function executeStructuralOp(
   if (!t.offSheet) await afterStructuralChange();
 }
 
+/**
+ * Excel's Insert Cells / Delete Cells, scripted (BUG-0358: VBA's
+ * `Range("B2:C3").Insert Shift:=xlDown` / `.Delete Shift:=xlToLeft`), over the
+ * SAME wrappers Home > Insert Cells... runs (`insertCellsRange` /
+ * `deleteCellsRange`), so a script and a person shift cells by one set of
+ * rules: a range that spans every column (row) is an entire-row (column)
+ * insert or delete, every store anchored to the cells follows, ONE undo step.
+ * ACTIVE SHEET ONLY (the backend command is). When the shift would cut a
+ * merged block, Excel asks "This operation will cause some merged cells to
+ * unmerge"; a script cannot be asked, so it is refused with that question --
+ * nothing changed -- unless the call said `{ unmergeCutMerges: true }` (what a
+ * recorded macro says when you answered OK). Exported for tests.
+ */
+export async function executeCellShift(
+  lib: Pick<Awaited<ReturnType<typeof getLib>>, "insertCellsRange" | "deleteCellsRange">,
+  op: "insert" | "delete",
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  shift: string,
+  options?: { unmergeCutMerges?: boolean },
+): Promise<void> {
+  const opts = { unmergeCutMerges: options?.unmergeCutMerges === true };
+  const result =
+    op === "insert"
+      ? await lib.insertCellsRange(startRow, startCol, endRow, endCol, shift as "right" | "down", opts)
+      : await lib.deleteCellsRange(startRow, startCol, endRow, endCol, shift as "left" | "up", opts);
+  if (!result.applied) {
+    throw new BrokerError(
+      "ValidationError",
+      `${op === "insert" ? "insertCells" : "deleteCells"}: ${result.confirm ?? "the cells could not be shifted"} ` +
+        `Nothing was changed; pass { unmergeCutMerges: true } to unmerge them and go on.`,
+    );
+  }
+  await afterStructuralChange();
+}
+
 export async function executeMergeCells(
   lib: Awaited<ReturnType<typeof getLib>>,
   scriptId: string,
@@ -12363,9 +12750,15 @@ export async function executeMergeCells(
 ): Promise<void> {
   const t = await resolveSheetWriteTarget(lib, sheetRef, "mergeCells");
   const result = await lib.mergeCells(startRow, startCol, endRow, endCol, t.target);
-  if (!result.success) {
-    throw new BrokerError("ValidationError", "mergeCells was refused (the range overlaps an existing merge)");
-  }
+  // `success: false` is the backend's NOTHING TO MERGE -- one cell, or a block
+  // that is already exactly that merge (merge_commands.rs) -- and Excel does
+  // nothing there either, without a word [LIVE, Excel 16: Range("A1").Merge
+  // and Range("C1").Merge inside C1:D2 both return, MergeCells unchanged]. It
+  // used to throw "the range overlaps an existing merge" (BUG-0283), which
+  // blamed an overlap that did not exist. A range that overlaps merges is now
+  // merged as their UNION, as Excel does (merge_commands.rs); any refusal the
+  // backend still gives (a protected sheet) passes through in its own words.
+  if (!result.success) return;
   // Off-sheet, updatedCells is [] by contract — attribution and repaint
   // degrade to no-ops together.
   for (const cell of result.updatedCells) {

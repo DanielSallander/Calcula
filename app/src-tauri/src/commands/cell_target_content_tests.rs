@@ -168,6 +168,7 @@ fn batch(wb: &Workbook, t: &CellTargetRef, writes: &[(u32, u32, &str)]) -> Resul
                 invariant: Some(true),
                 pasted: None,
                 moved: None,
+                source: None,
             })
             .collect(),
         "Paste",
@@ -470,6 +471,7 @@ fn a_styled_paste_onto_a_grid_lands_the_values_and_obeys_the_hosts_format_cells_
                     invariant: Some(true),
                     pasted: Some(true),
                     moved: None,
+                    source: None,
                 })
                 .collect(),
             "Paste",
@@ -552,6 +554,7 @@ fn a_target_batch_re_asks_format_cells_and_the_hosts_protection_under_the_write_
                 invariant: Some(true),
                 pasted: Some(true),
                 moved: None,
+                source: None,
             })
             .collect(),
         true, // the stale plan: "Format Cells allowed"
@@ -599,6 +602,14 @@ fn a_target_batch_moves_a_cut_cells_format_and_a_blank_without_a_style_keeps_its
             grids[backing].set_cell(row, 0, Cell { value: CellValue::Number(1.0), ast: None, style_index: unlocked_italic, rich_text: None });
         }
     }
+    // The cut SOURCES, on the host sheet: Sheet1!A1 (5) and the empty A2, both
+    // still holding the moved look -- a move claim is honoured only when its
+    // source shows the style it carries (BUG-0654, `honoured_move_claims`).
+    for (row, value) in [(0u32, CellValue::Number(5.0)), (1, CellValue::Empty)] {
+        let cell = Cell { value, ast: None, style_index: locked_bold, rich_text: None };
+        wb.state.grid.write(&seed).unwrap().set_cell(row, 0, cell.clone());
+        wb.state.grids.write(&seed).unwrap()[0].set_cell(row, 0, cell);
+    }
     let write = |cells: &[(u32, &str, Option<usize>, bool)]| -> Result<Vec<crate::api_types::CellData>, String> {
         crate::cell_target::update_cells_batch_on_target(
             &wb.state,
@@ -617,9 +628,10 @@ fn a_target_batch_moves_a_cut_cells_format_and_a_blank_without_a_style_keeps_its
                     style_index,
                     invariant: Some(true),
                     pasted: Some(true),
-                    // A move CLAIM (round 18: `moved` names its source cell;
-                    // this route reads the claim, the sheet route binds it).
+                    // A move CLAIM naming its source cell, Sheet1!A{row+1}
+                    // (seeded above); both routes bind it (BUG-0654).
                     moved: moved.then(|| crate::api_types::MovedFrom { sheet_index: 0, row, col: 0, target: None }),
+                    source: None,
                 })
                 .collect(),
             "Paste",
@@ -658,6 +670,178 @@ fn a_target_batch_moves_a_cut_cells_format_and_a_blank_without_a_style_keeps_its
     assert_eq!(backing_value(&wb, backing, 2, 0), CellValue::Empty, "the blank cleared A3");
     let a3 = style_of(2);
     assert!(a3.font.italic && !a3.locked, "unprotected: a blank without a style keeps A3's own format");
+}
+
+/// BUG-0654: the floating-grid batch BINDS a move claim to its source, as the
+/// sheet route does (`honoured_move_claims`). A claim whose source cell does
+/// not show the style the write carries -- an arbitrary style index sent with
+/// `moved` onto an unlocked backing cell of a protected host that refuses
+/// Format Cells -- is written as a COPY: the value lands, the format is
+/// dropped. A claim whose source shows it (a cut inside the grid itself, the
+/// source named by the grid's target) is honoured.
+#[test]
+fn a_target_batch_honours_a_move_claim_only_from_a_source_that_holds_the_style() {
+    let wb = Workbook::new(1);
+    let (t, backing) = float1(&wb, 4, 3);
+    let seed = crate::document_effect::test_seed_effect();
+    let (unlocked_italic, forged, bold) = {
+        let mut styles = wb.state.style_registry.write(&seed).unwrap();
+        (
+            styles.get_or_create(CellStyle { locked: false, ..CellStyle::new().with_italic(true) }),
+            styles.get_or_create(CellStyle { locked: false, ..CellStyle::new().with_strikethrough(true) }),
+            styles.get_or_create(CellStyle::new().with_bold(true)),
+        )
+    };
+    {
+        let mut grids = wb.state.grids.write(&seed).unwrap();
+        for row in 0..3 {
+            grids[backing].set_cell(row, 0, Cell { value: CellValue::Number(1.0), ast: None, style_index: unlocked_italic, rich_text: None });
+        }
+        // Float1!C1: a real in-grid cut source, still holding its bold.
+        grids[backing].set_cell(0, 2, Cell { value: CellValue::Number(9.0), ast: None, style_index: bold, rich_text: None });
+    }
+    // Sheet1!E1 shows the default style: a claim naming it carries nothing.
+    protect_host(&wb, SheetProtectionOptions::default());
+    let claim = |row: u32, style_index: usize, from: crate::api_types::MovedFrom| CellUpdateInput {
+        row,
+        col: 0,
+        value: "5".to_string(),
+        style_index: Some(style_index),
+        invariant: Some(true),
+        pasted: Some(true),
+        moved: Some(from),
+        source: None,
+    };
+    let on_host = |row: u32, col: u32| crate::api_types::MovedFrom { sheet_index: 0, row, col, target: None };
+    let in_grid = |row: u32, col: u32| crate::api_types::MovedFrom { sheet_index: 0, row, col, target: Some(t.clone()) };
+    let own_style = |row: u32| wb.state.grids.read().unwrap()[backing].get_cell(row, 0).map(|c| c.style_index).unwrap_or(0);
+    let paste = |updates: Vec<CellUpdateInput>| {
+        crate::cell_target::update_cells_batch_on_target(&wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, &t, updates, "Paste")
+    };
+
+    // The forgery: A1 "moved from" Sheet1!E1, carrying a style E1 does not show.
+    paste(vec![claim(0, forged, on_host(0, 4))]).expect("the value lands (Excel: no error on an unlocked cell)");
+    assert_eq!(backing_value(&wb, backing, 0, 0), CellValue::Number(5.0), "the value landed");
+    assert_eq!(
+        own_style(0),
+        unlocked_italic,
+        "an UNBOUND move claim landed its style on a protected host without Format Cells: Sheet1!E1 shows another style"
+    );
+    // A claim naming a sheet that does not exist is a copy too.
+    paste(vec![claim(1, forged, crate::api_types::MovedFrom { sheet_index: 9, row: 0, col: 0, target: None })]).expect("the value lands");
+    assert_eq!(own_style(1), unlocked_italic, "a claim on a sheet that does not exist carried a format");
+
+    // Positive control: a cut of Float1!C1 (bold) onto A3 is honoured -- the
+    // source is judged on the grid's backing sheet, whose cells are its own.
+    paste(vec![claim(2, bold, in_grid(0, 2))]).expect("an in-grid cut");
+    let a3 = {
+        let grids = wb.state.grids.read().unwrap();
+        wb.state.style_registry.read().unwrap().get(grids[backing].effective_style_index(2, 0)).clone()
+    };
+    assert!(a3.font.bold, "a real cut inside the grid lost its format");
+    assert!(!a3.locked, "the moved cell keeps the destination's Locked flag (unlocked)");
+}
+
+/// BUG-0655: the host-side lock and option questions a formatting-only paste
+/// onto a floating grid asks (`can_edit_cell` / `can_perform_action` with a
+/// `target`). They answer for the GRID's own cells under the HOST's
+/// protection -- never for the active sheet's cells at the same coordinates,
+/// which is all the targetless question could read.
+#[test]
+fn the_lock_and_option_questions_with_a_target_answer_for_the_grids_own_cells() {
+    use crate::protection::{can_edit_target_cells_core, ProtectionCellRef};
+    let wb = Workbook::new(1);
+    let (t, backing) = float1(&wb, 4, 3);
+    let seed = crate::document_effect::test_seed_effect();
+    let unlocked = wb.state.style_registry.write(&seed).unwrap().get_or_create(CellStyle { locked: false, ..CellStyle::new() });
+    // The grid's A1 unlocked, its B1 locked (the default). The HOST's B1, under
+    // the grid, is unlocked: a question read from the active sheet says "editable".
+    wb.state.grids.write(&seed).unwrap()[backing]
+        .set_cell(0, 0, Cell { value: CellValue::Empty, ast: None, style_index: unlocked, rich_text: None });
+    let host_b1 = Cell { value: CellValue::Empty, ast: None, style_index: unlocked, rich_text: None };
+    wb.state.grid.write(&seed).unwrap().set_cell(0, 1, host_b1.clone());
+    wb.state.grids.write(&seed).unwrap()[0].set_cell(0, 1, host_b1);
+    let cells = |list: &[(u32, u32)]| Some(list.iter().map(|&(row, col)| ProtectionCellRef { row, col }).collect::<Vec<_>>());
+
+    // Unprotected host: every cell can be edited.
+    assert!(can_edit_target_cells_core(&wb.state, &t, 0, 0, cells(&[(0, 0), (0, 1)])).can_edit);
+
+    protect_host(&wb, SheetProtectionOptions::default());
+    let a1 = can_edit_target_cells_core(&wb.state, &t, 0, 0, cells(&[(0, 0)]));
+    assert!(a1.can_edit, "the grid's unlocked A1 is editable on a protected host: {:?}", a1.reason);
+    let both = can_edit_target_cells_core(&wb.state, &t, 0, 0, cells(&[(0, 0), (0, 1)]));
+    assert!(!both.can_edit, "the grid's LOCKED B1 was answered from the host's unlocked B1 (the active sheet)");
+    assert!(both.reason.as_deref().is_some_and(|r| r.contains("B1")), "the refusal names B1: {:?}", both.reason);
+    let outside = can_edit_target_cells_core(&wb.state, &t, 0, 0, cells(&[(9, 0)]));
+    assert!(!outside.can_edit, "a cell outside the grid's extent cannot be edited");
+}
+
+/// BUG-0655, the option half: `can_perform_action` with a `target` asks the
+/// HOST's protection (the gate the grid's own format writes ask).
+#[test]
+fn the_option_question_with_a_target_asks_the_hosts_protection() {
+    use crate::protection::can_perform_action_core;
+    let wb = Workbook::new(1);
+    let (t, _backing) = float1(&wb, 4, 3);
+    assert!(can_perform_action_core(&wb.state, "formatCells", Some(&t)).can_edit, "an unprotected host allows it");
+    protect_host(&wb, SheetProtectionOptions::default());
+    assert!(
+        !can_perform_action_core(&wb.state, "formatCells", Some(&t)).can_edit,
+        "the HOST forbids Format Cells: the grid's option question says so"
+    );
+    protect_host(&wb, SheetProtectionOptions { allow_format_cells: true, ..SheetProtectionOptions::default() });
+    assert!(can_perform_action_core(&wb.state, "formatCells", Some(&t)).can_edit, "the host allows Format Cells");
+    let missing = crate::api_types::CellTargetRef::FloatingRange { id: identity::EntityId::from_bytes([7u8; 16]) };
+    assert!(!can_perform_action_core(&wb.state, "formatCells", Some(&missing)).can_edit, "a target that does not resolve cannot");
+}
+
+/// BUG-0347: Paste (No Borders) keeps the destination's OWN borders in full --
+/// a THEME-coloured (tinted) MEDIUM DASHED side stays exactly that, on the
+/// sheet and on a floating grid -- because the frontend now sends the source's
+/// style as a `keep_borders` style write the backend decides from the cell's
+/// own style, instead of putting each side back through applyFormatting's
+/// {style, color} wire (a fixed colour, width 1). Excel [LIVE, Excel 16 COM,
+/// 2026-11-04, paste-x/probe1.ps1]: xlPasteAllExceptBorders onto a cell with a
+/// theme-colour-5 medium dashed bottom border keeps theme colour 5, medium,
+/// dashed, while the source's bold arrives and its own top border does not.
+#[test]
+fn no_borders_keeps_a_theme_coloured_medium_dashed_border_in_full_on_a_sheet_and_a_grid() {
+    use engine::{BorderLineStyle, BorderStyle, ThemeColor, ThemeColorSlot, Tint};
+    let wb = Workbook::new(1);
+    let (t, backing) = float1(&wb, 4, 3);
+    let seed = crate::document_effect::test_seed_effect();
+    let themed = BorderStyle { width: 2, color: ThemeColor::theme_tinted(ThemeColorSlot::Accent2, Tint(-2500)), style: BorderLineStyle::Dashed };
+    let red_top = BorderStyle { width: 1, color: ThemeColor::absolute(255, 0, 0), style: BorderLineStyle::Solid };
+    let (dest, source) = {
+        let mut styles = wb.state.style_registry.write(&seed).unwrap();
+        let mut d = CellStyle::new().with_italic(true);
+        d.borders.bottom = themed.clone();
+        let mut s = CellStyle::new().with_bold(true);
+        s.borders.top = red_top.clone();
+        (styles.get_or_create(d), styles.get_or_create(s))
+    };
+    let cell = Cell { value: CellValue::Number(1.0), ast: None, style_index: dest, rich_text: None };
+    wb.state.grid.write(&seed).unwrap().set_cell(0, 0, cell.clone());
+    wb.state.grids.write(&seed).unwrap()[0].set_cell(0, 0, cell.clone());
+    wb.state.grids.write(&seed).unwrap()[backing].set_cell(0, 0, cell);
+    let write = [crate::api_types::CellStyleWrite { row: 0, col: 0, style_index: source, keep_borders: Some(true) }];
+
+    crate::commands::styles::set_cell_styles_core(&wb.state, &wb.file, &write, None).expect("No Borders on the sheet");
+    crate::commands::styles::set_cell_styles_core(&wb.state, &wb.file, &write, Some(&t)).expect("No Borders on the grid");
+
+    let sheet_style = {
+        let grid = wb.state.grid.read().unwrap();
+        wb.state.style_registry.read().unwrap().get(grid.effective_style_index(0, 0)).clone()
+    };
+    let grid_style = {
+        let grids = wb.state.grids.read().unwrap();
+        wb.state.style_registry.read().unwrap().get(grids[backing].effective_style_index(0, 0)).clone()
+    };
+    for (place, s) in [("sheet", sheet_style), ("grid", grid_style)] {
+        assert!(s.font.bold && !s.font.italic, "{place}: the source's style arrived whole");
+        assert_eq!(s.borders.bottom, themed, "{place}: the destination's theme-coloured medium dashed bottom border lost detail");
+        assert_eq!(s.borders.top, BorderStyle::default(), "{place}: the source's own top border arrived");
+    }
 }
 
 /// Fill Down on a floating grid of a PROTECTED host follows the sheet's rule
@@ -827,21 +1011,23 @@ fn merge_across_makes_one_region_per_row_and_absorb_dissolves_an_inner_backing_r
     undo_once(&wb);
     assert!(backing_merges(&wb, backing).is_empty(), "Merge Across is ONE undo step");
 
-    // ABSORB: B2:C2 merged on the backing sheet, then A1:C3 merged around it.
+    // ABSORB: B2:C2 merged on the backing sheet, then A1:C3 merged around it
+    // -- absorbed by every merge, as Excel's Range.Merge does (the `absorb`
+    // option that once asked for it is gone; without it this used to refuse).
     merge(&wb, &t, (1, 1, 1, 2), MergeOptions::default()).expect("merge B2:C2");
-    let err = merge(&wb, &t, (0, 0, 2, 2), MergeOptions::default()).expect_err("without absorb an inner merge refuses");
-    assert!(err.contains("overlaps"), "got: {err}");
     let before = depth(&wb);
-    let result = merge(&wb, &t, (0, 0, 2, 2), MergeOptions { absorb: true, ..Default::default() }).expect("absorb");
+    let result = merge(&wb, &t, (0, 0, 2, 2), MergeOptions::default()).expect("absorb");
     assert_eq!(result.removed_regions, vec![region(1, 1, 1, 2)], "the inner region is dissolved");
     assert_eq!(backing_merges(&wb, backing), vec![region(0, 0, 2, 2)], "and only the new one is left");
     assert_eq!(depth(&wb), before + 1);
     undo_once(&wb);
     assert_eq!(backing_merges(&wb, backing), vec![region(1, 1, 1, 2)], "one Ctrl+Z puts the inner region back");
 
-    // A partial overlap still refuses, absorb or not.
-    let err = merge(&wb, &t, (0, 0, 1, 1), MergeOptions { absorb: true, ..Default::default() }).expect_err("partial overlap");
-    assert!(err.contains("overlaps"), "got: {err}");
+    // A PARTIAL overlap merges the UNION (Excel [LIVE]; it used to refuse):
+    // A1:B2 over B2:C2 is A1:C2.
+    let result = merge(&wb, &t, (0, 0, 1, 1), MergeOptions::default()).expect("partial overlap merges the union");
+    assert_eq!(result.removed_regions, vec![region(1, 1, 1, 2)]);
+    assert_eq!(backing_merges(&wb, backing), vec![region(0, 0, 1, 2)], "the union A1:C2");
 }
 
 #[test]
@@ -853,7 +1039,7 @@ fn keep_first_value_moves_the_value_and_re_points_its_readers_on_the_backing_she
     type_in(&wb, &t, 0, 1, "42"); // B1 holds the first value; A1 is empty
     type_in(&wb, &t, 2, 0, "=B1+1"); // A3 reads B1
 
-    let result = merge(&wb, &t, (0, 0, 0, 1), MergeOptions { keep_first_value: true, ..Default::default() })
+    let result = merge(&wb, &t, (0, 0, 0, 1), MergeOptions::default())
         .expect("merge A1:B1 keeping the first value");
     assert_eq!(result.moved_cells.len(), 1);
     assert_eq!(backing_value(&wb, backing, 0, 0), CellValue::Number(42.0), "the value moved into A1");
@@ -905,10 +1091,10 @@ fn keep_first_value_re_points_the_backing_sheet_the_way_excel_moves_the_value() 
     };
     assert_eq!(backing_value(&wb, backing, 1, 0), CellValue::Number(7.0), "precondition: A2 reads the host");
 
-    merge(&wb, &t, (0, 0, 0, 1), MergeOptions { keep_first_value: true, ..Default::default() })
+    merge(&wb, &t, (0, 0, 0, 1), MergeOptions::default())
         .expect("merge A1:B1 keeping the first value");
     // The moved formula itself is re-pointed too: it read the cell it landed on.
-    merge(&wb, &t, (7, 0, 7, 1), MergeOptions { keep_first_value: true, ..Default::default() })
+    merge(&wb, &t, (7, 0, 7, 1), MergeOptions::default())
         .expect("merge A8:B8 keeping the first value");
 
     // Every disagreement with Excel is listed, not just the first.

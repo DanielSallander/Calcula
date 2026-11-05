@@ -28,6 +28,10 @@ vi.mock("@api/dialogs", () => dialogs);
 const events = vi.hoisted(() => ({ emit: vi.fn() }));
 vi.mock("@api/cellEvents", () => ({ cellEvents: events }));
 
+// What the active cell SHOWS at its width (BUG-0355); null unless a test says.
+const shown = vi.hoisted(() => ({ shownGeneralTextAt: vi.fn(async (_r: number, _c: number): Promise<string | null> => null) }));
+vi.mock("@api/shownCellText", () => shown);
+
 import { registerSelectionOwner } from "@api/selectionOwner";
 import { registerToastSink, type ToastPayload } from "@api/notifications";
 import type { Selection } from "@api/types";
@@ -125,6 +129,17 @@ describe("stepNumberFormatDecimals", () => {
     grid.selection = sel({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
     await stepNumberFormatDecimals(-1, "Decrease Decimal");
     expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([0], [0], -1, GRID);
+  });
+
+  // BUG-0355, Excel [LIVE] 2026-11-04: 1234.5678 in a default column SHOWS
+  // 1234,568, and Increase Decimal gives 0.0000 -- the step counts what the
+  // column shows, so the ACTIVE cell's shown text travels with it.
+  it("BUG-0355 the active cell's shown General text travels with the step", async () => {
+    shown.shownGeneralTextAt.mockResolvedValueOnce("1234,568");
+    grid.selection = sel({ startRow: 3, startCol: 2, endRow: 4, endCol: 2 });
+    await stepNumberFormatDecimals(1, "Increase Decimal");
+    expect(shown.shownGeneralTextAt).toHaveBeenCalledWith(4, 2);
+    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([4, 3], [2], 1, { target: undefined, shownText: "1234,568" });
   });
 
   it("when Excel would change nothing (a date, text, nothing left to remove) nothing is announced", async () => {

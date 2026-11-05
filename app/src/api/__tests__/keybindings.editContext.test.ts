@@ -172,7 +172,9 @@ const GRID_SCOPED_KEYS: [string, KeyboardEventInit, string][] = [
   ["Ctrl+C", { key: "c", ctrlKey: true }, "core.clipboard.copy"],
   ["Ctrl+X", { key: "x", ctrlKey: true }, "core.clipboard.cut"],
   ["Ctrl+V", { key: "v", ctrlKey: true }, "core.clipboard.paste"],
-  ["Ctrl+Shift+V", { key: "V", ctrlKey: true, shiftKey: true }, "core.clipboard.pasteSpecial"],
+  // Excel's keys (BUG-0375, [LIVE]): Ctrl+Shift+V pastes values, Ctrl+Alt+V opens Paste Special.
+  ["Ctrl+Shift+V", { key: "V", ctrlKey: true, shiftKey: true }, "core.clipboard.pasteValues"],
+  ["Ctrl+Alt+V", { key: "v", ctrlKey: true, altKey: true }, "core.clipboard.pasteSpecial"],
   ["Delete", { key: "Delete" }, "core.edit.clearContents"],
 ];
 

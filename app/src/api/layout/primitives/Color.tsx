@@ -98,6 +98,7 @@ import { focusWhenShown, gridKeyTarget, gridRows } from "./Tile";
 import { DISABLED_LOOK, softDisabled } from "./disabled";
 import { useFlyoutFocus, useMenuClose } from "./Menu";
 import { useNativeColorPick } from "./useNativeColorPick";
+import { useFocusRescueOnDisable } from "./focusRescue";
 
 // ============================================================================
 // Geometry
@@ -1324,6 +1325,11 @@ export function ColorSwatch({
     // eslint-disable-next-line react-hooks/set-state-in-effect -- closing may notify the caller (onOpenChange), which React refuses during render; the guard makes it run once
     if (disabled && open) closePopover();
   }, [disabled, open, closePopover]);
+  // The palette unmounts in the SAME commit `disabled` arrives in (it is gated
+  // by `!disabled`), and with focus inside it the browser put focus on <body>.
+  // Split form: the half that opened it gets focus back (BUG-0398). Its halves
+  // are aria-disabled, so they can take it.
+  const rescue = useFocusRescueOnDisable(disabled, () => openedFrom ?? chevronHalf);
 
   /** Split only: the face button's ref. The anchor is its WRAPPER, so the
    *  palette drops under the whole control and a press on either half is not
@@ -1518,7 +1524,12 @@ export function ColorSwatch({
             openFrom(e.currentTarget);
           }}
         />
-        {palette(openedFrom ?? chevronHalf)}
+        {/* React's focus events bubble out of the palette's portal to this
+            box-less span, which is how the rescue knows the palette held
+            focus (BUG-0398, ./focusRescue.ts). It holds no DOM of its own. */}
+        <span style={{ display: "contents" }} onFocus={rescue.onFocus} onBlur={rescue.onBlur}>
+          {palette(openedFrom ?? chevronHalf)}
+        </span>
       </>
     );
   }

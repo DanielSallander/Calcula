@@ -71,12 +71,13 @@ pub(crate) struct WhatIfStates<'a> {
 pub(crate) enum RecalcMode {
     /// As a typed value would: recalculated under automatic calculation, left
     /// for F9 under manual, on the active sheet and on any other (Scenario
-    /// Show, Scenario Summary, a data table's body). Excel [LIVE, 2026-10-30]:
+    /// Show, Scenario Summary). Excel [LIVE, 2026-10-30]:
     /// under manual calculation Scenario Show and Scenario Summary recalculate
     /// nothing -- the summary reports the result cells' stored values.
     AsAnEdit,
     /// Always: the route reads the result back (a Goal Seek or Solver trial, a
-    /// data-table substitution, an animation frame), so the cells that depend
+    /// data-table substitution, an animation frame), or writes a calculation's
+    /// own result (a live data table's body, `data_tables`), so the cells that depend
     /// on the written ones are recalculated whatever the mode -- the seeded
     /// cascade, never the whole sheet, so ONE TRIAL stays cheap and a value the
     /// user left stale for F9 that does not depend on it is not touched by it.
@@ -127,6 +128,11 @@ pub(crate) fn write_cells_and_recalc_on(
     mode: RecalcMode,
     updated_cells: &mut Vec<CellData>,
 ) -> Result<Option<usize>, String> {
+    // A WHAT-IF WRITE: the shared recalculations below are nested in it, so
+    // none of them refreshes a data table -- the run owns the input cells, and
+    // Goal Seek / Solver refresh at the run's end (`data_tables`,
+    // NEW-dt-refresh-root).
+    let _what_if_write = crate::data_tables::begin_what_if_write();
     // PHASE A: the write, both halves of the mirror, then every guard dropped.
     let (sheet, active_sheet, sheet_id) = {
         let mut grid = state.grid.write(effect).map_err(|e| e.to_string())?;
@@ -202,15 +208,21 @@ pub(crate) fn write_cells_and_recalc_on(
             // the real target was never recalculated and the trial read a
             // stale value. When another sheet is active now, the written
             // sheet is recalculated as the background sheet it has become.
-            let ran = crate::commands::data::cascade_whatever_the_mode(
-                state,
-                states.user_files,
-                states.pane_control,
-                states.ribbon_filter,
-                sheet_id,
-                &seeds,
-                updated_cells,
-            );
+            // The run's own pivot store answers a GETPIVOTDATA the trial's
+            // cascade reaches (NEW-getpivotdata-trials; Excel [LIVE,
+            // backende/probe1.ps1 G1/G2]: a table or Goal Seek over
+            // `=GETPIVOTDATA("Sales",$E$3)*H1` computes from the pivot).
+            let ran = crate::pivot::operations::with_cascade_pivots(states.pivots, || {
+                crate::commands::data::cascade_whatever_the_mode(
+                    state,
+                    states.user_files,
+                    states.pane_control,
+                    states.ribbon_filter,
+                    sheet_id,
+                    &seeds,
+                    updated_cells,
+                )
+            });
             if !ran {
                 if let Some(now) = resolve() {
                     if let Ok(grids) = state.grids.read() {
@@ -309,15 +321,19 @@ fn recalc_background_sheet(
             );
         }
     } else {
-        crate::commands::data::cascade_seeded_on_sheet(
-            state,
-            states.user_files,
-            states.pane_control,
-            states.ribbon_filter,
-            resolve,
-            seeds,
-            updated_cells,
-        );
+        // The run's own pivot store answers GETPIVOTDATA (see the active-sheet
+        // trial in `write_cells_and_recalc_on`).
+        crate::pivot::operations::with_cascade_pivots(states.pivots, || {
+            crate::commands::data::cascade_seeded_on_sheet(
+                state,
+                states.user_files,
+                states.pane_control,
+                states.ribbon_filter,
+                resolve,
+                seeds,
+                updated_cells,
+            )
+        });
     }
 }
 
@@ -354,15 +370,26 @@ fn recalc_background_sheet(
 /// Esc) is over by now and is cleared first, or the pass would end before it
 /// began. Every cell it recalculated joins `updated_cells` (the newer value
 /// replaces a trial's report of the same cell).
+///
+/// THE LIVE DATA TABLES (BUG-0652) are refreshed last, under the run's own
+/// single-flight (`run`), whatever the mode: the pass's own refresh cannot take
+/// the single-flight this run holds, and Excel's run end leaves every table
+/// calculated (`data_tables::refresh_at_run_end` [LIVE]).
 pub(crate) fn calculate_workbook_at_run_end(
     state: &AppState,
     states: &WhatIfStates<'_>,
+    run: &WhatIfRun<'_>,
     updated_cells: &mut Vec<CellData>,
 ) {
     let manual = state.calculation_mode.lock().map(|m| *m == "manual").unwrap_or(false);
-    if !manual && crate::calculation::calculation_state_impl(state) != "pending" {
-        return;
+    if manual || crate::calculation::calculation_state_impl(state) == "pending" {
+        crate::data_tables::during_run_end_pass(|| calculate_workbook_now(state, states, updated_cells));
     }
+    crate::data_tables::refresh_at_run_end(state, states, run, updated_cells);
+}
+
+/// The Calculate Now half of [`calculate_workbook_at_run_end`].
+fn calculate_workbook_now(state: &AppState, states: &WhatIfStates<'_>, updated_cells: &mut Vec<CellData>) {
     if state.calc_cancel.is_cancelled() {
         state.calc_cancel.reset();
     }

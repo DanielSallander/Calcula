@@ -86,6 +86,10 @@ impl<'a> MeasureEngine<'a> {
                     | Expression::ScalarFunc { .. }
                     | Expression::Coalesce(_)
                     | Expression::If { .. }
+                    | Expression::Comparison { .. }
+                    | Expression::And(..)
+                    | Expression::Or(..)
+                    | Expression::Xor(..)
             );
 
         if has_unsafe_group_by_dim && is_compound_with_context {
@@ -630,5 +634,96 @@ mod tests {
                 other => panic!("Unexpected period: {other}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_boundary_if_whose_condition_is_blank_answers_blank() {
+        // NEW-datafusion-case-null, the boundary combiner's IF: a compound
+        // measure with its own KEEP grouped through a many-to-many dimension
+        // combines per-sub-aggregate results in a final `CASE WHEN c THEN t
+        // ELSE NULL END`, whose THEN is a bare column there. DataFusion 44
+        // answers that CASE with THEN when `c` is NULL (BLANK > a number): the
+        // measure showed SUM(quantity) where DAX answers BLANK.
+        //
+        // IfBlank = IF(SUM(amount, KEEP(Sales[id] = 1)) > SUM(quantity),
+        // SUM(quantity), BLANK()). Order 1 (product 101, amount 10) is in P1
+        // only: P1's 10 > 5 answers 5; P2 has no order 1, so its condition is
+        // BLANK > 2 and the answer BLANK.
+        use crate::compute::expression::{
+            agg, blank, compare, if_expr, keep, qualified_col, ComparisonOp, FilterPredicate,
+        };
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::measure::expression_measure;
+        use crate::model::schema::DataModel;
+
+        let order_one = keep(
+            qualified_col("Sales", "amount"),
+            vec![FilterPredicate::new("Sales", "id", ComparisonOp::Equal, "1")],
+        );
+        let quantity = || agg(AggregateOp::Sum, qualified_col("Sales", "quantity"));
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(periods_table())
+            .add_relationship(Relationship::many_to_many(
+                "Sales_Periods",
+                "Sales",
+                "Periods",
+                vec![
+                    JoinCondition::new("product_id", "start_id", JoinOperator::GreaterThanOrEqual),
+                    JoinCondition::new("product_id", "end_id", JoinOperator::LessThanOrEqual),
+                ],
+            ))
+            .add_measure(expression_measure(
+                "IfBlank",
+                if_expr(
+                    compare(agg(AggregateOp::Sum, order_one), ComparisonOp::GreaterThan, quantity()),
+                    quantity(),
+                    blank(),
+                ),
+            ))
+            .build()
+            .unwrap();
+        let store = store_with_periods();
+        let engine = MeasureEngine::new(&model, &store);
+        let result = engine
+            .evaluate_grouped(
+                "IfBlank",
+                &[TableColumn {
+                    table: "Periods".to_string(),
+                    column: "period_name".to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.num_rows(), 2, "P1 and P2");
+        let names = result.column(0);
+        let measure = result.column(result.num_columns() - 1);
+        let mut seen = Vec::new();
+        for row in 0..result.num_rows() {
+            let name = ScalarValue::try_from_array(names, row).unwrap().to_string();
+            let v = ScalarValue::try_from_array(measure, row).unwrap();
+            let v = if v.is_null() {
+                None
+            } else {
+                Some(arrow::compute::cast(&v.to_array().unwrap(), &arrow::datatypes::DataType::Float64)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<arrow::array::Float64Array>()
+                    .unwrap()
+                    .value(0))
+            };
+            seen.push((name, v));
+        }
+        // (P2's group key comes back NULL -- the combiner takes the key from
+        // the first sub-result, which has no P2 row; a separate defect,
+        // reported. The VALUES are this test's subject.)
+        let mut values: Vec<Option<f64>> = seen.iter().map(|(_, v)| *v).collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(
+            values,
+            vec![None, Some(5.0)],
+            "P2's BLANK condition must not take the THEN branch: {seen:?}"
+        );
+        assert!(seen.contains(&("P1".to_string(), Some(5.0))), "{seen:?}");
     }
 }

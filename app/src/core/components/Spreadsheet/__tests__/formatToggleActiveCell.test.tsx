@@ -238,16 +238,20 @@ describe("the keyboard's formats cover EVERY block, in ONE undo step", () => {
     ],
   });
 
-  it("Ctrl+B over three Go To Special areas formats all three, as one step", async () => {
+  // BUG-0394: ONE call for every block -- the others as `moreAreas`, the
+  // backend's own one step. It was one call per block (three here, 10,000
+  // after a large Go To Special).
+  it("Ctrl+B over three Go To Special areas formats all three in ONE call, as one step", async () => {
     await select(goToSpecial());
     await press({ key: "b", ctrlKey: true });
-    expect(api.applyFormatting.mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      [[0], [0]],
-      [[2], [2]],
-      [[5, 6], [1]],
+    expect(api.applyFormatting).toHaveBeenCalledTimes(1);
+    const [rows, cols, , opts] = api.applyFormatting.mock.calls[0];
+    expect([rows, cols]).toEqual([[0], [0]]);
+    expect((opts as { moreAreas: unknown }).moreAreas).toEqual([
+      { rows: [2], cols: [2] },
+      { rows: [5, 6], cols: [1] },
     ]);
-    expect(api.beginUndoTransaction).toHaveBeenCalledTimes(1);
-    expect(api.commitUndoTransaction).toHaveBeenCalledWith(5);
+    expect(api.beginUndoTransaction, "one call is the backend's own step").not.toHaveBeenCalled();
   });
 
   it("one block: one write, no bracket (the backend's own step)", async () => {
@@ -257,26 +261,14 @@ describe("the keyboard's formats cover EVERY block, in ONE undo step", () => {
     expect(api.beginUndoTransaction).not.toHaveBeenCalled();
   });
 
-  it("a refusal on a later block: what landed stays ONE step, and the refusal is SHOWN", async () => {
-    api.applyFormatting.mockImplementation(async (rows: unknown) => {
-      if ((rows as number[])[0] === 5) throw "The cell is on a protected sheet.";
-      return { cells: [], styles: [] };
-    });
-    await select(goToSpecial());
-    await press({ key: "b", ctrlKey: true });
-    expect(api.commitUndoTransaction).toHaveBeenCalledWith(5);
-    expect(api.cancelUndoTransaction).not.toHaveBeenCalled();
-    expect(dialogs.alertAsync).toHaveBeenCalledWith("The cell is on a protected sheet.");
-  });
-
-  it("refused on the first block: nothing landed, the empty step is cancelled", async () => {
+  it("a refused multi-block format is SHOWN, and opens no step of its own", async () => {
     api.applyFormatting.mockImplementation(async () => {
       throw "Protected.";
     });
     await select(goToSpecial());
     await press({ key: "b", ctrlKey: true });
     expect(api.applyFormatting).toHaveBeenCalledTimes(1);
-    expect(api.cancelUndoTransaction).toHaveBeenCalledWith(5);
+    expect(api.beginUndoTransaction).not.toHaveBeenCalled();
     expect(dialogs.alertAsync).toHaveBeenCalledWith("Protected.");
   });
 });

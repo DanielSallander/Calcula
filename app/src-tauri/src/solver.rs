@@ -794,7 +794,7 @@ pub(crate) fn solver_solve_impl(
     // Solved, not solved or stopped, the run ends with the WHOLE workbook
     // calculated, as Excel's Solver does under manual calculation [LIVE] (see
     // `calculate_workbook_at_run_end`). The trials above stayed seeded.
-    crate::whatif_recalc::calculate_workbook_at_run_end(state, states, &mut updated_cells);
+    crate::whatif_recalc::calculate_workbook_at_run_end(state, states, &_run, &mut updated_cells);
     // The objective as this final write left it (the algorithm's own last
     // reading may have been cut short by a stop).
     let final_obj = stored_number_in(state, run_sheet, params.objective_row, params.objective_col).unwrap_or(final_obj);
@@ -956,7 +956,7 @@ pub(crate) fn solver_revert_impl(
     // Excel's Restore Original Values leaves the whole workbook calculated too
     // [LIVE: `SolverFinish KeepFinal:=2` under manual calculation puts A1 back
     // and recalculates stale cells that never read it, CalculationState xlDone].
-    crate::whatif_recalc::calculate_workbook_at_run_end(state, states, &mut updated_cells);
+    crate::whatif_recalc::calculate_workbook_at_run_end(state, states, &_run, &mut updated_cells);
 
     SolverResult {
         found_solution: false,

@@ -429,14 +429,18 @@ describe('Empty cell handling', () => {
 // ============================================================================
 
 describe('Field configuration', () => {
-  it('createFieldConfig sets defaults', () => {
+  // Changed deliberately (NEW-pivot-field-config-sort): the helper used to SET
+  // these defaults, which a layout edit then sent and so reset a sorted,
+  // subtotal-less or filtered field. Unsent, the backend keeps the field's own
+  // settings and starts a NEW field at the same defaults.
+  it('createFieldConfig sends no setting it was not given', () => {
     const field = createFieldConfig(0, 'Region');
     expect(field.sourceIndex).toBe(0);
     expect(field.name).toBe('Region');
-    expect(field.sortOrder).toBe('asc');
-    expect(field.showSubtotals).toBe(true);
-    expect(field.collapsed).toBe(false);
-    expect(field.hiddenItems).toEqual([]);
+    expect(field.sortOrder).toBeUndefined();
+    expect(field.showSubtotals).toBeUndefined();
+    expect(field.collapsed).toBeUndefined();
+    expect(field.hiddenItems).toBeUndefined();
   });
 
   it('createFieldConfig respects overrides', () => {

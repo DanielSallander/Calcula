@@ -301,6 +301,33 @@ describe("another visual's selection", () => {
     }
   });
 
+  // NEW-locale-listener-seam (round C): the filtered view is a MODEL query,
+  // and Rust gives the engines the new DAX FORMAT culture in a walk that ends
+  // AFTER `locale:changed`. The read on LOCALE_CHANGED can carry FORMAT text in
+  // the old culture, so the box re-reads when the walk ends -- the SAME
+  // question in the same locale, which the signature must not call answered.
+  it("the end of the FORMAT-culture walk re-reads the filtered view, in the same locale", async () => {
+    setCrossFilter(chartSelection([["East"]]));
+    await settle();
+    expect(filteredCalls()).toHaveLength(1);
+    appLocale.id = "de-DE";
+    try {
+      window.dispatchEvent(new CustomEvent(AppEvents.LOCALE_CHANGED, { detail: { localeId: "de-DE" } }));
+      await settle();
+      expect(filteredCalls()).toHaveLength(2);
+      const { simulateBiFormatCultureAppliedForTests } = await import("@api/locale");
+      simulateBiFormatCultureAppliedForTests();
+      await settle();
+      expect(filteredCalls(), "the box kept a view read before the engines had the new culture").toHaveLength(3);
+      // The same view announced again: that question IS answered now.
+      window.dispatchEvent(new CustomEvent(PivotEvents.PIVOT_VIEW_UPDATED, { detail: { pivotId: "p1", version: 1 } }));
+      await settle();
+      expect(filteredCalls()).toHaveLength(3);
+    } finally {
+      appLocale.id = "en-US";
+    }
+  });
+
   it("a real view re-announced after a locale switch re-asks in the new locale", async () => {
     setCrossFilter(chartSelection([["East"]]));
     await settle();

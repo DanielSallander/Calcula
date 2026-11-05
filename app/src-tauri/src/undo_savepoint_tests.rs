@@ -169,6 +169,66 @@ fn a_run_that_throws_after_two_writes_is_taken_back_entirely_and_leaves_no_step(
     assert_eq!(wb.value(0, 0), CellValue::Empty);
 }
 
+/// FORMATTING IS TAKEN BACK WITH THE CELLS (owner, 2026-11-04: an application's
+/// macro you run may change formatting too, and a run that fails part-way is
+/// still undone whole). Through the REAL commands the granted run reaches: a
+/// cell's own format (`apply_formatting`), a whole-column format (a column
+/// TIER, `apply_formatting` over every row) and a row height
+/// (`set_line_sizes_core`, the Row Height command) -- each joins the run's open
+/// step, so the savepoint takes all three back with the cell it wrote.
+///
+/// SABOTAGE: make `set_line_sizes_core` open a step of its own instead of
+/// joining (or `apply_formatting` commit its own) -> that change survives the
+/// rollback and this goes red.
+#[test]
+fn a_run_that_formats_and_throws_takes_its_formatting_back_with_its_cells() {
+    let wb = Wb::new();
+    let begin = begin_undo_savepoint_core(&wb.state, "Run 'Format report'".to_string());
+    let ticket = begin.ticket.expect("nothing was open: the run's begin opens the step");
+    let savepoint = begin.savepoint.expect("an opened step is always nameable");
+
+    wb.write(1, 1, 7.0);
+    let bold_b2 = crate::api_types::FormattingParams {
+        rows: vec![1],
+        cols: vec![1],
+        bold: Some(true),
+        ..Default::default()
+    };
+    crate::commands::styles::apply_formatting_core(&wb.state, &wb.file, &bold_b2, &[]).expect("Bold on B2");
+    let italic_c = crate::api_types::FormattingParams {
+        rows: (0..=engine::EXCEL_MAX_ROW_INDEX).collect(),
+        cols: vec![2],
+        italic: Some(true),
+        ..Default::default()
+    };
+    crate::commands::styles::apply_formatting_core(&wb.state, &wb.file, &italic_c, &[]).expect("Italic on C:C");
+    crate::commands::dimensions::set_line_sizes_core(&wb.state, &wb.file, true, &[(4, 4)], 40.0)
+        .expect("row 5 to 40 px");
+    // Preconditions: every one of the three landed, and in the run's step.
+    assert_ne!(
+        wb.state.grid.read().unwrap().get_cell(1, 1).map(|c| c.style_index).unwrap_or(0),
+        0,
+        "precondition: B2 has a style of its own"
+    );
+    assert!(wb.state.grid.read().unwrap().column_styles.contains_key(&2), "precondition: a column tier on C");
+    assert_eq!(wb.state.row_heights.read().unwrap().get(&4), Some(&40.0), "precondition: row 5 is 40 px");
+    assert!(wb.is_open(), "precondition: a formatting command closed the run's step");
+
+    let result = wb.roll_back(savepoint);
+    assert!(result.success, "the rollback was refused: {:?}", result.refusal);
+    assert_eq!(wb.value(1, 1), CellValue::Empty, "the cell the run wrote is still there");
+    assert_eq!(
+        wb.state.grid.read().unwrap().get_cell(1, 1).map(|c| c.style_index).unwrap_or(0),
+        0,
+        "B2 kept the bold the run gave it"
+    );
+    assert!(!wb.state.grid.read().unwrap().column_styles.contains_key(&2), "column C kept the run's italic");
+    assert_eq!(wb.state.row_heights.read().unwrap().get(&4), None, "row 5 kept the run's height");
+    // No step left behind.
+    assert!(commit_undo_transaction_core(&wb.state, Some(ticket)));
+    assert_eq!(wb.depths(), (0, 0), "a taken-back formatting run left an undo or a redo step");
+}
+
 #[test]
 fn a_run_that_completes_is_one_step_its_opener_commits() {
     // POSITIVE CONTROL for the test above: the same writes, committed -- one step.

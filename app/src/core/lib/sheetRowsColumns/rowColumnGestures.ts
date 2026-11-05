@@ -22,12 +22,22 @@
 //   its shape. Several Ctrl+click blocks each get their own; blocks that
 //   share a row (column) are refused whole.
 // - Several blocks are ONE undo step (one Ctrl+Z restores every one).
+// - Several blocks are ALL OR NOTHING: one that is refused refuses the whole
+//   gesture, and none of the others is inserted / deleted either [LIVE, Excel
+//   16 over the ribbon's own commands, 2026-11-05, dtrefresh/probe4.ps1: rows 3
+//   and 10 selected with a data table on K1:L4 (row 3 inside its body) --
+//   Insert Sheet Rows and Delete Sheet Rows changed nothing, whichever block
+//   was selected first; columns L and P the same; rows 6 and 10 beside it
+//   inserted and deleted both]. The blocks run bottom-up, so a refusal can come
+//   after a block has landed: that block is taken back to the savepoint marked
+//   before the first one (the restore Ctrl+Z uses, leaving no undo or redo step).
 // - Deleting every row (a whole-column selection) empties the sheet; Excel
 //   refuses to insert when non-blank cells would be pushed off the sheet, and
 //   inserting as many rows as the sheet has pushes off every one of them.
 
 import type { CellTargetRef, Selection } from "../../types";
 import {
+  beginUndoSavepoint,
   beginUndoTransaction,
   cancelUndoTransaction,
   commitUndoTransaction,
@@ -35,9 +45,12 @@ import {
   deleteRows,
   insertColumns,
   insertRows,
+  rollBackToUndoSavepoint,
+  type UndoSavepoint,
 } from "../tauri-api";
 import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionCloses } from "../undoTransactionOwnership";
 import { alertAsync } from "../dialogs";
+import { announceRolledBackRestore } from "../cellsMoved";
 import { sheetSpans, type IndexSpan, type SheetAxis } from "./spans";
 
 /** The four commands, named as their grid commands are. */
@@ -122,6 +135,51 @@ function apply(kind: RowColumnGestureKind, span: IndexSpan, target?: CellTargetR
 }
 
 /**
+ * The point the blocks are taken back to when a later one is refused, inside
+ * the step the gesture holds (the savepoint door JOINS it). `null` when none
+ * can be named -- the blocks then run as before, and what landed stays,
+ * undoable as one step. A begin that OPENED a step instead (the gesture's own
+ * was closed underneath it) is closed again at once: nobody else would.
+ */
+async function markGesturePoint(description: string): Promise<UndoSavepoint | null> {
+  try {
+    const answer = await beginUndoSavepoint(description);
+    if (typeof answer?.ticket === "number") {
+      await cancelUndoTransaction(answer.ticket).catch(() => {});
+      return null;
+    }
+    const point = answer?.savepoint;
+    if (point && Number.isSafeInteger(point.transaction) && Number.isSafeInteger(point.changes)) {
+      return { transaction: point.transaction, changes: point.changes };
+    }
+    return null;
+  } catch (error) {
+    console.error("[rowColumnGestures] no savepoint for the blocks:", error);
+    return null;
+  }
+}
+
+/** Take the landed blocks back to `point`, shown as Ctrl+Z shows a restore. Whether it did. */
+async function takeBackLandedBlocks(point: UndoSavepoint): Promise<boolean> {
+  try {
+    const result = await rollBackToUndoSavepoint(point);
+    if (result?.success !== true) {
+      console.error("[rowColumnGestures] the landed blocks were not taken back:", result?.refusal);
+      return false;
+    }
+    try {
+      announceRolledBackRestore(result, point.transaction);
+    } catch (error) {
+      console.error("[rowColumnGestures] the take-back could not be shown:", error);
+    }
+    return true;
+  } catch (error) {
+    console.error("[rowColumnGestures] the landed blocks were not taken back:", error);
+    return false;
+  }
+}
+
+/**
  * Run one of Excel's Insert / Delete Sheet Rows / Columns over
  * `host.selection`. Never throws: every refusal reaches the user as an alert.
  */
@@ -160,10 +218,12 @@ export async function runRowColumnGesture(kind: RowColumnGestureKind, host: RowC
   // where the user saw it when its turn comes -- inserting above row 5 first
   // leaves row 2 where it was. ONE undo step over all of them; a begin that
   // JOINS a script's batch closes nothing (undoTransactionOwnership).
-  const landed: IndexSpan[] = [];
+  let landed: IndexSpan[] = [];
   let tx: OwnedUndoTransaction | null = null;
+  let point: UndoSavepoint | null = null;
   try {
     tx = ownUndoTransaction(await beginUndoTransaction(STEP_LABELS[kind]), UNDO_CLOSES);
+    point = await markGesturePoint(STEP_LABELS[kind]);
     for (const span of [...spans].reverse()) {
       await apply(kind, span, host.target);
       landed.push(span);
@@ -171,9 +231,15 @@ export async function runRowColumnGesture(kind: RowColumnGestureKind, host: RowC
     await tx.commit();
   } catch (error) {
     console.error(`[rowColumnGestures] ${kind} failed:`, error);
-    // What LANDED is committed, never cancelled: a cancel drops the undo record
-    // and keeps the writes, so the blocks already inserted / deleted would be
-    // undoable by nothing. With nothing landed, the empty step is cancelled.
+    // ALL OR NOTHING (Excel [LIVE]): the blocks that landed before the refused
+    // one are taken back to the point, and the step -- holding nothing of this
+    // gesture's any more -- is cancelled. When they cannot be taken back, what
+    // LANDED is committed, never cancelled: a cancel drops the undo record and
+    // keeps the writes, so the blocks already inserted / deleted would be
+    // undoable by nothing.
+    if (landed.length > 0 && point !== null && (await takeBackLandedBlocks(point))) {
+      landed = [];
+    }
     if (landed.length > 0) {
       await tx?.commit().catch(() => {});
     } else {

@@ -589,10 +589,16 @@ mod tests {
             "category_name",
         )
         .unwrap();
+        // Re-pinned DELIBERATELY for DAX (round C): DISTINCTCOUNT of nothing
+        // is BLANK, never 0 (`NULLIF(count, 0)`), and a BLANK measure-level
+        // value compares as 0 against a number (`COALESCE(.., 0) > 1`).
+        // Round D: DISTINCTCOUNT counts BLANK as one value, and a DataFusion
+        // CASE condition is `COALESCE(c, FALSE)` (a NULL condition is FALSE).
         assert_eq!(
             sql,
-            "CASE WHEN (COUNT(DISTINCT products.\"category_name\") > 1) \
-             THEN '*''s' ELSE MIN(products.\"category_name\") END"
+            "CASE WHEN COALESCE((COALESCE(NULLIF((COUNT(DISTINCT products.\"category_name\") + \
+             MAX(CASE WHEN (products.\"category_name\") IS NULL THEN 1 ELSE 0 END)), 0), 0) > 1), \
+             FALSE) THEN '*''s' ELSE MIN(products.\"category_name\") END"
         );
     }
 

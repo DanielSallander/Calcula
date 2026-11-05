@@ -50,6 +50,16 @@ export interface SupportedLocaleEntry {
  */
 export const LOCALE_CHANGED_EVENT = "locale:changed";
 
+/**
+ * The Tauri event Rust emits (to every window) once every BI model engine
+ * writes DAX `FORMAT` in the current app locale -- after EVERY `set_locale`,
+ * also with no model open. Mirrors `FORMAT_CULTURE_APPLIED_EVENT` in
+ * `app/src-tauri/src/bi/commands.rs`. Re-dispatched in each window as
+ * `AppEvents.BI_FORMAT_CULTURE_APPLIED`; subscribe with
+ * {@link onBiFormatCultureApplied}.
+ */
+export const BI_FORMAT_CULTURE_APPLIED_EVENT = "bi:format-culture-applied";
+
 /** The invariant (en-US) locale every window starts from before init. */
 export { INVARIANT_LOCALE };
 
@@ -59,6 +69,19 @@ export { INVARIANT_LOCALE };
 
 let initPromise: Promise<LocaleSettings> | null = null;
 let initFailureLogged = false;
+
+/** How many FORMAT-culture walks this window has heard end (see below). */
+let biFormatCultureGeneration = 0;
+
+/**
+ * Rust says every model engine now writes DAX FORMAT in the app locale: count
+ * it, THEN announce it, so a listener keying a cached model read by
+ * {@link getBiFormatCultureGeneration} already sees the new generation.
+ */
+function noteBiFormatCultureApplied(): void {
+  biFormatCultureGeneration += 1;
+  emitAppEvent(AppEvents.BI_FORMAT_CULTURE_APPLIED, undefined);
+}
 
 /**
  * Install a locale received from the backend into this window and announce it
@@ -100,6 +123,11 @@ export function initAppLocale(): Promise<LocaleSettings> {
     } catch {
       // No Tauri event bridge (a non-webview context): the window keeps the
       // locale it read; `setLocale` in this window still installs its reply.
+    }
+    try {
+      await listen<null>(BI_FORMAT_CULTURE_APPLIED_EVENT, () => noteBiFormatCultureApplied());
+    } catch {
+      // No Tauri event bridge: no model engine to wait for either.
     }
     return getActiveLocale();
   })();
@@ -175,6 +203,43 @@ export function onLocaleChanged(callback: (locale: LocaleSettings) => void): () 
   return () => window.removeEventListener(AppEvents.LOCALE_CHANGED, handler);
 }
 
+/**
+ * Subscribe to "every BI model engine now writes DAX FORMAT in the app
+ * locale" in this window (`AppEvents.BI_FORMAT_CULTURE_APPLIED`).
+ *
+ * THE moment to RE-QUERY a model after a locale switch: `LOCALE_CHANGED`
+ * fires before Rust's walk over the engines ends, so a model query made on it
+ * can compute FORMAT text in the OLD culture with nothing re-querying after.
+ * The two events come in either order (the walk can also finish first), so a
+ * view that paints with this window's locale too (`getAppLocale()`) repaints
+ * on `LOCALE_CHANGED` as well; one whose text is all Rust's needs only this.
+ * @returns Unsubscribe function.
+ */
+export function onBiFormatCultureApplied(callback: () => void): () => void {
+  const handler = () => callback();
+  window.addEventListener(AppEvents.BI_FORMAT_CULTURE_APPLIED, handler);
+  return () => window.removeEventListener(AppEvents.BI_FORMAT_CULTURE_APPLIED, handler);
+}
+
+/**
+ * How many times this window has heard the FORMAT-culture walk end. A cache
+ * that keys a model read by the locale id puts this beside it: a re-read on
+ * {@link onBiFormatCultureApplied} asks the SAME question in the same locale,
+ * and a key without the generation would call it already answered -- in the
+ * old culture. Sync; 0 until the first walk ends.
+ */
+export function getBiFormatCultureGeneration(): number {
+  return biFormatCultureGeneration;
+}
+
+/**
+ * TEST ONLY: the same as Rust's `bi:format-culture-applied` reaching this
+ * window (count the generation, then announce it).
+ */
+export function simulateBiFormatCultureAppliedForTests(): void {
+  noteBiFormatCultureApplied();
+}
+
 // ============================================================================
 // Formatting and parsing in the app locale (sync)
 // ============================================================================
@@ -187,6 +252,29 @@ export function onLocaleChanged(callback: (locale: LocaleSettings) => void): () 
  */
 export function formatNumber(value: number, opts?: FormatNumberOptions): string {
   return formatNumberIn(getActiveLocale(), value, opts);
+}
+
+/**
+ * A non-finite model number as the backend names it on the wire
+ * (`PivotCellData.nonFinite`): a measure's 1/0, -1/0 and 0/0.
+ */
+export type NonFiniteNumber = "infinity" | "negativeInfinity" | "nan";
+
+/**
+ * Power BI's words for a non-finite measure value, which a canvas visual (a
+ * Card, a KPI, a Gauge) shows where Excel's grid shows #NUM!: "Infinity",
+ * "-Infinity" and "NaN". The words are Power BI's own and are not translated.
+ * The ONE place they are written; no visual spells them itself.
+ */
+export function nonFiniteNumberText(kind: NonFiniteNumber): string {
+  switch (kind) {
+    case "infinity":
+      return "Infinity";
+    case "negativeInfinity":
+      return "-Infinity";
+    default:
+      return "NaN";
+  }
 }
 
 /**

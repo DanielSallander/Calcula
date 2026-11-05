@@ -123,6 +123,9 @@ export function buildFillParam(s: FormatCellsSnapshot): FillParam | undefined {
 }
 
 function sameSide(a: BorderSide, b: BorderSide): boolean {
+  // A MIXED edge (BUG-0365) is a state, not a line: it equals only itself.
+  if (Boolean(a.mixed) !== Boolean(b.mixed)) return false;
+  if (a.mixed && b.mixed) return true;
   // Two "none" sides are the same line whatever colour they remember.
   if (a.style === "none" && b.style === "none") return true;
   return a.style === b.style && a.color.toLowerCase() === b.color.toLowerCase();
@@ -235,7 +238,11 @@ export function planFormatCellsWrites(
     { key: "borderLeft", rows, cols: [rect.startCol] },
     { key: "borderRight", rows, cols: [rect.endCol] },
   ] as const;
-  const changedEdges = edges.filter((e) => !sameSide(current[e.key], borderBase[e.key]) || forcedSide(e.key));
+  // An edge still MIXED (BUG-0365: its cells draw different lines and the user
+  // chose none for it) is never written -- each cell keeps its own line.
+  const changedEdges = edges.filter(
+    (e) => !current[e.key].mixed && (!sameSide(current[e.key], borderBase[e.key]) || forcedSide(e.key)),
+  );
   const outline = current.borderTop;
   const isOutline =
     changedEdges.length === 4 &&
@@ -245,7 +252,8 @@ export function planFormatCellsWrites(
     calls.push({ kind: "preset", preset: "outside", ...presetLine(outline) });
   } else {
     for (const e of changedEdges) {
-      calls.push({ kind: "format", rows: [...e.rows], cols: [...e.cols], formatting: { [e.key]: { ...current[e.key] } } });
+      const { style, color } = current[e.key];
+      calls.push({ kind: "format", rows: [...e.rows], cols: [...e.cols], formatting: { [e.key]: { style, color } } });
     }
   }
 

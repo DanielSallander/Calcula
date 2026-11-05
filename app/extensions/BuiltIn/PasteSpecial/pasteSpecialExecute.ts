@@ -18,34 +18,40 @@
 //          resolved an OBJECT target hands it in (`target`), and the paste is
 //          written to the object's cells in ONE `updateCellsBatch(.., { target })`
 //          -- value and source style together, Excel's relative shift on the
-//          object's own coordinates -- plus the number formats through
-//          `applyFormatting(.., { target })`. A style-only write (Formatting,
-//          the source's style on a cell an operation leaves alone) points the
-//          object's cell at the source's style INDEX through
-//          `setCellStyle(.., { target })` (BUG-0513), and No Borders then puts
-//          the destination's own border sides back -- all inside the paste's
-//          ONE undo step, and never half done: every cell that takes formatting
-//          is CHECKED before the first write (`writeTargetBatch`), so a refusal
-//          refuses a formatting-only paste whole and pastes content without its
-//          formatting. What has no route onto an object's cells is refused
-//          there in one sentence: comments and validation (their doors refuse on
-//          a floating grid), and column widths (the object's widths are not the
-//          sheet's).
+//          object's own coordinates -- then every style-only write (Formatting,
+//          the source's style on a cell an operation leaves alone, and No
+//          Borders' source style with each cell's OWN borders kept,
+//          `keepBorders`) in ONE `setCellStyles(.., { target })` (BUG-0513,
+//          BUG-0345, BUG-0347), and the number formats grouped
+//          (`numberFormatGroups`) -- all inside the paste's ONE undo step, and
+//          never half done: every cell that takes formatting is CHECKED before
+//          the first write (`writeTargetBatch`). A host that refuses Format
+//          Cells refuses a formatting-only paste whole over a LOCKED grid cell,
+//          changes nothing SILENTLY over unlocked ones (BUG-0655, the sheet's
+//          rule), and pastes content without its formatting. What has no route
+//          onto an object's cells is refused there in one sentence: comments
+//          and validation (their doors refuse on a floating grid), and column
+//          widths (the object's widths are not the sheet's).
 //
-//          ON A PROTECTED SHEET (the per-cell sheet route) the paste is never
-//          half done either: every written cell is asked BEFORE the first
-//          write (`protectedPasteGate`) -- content onto a locked cell refuses
-//          the whole paste, and a sheet that does not allow Format Cells
-//          refuses a formatting-only paste whole and pastes content without
-//          its formatting, as Excel does [LIVE].
+//          ON A PROTECTED SHEET the paste is never half done either: every
+//          written cell is asked BEFORE the first write (`protectedPasteGate`)
+//          -- content onto a locked cell refuses the whole paste, and a sheet
+//          that does not allow Format Cells refuses a formatting-only paste
+//          whole over a locked cell, changes nothing silently over unlocked
+//          ones, and pastes content without its formatting, as Excel does
+//          [LIVE].
 //
-//          A TILED paste (a selection that is a multiple of the copy) is the
-//          same route with its writes COLLECTED (`TileBatch`): every cell's
-//          content in one `updateCellsBatch`, every tile's formulas in one
-//          shift, a number format once per copied cell -- a bounded number of
-//          calls whatever the area. Only style-only writes (Paste Formatting,
-//          No Borders' sides), comments and validation remain one call per
-//          cell: the backend has no batch door for them.
+//          EVERY sheet-route paste COLLECTS its writes (`TileBatch`), tiled (a
+//          selection that is a multiple of the copy) or not (BUG-0345): every
+//          cell's content in one `updateCellsBatch`, every tile's formulas in
+//          one shift, every style-only write in one `setCellStyles`, the number
+//          formats grouped -- a bounded number of calls whatever the area. Only
+//          comments and validation remain one call per cell: the backend has no
+//          batch door for them. Paste Link writes its links in one batch too.
+//
+//          AFTER A PASTE the pasted range is SELECTED (BUG-0349), as plain
+//          Paste does and Excel does [LIVE]: Core's selection on the sheet, the
+//          grid's own selection on a floating grid.
 //
 //          AN OPERATION (Add / Subtract / Multiply / Divide) asks two more
 //          questions before it writes (`operationRefusal`): does the paste area
@@ -63,22 +69,30 @@
 //          (`ClipboardData.values`, `storedConstantOf`), invariant: never by
 //          re-typing its display text, which held only what the source's
 //          number format showed (1.23456 under 0.00 pasted as 1.23).
+//
+//          AND IT IS WHAT THE SOURCE HOLDS AT THE WRITE (BUG-0657): with no
+//          operation, no Transpose and Skip Blanks off, every content write
+//          names its SOURCE cell (`pasteSourcePlan`, `CellUpdateInput.source`;
+//          `valuesOnly` for the values attributes) and the backend writes what
+//          that cell holds then -- the snapshot answers only for the formatting
+//          and the fallback `value`. The settled snapshot alone lost to a
+//          source written continuously (an animation, a fast scheduled job).
 
-import type { CellData, Selection, StyleData, FormattingOptions } from "@api/types";
+import type { CellData, Selection, StyleData } from "@api/types";
 import type {
   ClipboardData,
   FormulaShiftInput,
   AddCommentParams,
   CellUpdateInput,
+  CellStyleWrite,
   TypedCellData,
   SheetsResult,
   PastedConstant,
+  PasteSource,
 } from "@api/lib";
 import type { PasteSpecialOptions, PasteOperation, PasteAttribute } from "./types";
 import {
-  getCell,
   getSheets,
-  updateCell,
   setCellStyle,
   setCellStyles,
   getStyle,
@@ -105,14 +119,16 @@ import {
   PASTE_ONCE,
   pasteMayTile,
   pasteTiles,
+  clipboardSourceStandsAt,
   type PasteTiles,
 } from "@api/lib";
 import { cellEvents } from "@api";
 import { alertAsync } from "@api/dialogs";
 import {
-  getCellTargetCells,
+  cellTargetFor,
   getCellTargetCellsTyped,
   resolveCellTarget,
+  selectTargetCells,
   type CellTargetRef,
 } from "@api/cellTarget";
 import { getFloatingRangeSpillRanges, type SpillRangeInfo } from "@api/floatingRangeSpills";
@@ -555,6 +571,80 @@ function linkSheetPrefix(clipboard: ClipboardData, target: CellTargetRef | undef
   if (targetSheet === undefined || sourceSheet === undefined || !sourceName) return "";
   if (targetSheet === sourceSheet) return "";
   return `${quoteSheetNameForFormula(sourceName)}!`;
+}
+
+/**
+ * Where a Paste Special write pastes FROM (BUG-0657): the source cells it
+ * names (`CellUpdateInput.source`), so the backend writes what each holds AT
+ * THE WRITE -- read under the batch's own guards, before any of its writes --
+ * rather than the settled snapshot, which a writer that never stops (an
+ * animation, a fast scheduled job) has already outrun by then. Excel pastes
+ * what the source holds at the paste [LIVE, round 19, misc19/probe3.ps1: with
+ * A1 = B1*2 copied, a write of 5 into B1 keeps the copy pending and Paste
+ * Values gives 10]. Plain Paste has named its sources since round C
+ * (useClipboard.ts `pasteSourceOf`); this is the same rule for the doors here.
+ */
+interface PasteSourcePlan {
+  /** The source sheet's index NOW (unused, but a valid index, with `target`). */
+  sheetIndex: number;
+  /** An object's cells (a floating grid) the copy came from, in its coordinates. */
+  target?: CellTargetRef;
+  /** A values attribute: the source's value (a formula's result), never its formula. */
+  valuesOnly: boolean;
+  minRow: number;
+  minCol: number;
+}
+
+/**
+ * The sources a paste of `clipboard` under `options` names, or null when it
+ * pastes the snapshot. Named only where the backend's paste rule is the whole
+ * answer: the cell's CONTENT attributes (formulas shifted as Copy + Paste
+ * shifts them; `valuesOnly` for the values attributes), with no operation, no
+ * Transpose and Skip Blanks off -- the backend has no rule for an operation, a
+ * transposed shift or a skipped blank, so those keep the snapshot. Never for
+ * a cut (refused before this), a copy whose source no longer stands where it
+ * was copied (`clipboardSourceStandsAt`: it followed a shift, its positions
+ * were lost, the mode ended), or a source sheet that is gone.
+ */
+async function pasteSourcePlan(clipboard: ClipboardData, options: PasteSpecialOptions): Promise<PasteSourcePlan | null> {
+  const { pasteAttribute, operation, skipBlanks, transpose } = options;
+  if (operation !== "none" || transpose || skipBlanks || clipboard.isCut) return null;
+  if (!CONTENT_ATTRIBUTES.has(pasteAttribute)) return null;
+  if (!clipboardSourceStandsAt(clipboard)) return null;
+  const valuesOnly = !FORMULA_ATTRIBUTES.has(pasteAttribute);
+  const minRow = Math.min(clipboard.sourceSelection.startRow, clipboard.sourceSelection.endRow);
+  const minCol = Math.min(clipboard.sourceSelection.startCol, clipboard.sourceSelection.endCol);
+  if (clipboard.sourceTarget) {
+    // An object's cells carry no sheet (ClipboardData.sourceSheetIndex is -1,
+    // which the wire's index refuses); the backend reads the object's own.
+    return { sheetIndex: 0, target: clipboard.sourceTarget, valuesOnly, minRow, minCol };
+  }
+  const sheet = await sourceSheetNow(clipboard);
+  if (sheet === null) return null;
+  const sheetIndex = sheet?.index ?? clipboard.sourceSheetIndex;
+  if (!Number.isInteger(sheetIndex) || sheetIndex < 0) return null;
+  return { sheetIndex, valuesOnly, minRow, minCol };
+}
+
+/** The source cell of clipboard matrix position (srcR, srcC) under `plan`. */
+function pasteSourceAt(plan: PasteSourcePlan, clipboard: ClipboardData, srcR: number, srcC: number): PasteSource {
+  return {
+    sheetIndex: plan.sheetIndex,
+    row: clipboardSourceRow(clipboard.sourceRows, plan.minRow, srcR),
+    col: plan.minCol + srcC,
+    ...(plan.target ? { target: plan.target } : {}),
+    ...(plan.valuesOnly ? { valuesOnly: true } : {}),
+  };
+}
+
+/**
+ * Right before the writes go out: a copy that FOLLOWED a shift during the
+ * paste's awaits names other cells now, so every write pastes the snapshot it
+ * carries instead (as plain Paste does past its bounded restarts).
+ */
+function keepSourcesOnlyWhereTheyStand(clipboard: ClipboardData, updates: CellUpdateInput[]): void {
+  if (clipboardSourceStandsAt(clipboard)) return;
+  for (const update of updates) delete update.source;
 }
 
 /**
@@ -1088,6 +1178,9 @@ async function pasteCells(
   // no undo step.
   if (gate.nothingToPaste) return true;
 
+  // What each content write pastes FROM (BUG-0657, `pasteSourcePlan`).
+  const sources = await pasteSourcePlan(clipboard, options);
+
   // The grid route: no object target (`ctx.target` is the paste's place).
   const ctx: PasteContext = {
     clipboard,
@@ -1097,8 +1190,10 @@ async function pasteCells(
     operands,
     contentLanded: false,
     formattingDropped: gate.formattingRefused !== null,
-    // A TILED paste collects its writes and sends them together (`TileBatch`).
-    batch: tiles.rows * tiles.cols > 1 ? newTileBatch() : null,
+    // EVERY paste collects its writes and sends them together (`TileBatch`),
+    // tiled or not (BUG-0345: an untiled Paste Values over 1,000 cells was
+    // 1,000+ calls, one per cell).
+    batch: newTileBatch(),
   };
 
   // Begin undo transaction
@@ -1108,10 +1203,13 @@ async function pasteCells(
     UNDO_CLOSES,
   );
 
-  // A cell whose write was refused is SKIPPED; a cell whose content landed
-  // and whose formatting then failed is not -- its value changed -- and is
-  // reported as such. (After the gate above, either happens only when the
-  // sheet's protection changed between the gate and the write.)
+  // A cell whose write was refused is SKIPPED (comments and validation, still
+  // one call per cell); a cell whose content landed and whose formatting then
+  // failed is not -- its value changed -- and is reported as such. The content
+  // itself goes out in ONE batch, refused whole (Excel refuses a paste whole;
+  // the gate above has already asked every written cell). (After the gate,
+  // a formatting failure happens only when the sheet's protection changed
+  // between the gate and the write.)
   let failedCells = 0;
   let firstFailure: string | null = null;
   let unformattedCells = 0;
@@ -1131,6 +1229,10 @@ async function pasteCells(
         operation,
         ctx,
       );
+      // ...named on the cell's content write, whose `value` is then only the
+      // fallback for what the backend cannot vouch for (a collection value).
+      const content = sources ? ctx.batch.byCell.get(`${destRow},${destCol}`) : undefined;
+      if (sources && content) content.source = pasteSourceAt(sources, clipboard, srcR, srcC);
       if (failure !== null && ctx.contentLanded) {
         unformattedCells++;
         firstUnformatted = firstUnformatted ?? failure;
@@ -1140,14 +1242,14 @@ async function pasteCells(
       }
     }
 
-    // A tiled paste's collected writes, sent together (`flushTileBatch`).
-    if (ctx.batch) {
-      const flushed = await flushTileBatch(ctx.batch);
-      failedCells += flushed.failedCells;
-      firstFailure = firstFailure ?? flushed.firstFailure;
-      unformattedCells += flushed.unformattedCells;
-      firstUnformatted = firstUnformatted ?? flushed.firstUnformatted;
-    }
+    // The paste's collected writes, sent together (`flushTileBatch`) -- naming
+    // their sources only while the copy still stands where it was copied.
+    keepSourcesOnlyWhereTheyStand(clipboard, ctx.batch.updates);
+    const flushed = await flushTileBatch(ctx.batch);
+    failedCells += flushed.failedCells;
+    firstFailure = firstFailure ?? flushed.firstFailure;
+    unformattedCells += flushed.unformattedCells;
+    firstUnformatted = firstUnformatted ?? flushed.firstUnformatted;
 
     // Commit whatever applied (an all-refused paste commits an empty
     // transaction, which is a no-op) so a partial paste stays undoable.
@@ -1156,6 +1258,8 @@ async function pasteCells(
     // Refresh grid
     window.dispatchEvent(new CustomEvent("styles:refresh"));
     window.dispatchEvent(new CustomEvent("grid:refresh"));
+    // Excel selects the pasted range (BUG-0349, `selectPastedSheetArea`).
+    selectPastedSheetArea({ row: targetRow, col: targetCol, height: actualPasteHeight, width: actualPasteWidth });
   } catch (error) {
     // Close the transaction — left open, every subsequent edit silently joins
     // it and collapses into one giant Ctrl+Z step.
@@ -1211,9 +1315,10 @@ const FORMATTING_ATTRIBUTES: ReadonlySet<PasteAttribute> = new Set<PasteAttribut
 
 /**
  * The protected-sheet questions of a SHEET-route paste, asked of exactly the
- * cells it writes (`plan`), before anything is written -- the per-cell writes
- * ask them one cell at a time, so without this a paste over A1:A3 wrote A1 and
- * A2 and skipped A3 (rev12A). Excel answers them for the whole paste at once
+ * cells it writes (`plan`), before anything is written -- the writes used to
+ * ask them one cell at a time, so a paste over A1:A3 wrote A1 and A2 and
+ * skipped A3 (rev12A); the content batch refuses whole, but its formatting
+ * writes follow it. Excel answers them for the whole paste at once
  * [LIVE, Excel 16 COM, 2026-10-30, fmtprot/probe1-2.ps1; A1:A4 unlocked, A5
  * locked]:
  *   - CONTENT onto a LOCKED cell refuses the whole paste, whatever the
@@ -1264,7 +1369,7 @@ async function protectedPasteGate(
   const writesFormatting = FORMATTING_ATTRIBUTES.has(pasteAttribute);
   if (!writesContent && !writesFormatting) return allowed;
 
-  // A protection state that cannot be read falls back to the per-cell gates:
+  // A protection state that cannot be read falls back to the writes' own gates:
   // the backend still refuses every locked or unformattable cell itself
   // (each write is gated), so nothing is ever written that protection forbids
   // -- only the all-or-nothing guarantee is lost, never the protection.
@@ -1296,7 +1401,7 @@ async function protectedPasteGate(
 
   if (writesContent) {
     const locked = await lockedRefusal();
-    // Unreadable: as above, the per-cell gates still refuse every locked cell.
+    // Unreadable: as above, the content batch still refuses any locked cell (whole).
     if (typeof locked === "string") return { ...allowed, refusal: locked };
   }
 
@@ -1304,7 +1409,7 @@ async function protectedPasteGate(
     const area = boundsOfCells(plan.map((c) => ({ row: c.destRow, col: c.destCol })));
     if (area !== null) {
       try {
-        // The per-cell route writes the ACTIVE sheet: no object target.
+        // The sheet route writes the ACTIVE sheet: no object target.
         await setCellStyle(area.startRow, area.startCol, 0, { target: undefined, checkArea: area });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
@@ -1387,66 +1492,51 @@ export async function executePasteLink(
         updates.push(pastedUpdate(targetRow + r, targetCol + c, buildLinkFormula(sheetPrefix, srcRow, srcCol, absolute), false));
       }
     }
-    await writeTargetBatch(updates, [], `Paste Link ${updates.length} cells`, target);
+    if (await writeTargetBatch(updates, [], `Paste Link ${updates.length} cells`, target)) {
+      selectPastedTarget(target, {
+        startRow: targetRow,
+        startCol: targetCol,
+        endRow: targetRow + actualPasteHeight - 1,
+        endCol: targetCol + actualPasteWidth - 1,
+      });
+    }
     return true;
+  }
+
+  // Every link in ONE batch (BUG-0345: it was one call per cell), refused
+  // whole as Excel refuses a paste whole; a link is a formula, pasted: it
+  // stays one in a Text-formatted cell (pastedUpdate).
+  const updates: CellUpdateInput[] = [];
+  for (let r = 0; r < actualPasteHeight; r++) {
+    for (let c = 0; c < actualPasteWidth; c++) {
+      const destRow = targetRow + r;
+      const destCol = targetCol + c;
+      if (destRow >= totalRows || destCol >= totalCols) continue;
+      // The cell this matrix entry was copied from.
+      const srcRow = clipboardSourceRow(clipboard.sourceRows, sourceMinRow, r);
+      const srcCol = sourceMinCol + c;
+      updates.push(pastedUpdate(destRow, destCol, buildLinkFormula(sheetPrefix, srcRow, srcCol, absolute), false));
+    }
   }
 
   const tx = ownUndoTransaction(
     await beginUndoTransaction(`Paste Link ${actualPasteHeight * actualPasteWidth} cells`),
     UNDO_CLOSES,
   );
-
-  // A link is a formula, pasted: it stays one in a Text-formatted cell (pastedUpdate).
-  let failedCells = 0;
-  let firstFailure: string | null = null;
   try {
-    for (let r = 0; r < actualPasteHeight; r++) {
-      for (let c = 0; c < actualPasteWidth; c++) {
-        const destRow = targetRow + r;
-        const destCol = targetCol + c;
-
-        if (destRow >= totalRows || destCol >= totalCols) continue;
-
-        // The cell this matrix entry was copied from.
-        const srcRow = clipboardSourceRow(clipboard.sourceRows, sourceMinRow, r);
-        const srcCol = sourceMinCol + c;
-        const formula = buildLinkFormula(sheetPrefix, srcRow, srcCol, absolute);
-
-        try {
-          // The sheet branch: no object target (that one returned above),
-          // passed on all the same so this write can never land elsewhere.
-          const updatedCells = await updateCellsBatch([pastedUpdate(destRow, destCol, formula, false)], { target });
-          for (const cell of updatedCells) {
-            if (cell.sheetIndex !== undefined) continue;
-            cellEvents.emit({
-              row: cell.row,
-              col: cell.col,
-              oldValue: undefined,
-              newValue: cell.display,
-              formula: cell.formula ?? null,
-            });
-          }
-        } catch (err) {
-          console.error(`[PasteSpecial] Failed to paste link (${destRow}, ${destCol}):`, err);
-          failedCells++;
-          firstFailure = firstFailure ?? (err instanceof Error ? err.message : String(err));
-        }
-      }
-    }
-
+    // The sheet branch: no object target (that one returned above), passed on
+    // all the same so this write can never land elsewhere.
+    emitUpdated(await updateCellsBatch(updates, { target }));
     await tx.commit();
 
     window.dispatchEvent(new CustomEvent("styles:refresh"));
     window.dispatchEvent(new CustomEvent("grid:refresh"));
+    // Excel selects the pasted range (BUG-0349).
+    selectPastedSheetArea(area);
   } catch (error) {
     try { await tx.cancel(); } catch { /* already closed */ }
     void alertAsync(error instanceof Error ? error.message : String(error));
     throw error;
-  }
-  if (failedCells > 0) {
-    void alertAsync(
-      `Paste Link skipped ${failedCells} cell(s):\n${firstFailure ?? "unknown error"}`,
-    );
   }
   return true;
 }
@@ -1462,7 +1552,7 @@ interface PasteContext {
   /** Style-table reads, once per index per paste (a column of one style asks once). */
   styles: Map<number, Promise<StyleData>>;
   /**
-   * The paste's place: undefined on this per-cell route, which writes the
+   * The paste's place: undefined on this sheet route, which writes the
    * ACTIVE sheet (an object's cells go through `pasteCellsOnTarget`). Passed on
    * every target-taking wrapper call, so a write can never drop it.
    */
@@ -1482,27 +1572,24 @@ interface PasteContext {
    * left out -- Excel pastes the value alone [LIVE].
    */
   formattingDropped: boolean;
-  /**
-   * A TILED paste's writes, collected instead of sent cell by cell (null: the
-   * paste is written as it goes). See `TileBatch`.
-   */
-  batch: TileBatch | null;
+  /** The paste's writes, collected instead of sent cell by cell. See `TileBatch`. */
+  batch: TileBatch;
 }
 
 /**
- * A TILED paste's writes, collected and then sent together (round 15,
- * rev13B): every cell's content -- with the source's style index riding the
- * same update where the style travels -- in ONE `updateCellsBatch`, one
- * `applyFormatting` per copied cell for a number format (its tiles' rows x
- * columns), and every style-only write -- Paste Formatting, a style an
- * operation's skipped cell still takes, No Borders' source style with the
- * destination's own borders kept (`keepBorders`) -- in ONE `setCellStyles`
- * (round 16; they were one call per cell, plus a read and a border restore
- * per cell for No Borders). Before, every cell of the tiled area was its own
- * awaited IPC, each with its own recalculation: one copied cell into a whole
- * column was a million calls, with the paste's undo step open throughout.
- * Plain Paste already wrote one batch. The writes are the per-cell route's
- * own, in the same per-cell order.
+ * A sheet-route paste's writes, collected and then sent together -- tiled
+ * (round 15, rev13B) or not (BUG-0345, 2026-11-04): every cell's content --
+ * with the source's style index riding the same update where the style
+ * travels -- in ONE `updateCellsBatch`, the number formats in as few
+ * rows x columns `applyFormatting` calls as they allow (`numberFormatGroups`),
+ * and every style-only write -- Paste Formatting, a style an operation's
+ * skipped cell still takes, No Borders' source style with the destination's
+ * own borders kept (`keepBorders`, the backend's: every side as the cell holds
+ * it, theme colour and weight included, BUG-0347) -- in ONE `setCellStyles`.
+ * Before, every cell was its own awaited IPC, each with its own recalculation
+ * (Paste Values over 1,000 cells was 1,000+ calls; No Borders added a read and
+ * a lossy border restore per cell). Plain Paste already wrote one batch. The
+ * writes are made in the per-cell order.
  */
 interface TileBatch {
   updates: CellUpdateInput[];
@@ -1513,22 +1600,21 @@ interface TileBatch {
    * style landed; `keepBorders` keeps the cell's own border sides (No Borders).
    */
   styleWrites: Array<{ row: number; col: number; styleIndex: number; announce: boolean; keepBorders?: boolean }>;
-  /** A number format per copied cell ("srcR,srcC"): the rows and columns its tiles land on. */
-  numberFormats: Map<string, { rows: Set<number>; cols: Set<number>; numberFormat: string }>;
+  /** A number format per destination cell, grouped when sent (`numberFormatGroups`). */
+  numberFormats: Array<{ row: number; col: number; numberFormat: string }>;
 }
 
 function newTileBatch(): TileBatch {
-  return { updates: [], byCell: new Map(), styleWrites: [], numberFormats: new Map() };
+  return { updates: [], byCell: new Map(), styleWrites: [], numberFormats: [] };
 }
 
 /**
- * Send a tiled paste's collected writes (`TileBatch`), in the per-cell
- * route's order: content (with the styles riding it), the style-only writes
- * (ONE call, all or nothing), the number formats. A content batch the backend
- * refuses THROWS (nothing of it landed; the caller closes the step and says
- * why); a formatting write that fails afterwards is counted, as the per-cell
- * route counts it -- on a cell whose content landed as "not formatted", on a
- * cell that only took formatting as skipped.
+ * Send a paste's collected writes (`TileBatch`): content (with the styles
+ * riding it), the style-only writes (ONE call, all or nothing), the number
+ * formats (grouped). A content batch the backend refuses THROWS (nothing of it
+ * landed; the caller closes the step and says why); a formatting write that
+ * fails afterwards is counted -- on a cell whose content landed as "not
+ * formatted", on a cell that only took formatting as skipped.
  */
 async function flushTileBatch(batch: TileBatch): Promise<{
   failedCells: number;
@@ -1570,11 +1656,9 @@ async function flushTileBatch(batch: TileBatch): Promise<{
       for (const sw of batch.styleWrites) failed(sw.row, sw.col, err);
     }
   }
-  for (const nf of batch.numberFormats.values()) {
-    const rows = [...nf.rows].sort((a, b) => a - b);
-    const cols = [...nf.cols].sort((a, b) => a - b);
+  for (const { rows, cols, numberFormat } of numberFormatGroups(batch.numberFormats)) {
     try {
-      await applyFormatting(rows, cols, { numberFormat: nf.numberFormat }, { target: undefined });
+      await applyFormatting(rows, cols, { numberFormat }, { target: undefined });
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       console.error("[PasteSpecial] A number format could not be pasted:", err);
@@ -1591,79 +1675,40 @@ function styleOf(ctx: PasteContext, index: number): Promise<StyleData> {
 }
 
 /**
- * Write one cell's CONTENT on this paste's place and record that it landed.
- * Every content write of the per-cell route goes through here, so a later
- * failure of the same cell is told apart from a refused write. A tiled paste
- * collects it (`TileBatch`) instead.
+ * Collect one cell's CONTENT (`TileBatch`) and record that it landed, so a
+ * later failure of the same cell is told apart from a refused write. Returns
+ * no cells: the batch announces what it wrote when it is sent.
  */
 async function writeContent(update: CellUpdateInput, ctx: PasteContext): Promise<CellData[]> {
-  if (ctx.batch) {
-    ctx.batch.updates.push(update);
-    ctx.batch.byCell.set(`${update.row},${update.col}`, update);
-    ctx.contentLanded = true;
-    return [];
-  }
-  const written = await updateCellsBatch([update], { target: ctx.target });
+  ctx.batch.updates.push(update);
+  ctx.batch.byCell.set(`${update.row},${update.col}`, update);
   ctx.contentLanded = true;
-  return written;
+  return [];
 }
 
 /** The display-text fallback (a copy without stored values; a collection's JSON): an ENTRY, as before. */
 async function writeEntry(row: number, col: number, value: string, ctx: PasteContext): Promise<CellData[]> {
-  // Collected, it is a batch update without `pasted` / `invariant`: an entry,
-  // read as typed, as `updateCell` reads it.
-  if (ctx.batch) return writeContent({ row, col, value }, ctx);
-  const { cells } = await updateCell(row, col, value);
-  ctx.contentLanded = true;
-  return cells;
+  // A batch update without `pasted` / `invariant`: an entry, read as typed.
+  return writeContent({ row, col, value }, ctx);
 }
 
 /**
- * Point one destination cell at the source's style INDEX. Collected by a
- * tiled paste: on the cell's own content update when it has one (the style
- * rides the same write, as plain Paste sends it), else as a style-only write.
+ * Point one destination cell at the source's style INDEX: on the cell's own
+ * content update when it has one (the style rides the same write, as plain
+ * Paste sends it), else as a style-only write.
  */
 async function writeStyle(row: number, col: number, styleIndex: number, ctx: PasteContext, announce = false): Promise<void> {
-  if (ctx.batch) {
-    const update = ctx.batch.byCell.get(`${row},${col}`);
-    if (update && !announce) update.styleIndex = styleIndex;
-    else ctx.batch.styleWrites.push({ row, col, styleIndex, announce });
-    return;
-  }
-  await setCellStyle(row, col, styleIndex, { target: ctx.target });
-  if (announce) cellEvents.emit({ row, col, oldValue: undefined, newValue: "", formula: null });
+  const update = ctx.batch.byCell.get(`${row},${col}`);
+  if (update && !announce) update.styleIndex = styleIndex;
+  else ctx.batch.styleWrites.push({ row, col, styleIndex, announce });
 }
 
 /**
- * Give one destination cell the source cell (srcR, srcC)'s number format.
- * Collected by a tiled paste per copied cell: its tiles land on a full grid of
- * rows x columns, so one `applyFormatting` covers them all.
+ * Give one destination cell a source cell's number format, collected and
+ * grouped when sent (`numberFormatGroups`).
  */
-async function writeNumberFormat(
-  row: number,
-  col: number,
-  srcR: number,
-  srcC: number,
-  numberFormat: string,
-  ctx: PasteContext,
-): Promise<void> {
-  if (ctx.batch) {
-    const key = `${srcR},${srcC}`;
-    let entry = ctx.batch.numberFormats.get(key);
-    if (!entry) {
-      entry = { rows: new Set(), cols: new Set(), numberFormat };
-      ctx.batch.numberFormats.set(key, entry);
-    }
-    entry.rows.add(row);
-    entry.cols.add(col);
-    return;
-  }
-  await applyFormatting([row], [col], { numberFormat }, { target: ctx.target });
-}
-
-/** Put a destination cell's own border sides back after the source's style (No Borders, untiled). */
-async function writeBorders(row: number, col: number, borders: FormattingOptions, ctx: PasteContext): Promise<void> {
-  await applyFormatting([row], [col], borders, { target: ctx.target });
+async function writeNumberFormat(row: number, col: number, numberFormat: string, ctx: PasteContext): Promise<void> {
+  ctx.batch.numberFormats.push({ row, col, numberFormat });
 }
 
 /** The formula a paste writes for source matrix cell (srcR, srcC), or null when it writes a value. */
@@ -1992,34 +2037,6 @@ async function pasteWithOperation(
 // No Borders
 // ----------------------------------------------------------------------------
 
-/** The style fields that ARE borders -- derived from the type, never listed. */
-type BorderKey = Extract<keyof StyleData, `border${string}`>;
-/** What applyFormatting takes for one border side. */
-type BorderParam = NonNullable<FormattingOptions[BorderKey]>;
-/** One border side as the style table reports it. */
-type BorderSide = StyleData[BorderKey];
-
-/** The border sides a style carries, read off the style itself. */
-function borderKeysOf(style: StyleData): BorderKey[] {
-  return (Object.keys(style) as Array<keyof StyleData>).filter(
-    (k): k is BorderKey => k.startsWith("border"),
-  );
-}
-
-function isNoBorder(side: BorderSide | undefined): boolean {
-  return !side || side.style === "none" || side.width === 0;
-}
-
-function sameBorder(a: BorderSide | undefined, b: BorderSide | undefined): boolean {
-  if (isNoBorder(a) && isNoBorder(b)) return true;
-  if (isNoBorder(a) || isNoBorder(b)) return false;
-  return a!.style === b!.style && a!.color === b!.color && a!.width === b!.width;
-}
-
-function borderParamOf(side: BorderSide | undefined): BorderParam {
-  return isNoBorder(side) ? { style: "none", color: "#000000" } : { style: side!.style, color: side!.color };
-}
-
 /**
  * Paste All Except Borders (Excel's "No Borders"): the value/formula and
  * EVERY style field of the source except its borders; the destination keeps
@@ -2028,19 +2045,17 @@ function borderParamOf(side: BorderSide | undefined): BorderParam {
  * Excel, measured live through COM (2026-10-04, xlPasteAllExceptBorders onto a
  * cell that had a thick top border and italic): bold and indent 2 arrived from
  * the source, the destination's italic went, the source's bottom border did
- * NOT arrive, and the destination's thick top border STAYED.
+ * NOT arrive, and the destination's thick top border STAYED -- in full detail:
+ * a THEME-coloured medium dashed bottom border stays theme colour 5, medium,
+ * dashed [LIVE, Excel 16 COM, 2026-11-04, paste-x/probe1.ps1].
  *
- * DERIVED, not hand-listed. This used to re-apply a hand-copied list of
- * fifteen style fields through applyFormatting, which left out indent,
- * shrink-to-fit, fills, theme colours and the protection flags -- and would
- * have left out every field added to the style after it (clipboard survey
- * defect 5). Now the destination is pointed at the SOURCE's style index (the
- * whole style, whatever it holds), and only the border sides -- found by
- * their `border` prefix on the style objects themselves -- are put back to
- * what the destination had, side by side, and only where the two differ.
- * The one lossy corner is the border wire itself: applyFormatting takes a
- * side as {style, color}, so a destination border coloured from a THEME slot
- * comes back as its resolved colour.
+ * DERIVED, not hand-listed: the destination is pointed at the SOURCE's style
+ * index (the whole style, whatever it holds) by a style-only write that keeps
+ * the cell's own border sides (`keepBorders`), decided by the backend from the
+ * cell's own style. It used to read each destination and put each differing
+ * side back through applyFormatting, whose wire takes a side as {style,
+ * color} -- a theme-coloured border came back as a fixed colour and a
+ * medium dashed side as a thin one (BUG-0347).
  */
 async function pasteAllExceptBorders(
   sourceCell: CellData | null,
@@ -2051,58 +2066,41 @@ async function pasteAllExceptBorders(
   operation: PasteOperation,
   ctx: PasteContext,
 ): Promise<void> {
-  if (ctx.formattingDropped) {
-    // Format Cells not allowed: the content alone (no style, no border put back).
-    if (operation !== "none") {
-      await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
-    } else {
-      await writeFormulaOrDisplay(sourceCell, destRow, destCol, srcR, srcC, ctx);
-    }
-    return;
-  }
-  if (ctx.batch) {
-    // TILED: the content is collected, and the source's style with the
-    // destination's OWN borders kept is ONE style-only write the backend
-    // decides (`keepBorders`) -- no read of the destination, no border put
-    // back, per cell.
-    if (operation !== "none") {
-      await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
-    } else {
-      await writeFormulaOrDisplay(sourceCell, destRow, destCol, srcR, srcC, ctx);
-    }
-    ctx.batch.styleWrites.push({
-      row: destRow,
-      col: destCol,
-      styleIndex: sourceStyleIndex(sourceCell),
-      announce: false,
-      keepBorders: true,
-    });
-    return;
-  }
-  // The destination's borders, read BEFORE the source style replaces them.
-  const destCell = await getCell(destRow, destCol);
-  const destStyle = await styleOf(ctx, destCell?.styleIndex ?? 0);
-
   if (operation !== "none") {
     await pasteWithOperation(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
   } else {
     await writeFormulaOrDisplay(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
+  // Format Cells not allowed: the content alone (no style).
+  if (ctx.formattingDropped) return;
+  ctx.batch.styleWrites.push({
+    row: destRow,
+    col: destCol,
+    styleIndex: sourceStyleIndex(sourceCell),
+    announce: false,
+    keepBorders: true,
+  });
+}
 
-  // Every style field of the source...
-  const sourceIndex = sourceStyleIndex(sourceCell);
-  const sourceStyle = await styleOf(ctx, sourceIndex);
-  await writeStyle(destRow, destCol, sourceIndex, ctx);
-
-  // ...except borders: each side the destination had differently goes back.
-  const borders: Partial<Record<BorderKey, BorderParam>> = {};
-  for (const key of new Set([...borderKeysOf(sourceStyle), ...borderKeysOf(destStyle)])) {
-    if (sameBorder(sourceStyle[key], destStyle[key])) continue;
-    borders[key] = borderParamOf(destStyle[key]);
-  }
-  if (Object.keys(borders).length > 0) {
-    await writeBorders(destRow, destCol, borders as FormattingOptions, ctx);
-  }
+/**
+ * The number format a Values / Formulas and Number Formats paste writes onto
+ * one destination cell: the source cell's -- and an EMPTY source position's
+ * too, the default style's (`sourceStyleIndex`). Excel [LIVE, Excel 16 COM,
+ * 2026-11-04, paste-x/probe1.ps1]: G1 = 5, G2 empty (General); G1:G2 pasted
+ * with Values and Number Formats (and Formulas and Number Formats) onto I1:I2
+ * leaves I2 EMPTY in General -- its 0% gone, its bold kept -- and an empty G2
+ * formatted 0.000 brings 0.000. This used to skip an empty source position and
+ * leave the destination's number format standing (BUG-0349's second half).
+ */
+async function pasteSourceNumberFormat(
+  sourceCell: CellData | null,
+  destRow: number,
+  destCol: number,
+  ctx: PasteContext,
+): Promise<void> {
+  if (ctx.formattingDropped) return;
+  const sourceStyle = await styleOf(ctx, sourceStyleIndex(sourceCell));
+  await writeNumberFormat(destRow, destCol, sourceStyle.numberFormat, ctx);
 }
 
 /**
@@ -2122,12 +2120,7 @@ async function pasteFormulasAndNumberFormats(
   } else {
     await writeFormulaOrDisplay(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
-
-  // Copy only the number format from source style
-  if (sourceCell && !ctx.formattingDropped) {
-    const sourceStyle = await styleOf(ctx, sourceCell.styleIndex);
-    await writeNumberFormat(destRow, destCol, srcR, srcC, sourceStyle.numberFormat, ctx);
-  }
+  await pasteSourceNumberFormat(sourceCell, destRow, destCol, ctx);
 }
 
 /**
@@ -2147,12 +2140,7 @@ async function pasteValuesAndNumberFormats(
   } else {
     await writeValue(sourceCell, destRow, destCol, srcR, srcC, ctx);
   }
-
-  // Copy only the number format from source style
-  if (sourceCell && !ctx.formattingDropped) {
-    const sourceStyle = await styleOf(ctx, sourceCell.styleIndex);
-    await writeNumberFormat(destRow, destCol, srcR, srcC, sourceStyle.numberFormat, ctx);
-  }
+  await pasteSourceNumberFormat(sourceCell, destRow, destCol, ctx);
 }
 
 /**
@@ -2260,64 +2248,70 @@ const TARGET_PASTE_ATTRIBUTES: ReadonlySet<PasteAttribute> = new Set<PasteAttrib
   "valuesAndNumberFormats",
 ]);
 
-/** A style-only write onto one object cell: the source's style INDEX. */
-interface TargetStyleWrite {
-  row: number;
-  col: number;
-  styleIndex: number;
-}
-
-/** The destination's own border sides put back after the source's style landed (No Borders). */
-interface TargetBorderRestore {
-  row: number;
-  col: number;
-  borders: FormattingOptions;
+/**
+ * Whether the target HOST's protection is what refuses formatting: protected,
+ * with Format Cells NOT allowed (`canPerformAction` with the target, BUG-0655).
+ * False when it is allowed or the option cannot be read -- then a failed format
+ * check was something else, and is shown.
+ */
+async function targetFormatCellsOptionRefuses(target: CellTargetRef): Promise<boolean> {
+  try {
+    const answer = await canPerformAction("formatCells", { target });
+    return answer.canEdit === false;
+  } catch (err) {
+    console.warn("[PasteSpecial] the floating grid host's Format Cells option could not be read:", err);
+    return false;
+  }
 }
 
 /**
  * Write `updates` (values, with a style index where the source's style
- * travels) to the object's cells in ONE batch, then each style-only write
- * (`styleWrites`, Paste Formatting), each `numberFormats` entry and each
- * border restore (`borderRestores`, Paste (No Borders)), all inside ONE undo
- * step (the batch's own owned step joins it). A refusal is shown and the step
- * closed; nothing half-applied is left open. A pasted formula or stored value
- * carries `pasted` (`pastedUpdate`), so it keeps its kind in a Text-formatted
- * cell in this same batch.
+ * travels) to the object's cells in ONE batch, then every style-only write
+ * (`styleWrites`: Paste Formatting, a style an operation's skipped cell still
+ * takes, and Paste (No Borders)'s source style with each cell's OWN border
+ * sides kept, `keepBorders`) in ONE `setCellStyles`, then the number formats
+ * grouped into as few rows x columns writes as they allow (`numberFormatGroups`)
+ * -- a bounded number of calls whatever the area (BUG-0345) -- all inside ONE
+ * undo step (the batch's own owned step joins it). The kept borders are the
+ * backend's: every side as the cell holds it, theme colour and weight included
+ * (BUG-0347; they used to be put back through applyFormatting as a fixed colour
+ * and width 1). A refusal is shown and the step closed; nothing half-applied is
+ * left open. A pasted formula or stored value carries `pasted` (`pastedUpdate`),
+ * so it keeps its kind in a Text-formatted cell in this same batch.
  *
- * NEVER HALF DONE (rev10A). The formatting writes are gated one cell at a
- * time, so BEFORE ANY WRITE every cell that takes formatting -- a style write,
- * a number format, a border put back, and a content update carrying the
- * source's style -- is CHECKED once against the same gates (`setCellStyle`'s
- * `checkArea`: the host's Format Cells option -- with it allowed, a LOCKED
- * cell is formatted too and keeps its Locked flag, as in Excel); the
- * content batch gates its own cells whole. A host that refused one cell of a
- * Paste Formatting / Paste (No Borders) used to leave the earlier cells
- * restyled. Now:
- *   - nothing but formatting to paste (Paste Formatting): a refused check
- *     refuses the paste before any cell changes -- Excel refuses a protected
- *     format whole [LIVE, Excel 16: Paste Special > Formats onto A1:A3 with A3
- *     locked, Format Cells not allowed, raises the protected-sheet error and
- *     A1:A2 are unchanged];
+ * NEVER HALF DONE (rev10A). BEFORE ANY WRITE every cell that takes formatting
+ * -- a style write, a number format, and a content update carrying the
+ * source's style -- is CHECKED once (`setCellStyle`'s `checkArea`: the host's
+ * Format Cells option -- with it allowed, a LOCKED cell is formatted too and
+ * keeps its Locked flag, as in Excel); the content batch gates its own cells
+ * whole. With the option refused:
+ *   - nothing but formatting to paste (Paste Formatting): the sheet's rule
+ *     (BUG-0655) -- SILENT, nothing changed and no undo step, when every
+ *     destination is unlocked; the protected-sheet refusal, before any cell
+ *     changes, when a LOCKED one is in the range [LIVE, Excel 16 COM,
+ *     fmtprot/probe1.ps1 and cutfmt/probe1.ps1: PasteSpecial(xlPasteFormats)
+ *     onto unlocked cells with Format Cells off raises nothing and changes
+ *     nothing; with A3 locked it raises and A1:A2 are unchanged]. The lock
+ *     flags are the GRID's own cells' under the host's protection
+ *     (`canEditCells` with the target). Only the OPTION refusing is silent: a
+ *     check that failed for another reason, or an option or lock state that
+ *     cannot be read, is shown;
  *   - content too: the content is pasted WITHOUT the formatting, and nothing
  *     is said (as the sheet route) -- Excel, Format Cells not allowed, pastes
  *     All / No Borders / Values and Number Formats onto unlocked cells as the
  *     value alone, the format dropped, with no error [LIVE, Excel 16 COM;
  *     cutfmt/probe1.ps1]. A locked cell still refuses the whole content
  *     batch, before anything is written.
- * (The formatting-only refusal above still speaks over unlocked cells too: a
- * floating grid's host cells have no one-call lock question yet, so the
- * Excel silence there is not told apart from a locked cell's refusal.)
  */
 async function writeTargetBatch(
   updates: CellUpdateInput[],
   numberFormats: Array<{ row: number; col: number; numberFormat: string }>,
   description: string,
   target: CellTargetRef,
-  styleWrites: readonly TargetStyleWrite[] = [],
-  borderRestores: readonly TargetBorderRestore[] = [],
-): Promise<void> {
+  styleWrites: readonly CellStyleWrite[] = [],
+): Promise<boolean> {
   const styledUpdates = updates.filter((u) => u.styleIndex !== undefined);
-  const checkArea = boundsOfCells([...styleWrites, ...numberFormats, ...borderRestores, ...styledUpdates]);
+  const checkArea = boundsOfCells([...styleWrites, ...numberFormats, ...styledUpdates]);
   let formattingRefused: string | null = null;
   if (checkArea !== null) {
     try {
@@ -2325,8 +2319,27 @@ async function writeTargetBatch(
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       if (updates.length === 0) {
-        void alertAsync(reason);
-        throw error;
+        // Formatting only: silent exactly when the host's OPTION refuses and
+        // every destination is unlocked (BUG-0655, the sheet's rule).
+        if (!(await targetFormatCellsOptionRefuses(target))) {
+          void alertAsync(reason);
+          throw error;
+        }
+        let locked: Awaited<ReturnType<typeof canEditCells>>;
+        try {
+          locked = await canEditCells([...styleWrites, ...numberFormats], { target });
+        } catch (err) {
+          console.warn("[PasteSpecial] the floating grid's locked cells could not be read:", err);
+          void alertAsync(reason);
+          throw error;
+        }
+        if (!locked.canEdit) {
+          const refusal = locked.reason || reason;
+          void alertAsync(refusal);
+          throw new Error(refusal);
+        }
+        // Nothing to paste, nothing said, no undo step (Excel).
+        return false;
       }
       formattingRefused = reason;
     }
@@ -2336,7 +2349,6 @@ async function writeTargetBatch(
     updates = updates.map(({ styleIndex: _dropped, ...content }) => content);
     numberFormats = [];
     styleWrites = [];
-    borderRestores = [];
   }
   const tx = ownUndoTransaction(await beginUndoTransaction(description), UNDO_CLOSES);
   let landed = false;
@@ -2345,16 +2357,12 @@ async function writeTargetBatch(
       await updateCellsBatch(updates, { target });
       landed = true;
     }
-    for (const sw of styleWrites) {
-      await setCellStyle(sw.row, sw.col, sw.styleIndex, { target });
+    if (styleWrites.length > 0) {
+      await setCellStyles([...styleWrites], { target });
       landed = true;
     }
-    for (const nf of numberFormats) {
-      await applyFormatting([nf.row], [nf.col], { numberFormat: nf.numberFormat }, { target });
-      landed = true;
-    }
-    for (const br of borderRestores) {
-      await applyFormatting([br.row], [br.col], br.borders, { target });
+    for (const group of numberFormatGroups(numberFormats)) {
+      await applyFormatting(group.rows, group.cols, { numberFormat: group.numberFormat }, { target });
       landed = true;
     }
     await tx.commit();
@@ -2373,6 +2381,76 @@ async function writeTargetBatch(
   window.dispatchEvent(new CustomEvent("grid:refresh"));
   // With the format refused (`formattingRefused`) the content landed alone,
   // and -- as in Excel, and as the sheet route does -- nothing is said.
+  return true;
+}
+
+/**
+ * The number formats a paste writes, grouped into as few `applyFormatting`
+ * calls as they allow (BUG-0345): the cells of one format in one column
+ * first, then the columns of one format whose ROW sets are equal merged --
+ * so every group is an exact rows x columns product of cells that take that
+ * format, and nothing else. A column of 1,000 cells in one format is ONE call
+ * (it was one per cell); a block whose columns share a format is one call.
+ */
+function numberFormatGroups(
+  cells: ReadonlyArray<{ row: number; col: number; numberFormat: string }>,
+): Array<{ rows: number[]; cols: number[]; numberFormat: string }> {
+  const byColumn = new Map<string, { numberFormat: string; col: number; rows: number[] }>();
+  for (const { row, col, numberFormat } of cells) {
+    const key = `${col}|${numberFormat}`;
+    let entry = byColumn.get(key);
+    if (!entry) {
+      entry = { numberFormat, col, rows: [] };
+      byColumn.set(key, entry);
+    }
+    entry.rows.push(row);
+  }
+  const byRows = new Map<string, { rows: number[]; cols: number[]; numberFormat: string }>();
+  for (const { numberFormat, col, rows } of byColumn.values()) {
+    const sorted = [...new Set(rows)].sort((a, b) => a - b);
+    // The rows come LAST and hold no "|", so a format containing one cannot collide.
+    const key = `${numberFormat}|${sorted.join(",")}`;
+    let group = byRows.get(key);
+    if (!group) {
+      group = { rows: sorted, cols: [], numberFormat };
+      byRows.set(key, group);
+    }
+    group.cols.push(col);
+  }
+  const groups = [...byRows.values()];
+  for (const g of groups) g.cols.sort((a, b) => a - b);
+  return groups;
+}
+
+/**
+ * Excel selects the PASTED range after every Paste Special variant (BUG-0349)
+ * [LIVE, Excel 16 COM, 2026-11-04, paste-x/probe1.ps1: a 3x2 copy pasted on D1
+ * as Values, Formulas, Formats, All Except Borders, Values and Number Formats,
+ * Formulas and Number Formats, All and Paste Link leaves D1:E3 selected, D1
+ * active; Transpose D1:F2; into D1:E4 (no multiple) D1:E3; into D1:E6 (tiled)
+ * D1:E6], as plain Paste does here. The active sheet's selection, Core's.
+ */
+function selectPastedSheetArea(area: { row: number; col: number; height: number; width: number }): void {
+  if (area.height <= 0 || area.width <= 0) return;
+  selectTargetCells({ kind: "grid", selection: null }, {
+    startRow: area.row,
+    startCol: area.col,
+    endRow: area.row + area.height - 1,
+    endCol: area.col + area.width - 1,
+    type: "cells",
+  });
+}
+
+/**
+ * `selectPastedSheetArea` on a floating grid: the OBJECT's own selection,
+ * through the owner that holds it now -- only when that owner still answers
+ * the same object (a paste whose grid lost the selection meanwhile selects
+ * nothing rather than another object's cells).
+ */
+function selectPastedTarget(target: CellTargetRef, rect: { startRow: number; startCol: number; endRow: number; endCol: number }): void {
+  const now = cellTargetFor("content");
+  if ("refusal" in now || now.kind !== "object" || now.ref.kind !== target.kind || now.ref.id !== target.id) return;
+  selectTargetCells(now, { ...rect, type: "cells" });
 }
 
 /** The bounding rectangle of `cells`, or null when there are none. */
@@ -2422,8 +2500,9 @@ async function pasteCellsOnTarget(
   // Paste Formatting: the source's style INDEX per cell, no content
   // (`setCellStyle` with the target, as `pasteFormats` on a sheet).
   const stylesOnly = pasteAttribute === "formats";
-  // Paste (No Borders): Paste All, then the destination's OWN border sides put
-  // back where the source's differ (as `pasteAllExceptBorders` on a sheet).
+  // Paste (No Borders): the content, then the source's style as a style-only
+  // write that keeps each cell's OWN border sides (`keepBorders`, decided by
+  // the backend from the cell's own style -- BUG-0347), as on a sheet.
   const keepsDestBorders = pasteAttribute === "allExceptBorders";
   const carriesStyle =
     pasteAttribute === "all" || pasteAttribute === "valuesAndSourceFormatting" || keepsDestBorders;
@@ -2440,15 +2519,6 @@ async function pasteCellsOnTarget(
     endRow: targetRow + actualPasteHeight - 1,
     endCol: targetCol + actualPasteWidth - 1,
   };
-
-  // No Borders keeps the destination's borders: read the object's cells'
-  // style indices BEFORE anything is written (a cell the read does not return
-  // stores nothing, so it carries the default style).
-  let destStyleAt: ReadonlyMap<string, number> | null = null;
-  if (keepsDestBorders) {
-    const read = await getCellTargetCells(target, rect);
-    destStyleAt = new Map((read?.cells ?? []).map((cell) => [`${cell.row},${cell.col}`, cell.styleIndex] as const));
-  }
 
   // An operation reads what the destination holds now: the object's cells,
   // through its typed read (never the active sheet's cell at those
@@ -2469,11 +2539,12 @@ async function pasteCellsOnTarget(
   }
 
   const styles = new Map<number, Promise<StyleData>>();
+  // What each content write pastes FROM (BUG-0657), as on a sheet.
+  const sources = stylesOnly ? null : await pasteSourcePlan(clipboard, options);
 
   const updates: CellUpdateInput[] = [];
   const numberFormats: Array<{ row: number; col: number; numberFormat: string }> = [];
-  const styleWrites: TargetStyleWrite[] = [];
-  const borderRestores: TargetBorderRestore[] = [];
+  const styleWrites: CellStyleWrite[] = [];
   for (let pr = 0; pr < actualPasteHeight; pr++) {
     for (let pc = 0; pc < actualPasteWidth; pc++) {
       const destRow = targetRow + pr;
@@ -2483,7 +2554,6 @@ async function pasteCellsOnTarget(
       if (srcR >= sourceHeight || srcC >= sourceWidth) continue;
       const sourceCell = cellsToPaste[srcR]?.[srcC] ?? null;
       if (skipBlanks && isCellBlank(sourceCell)) continue;
-      const key = `${destRow},${destCol}`;
 
       if (stylesOnly) {
         styleWrites.push({ row: destRow, col: destCol, styleIndex: sourceStyleIndex(sourceCell) });
@@ -2493,8 +2563,6 @@ async function pasteCellsOnTarget(
       // Every write but the display-text fallback is a PASTE (`pastedUpdate`):
       // a formula or a stored value keeps its kind in a Text-formatted cell.
       let update: CellUpdateInput | null = null;
-      // Whether the source's style lands on this cell (with its content, or alone).
-      let styleLands = false;
       if (operation !== "none") {
         // The same rules as on a sheet (`Operand`): a formula stays a formula,
         // an inert side or blank on blank writes nothing, collections are skipped.
@@ -2506,8 +2574,12 @@ async function pasteCellsOnTarget(
           // COM 2026-10-29, "abc" + Add of a bold 0.00% 1 stays "abc", bold,
           // 0.00%. A style-only write (BUG-0513), so the content -- a formula,
           // rich text, a collection -- is never re-entered.
-          styleWrites.push({ row: destRow, col: destCol, styleIndex: sourceStyleIndex(sourceCell) });
-          styleLands = true;
+          styleWrites.push({
+            row: destRow,
+            col: destCol,
+            styleIndex: sourceStyleIndex(sourceCell),
+            ...(keepsDestBorders ? { keepBorders: true } : {}),
+          });
         }
       } else {
         // A formula (when the attribute pastes formulas), else the STORED
@@ -2528,41 +2600,38 @@ async function pasteCellsOnTarget(
           }
           update = { row: destRow, col: destCol, value };
         }
+        if (sources) update.source = pasteSourceAt(sources, clipboard, srcR, srcC);
       }
 
       if (update !== null) {
-        if (carriesStyle) {
+        if (keepsDestBorders) {
+          // The source's whole style but the cell's OWN borders: a style-only
+          // write after the content, kept by the backend (`keepBorders`).
+          styleWrites.push({ row: destRow, col: destCol, styleIndex: sourceStyleIndex(sourceCell), keepBorders: true });
+        } else if (carriesStyle) {
           update.styleIndex = sourceStyleIndex(sourceCell);
-          styleLands = true;
         }
         updates.push(update);
       }
-      if (styleLands && destStyleAt !== null) {
-        // ...except borders: each side the destination had differently goes back.
+      if (carriesNumberFormat) {
+        // An EMPTY source position carries the default style's number format
+        // too (`sourceStyleIndex`): Excel [LIVE, Excel 16 COM, 2026-11-04,
+        // paste-x/probe1.ps1] Paste Special > Values and Number Formats of an
+        // empty General cell onto a 0% cell leaves it empty in General.
         const sourceStyle = await cachedStyle(styles, sourceStyleIndex(sourceCell));
-        const destStyle = await cachedStyle(styles, destStyleAt.get(key) ?? 0);
-        const borders: Partial<Record<BorderKey, BorderParam>> = {};
-        for (const side of new Set([...borderKeysOf(sourceStyle), ...borderKeysOf(destStyle)])) {
-          if (sameBorder(sourceStyle[side], destStyle[side])) continue;
-          borders[side] = borderParamOf(destStyle[side]);
-        }
-        if (Object.keys(borders).length > 0) {
-          borderRestores.push({ row: destRow, col: destCol, borders: borders as FormattingOptions });
-        }
-      }
-      if (carriesNumberFormat && sourceCell) {
-        const sourceStyle = await cachedStyle(styles, sourceCell.styleIndex);
         numberFormats.push({ row: destRow, col: destCol, numberFormat: sourceStyle.numberFormat });
       }
     }
   }
   if (updates.length === 0 && numberFormats.length === 0 && styleWrites.length === 0) return;
-  await writeTargetBatch(
+  keepSourcesOnlyWhereTheyStand(clipboard, updates);
+  const wrote = await writeTargetBatch(
     updates,
     numberFormats,
     `Paste Special (${pasteAttribute}) ${actualPasteHeight * actualPasteWidth} cells`,
     target,
     styleWrites,
-    borderRestores,
   );
+  // Excel selects the pasted range (BUG-0349): the grid's own selection.
+  if (wrote) selectPastedTarget(target, rect);
 }

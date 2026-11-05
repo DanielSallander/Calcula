@@ -144,7 +144,7 @@ export const BOOKMARKS_TOGGLE_COMMAND = "bookmarks.toggle";
  * bindings running registered commands (bookmarks.toggle / next / prev), the
  * ONE keyboard path, so a key runs once and a remap in Settings moves it; the
  * registry's layout tier also takes sv-SE's Ctrl+AltGr+9 / 8. Ctrl+Shift+V
- * cannot be a binding: it is Paste Special's key ON the grid (a grid-scoped
+ * cannot be a binding: it is Paste Values' key ON the grid (a grid-scoped
  * binding), and only off the grid -- a ribbon button, a pane -- does this
  * bubble-phase listener hear it.
  */

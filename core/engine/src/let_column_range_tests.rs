@@ -103,7 +103,11 @@ fn an_absolute_qualified_or_unbound_column_range_stays_the_column() {
 fn the_rewrite_renders_back_to_the_same_text() {
     let ast = parser::parse("=LET(b,2,SUM(B:B)*b)").expect("parses");
     let text = crate::ast_render::render_formula(&ast);
-    assert!(text.contains("SUM(B:B)"), "{text}");
+    // Excel stores the range of the parameter in the parameter's spelling,
+    // `SUM(b:b)` ([LIVE] round 18, above), and so does Calcula since lane formd
+    // kept LET names as declared; the text reads back as the same tree.
+    assert!(text.contains("SUM(b:b)"), "{text}");
+    assert_eq!(parser::parse(&format!("={text}")).expect("reparses"), ast, "{text}");
 }
 
 /// The sheet of Excel's round-19/20 probes (xlpm2/probeA.ps1, parsefix/probe1.ps1):
@@ -180,4 +184,90 @@ fn a_bare_column_range_is_a_name_range_only_when_its_first_half_is_bound() {
         }
     }
     assert!(wrong.is_empty(), "NOT EXCEL'S VALUE:\n{}", wrong.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// BUG-0646: the range operator between a NAME and a CELL, a spill after a
+// name, and a sheet-qualified second half.
+//
+// [LIVE] Excel 16, parser lane probe (scratchpad parser-probe/probe.ps1), with
+// A1:A5 = 1..5, B1:B5 = 10..50, C1:C5 = 100..500:
+//
+//   =LET(a,B2,SUM(a:C3))                   550      (B2:C3)
+//   =LET(a,B2,SUM(C3:a))                   550
+//   =LET(b,A3,SUM(A1:b))                   6        (A1:A3)
+//   =LET(a,1,SUM(a:C3))                    #VALUE!  (a is no reference)
+//   =SUM(A:C3)                             #NAME?   (A is a name, unbound)
+//   =SUM(A1:B)                             #NAME?
+//   =LET(a,SEQUENCE(3),SUM(a#))            #VALUE!
+//   =LET(a,1,SUM(Sheet1!A1:Sheet1!A3)+a)   7, shown with both qualifiers
+//   =SUM(Sheet1!A1:Sheet2!A3)              #VALUE!
+//
+// Every one of these was a PARSE error, so `Cell::new_formula` stored the
+// typed text as a text value.
+// ---------------------------------------------------------------------------
+
+fn eval_probe(formula: &str) -> EvalResult {
+    let grid = probe_sheet();
+    let ast = parser::parse(formula).unwrap_or_else(|e| panic!("{formula} must parse: {e}"));
+    Evaluator::new(&grid).evaluate(&ast)
+}
+
+#[test]
+fn a_name_half_beside_a_cell_half_is_the_range_operator() {
+    assert_eq!(eval_probe("=LET(a,B2,SUM(a:C3))"), EvalResult::Number(550.0));
+    assert_eq!(eval_probe("=LET(a,B2,SUM(C3:a))"), EvalResult::Number(550.0));
+    assert_eq!(eval_probe("=LET(b,A3,SUM(A1:b))"), EvalResult::Number(6.0));
+    assert_eq!(eval_probe("=LET(a,1,SUM(a:C3))"), EvalResult::Error(CellError::Value));
+    assert_eq!(eval_probe("=SUM(A:C3)"), EvalResult::Error(CellError::Name));
+    assert_eq!(eval_probe("=SUM(A1:B)"), EvalResult::Error(CellError::Name));
+    // Controls: the shapes that always parsed still mean what they meant.
+    assert_eq!(eval_probe("=SUM(A1:B2)"), EvalResult::Number(33.0));
+    assert_eq!(eval_probe("=SUM(A:B)"), EvalResult::Number(165.0));
+}
+
+#[test]
+fn a_spill_after_a_name_bound_to_a_value_is_a_value_error() {
+    assert_eq!(eval_probe("=LET(a,SEQUENCE(3),SUM(a#))"), EvalResult::Error(CellError::Value));
+    assert_eq!(eval_probe("=SUM(nobody#)"), EvalResult::Error(CellError::Name));
+    let ast = parser::parse("=LET(a,SEQUENCE(3),SUM(a#))").expect("parses");
+    // The LET name keeps its declared spelling (lane formd, [LIVE] Excel 16).
+    assert_eq!(crate::ast_render::render_formula(&ast), "LET(a,SEQUENCE(3),SUM(a#))");
+}
+
+#[test]
+fn a_sheet_qualified_second_half_is_the_range_on_one_sheet_and_value_on_two() {
+    assert_eq!(eval_probe("=LET(a,1,SUM(Sheet1!A1:Sheet1!A3)+a)"), EvalResult::Number(7.0));
+    assert_eq!(eval_probe("=SUM(Sheet1!$A$1:Sheet1!$A$3)"), EvalResult::Number(6.0));
+    assert_eq!(eval_probe("=SUM(Sheet1!A1:'Sheet1'!A3)"), EvalResult::Number(6.0));
+    assert_eq!(eval_probe("=SUM(Sheet1!A1:Sheet2!A3)"), EvalResult::Error(CellError::Value));
+    // The formula bar keeps BOTH qualifiers, as Excel's does.
+    for (typed, shown) in [
+        ("=SUM(Sheet1!A1:Sheet1!A3)", "SUM(SHEET1!A1:SHEET1!A3)"),
+        ("=SUM(Sheet1!$A$1:Sheet1!$A$3)", "SUM(SHEET1!$A$1:SHEET1!$A$3)"),
+        ("=SUM('My Sheet'!A1:'My Sheet'!A3)", "SUM('My Sheet'!A1:'My Sheet'!A3)"),
+        // Control: one qualifier renders one.
+        ("=SUM(Sheet1!A1:A3)", "SUM(SHEET1!A1:A3)"),
+    ] {
+        let ast = parser::parse(typed).expect("parses");
+        assert_eq!(crate::ast_render::render_formula(&ast), shown, "{typed}");
+        let again = parser::parse(&format!("={shown}")).expect("the rendered text parses back");
+        assert_eq!(again, ast, "{typed}: render then parse is a fixed point");
+    }
+}
+
+/// NEW-let-scope-fold. A LET name or LAMBDA parameter is bound and looked up by
+/// Excel's per-character fold, never `to_uppercase` (which makes `ß` `SS`).
+/// [LIVE, Excel 16, lane formd p1 J1794 / J1802, lane namese p2 J9 / J10]
+/// `=LET(Straße,1,STRASSE)` and `=LAMBDA(Straße,STRASSE)(1)` are #NAME?;
+/// `=LET(Straße,1,STRAẞE)` and `=LAMBDA(Straße,STRAẞE)(1)` are 1.
+#[test]
+fn a_let_or_lambda_binding_is_found_by_the_per_character_fold() {
+    assert_eq!(eval("=LET(Straße,1,STRASSE)"), EvalResult::Error(CellError::Name));
+    assert_eq!(eval("=LAMBDA(Straße,STRASSE)(1)"), EvalResult::Error(CellError::Name));
+    assert_eq!(number("=LET(Straße,1,STRAẞE)"), 1.0);
+    assert_eq!(number("=LAMBDA(Straße,STRAẞE)(1)"), 1.0);
+    assert_eq!(number("=LET(straße,2,Straße*3)"), 6.0);
+    // ASCII case still folds.
+    assert_eq!(number("=LET(Abc,1,ABC+abc)"), 2.0);
 }

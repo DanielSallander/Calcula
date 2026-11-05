@@ -327,9 +327,11 @@ describe("the other endings Excel has", () => {
       });
     });
     await settle();
-    expect(api.clearRange).toHaveBeenCalledTimes(1);
+    // Delete is Clear CONTENTS (BUG-0394 lane: the contents clear keeps the
+    // cells' formats, as Excel's Delete does).
+    expect(api.clearRangeWithOptions).toHaveBeenCalledTimes(1);
     expectCutEnded("Delete on E5");
-    api.clearRange.mockClear();
+    api.clearRangeWithOptions.mockClear();
     await pasteAt(0, 2);
     expectNothingPasted("Delete, then Paste");
   });

@@ -10,6 +10,45 @@ use pivot_engine::{
 };
 
 // ============================================================================
+// ERROR VALUE CELLS
+// ============================================================================
+
+/// The grid error a pivot view's `PivotCellValue::Error(code)` stands for.
+///
+/// [LIVE] Excel 16 (lane bie probe 1): a PivotTable value cell that holds an
+/// error -- a calculated field `=Amount/0`, a Sum over a source `#DIV/0!` --
+/// is an ERROR VALUE: `ISERROR` is TRUE, `ERROR.TYPE` is 2, `ISTEXT` FALSE.
+/// The writer put the TEXT "#DIV/0!" in the grid, so `ISERROR` answered FALSE.
+///
+/// The code arrives in two spellings: a calculated field's bare code
+/// (`"DIV/0!"`, `"NUM!"`, `"VALUE!"`; `CalcValue::Error`) and a source cell's
+/// variant name (`"Div0"`, `"NA"`; `CacheValue::Error` is written with
+/// `{:?}`). Both map to their error; anything else is `#VALUE!`.
+pub(crate) fn pivot_error_value(code: &str) -> engine::CellError {
+    use engine::CellError;
+    let bare = code.trim().trim_start_matches('#');
+    let literal = format!("#{bare}");
+    let by_literal = CellError::from_literal(&literal);
+    if by_literal.as_literal().eq_ignore_ascii_case(&literal) {
+        return by_literal;
+    }
+    match bare {
+        "Div0" => CellError::Div0,
+        "Ref" => CellError::Ref,
+        "Name" => CellError::Name,
+        "NA" => CellError::NA,
+        "Null" => CellError::Null,
+        "Num" => CellError::Num,
+        "Spill" => CellError::Spill,
+        "Circular" => CellError::Circular,
+        "Conflict" => CellError::Conflict,
+        "Blocked" => CellError::Blocked,
+        "Limit" => CellError::Limit,
+        _ => CellError::Value,
+    }
+}
+
+// ============================================================================
 // MEMBERS (P2: THE member shape, app locale everywhere)
 // ============================================================================
 
@@ -400,8 +439,8 @@ pub(crate) fn preserve_collapse_state(new_fields: &mut [PivotField], old_fields:
     }
 }
 
-/// Carry each field's own SETTINGS -- sort order, subtotals, show-all-items
-/// and grouping -- from the field of the same NAME and kind
+/// Carry each field's own SETTINGS -- sort order (by label or by value),
+/// subtotals, show-all-items and grouping -- from the field of the same NAME and kind
 /// ([`previous_namesake`]) the pivot held before a rebuild, found in ANY zone
 /// (a field dragged from Rows to Columns is still the same field and keeps its
 /// settings, as in Excel).
@@ -417,6 +456,7 @@ pub(crate) fn preserve_field_settings(new_fields: &mut [PivotField], old_fields:
     for new_field in new_fields.iter_mut() {
         if let Some(old) = previous_namesake(old_fields, new_field) {
             new_field.sort_order = old.sort_order;
+            new_field.value_sort = old.value_sort.clone();
             new_field.show_subtotals = old.show_subtotals;
             new_field.show_all_items = old.show_all_items;
             new_field.grouping = old.grouping.clone();
@@ -1029,16 +1069,31 @@ pub(crate) fn pivot_cell_to_data(cell: &pivot_engine::PivotViewCell, locale: &Lo
         cell_type: cell.cell_type,
         value: match &cell.value {
             pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
+            // A non-finite number (a measure's 1/0, -1/0, 0/0) is #NUM!, as
+            // Excel's data-model PivotTable shows it [LIVE]; `non_finite`
+            // below says which. (JSON would carry it as `null`: empty.)
+            pivot_engine::PivotCellValue::Number(n) if !n.is_finite() => {
+                PivotCellValueData::Text("#NUM!".to_string())
+            }
             pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
             pivot_engine::PivotCellValue::Text(s) => PivotCellValueData::Text(s.clone()),
             pivot_engine::PivotCellValue::Boolean(b) => PivotCellValueData::Boolean(*b),
-            pivot_engine::PivotCellValue::Error(e) => PivotCellValueData::Text(format!("#{}", e)),
+            // The error's Excel literal, the text the grid cell displays
+            // (`pivot_error_value`): a source error's variant name ("Div0")
+            // showed as "#Div0".
+            pivot_engine::PivotCellValue::Error(e) => {
+                PivotCellValueData::Text(pivot_error_value(e).as_literal().to_string())
+            }
         },
         formatted_value: match (&cell.value, &cell.number_format) {
-            (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
+            (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() && n.is_finite() => {
                 format_number(*n, &parse_number_format(fmt), locale)
             }
             _ => String::new(),
+        },
+        non_finite: match &cell.value {
+            pivot_engine::PivotCellValue::Number(n) => crate::pivot::types::NonFiniteNumber::of(*n),
+            _ => None,
         },
         indent_level: cell.indent_level,
         is_bold: cell.is_bold,
@@ -1215,6 +1270,41 @@ pub(crate) fn is_bi_cosmetic_only_change(
     }
 
     true
+}
+
+#[cfg(test)]
+mod non_finite_cell_tests {
+    use super::*;
+    use crate::pivot::types::NonFiniteNumber;
+
+    /// NEW-bi-nonfinite-cells: a model measure's 1/0, -1/0 and 0/0 reach a
+    /// BI pivot's view as non-finite numbers, which JSON writes as `null` --
+    /// the pivot showed an EMPTY cell. [LIVE] Excel 16's data-model
+    /// PivotTable shows #NUM! for each; the canvas visuals need to know which
+    /// one to write Power BI's word for it.
+    #[test]
+    fn a_non_finite_value_cell_is_num_on_the_wire_and_says_which() {
+        let locale = LocaleSettings::invariant();
+        for (n, kind) in [
+            (f64::INFINITY, NonFiniteNumber::Infinity),
+            (f64::NEG_INFINITY, NonFiniteNumber::NegativeInfinity),
+            (f64::NAN, NonFiniteNumber::Nan),
+        ] {
+            let mut cell = pivot_engine::PivotViewCell::data(n);
+            cell.number_format = Some("#,##0.00".to_string());
+            let data = pivot_cell_to_data(&cell, &locale);
+            let json = serde_json::to_value(&data).unwrap();
+            assert_eq!(json["value"], serde_json::json!("#NUM!"), "{n}");
+            assert_eq!(data.non_finite, Some(kind), "{n}");
+            assert!(json.get("formattedValue").is_none(), "{n}: no formatted text for #NUM!");
+        }
+        let data = pivot_cell_to_data(&pivot_engine::PivotViewCell::data(2.5), &locale);
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["value"], serde_json::json!(2.5));
+        assert!(json.get("nonFinite").is_none(), "a finite cell carries no marker");
+        let json = serde_json::to_value(&pivot_cell_to_data(&pivot_engine::PivotViewCell::data(f64::NEG_INFINITY), &locale)).unwrap();
+        assert_eq!(json["nonFinite"], serde_json::json!("negativeInfinity"), "camelCase on the wire");
+    }
 }
 
 #[cfg(test)]

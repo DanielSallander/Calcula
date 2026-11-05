@@ -1302,7 +1302,8 @@ pub(crate) fn reregister_3d_span_edges(state: &AppState) -> bool {
 /// when a sheet enters or leaves it (see [`reregister_3d_span_edges`] for the
 /// probe). The edges are re-registered (the impls already did; this is the
 /// same idempotent pass, which also answers whether any span exists) and, only
-/// when one does, every sheet is recalculated in order -- the treatment
+/// when one does and calculation is automatic, every sheet is recalculated in
+/// order (under manual the workbook is marked pending instead) -- the treatment
 /// `delete_sheet_impl` gives the workbook after a delete. Runs with nothing
 /// held. A workbook with no span pays one scan and recalculates nothing.
 pub(crate) fn recalculate_3d_span_readers(
@@ -1313,6 +1314,19 @@ pub(crate) fn recalculate_3d_span_readers(
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
 ) {
     if !reregister_3d_span_edges(state) {
+        return;
+    }
+    // UNDER MANUAL CALCULATION the readers wait for F9 (BUG-0658). Excel [LIVE,
+    // whatifcalc/probe3, 2026-11-04, Excel 16 over COM, manual]: moving Sheet5
+    // (A1 = 1000) into `=SUM(Sheet2:Sheet3!A1)` leaves the sum at 11 and
+    // `B1 = A1*2` at 22 with CalculationState xlPending, and F9 makes them 1011
+    // and 2022; moving it back out, copying Sheet4 into the span and moving an
+    // endpoint each leave the sum stale and pending the same way. The edges are
+    // re-registered above, so F9 reads the new span; the workbook says it is
+    // pending (a save stamps `calculation_incomplete`) until a completed
+    // Calculate Now.
+    if state.calculation_mode.lock().map(|m| *m == "manual").unwrap_or(false) {
+        crate::calculation::note_stored_values_may_be_stale(state);
         return;
     }
     let sheet_count = state.sheet_names.read().unwrap().len();
@@ -1534,7 +1548,17 @@ fn rewrite_rule_formulas(
     effect: &crate::document_effect::DocumentEffect,
     rewrite: &dyn Fn(&str) -> Option<String>,
 ) {
-    let mut slot = |text: &mut String| match rewrite(text.as_str()) {
+    // BUG-0470. A repair RE-RENDERS the whole rule formula, and the lexer
+    // upper-cases every bare sheet and defined name it re-reads, so an
+    // untouched `Data!A1` beside the repaired reference came back `DATA!A1`
+    // (`=Data!A1&Inputs!B1` with Inputs deleted read `=DATA!A1&#REF!`). Excel
+    // spells every sheet as its tab does and every name as the Name Manager
+    // does. The authorities are read and released here, before any rule store
+    // is taken; the bindings arm respells its own (`rewrite_binding_formulas`).
+    let sheet_names: Vec<String> = state.sheet_names.read().map(|g| g.clone()).unwrap_or_default();
+    let named_ranges = state.named_ranges.read().map(|g| g.clone()).unwrap_or_default();
+    let respelled = |text: String| respell_rule_formula(&text, &sheet_names, &named_ranges).unwrap_or(text);
+    let mut slot = |text: &mut String| match rewrite(text.as_str()).map(&respelled) {
         Some(rewritten) => {
             *text = rewritten;
             true
@@ -1554,6 +1578,23 @@ fn rewrite_rule_formulas(
     // Every binding formula is a formula (stored with its `=`, sheet-qualified)
     // -- the slot `calp::sheet_renames::visit_binding_formulas` visits.
     crate::object_bindings::cascade::rewrite_binding_formulas(state, effect, rewrite);
+}
+
+/// A repaired rule formula with every sheet spelled as its tab is and every
+/// defined name as the Name Manager holds it (BUG-0470) -- the same two
+/// restamps a cell formula gets at entry. `None` when the text does not parse
+/// (it is then kept exactly as the repair wrote it). A leading `=` is kept
+/// when the text had one.
+fn respell_rule_formula(
+    text: &str,
+    sheet_names: &[String],
+    named_ranges: &HashMap<String, crate::named_ranges::NamedRange>,
+) -> Option<String> {
+    let mut ast = parser::parse(text).ok()?;
+    crate::sheet_names::restamp_sheet_casing(&mut ast, sheet_names);
+    crate::name_resolution::restamp_name_casing(&mut ast, named_ranges);
+    let rendered = engine::ast_render::render_formula_raw(&ast);
+    Some(if text.trim_start().starts_with('=') { format!("={}", rendered) } else { rendered })
 }
 
 /// The DELETE twin of [`rename_rule_references`], plus the override layer
@@ -1577,9 +1618,9 @@ fn rewrite_rule_formulas(
 /// evaluates -- a rule formula, an override's CURRENT text, which the next
 /// refresh writes over its cell -- is repaired as the CELLS were: a 3D
 /// reference that loses one endpoint keeps the rest of its range
-/// (`SUM(Mid:Data!B1)` becomes `SUM(Mid:Mid!B1)`), and anything else naming
-/// the deleted sheet becomes `#REF!` in place, as Excel writes a rule
-/// (`=A1>#REF!`) -- `crate::repair_formula_text_on_delete_at`. The gone-walker
+/// (`SUM(Mid:Data!B1)` becomes `SUM(Mid!B1)`), and anything else naming
+/// the deleted sheet keeps its cell part behind `#REF!`, as Excel writes a
+/// rule (`=A1>#REF!$B$1`) -- `crate::repair_formula_text_on_delete_at`. The gone-walker
 /// alone had turned the 3D reference into `#REF!` beside a cell that still
 /// summed Mid, and the override's current text then broke that working cell
 /// at the next refresh. An override's BASELINE and conflict UPSTREAM are
@@ -2720,12 +2761,17 @@ pub(crate) fn canvas_objects_locked_in(sheet_kinds: &[::persistence::SheetKind],
 /// records no undo step. The frontend reads the same flag
 /// (`canvasObjectsLocked`, @api/canvasSheet) to stop offering the gesture in
 /// the first place; this is the rule where it cannot be skipped -- a script,
-/// the CLI, an AI tool, a renderer that missed a door. Undo and redo are not
-/// asked: they restore history through the restore paths, never through a
-/// geometry command. Not enforced either (stated so nobody assumes it): the
-/// raw JSON object editor (`json_view.rs`, a developer tool that replaces a
-/// whole object), and -- as before -- the per-object `locked` list, which
-/// stays a frontend rule.
+/// the CLI, an AI tool, a renderer that missed a door -- and the raw JSON
+/// object editor (`json_view.rs`'s chart, slicer, timeline and pivot arms):
+/// what it replaces is what the user typed, so it is a user edit and asks
+/// this like any door (BUG-0656). UNDO AND REDO ARE NOT ASKED, by decision
+/// (2026-11-04, BUG-0656): restoring a state from history is not a user move,
+/// so Ctrl+Z puts an object back where it was before the lock went on, as
+/// Excel's Undo would -- they restore through the restore paths, never through
+/// a geometry command (pinned by
+/// `canvas_objects_lock_tests::undo_still_restores_a_move_on_a_locked_page_but_the_json_editor_asks`).
+/// Not enforced (stated so nobody assumes it): the per-object `locked` list,
+/// which stays a frontend rule.
 ///
 /// ASKED WHILE HOLDING THE DOOR'S OWN STORE (BUG-0443). Every door calls this
 /// (or [`canvas_objects_locked_now`]) between taking the store it writes the
@@ -3467,6 +3513,19 @@ pub(crate) fn delete_sheet_impl(
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(state, "delete a sheet")?;
 
+    // Whether any formula READS the doomed sheet -- directly or through a 3-D
+    // span, which the cross-sheet map holds expanded to every sheet it covers
+    // -- asked before anything moves: under MANUAL calculation only such a
+    // delete leaves the workbook pending (see the end of this function). Read
+    // with nothing else held; a flag for the calculation state only.
+    let doomed_sheet_is_read = {
+        let name = state.sheet_names.read().ok().and_then(|n| n.get(index).cloned());
+        match (name, state.cross_sheet_dependents.lock()) {
+            (Some(name), Ok(map)) => map.keys().any(|(sheet, _, _)| identity::sheet_names_equal(sheet, &name)),
+            _ => true,
+        }
+    };
+
     // MAY this sheet be deleted, before "can the workbook survive it".
     //
     // A subscribed sheet is somebody else's content, still tracked and still
@@ -3524,6 +3583,10 @@ pub(crate) fn delete_sheet_impl(
     // (W10/W11). Deferred init, like the id.
     let deleted_sheet_name: String;
     let deleted_sheet_names_after: Vec<String>;
+    // How many formulas the delete rewrote (a reference to the deleted sheet,
+    // a 3-D bookend): under manual calculation those leave the workbook
+    // pending. Deferred init, like the id.
+    let formulas_repaired: usize;
     let result = {
     // PENDING, NOT READ, AND HELD THROUGH THE WRITE (review RA-1, 2026-10-23).
     // The three guards are taken here and AUTHORIZED below once the effect
@@ -3916,7 +3979,11 @@ pub(crate) fn delete_sheet_impl(
     }
 
     // Repair 3D reference bookends AND plain cross-sheet references in all
-    // formulas. A reference to the deleted sheet becomes #REF!.
+    // formulas. A reference to the deleted sheet keeps its formula and reads
+    // `#REF!` where the sheet was (`=Data!A1` -> `=#REF!A1`, Excel's text); the
+    // cell's VALUE is left to the recalculation at the end of this command, so
+    // under MANUAL calculation it keeps showing its old value until F9, as in
+    // Excel [LIVE].
     let names_after = sheet_names.clone();
     deleted_sheet_names_after = names_after.clone();
     // UNREACHABLE BY CONSTRUCTION: the pre-flight at the top of this command ran
@@ -3924,18 +3991,22 @@ pub(crate) fn delete_sheet_impl(
     // there and here rewrites a cell. If it ever does fire, the repair wrote
     // NOTHING (it is all-or-nothing), so no formula has been corrupted — the
     // workbook is left with the sheet removed and a refusal the log names.
-    if let Err(refusal) = crate::repair_all_formulas(&mut grids, &|formula| {
+    match crate::repair_all_formulas(&mut grids, &|formula| {
         crate::repair_3d_refs_on_delete_at(formula, &deleted_name, index, &names_after)
     }) {
-        crate::log_error!(
-            "SHEET",
-            "delete_sheet repair failed AFTER its pre-flight passed: {}",
-            refusal
-        );
-        return Err(refusal.message(&format!("delete sheet '{}'", deleted_name), &sheet_names));
+        Ok(rewritten) => formulas_repaired = rewritten,
+        Err(refusal) => {
+            crate::log_error!(
+                "SHEET",
+                "delete_sheet repair failed AFTER its pre-flight passed: {}",
+                refusal
+            );
+            return Err(refusal.message(&format!("delete sheet '{}'", deleted_name), &sheet_names));
+        }
     }
     // Defined names hold their target as formula TEXT and go through the same
-    // repair; one whose sheet just vanished becomes `=#REF!`.
+    // repair; one whose sheet just vanished reads `=#REF!$A$1:$A$3`, as Excel
+    // [LIVE] writes it.
     repair_named_ranges(&state, &effect, &|refers_to| {
         crate::repair_3d_refs_on_delete_at(refers_to, &deleted_name, index, &names_after)
     });
@@ -4147,10 +4218,10 @@ pub(crate) fn delete_sheet_impl(
     crate::persistence::restamp_workbook_name_casing(&state, &effect);
 
     // RECALCULATE THE WORKBOOK. Deleting a sheet is the one structural edit
-    // that changes VALUES it does not write: `repair_all_formulas` above turned
-    // every formula referencing the deleted sheet into `#REF!`, and everything
-    // downstream of those cells still held the number it computed while the
-    // sheet existed. Nothing recalculated, so the stale values simply stayed --
+    // that changes VALUES it does not write: `repair_all_formulas` above made
+    // every formula referencing the deleted sheet read `#REF!` (`=#REF!A1`),
+    // and those cells -- and everything downstream of them -- still held the
+    // number they computed while the sheet existed. Nothing recalculated, so the stale values simply stayed --
     // and were what a save then wrote.
     //
     // Whole-workbook rather than a seeded cascade: the repaired cells are
@@ -4162,14 +4233,40 @@ pub(crate) fn delete_sheet_impl(
     // The 3-D spans first: the deleted sheet's edges go, and a span whose
     // bookend the repair moved reads its new sheets (`reregister_3d_span_edges`).
     reregister_3d_span_edges(state);
-    let sheet_count = state.sheet_names.read().unwrap().len();
-    for idx in 0..sheet_count {
-        crate::calculation::recalculate_sheet_values(
-            &state,
-            &user_files_state,
-            &pivot_state,
-            idx,
-            Some((&*pane_control_state, &*ribbon_filter_state)),
+    // UNDER MANUAL CALCULATION nothing is recalculated: the workbook is left
+    // pending for F9, as `recalculate_3d_span_readers` leaves a moved span.
+    // Excel [LIVE, Excel 16 over COM, 2026-11-05, dtfollow/probe2.ps1 and
+    // probe3.ps1, manual]: deleting Sheet3 out of `=SUM(Sheet2:Sheet4!A1)`
+    // (111) left it at 111 and its reader `=A1*2` at 222, and `=Sheet3!A1`
+    // (10) -- now `=#REF!A1` -- still showing 10 with its reader at 20,
+    // CalculationState xlPending; F9 made them 101, 202, #REF!, #REF!.
+    // Deleting the bookend Sheet2 left the workbook pending the same way, while
+    // deleting a sheet no formula names left a calculated workbook xlDone.
+    if state.calculation_mode.lock().map(|m| *m == "manual").unwrap_or(false) {
+        if formulas_repaired > 0 || doomed_sheet_is_read {
+            crate::calculation::note_stored_values_may_be_stale(state);
+        }
+    } else {
+        let sheet_count = state.sheet_names.read().unwrap().len();
+        for idx in 0..sheet_count {
+            crate::calculation::recalculate_sheet_values(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                idx,
+                Some((&*pane_control_state, &*ribbon_filter_state)),
+            );
+        }
+        // A LIVE DATA TABLE reading what the delete repaired follows it, as
+        // after any edit under automatic calculation (BUG-0652).
+        let mut refreshed = Vec::new();
+        crate::data_tables::refresh_after_edit(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &mut refreshed,
         );
     }
 
@@ -5005,6 +5102,10 @@ pub(crate) fn copy_sheet_impl(
             crate::sheet_names::ensure_sheet_name_is_free(name, &sheet_names, None)?;
         }
     }
+    // The defined names a copied table's new name must avoid (one namespace),
+    // read before any lock below is taken.
+    let copy_defined_name_keys: std::collections::HashSet<String> =
+        state.named_ranges.read().map_err(|e| e.to_string())?.keys().cloned().collect();
 
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -5181,18 +5282,32 @@ pub(crate) fn copy_sheet_impl(
         // scenarios, outlines, conditional formats, data validations, cell
         // types, on-grid controls, advanced-filter hidden rows, spill
         // tracking): indices at/above the insertion point move up by one. The
-        // copy itself starts with none of this state (mirroring reports).
+        // copy itself starts with none of this state (mirroring reports) --
+        // except its conditional formats, validations, comments and notes,
+        // which `copy_rules_and_annotations_to_copied_sheet` gives it below,
+        // once every sheet guard is released.
         remap_sheet_keyed_stores(&state, &effect, |i| {
             Some(if i >= insert_at { i + 1 } else { i })
         });
 
         // TABLES, for the same reason and by the same shift — they are not in
-        // the helper above (see `remap_tables_store`, BUG-0047). The copy gets
-        // none of its own, mirroring reports; this re-anchors the originals the
-        // insertion pushed up.
+        // the helper above (see `remap_tables_store`, BUG-0047); this
+        // re-anchors the originals the insertion pushed up.
         remap_tables_store(&state, &effect, |i| {
             Some(if i >= insert_at { i + 1 } else { i })
         });
+        // ...and the COPY gets a copy of every table on the source, under a
+        // new name, with its own cells re-pointed at the copies, as Excel's
+        // Worksheet.Copy does (NEW-copy-sheet-tables). It used to get none,
+        // and its cells kept reading the source's tables.
+        crate::tables::copy_tables_to_copied_sheet(
+            &state,
+            &effect,
+            source_index,
+            insert_at,
+            &mut [&mut grids[insert_at], &mut *current_grid],
+            &copy_defined_name_keys,
+        );
 
         // Same shift for the floating object stores (slicers, timelines,
         // charts, sparklines, bySheet filter targets), which are keyed by a
@@ -5231,6 +5346,11 @@ pub(crate) fn copy_sheet_impl(
         page_setups,
     ));
 
+    // The copy's conditional formats, data validations, comments and notes
+    // (NEW-copy-sheet-cfdv-names). Every sheet guard is released above: the
+    // rule formulas are respelled against the sheet and name tables.
+    copy_rules_and_annotations_to_copied_sheet(state, &effect, source_index, insert_at);
+
     // EXCEL PARITY: copying a sheet ends the undo history (BUG-0005). The copy
     // is INSERTED, so every index at or above the insertion point moved up by
     // one under every queued entry.
@@ -5241,6 +5361,114 @@ pub(crate) fn copy_sheet_impl(
     reregister_3d_span_edges(state);
 
     Ok(result)
+}
+
+/// What Excel's `Worksheet.Copy` carries onto the copy besides its cells
+/// (NEW-copy-sheet-cfdv-names). [LIVE, Excel 16, 2026-11-05,
+/// cfdv/probe1.ps1 K] the copy `Src (2)` has every conditional format of
+/// `Src` on the same ranges, every data validation, the note on A1 and the
+/// threaded comment on A2; a rule or validation naming `Src` itself
+/// (`=A1>Src!$B$1`, a list `=Src!$D$1:$D$3`, `=G5>Src!$A$1`) reads the COPY's
+/// cells there (`=A1>$B$1`, `=$D$1:$D$3`, `=G5>$A$1`), while one naming
+/// another sheet (`=A1>Other!$A$1`, `=Other!$A$1:$A$2`) keeps reading it.
+/// Calcula's copy had none of them.
+///
+/// Rule formulas are re-pointed through the same walkers a sheet rename uses
+/// (`calp::sheet_renames::visit_*_formulas`, respelled as `rewrite_rule_formulas`
+/// does); a list source on the source sheet becomes one on the copy. Each
+/// copied rule gets a fresh id, each comment, reply and note a fresh id. Every
+/// store is taken alone; call holding no sheet guard.
+///
+/// NOT CARRIED (yet): defined names. Excel gives the copy a SHEET-scoped copy
+/// of every name scoped to the source and of every workbook name whose
+/// definition reads the source, re-pointed at the copy (`'Src (2)'!WbRef =
+/// ='Src (2)'!$A$1:$A$3` beside the workbook's own `WbRef`). Calcula's name
+/// registry is keyed by the name alone (`identity::defined_name_key`), so a
+/// second `WbRef` in another scope cannot be held.
+fn copy_rules_and_annotations_to_copied_sheet(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    source: usize,
+    copy: usize,
+) {
+    use crate::data_validation::{DataValidationRule, ListSource};
+    let sheet_names: Vec<String> = state.sheet_names.read().map(|g| g.clone()).unwrap_or_default();
+    let (Some(source_name), Some(copy_name)) = (sheet_names.get(source).cloned(), sheet_names.get(copy).cloned())
+    else {
+        return;
+    };
+    let named_ranges = state.named_ranges.read().map(|g| g.clone()).unwrap_or_default();
+    let renames = calp::sheet_renames::SheetRenames::new([(source_name.as_str(), copy_name.as_str())]);
+    let mut slot = |text: &mut String| {
+        match renames
+            .rename_formula(text)
+            .map(|t| respell_rule_formula(&t, &sheet_names, &named_ranges).unwrap_or(t))
+        {
+            Some(rewritten) => {
+                *text = rewritten;
+                true
+            }
+            None => false,
+        }
+    };
+
+    if let Ok(mut store) = state.conditional_formats.write(effect) {
+        if let Some(mut rules) = store.get(&source).cloned().filter(|r| !r.is_empty()) {
+            {
+                let mut next_id = state.next_cf_rule_id.lock().unwrap();
+                for rule in rules.iter_mut() {
+                    rule.id = *next_id;
+                    *next_id += 1;
+                }
+            }
+            rename_typed_payload(&mut rules, |json| calp::sheet_renames::visit_cf_rule_formulas(json, &mut slot));
+            store.insert(copy, rules);
+        }
+    }
+    if let Ok(mut store) = state.data_validations.write(effect) {
+        if let Some(mut ranges) = store.get(&source).cloned().filter(|r| !r.is_empty()) {
+            for range in ranges.iter_mut() {
+                if let DataValidationRule::List(list) = &mut range.validation.rule {
+                    if let ListSource::Range { sheet_index: Some(index), .. } = &mut list.source {
+                        if *index == source {
+                            *index = copy;
+                        }
+                    }
+                }
+            }
+            rename_typed_payload(&mut ranges, |json| calp::sheet_renames::visit_validation_formulas(json, &mut slot));
+            store.insert(copy, ranges);
+        }
+    }
+    if let Ok(mut store) = state.comments.write(effect) {
+        if let Some(map) = store.get(&source).cloned().filter(|m| !m.is_empty()) {
+            let copied = map
+                .into_iter()
+                .map(|(key, mut comment)| {
+                    comment.id = uuid::Uuid::new_v4().to_string();
+                    comment.sheet_index = copy;
+                    for reply in comment.replies.iter_mut() {
+                        reply.id = uuid::Uuid::new_v4().to_string();
+                    }
+                    (key, comment)
+                })
+                .collect();
+            store.insert(copy, copied);
+        }
+    }
+    if let Ok(mut store) = state.notes.write(effect) {
+        if let Some(map) = store.get(&source).cloned().filter(|m| !m.is_empty()) {
+            let copied = map
+                .into_iter()
+                .map(|(key, mut note)| {
+                    note.id = uuid::Uuid::new_v4().to_string();
+                    note.sheet_index = copy;
+                    (key, note)
+                })
+                .collect();
+            store.insert(copy, copied);
+        }
+    }
 }
 
 /// Hide a sheet. Cannot hide the last visible sheet.

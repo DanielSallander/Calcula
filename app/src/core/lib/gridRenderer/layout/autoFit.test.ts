@@ -142,6 +142,28 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
     expect(measureOptimalColumnWidth(2, cells, STYLES, THEME, MIN_WIDTH)).toBe(150);
   });
 
+  // BUG-0351: AutoFit Column Width over a PARTIAL range fits only the
+  // selected cells (Excel); a PivotTable lower down the column sizes nothing.
+  it("BUG-0351 a contributor's content outside the fitted rows sizes nothing", () => {
+    const seen: unknown[] = [];
+    registerAutoFitContributor({
+      id: "test-pivot",
+      measureColumn: (_col, _ctx, rows) => {
+        seen.push(rows);
+        // A contributor that ignores `rows`: the seam clips it anyway.
+        return { claimedRowRanges: [{ startRow: 19, endRow: 39 }], requiredWidth: 300, extraCellWidth: new Map([[19, 50]]) };
+      },
+    });
+    const a1 = [makeCell({ row: 0, display: "abc" })];
+    // A1 alone: the cell's own width (3*10 + 8), not the pivot's 300.
+    expect(measureOptimalColumnWidth(0, a1, STYLES, THEME, MIN_WIDTH, true, [{ startRow: 0, endRow: 0 }])).toBe(38);
+    expect(seen[0]).toEqual([{ startRow: 0, endRow: 0 }]);
+    // Rows reaching into the pivot: its width counts again.
+    expect(measureOptimalColumnWidth(0, a1, STYLES, THEME, MIN_WIDTH, true, [{ startRow: 0, endRow: 25 }])).toBe(300);
+    // No rows (the header double-click, a whole column): the whole column.
+    expect(measureOptimalColumnWidth(0, a1, STYLES, THEME, MIN_WIDTH)).toBe(300);
+  });
+
   it("lets a core-measured cell beat a smaller contributor width", () => {
     registerAutoFitContributor({
       id: "test-pivot",
@@ -190,10 +212,10 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
     errorSpy.mockRestore();
   });
 
-  it("adds the style indent the renderer shifts text by (8px per level)", () => {
+  it("adds the style indent the renderer shifts text by (10.5px per level, Excel's Calibri 11 step)", () => {
     const cells = [makeCell({ display: "abc", styleIndex: 4 })];
-    // 3 * 10 + 8 padding + 2 * 8 indent = 54
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(54);
+    // 3 * 10 + 8 padding + 2 * 10.5 indent = 59 (BUG-0364: the step was 8px)
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(59);
   });
 
   it("measures rich-text cells per run with each run's own font", () => {

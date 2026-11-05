@@ -105,6 +105,7 @@ import {
 } from "./Button";
 import { resolveShortcutLabel } from "./Tooltip";
 import { softDisabled } from "./disabled";
+import { useFocusRescueOnDisable } from "./focusRescue";
 import {
   focusWhenVisible,
   isTypeaheadKey,
@@ -1259,6 +1260,10 @@ export function SplitMenuButton({
   // no `!disabled` gate of its own (a gate here was measured to change
   // nothing: the state is already false when the attribute is written).
   if (disabled && open) setOpen(false);
+  // ...and if the menu HELD focus, the half that opened it gets it back rather
+  // than <body> (BUG-0398; ./focusRescue.ts). The halves are aria-disabled, so
+  // they can still take it.
+  const rescue = useFocusRescueOnDisable(disabled, () => returnTo.current);
 
   const dismiss = useCallback(() => setOpen(false), []);
   const close = useCallback(() => {
@@ -1357,7 +1362,7 @@ export function SplitMenuButton({
         role="presentation"
       >
         <MenuContext.Provider value={ctx}>
-          <Menu id={menuId} ariaLabel={menuLabel ?? halfLabel}>
+          <Menu id={menuId} ariaLabel={menuLabel ?? halfLabel} onFocus={rescue.onFocus} onBlur={rescue.onBlur}>
             {children}
           </Menu>
         </MenuContext.Provider>

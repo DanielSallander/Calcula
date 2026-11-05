@@ -42,7 +42,7 @@ import { showToast } from "@api";
 import { AppEvents, onAppEvent } from "@api/events";
 import { getGridStateSnapshot } from "@api/grid";
 import { requestOverlayRedraw } from "@api/gridOverlays";
-import { getAppLocale } from "@api/locale";
+import { getAppLocale, getBiFormatCultureGeneration, onBiFormatCultureApplied } from "@api/locale";
 import {
   clearCrossFilter,
   onReportFiltersChange,
@@ -302,8 +302,15 @@ export async function refreshPivotCrossFilter(pivotId: string): Promise<void> {
   // The LOCALE belongs in the question: Rust writes the filtered view's
   // formatted values and member labels in the app locale, and a locale switch
   // moves neither the definition version nor the request's keys -- without it
-  // the box kept the old locale's text after a switch.
-  const signature = JSON.stringify({ version: real.version, locale: getAppLocale()?.localeId ?? "", request });
+  // the box kept the old locale's text after a switch. So does the FORMAT
+  // culture generation: the re-read when the engines' culture walk ends asks
+  // the same question in the same locale, and must not be called answered.
+  const signature = JSON.stringify({
+    version: real.version,
+    locale: getAppLocale()?.localeId ?? "",
+    culture: getBiFormatCultureGeneration(),
+    request,
+  });
   if (filteredViews.get(pivotId)?.signature === signature) return;
   if (pendingSignature.get(pivotId) === signature) return;
 
@@ -405,8 +412,12 @@ export function installPivotCrossFilter(): Array<() => void> {
     }),
   );
   // A locale switch re-reads every box's filtered view (its text is Rust's,
-  // written in the app locale; the signature carries the locale id).
+  // written in the app locale; the signature carries the locale id). The view
+  // is a MODEL query, and the engines take the new DAX FORMAT culture in a
+  // walk that ends after `locale:changed`, so it is re-read again when the
+  // walk ends (@api/locale onBiFormatCultureApplied; either order).
   cleanups.push(onAppEvent(AppEvents.LOCALE_CHANGED, () => refreshAllPivotCrossFilters()));
+  cleanups.push(onBiFormatCultureApplied(() => refreshAllPivotCrossFilters()));
   cleanups.push(
     onAppEvent("bi:model-changed", () => {
       forgetPivotModelInfo();

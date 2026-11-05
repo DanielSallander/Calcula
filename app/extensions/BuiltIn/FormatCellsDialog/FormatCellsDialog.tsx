@@ -23,6 +23,7 @@ import {
 import {
   getCell,
   getStyle,
+  getViewportCells,
   beginUndoTransaction,
   commitUndoTransaction,
   cancelUndoTransaction,
@@ -50,7 +51,15 @@ import { FillTab } from "./tabs/FillTab";
 import { ProtectionTab } from "./tabs/ProtectionTab";
 import * as S from "./FormatCellsDialog.styles";
 import { alertAsync } from "@api/dialogs";
-import { cellTargetFor, resolveCellTarget, readTargetCell, targetRefOf, type CellTargetRef } from "@api/cellTarget";
+import {
+  cellTargetFor,
+  resolveCellTarget,
+  readTargetCell,
+  targetRefOf,
+  getCellTargetCells,
+  type CellTargetRef,
+} from "@api/cellTarget";
+import { outerEdgeSides } from "./lib/borderEdges";
 import { announceFormattingResult } from "@api/announceFormatting";
 import { activeCellOf } from "@api/activeCell";
 
@@ -196,18 +205,26 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         });
 
         // On a RANGE the Border tab's four edges are the range's OUTER edges
-        // and two more buttons are the lines inside it (Excel), so the edges
-        // are read from the corners that own them, and the inside lines from
-        // the top-left cell's inner sides.
+        // and two more buttons are the lines inside it (Excel). Each outer
+        // edge is read along its WHOLE length and shows MIXED (greyed) when
+        // its cells differ (BUG-0365, lib/borderEdges.ts) -- it used to be
+        // read from one corner cell. The inside lines come from the top-left
+        // cell's inner sides.
         if (multiRow || multiCol) {
           const topLeft = await styleAt(startRow, startCol, seedTarget);
-          const topRight = multiCol ? await styleAt(startRow, endCol, seedTarget) : topLeft;
-          const bottomLeft = multiRow ? await styleAt(endRow, startCol, seedTarget) : topLeft;
+          const edges = await outerEdgeSides(
+            { startRow, startCol, endRow, endCol },
+            {
+              cells: async (strip) =>
+                seedTarget
+                  ? (await getCellTargetCells(seedTarget, strip)).cells
+                  : await getViewportCells(strip.startRow, strip.startCol, strip.endRow, strip.endCol),
+              style: (index) => getStyle(index),
+              styleAt: (r, c) => styleAt(r, c, seedTarget),
+            },
+          );
           loadFromStyle({
-            borderTop: sideOf(topLeft.borderTop),
-            borderLeft: sideOf(topLeft.borderLeft),
-            borderRight: sideOf(topRight.borderRight),
-            borderBottom: sideOf(bottomLeft.borderBottom),
+            ...edges,
             borderInsideHorizontal: multiRow ? sideOf(topLeft.borderBottom) : sideOf(undefined),
             borderInsideVertical: multiCol ? sideOf(topLeft.borderRight) : sideOf(undefined),
           });

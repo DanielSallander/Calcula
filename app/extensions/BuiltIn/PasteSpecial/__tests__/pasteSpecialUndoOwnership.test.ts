@@ -98,7 +98,8 @@ const PASTES = [
   {
     name: "Paste Special (values)",
     label: "Paste Special (values) 1 cells",
-    writes: h.updateCell,
+    // Every Paste Special variant writes its cells in ONE batch (BUG-0345).
+    writes: h.updateCellsBatch,
     run: () => executePasteSpecial(CLIPBOARD, TARGET, options("values"), 100, 50),
   },
   {

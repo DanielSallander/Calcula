@@ -122,7 +122,7 @@ export const GLOBAL_INPUT_LISTENERS: readonly GlobalInputListener[] = [
   { file: "extensions/AutoFilter/components/FilterDropdownOverlay.tsx", event: "mousedown", verdict: "session-scoped",
     note: "Click-outside dismissal for a popup this surface itself opened; it closes only its own surface." },
   { file: "extensions/BuiltIn/CellBookmarks/index.ts", event: "keydown", verdict: "claim-guarded",
-    note: "Ctrl+Shift+V OFF the grid opens the Save Current View overlay (on the grid the key is Paste Special's registry binding); it stays native inside a field or a cell edit. Its other keys (Ctrl+Shift+B, Ctrl+] / Ctrl+[) are registry bindings now, not this listener." },
+    note: "Ctrl+Shift+V OFF the grid opens the Save Current View overlay (on the grid the key is Paste Values' registry binding, Excel's); it stays native inside a field or a cell edit. Its other keys (Ctrl+Shift+B, Ctrl+] / Ctrl+[) are registry bindings now, not this listener." },
   { file: "extensions/BuiltIn/FormatPainter/formatPainterLogic.ts", event: "mousemove", verdict: "session-scoped",
     note: "Drag session: registered only while a drag this surface itself began is live, so the press that started it was already filtered." },
   { file: "extensions/BuiltIn/FormatPainter/formatPainterLogic.ts", event: "mouseup", verdict: "session-scoped",

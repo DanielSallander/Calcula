@@ -707,9 +707,9 @@ describe("MiniFormatToolbar — the shared selection and font rules", () => {
       }),
     );
     await click(byTestId("mini-format-italic"));
+    // BUG-0394: every block in ONE call, the others as `moreAreas`.
     expect(applyMock.mock.calls).toEqual([
-      [[1, 2], [2, 3], { italic: true }, GRID],
-      [[5, 6], [0], { italic: true }, GRID],
+      [[1, 2], [2, 3], { italic: true }, { ...GRID, moreAreas: [{ rows: [5, 6], cols: [0] }] }],
     ]);
     expect(beginMock).toHaveBeenCalledTimes(1);
     expect(commitMock).toHaveBeenCalledWith(77);

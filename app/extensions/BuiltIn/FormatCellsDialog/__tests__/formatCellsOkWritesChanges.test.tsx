@@ -37,6 +37,18 @@ vi.mock("@api", () => ({
 vi.mock("@api/lib", () => ({
   getCell: (...a: unknown[]) => h.getCell(...a),
   getStyle: (...a: unknown[]) => h.getStyle(...a),
+  // The styled read of an edge strip, answered from the same getCell double
+  // (every position of the strip, as the backend's read answers a styled one).
+  getViewportCells: async (r0: number, c0: number, r1: number, c1: number) => {
+    const out: unknown[] = [];
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const cell = await h.getCell(r, c);
+        if (cell) out.push({ rowSpan: 1, colSpan: 1, ...cell });
+      }
+    }
+    return out;
+  },
   applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
   applyBorderPreset: (...a: unknown[]) => h.applyBorderPreset(...a),
   beginUndoTransaction: (...a: unknown[]) => h.begin(...a),
@@ -64,7 +76,7 @@ vi.mock("../tabs/ProtectionTab", () => ({ ProtectionTab: () => null }));
 import { FormatCellsDialog } from "../FormatCellsDialog";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
 import extension from "../index";
-import { CoreCommands } from "@api/commands";
+import { CoreCommands } from "@api/commands";
 
 /** The options a write on Core's own selection carries: no target (P3). */
 const GRID = { target: undefined };
@@ -202,20 +214,27 @@ describe("Borders on a range, and the undo step", () => {
     expect(h.commit).toHaveBeenCalledWith(41);
   });
 
-  it("reads the range's OUTER edges from the corners that own them", async () => {
-    // Top-left (0,0) has a top line; the bottom-left corner (2,0) a bottom line.
+  // BUG-0365 overrules the corner reads this test used to pin (Top from the
+  // top-left cell, Bottom from the bottom-left one): each edge is read along
+  // its whole length, and an edge whose cells differ is MIXED, as Excel greys
+  // it (Range.Borders(edge).LineStyle reads Null there, [LIVE] 2026-11-04).
+  it("reads the range's OUTER edges along their whole length: a line on one corner only is MIXED", async () => {
+    // Top-left (0,0) has a top line; the bottom-left corner (2,0) a bottom
+    // line; the whole right column (x,2) a right line.
     h.getCell.mockImplementation(async (row: number, col: number) => ({ row, col, styleIndex: row * 10 + col + 1, display: "" }));
     h.getStyle.mockImplementation(async (i: number) => {
       const line = { style: "thin", color: "#000000", width: 1 };
       if (i === 1) return { ...DEFAULT_STYLE, borderTop: line };
       if (i === 21) return { ...DEFAULT_STYLE, borderBottom: line };
+      if (i === 3 || i === 13 || i === 23) return { ...DEFAULT_STYLE, borderRight: line };
       return DEFAULT_STYLE;
     });
     await renderDialog(vi.fn());
     const s = useFormatCellsStore.getState();
-    expect(s.borderTop.style).toBe("thin");
-    expect(s.borderBottom.style).toBe("thin");
-    expect(s.borderRight.style).toBe("none");
+    expect(s.borderTop.mixed).toBe(true);
+    expect(s.borderBottom.mixed).toBe(true);
+    expect(s.borderRight).toEqual({ style: "thin", color: "#000000" });
+    expect(s.borderLeft).toEqual({ style: "none", color: "#000000" });
     expect(s.rangeShape).toEqual({ multiRow: true, multiCol: true });
     // ...and an untouched OK still writes nothing.
     await pressOk();

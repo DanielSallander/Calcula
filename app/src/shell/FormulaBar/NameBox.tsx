@@ -156,7 +156,10 @@ function buildRefersTo(
 }
 
 /**
- * Basic client-side name validation matching Rust rules.
+ * Basic client-side name validation: a first filter. The backend's
+ * `NamedRange::is_valid_name` decides and refuses more (R1C1-shaped names such
+ * as `R1C1` / `RC` / `C`, Lotus-style `A1.B1`, over 255 characters, as
+ * Excel does); its refusal is reported through `reportProblem` below.
  */
 function isValidName(name: string): boolean {
   if (!name || name.length === 0) return false;

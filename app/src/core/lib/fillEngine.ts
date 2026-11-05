@@ -14,6 +14,7 @@ import {
   getMergedRegions,
   mergeCells,
   type CellUpdateInput,
+  type MergedRegion,
   type FormulaShiftInput,
 } from "./tauri-api";
 import { FillListRegistry, type FillListMatch } from "./fillLists";
@@ -624,29 +625,48 @@ export async function processPendingFills(pendingFills: PendingFill[]): Promise<
   return results;
 }
 
+type FillBox = { startRow: number; startCol: number; endRow: number; endCol: number };
+
 /**
- * Replicate merged regions from the source range into the filled target range.
- * For each source merge, creates corresponding merges in every repetition of the
- * source pattern that falls within the target range.
+ * Excel's refusal of a fill whose destination holds merged cells that are
+ * not the source's own merge pattern [LIVE, Excel 16, 2026-11-05,
+ * tablec/probe2.ps1 + probe3.ps1]: `AutoFill` of a merged A1:B1 down over a
+ * merge it partly overlaps (B2:C2), a wider one (A2:C2), a vertical one
+ * (A2:A3), a merge offset from the repetition (A3:C3) -- and even a merge of
+ * the same shape on a row the pattern would leave unmerged -- are each
+ * refused with this, changing nothing; a plain source over a merged
+ * destination is refused too; a destination with no merged cells fills.
  */
-export async function replicateMergeRegions(
-  sourceRange: { startRow: number; startCol: number; endRow: number; endCol: number },
-  targetRange: { startRow: number; startCol: number; endRow: number; endCol: number },
+export const FILL_MERGE_SHAPES_MESSAGE = "To do this, all the merged cells need to be the same size.";
+
+function boxesIntersect(a: FillBox, b: FillBox): boolean {
+  return !(a.endRow < b.startRow || a.startRow > b.endRow || a.endCol < b.startCol || a.startCol > b.endCol);
+}
+
+/** The fill's DESTINATION: the target range minus the source, on the fill's axis. */
+function fillDestination(source: FillBox, target: FillBox, direction: FillDirection): FillBox | null {
+  switch (direction) {
+    case "down":
+      return target.endRow > source.endRow ? { ...source, startRow: source.endRow + 1, endRow: target.endRow } : null;
+    case "up":
+      return target.startRow < source.startRow ? { ...source, startRow: target.startRow, endRow: source.startRow - 1 } : null;
+    case "right":
+      return target.endCol > source.endCol ? { ...source, startCol: source.endCol + 1, endCol: target.endCol } : null;
+    case "left":
+      return target.startCol < source.startCol ? { ...source, startCol: target.startCol, endCol: source.startCol - 1 } : null;
+    default:
+      return null;
+  }
+}
+
+/** The merges a fill replicates: each source merge in every whole repetition of the source inside the destination. */
+function plannedFillMerges(
+  sourceMerges: MergedRegion[],
+  sourceRange: FillBox,
+  targetRange: FillBox,
   direction: FillDirection,
-): Promise<void> {
-  const allMerged = await getMergedRegions();
-
-  // Find merged regions that are fully within the source range
-  const sourceMerges = allMerged.filter(
-    (m) =>
-      m.startRow >= sourceRange.startRow &&
-      m.endRow <= sourceRange.endRow &&
-      m.startCol >= sourceRange.startCol &&
-      m.endCol <= sourceRange.endCol,
-  );
-
-  if (sourceMerges.length === 0) return;
-
+): MergedRegion[] {
+  const out: MergedRegion[] = [];
   const sourceRows = sourceRange.endRow - sourceRange.startRow + 1;
   const sourceCols = sourceRange.endCol - sourceRange.startCol + 1;
 
@@ -654,7 +674,7 @@ export async function replicateMergeRegions(
     const fillStart = direction === "down" ? sourceRange.endRow + 1 : targetRange.startRow;
     const fillEnd = direction === "down" ? targetRange.endRow : sourceRange.startRow - 1;
     const fillCount = fillEnd - fillStart + 1;
-    if (fillCount <= 0) return;
+    if (fillCount <= 0) return out;
 
     const repetitions = Math.ceil(fillCount / sourceRows);
 
@@ -675,14 +695,14 @@ export async function replicateMergeRegions(
         // Only merge if we have the full merge height (don't create partial merges)
         if (clippedEndRow - clippedStartRow !== m.endRow - m.startRow) continue;
 
-        await mergeCells(clippedStartRow, m.startCol, clippedEndRow, m.endCol);
+        out.push({ startRow: clippedStartRow, startCol: m.startCol, endRow: clippedEndRow, endCol: m.endCol });
       }
     }
   } else if (direction === "right" || direction === "left") {
     const fillStart = direction === "right" ? sourceRange.endCol + 1 : targetRange.startCol;
     const fillEnd = direction === "right" ? targetRange.endCol : sourceRange.startCol - 1;
     const fillCount = fillEnd - fillStart + 1;
-    if (fillCount <= 0) return;
+    if (fillCount <= 0) return out;
 
     const repetitions = Math.ceil(fillCount / sourceCols);
 
@@ -703,8 +723,75 @@ export async function replicateMergeRegions(
         // Only merge if we have the full merge width
         if (clippedEndCol - clippedStartCol !== m.endCol - m.startCol) continue;
 
-        await mergeCells(m.startRow, clippedStartCol, m.endRow, clippedEndCol);
+        out.push({ startRow: m.startRow, startCol: clippedStartCol, endRow: m.endRow, endCol: clippedEndCol });
       }
     }
+  }
+  return out;
+}
+
+function sameBox(a: FillBox, b: FillBox): boolean {
+  return a.startRow === b.startRow && a.startCol === b.startCol && a.endRow === b.endRow && a.endCol === b.endCol;
+}
+
+function mergesInside(allMerged: MergedRegion[], range: FillBox): MergedRegion[] {
+  return allMerged.filter(
+    (m) =>
+      m.startRow >= range.startRow &&
+      m.endRow <= range.endRow &&
+      m.startCol >= range.startCol &&
+      m.endCol <= range.endCol,
+  );
+}
+
+/**
+ * Excel's answer to "may this fill run over the merges in its way?", asked
+ * BEFORE anything is written: `null` when it may, otherwise the refusal
+ * ({@link FILL_MERGE_SHAPES_MESSAGE}). The fill may run when its destination
+ * holds no merged cell, or exactly the merges it would replicate there (each
+ * one already in place). Every other merge in the way refuses the whole fill
+ * (NEW-fill-merge-replace): replicating onto a merge it partly overlapped used
+ * to grow it into the union, and a destination merge the pattern did not
+ * have was left straddling the filled cells.
+ */
+export function fillMergeRefusal(
+  allMerged: MergedRegion[],
+  sourceRange: FillBox,
+  targetRange: FillBox,
+  direction: FillDirection,
+): string | null {
+  const destination = fillDestination(sourceRange, targetRange, direction);
+  if (!destination) return null;
+  const inTheWay = allMerged.filter((m) => boxesIntersect(m, destination));
+  if (inTheWay.length === 0) return null;
+  const planned = plannedFillMerges(mergesInside(allMerged, sourceRange), sourceRange, targetRange, direction);
+  const exact = inTheWay.length === planned.length && inTheWay.every((m) => planned.some((p) => sameBox(p, m)));
+  return exact ? null : FILL_MERGE_SHAPES_MESSAGE;
+}
+
+/**
+ * Replicate merged regions from the source range into the filled target range.
+ * For each source merge, creates corresponding merges in every repetition of the
+ * source pattern that falls within the target range. Callers ask
+ * {@link fillMergeRefusal} first: a destination holding any other merge is
+ * refused before the fill writes a cell, so every merge made here lands on
+ * unmerged cells (or is one already in place, which is left be).
+ */
+export async function replicateMergeRegions(
+  sourceRange: FillBox,
+  targetRange: FillBox,
+  direction: FillDirection,
+): Promise<void> {
+  const allMerged = await getMergedRegions();
+
+  // Find merged regions that are fully within the source range
+  const sourceMerges = mergesInside(allMerged, sourceRange);
+  if (sourceMerges.length === 0) return;
+
+  for (const m of plannedFillMerges(sourceMerges, sourceRange, targetRange, direction)) {
+    // A planned merge that is already exactly in place is left be: merging
+    // it again would only re-run the value rule over it.
+    if (allMerged.some((existing) => sameBox(existing, m))) continue;
+    await mergeCells(m.startRow, m.startCol, m.endRow, m.endCol);
   }
 }

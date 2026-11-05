@@ -438,11 +438,12 @@ export async function runObjectScriptOnce(
     options.accessLevel ?? "unlocked",
   );
   // NO HALF-RUNS (owner decision B). A person's run of an application's macro
-  // may get CELL access and nothing more. A macro that also formats, sorts or
-  // inserts would write its cells and then be refused at its first call outside
-  // that access, leaving the sheet half-changed with no single undo step -- so
-  // it is refused HERE, before anything runs, with those calls named. The
-  // broker stays the authority for whatever this text scan cannot see.
+  // may get CELL access and formatting (owner, 2026-11-04) and nothing more. A
+  // macro that also sorts, inserts or merges would write its cells and then be
+  // refused at its first call outside that access -- so it is refused HERE,
+  // before anything runs, with those calls named. The broker stays the
+  // authority for whatever this text scan cannot see (and the run's earlier
+  // changes are then taken back whole).
   if (origin.kind === "package" && options.explicitRun !== undefined) {
     const outside = ungrantedApiCalls(source);
     if (outside.length > 0) {
@@ -458,7 +459,7 @@ export async function runObjectScriptOnce(
       const unrecorded = recorded?.unrecorded ?? null;
       throw new Error(
         `"${name}" was not run: it came in the application "${origin.name}". When you run ` +
-          "such a macro yourself it may read and change cells on any sheet, but it also " +
+          "such a macro yourself it may read and change cells, and how they look, on any sheet, but it also " +
           `calls ${outside.join(", ")}, which is outside that access. ` +
           "Nothing was changed. To keep using it, adapt it into a macro of your own " +
           "(Developer > Macros: edit it and choose \"Save as my copy\")." +

@@ -47,6 +47,7 @@ fn paste(wb: &Workbook, writes: &[(u32, u32, &str)]) -> Vec<CellData> {
             invariant: Some(true),
             pasted: None,
             moved: None,
+            source: None,
         })
         .collect();
     update_cells_batch_core(

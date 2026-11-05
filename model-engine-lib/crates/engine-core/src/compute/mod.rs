@@ -2,8 +2,10 @@
 
 pub mod aggregate;
 pub mod context;
+pub mod dax_semantics;
 pub mod evaluate;
 pub mod expression;
+pub mod format_string;
 pub mod incremental;
 pub mod join;
 pub mod measure;

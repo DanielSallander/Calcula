@@ -36,10 +36,10 @@
 // the same gesture, the same warning, the same value rule (ruling Q4: one
 // behaviour, not two), one undo step. Every probe, merge, unmerge and
 // alignment names the target, and the merges it reads are the object's backing
-// merges (`getCellTargetCells`), never the active sheet's. The one difference:
-// a value the value rule moves into the top-left cell is NOT re-pointed by
-// `relocateCellReferences`, which acts on the active sheet only -- a formula
-// elsewhere that read the moved value keeps its old address.
+// merges (`getCellTargetCells`), never the active sheet's. The value rule's
+// move is re-pointed by the BACKEND in both cases (on a sheet through
+// `relocate_cell_references`, on a backing sheet by its own rule), so the
+// gesture never re-points anything itself.
 
 import type { CellTargetRef, Selection } from "../../types";
 import { getCellTargetCells } from "../../../api/cellTarget";
@@ -51,7 +51,6 @@ import {
   getMergedRegions,
   isActiveSheetProtected,
   mergeCells,
-  relocateCellReferences,
   unmergeCells,
 } from "../tauri-api";
 import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionCloses } from "../undoTransactionOwnership";
@@ -232,7 +231,7 @@ async function mergeBlocks(
   label: string,
   host: MergeGestureHost,
 ): Promise<void> {
-  const options: MergeOptions = { across: kind === "mergeAcross", absorb: true, keepFirstValue: true };
+  const options: MergeOptions = { across: kind === "mergeAcross" };
   const mergeable = blocks.filter((b) => (kind === "mergeAcross" ? b.startCol !== b.endCol : !isSingleCell(b)));
   // Merge & Center on a single cell only centres it (Excel).
   const centreOnly = kind === "mergeCenter" ? blocks.filter(isSingleCell) : [];
@@ -286,12 +285,11 @@ async function mergeBlocks(
     // at the merged cell, and one that read the top-left cell it landed on is
     // #REF! -- Excel moves it the way a cut and paste does [LIVE 2026-10-30:
     // A1 empty, B1=5, Merge & Center A1:C1 -> =B1 reads =A1, =A1 reads #REF!].
-    // Never for a target: relocateCellReferences acts on the ACTIVE sheet's
-    // coordinates, and an object's (row, col) would re-point the host's cells.
-    for (const m of host.target ? [] : moved) {
-      await relocateCellReferences(m.fromRow, m.fromCol, m.fromRow, m.fromCol, m.toRow, m.toCol);
-      relocated.push(m);
-    }
+    // The BACKEND re-points them now, inside the merge's own step, for every
+    // merge door (a script's plain Range.Merge included); the gesture only
+    // announces the moves. Never for a target: the backend re-points the
+    // backing sheet itself, and an object's (row, col) names no host cell.
+    if (!host.target) relocated.push(...moved);
     if (kind === "mergeCenter") {
       for (const b of [...mergeable, ...centreOnly]) {
         await alignArea(b, "center", host.target);

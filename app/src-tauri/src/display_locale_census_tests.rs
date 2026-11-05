@@ -61,10 +61,11 @@ const ALLOWLIST: &[Allowed] = &[
     ("object_bindings/mod.rs", "workbook_locale", INVARIANT, "poisoned-lock fallback of the state.locale read"),
     // --- Format CODES stay invariant syntax (DECISIONS2 P2, RULINGS2 Q10).
     ("commands/styles.rs", "parse_number_format", INVARIANT, "a format CODE parse: codes are en-US syntax"),
-    ("commands/styles.rs", "next_decimal_format", INVARIANT, "Increase/Decrease Decimal counts digits of a code (measurement)"),
+    ("commands/styles.rs", "next_decimal_format_shown", INVARIANT, "Increase/Decrease Decimal counts digits of a code (measurement)"),
     // --- KEY projections: the label is discarded, only invariant keys leave.
     ("bi/commands.rs", "bi_get_column_values_core", INVARIANT, "key projection of the member list; labels discarded"),
     ("slicer/commands.rs", "set_slicer_item_selected", INVARIANT, "resolves member KEYS only; labels discarded"),
+    ("slicer/commands.rs", "table_member_key", SIMPLE_VALUE, "a TABLE slicer's invariant member KEY (BUG-0523); the label is format_cell_value in the app locale"),
     // --- Comparisons, not display (P2 non-goals).
     ("commands/data.rs", "remove_duplicates", SIMPLE_VALUE, "duplicate-detection comparison key"),
     ("conditional_formatting.rs", "cell_value_to_string", SIMPLE_NUMBER, "CF rule comparison text"),

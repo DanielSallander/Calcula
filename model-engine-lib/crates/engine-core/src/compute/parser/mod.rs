@@ -275,6 +275,7 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "MIN",
         "MAX",
         "DISTINCTCOUNT",
+        "DISTINCTCOUNTNOBLANK",
         "MEDIAN",
         "STDEV",
         "STDEVP",

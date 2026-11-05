@@ -758,6 +758,14 @@ it runs at**. See `scriptable-objects.md` §3, which is where that framing lived
 
 ## 11. Explicit-run cell access for application macros (owner decision B, 2026-09-30)
 
+**Widened to formatting (owner, 2026-11-04): "Macros should be able to change
+formatting as well."** Everything below about cell access now holds for
+formatting too -- the same doors, never for a run a script starts, Rust
+co-deciding, the run's formatting on the trail, a failed run undone whole --
+and 11.13 says exactly where the formatting line is drawn and why. Where a
+sentence below still says "cell access" alone, read it as "cell access and
+formatting".
+
 **Status (2026-10-01).** Built through every door the owner named, unit-proven
 end to end, and recorded on the persistent trail; every follow-up the decision
 raised (F1-F15) is closed in code. What is still owed before the owner item can
@@ -960,19 +968,18 @@ distributed restricted handle), is read in these places:
   unlocked tier; anything else is refused with a sentence saying what cell
   access covers. A realm without the flag gets the old refusal byte for byte.
 - `decidePolicy` also REFUSES a few RESTRICTED rows to a realm carrying the flag
-  (`explicitRunRestrictedRefusal`): the run-only rows (11.7) and the two
-  restricted formatting writes, `sheet.setRangeFormat` and
-  `sheet.clearRangeFormat` (`EXPLICIT_RUN_REFUSED_FORMAT_METHODS`). The reason
-  is a COMPOSITION: every restricted `sheet.*` row is clamped to the LIVE active
-  sheet (`clampSheetIndex`), and the grant includes `api.setActiveSheet`, so
-  without this the run could switch to each sheet in turn and format or strip
-  the formatting of all of them -- reach no restricted realm has on its own
-  (only the user moves the sheet on screen) and not cell access. It costs a
-  macro nothing it can reach through its own context: a workbook-context realm
-  has no `context.sheet` object, and the recorder formats through
-  `api.setRangeFormat`, already excluded. The broker is the barrier, not the
-  shim -- a realm can post a broker call directly (`postMessage` is not
-  neutered). The restricted cell rows and format READS stay admitted.
+  (`explicitRunRestrictedRefusal`): the run-only rows (11.7), always, and the
+  two restricted formatting writes, `sheet.setRangeFormat` and
+  `sheet.clearRangeFormat` (`EXPLICIT_RUN_RESTRICTED_FORMAT_METHODS`), whenever
+  the realm's FORMATTING grant is not live (Rust did not grant it, or the run
+  ended). The reason is a COMPOSITION: every restricted `sheet.*` row is
+  clamped to the LIVE active sheet (`clampSheetIndex`), and the grant includes
+  `api.setActiveSheet`, so together they let the run format every sheet in
+  turn -- which is exactly the formatting grant (11.13), and reach no
+  restricted realm has on its own (only the user moves the sheet on screen).
+  The broker is the barrier, not the shim -- a realm can post a broker call
+  directly (`postMessage` is not neutered). The restricted cell rows and format
+  READS stay admitted.
 - `fillRangeFromScript` (host.ts) is told `moduleParity` (11.5).
 - `buildBase` (`worker/contextShims.ts`) gives the realm the normal
   `context.api` object, so a recorded macro runs unchanged; enforcement stays
@@ -1002,7 +1009,10 @@ capability.
 | `api.recalculate`, `api.getCalculationMode` | `Calcula.application.calculate`, `.calculationMode` |
 | `api.beginBatch`, `api.commitBatch`, `api.cancelBatch` | a module run is one transaction -- and so is a granted run: the run's own undo step is opened before it starts, and these JOIN it (11.8) |
 
-**Excluded, with the owner's words ("the same CELL access") as the test:**
+**Excluded from the CELL table, with the owner's words ("the same CELL access")
+as the test** -- formatting has its own table since 2026-11-04 (11.13), so the
+formatting rows below are excluded from THIS table and admitted by that one,
+except where 11.13 says otherwise:
 `api.runMacro` (a macro started from inside the run is script-started, and it
 could reach the user's own unlocked macros); `api.executeCommand`,
 `api.emitEvent`, `api.onEvent` (drive other code; the module runtime has none);
@@ -1034,8 +1044,8 @@ values and shifted formulas and copies the source band's STYLES onto the target
 non-formula cells are "cloned verbatim (value + style)". Both paths check sheet
 protection over the target, so a fill cannot lift protection; on an UNPROTECTED
 sheet a fill can carry an unlocked style onto a cell, which an approved module
-macro could already do. This style copy is the one formatting a granted run
-does, and both the Macros dialog and the approval screen say so.
+macro could already do. Until 2026-11-04 this style copy was the one formatting a
+granted run did; since the owner widened the grant (11.13) it is one of many.
 
 The drag does two more things the module twin does not, and a GRANTED realm's
 fill does neither (`fillRangeFromScript(..., { moduleParity: true })`, passed
@@ -1300,6 +1310,8 @@ application's, none, or the stamp cannot be read), which keeps the confirm's
 promise true: the macro it runs stays the application's and still runs only
 after its approval.
 
+**Formatting** (owner, 2026-11-04) follows every rule above -- see 11.13.
+
 **Still owed, or the owner's to decide:**
 
 - **The live run.** `app/e2e/journeys/calp-macro-buttons.spec.ts` "M4-7 (owner
@@ -1374,6 +1386,131 @@ sabotage-proven: the button-door caller census (`explicitMacroRun.test.ts`);
 `objectScriptRunner.test.ts` (b3) and the others-undone sentence;
 `buttonCellObjectScriptMacro.test.ts` / `controlActionDoor.test.ts` (the
 runner's own sentence said once; a repaint after every button run).
+
+### 11.13 Formatting as well (owner, 2026-11-04)
+
+> "Macros should be able to change formatting as well."
+
+**What it grants.** A second closed table, `EXPLICIT_RUN_FORMAT_METHODS`
+(`app/src/api/scriptHost/explicitRunGrant.ts`), admitted beside the cell table
+while a second identity flag is live (`ScriptHandle.explicitRun.formatting`):
+
+| Formatting row | What it is |
+|---|---|
+| `api.setRangeFormat` | font, colour, fill, alignment, number format, wrap / indent / rotation, borders -- the range-edge borders too (active sheet, which the granted `api.setActiveSheet` reaches) -- on any sheet; NOT `locked` / `formulaHidden` (below) |
+| `api.clearRangeFormat`, `api.clearRange` with `"formats"` / `"all"` | VBA `Range.ClearFormats` / `Range.Clear` (the contents half of `"all"` is cell access) |
+| `api.applyNamedStyle` | VBA `Range.Style = "Good"` -- the module runtime's `Calcula.applyNamedStyle` twin |
+| `api.setRowHeight` / `setColumnWidth` / `setRowHeights` / `setColumnWidths`, `api.autoFitRows` / `autoFitColumns` | Home > Format > Cell Size -- what the recorder records as row-column formatting; never a HIDDEN line (below) |
+| `api.getRangeFormat`, `api.getCellFormat`, `api.listNamedStyles`, `api.getThemePalette` | reads that disclose less than the value reads the cell table already gives |
+| `sheet.setRangeFormat`, `sheet.clearRangeFormat` (restricted) | admitted again while the formatting grant is live (11.4) |
+
+**Where the line is drawn, and why.** Formatting is HOW CELLS LOOK, written by a
+call whose whole effect is fixed when the run ends and is taken back by the
+run's one undo step. Excluded, each refused at the broker with its reason:
+
+- **Protection.** `api.setRangeFormat` with `locked` or `formulaHidden`
+  (`explicitRunArgsRefusal`): whether a cell can be edited once its sheet is
+  protected is protection, and code from an application never sets it
+  DIRECTLY (the protection rows themselves stay excluded). The pre-flight
+  names such a call before anything runs. Two calls the grant does carry
+  change protection as a SIDE EFFECT, exactly as Excel's do [LIVE]:
+  - **Clear Formats** (`api.clearRangeFormat`, `api.clearRange` `"formats"` /
+    `"all"`) puts every cleared cell back to Normal, and Normal is Locked and
+    not Hidden -- so on an UNPROTECTED sheet it re-locks cells the person
+    unlocked and un-hides formulas they hid, as Excel's `Range.ClearFormats`
+    does. That is accepted Excel behaviour, not a lift of anything: on an
+    unprotected sheet neither flag does anything yet, and a run that clears
+    formats is on the trail with the cells it reached. On a PROTECTED sheet
+    the clear is gated by the sheet's own Format Cells option.
+  - **A named style** (`api.applyNamedStyle`, the module runtime's
+    `Calcula.applyNamedStyle`, the person's own Cell Styles gallery) follows
+    Excel's IncludeProtection (rev-sec-1, [LIVE] 2026-11-05;
+    `named_styles_cmd::named_style_includes_protection`): every built-in style
+    but Normal keeps each cell's Locked AND Hidden flags on any sheet; Normal
+    and a style the user created write their own; and on a PROTECTED sheet
+    (Format Cells allowed) every style keeps both (`keep_cell_protection`). So
+    a style can never unlock a cell or un-hide a formula on a protected sheet.
+- **Which lines are shown.** Hide / unhide (`api.setRowsHidden` /
+  `setColumnsHidden`) stay excluded, and so does a RESIZE of a hidden line
+  (`grantedRunResizeRefusal`, host.ts): Excel shows a hidden row you give a
+  height -- one a filter hid too ([LIVE], round 14) -- which would turn the
+  person's hidden rows visible and lift a filter's. That is visibility, not
+  formatting (rows hidden to keep working data out of a distributed report are
+  a `.cala` lie case, CLAUDE.md "Format Versioning").
+- **Standing rules.** Conditional formats and data validation: rules that keep
+  acting on every later recalculation and edit, addressed by rule id, not a
+  change of how the cells look when the run ends.
+- **The style catalogue.** `api.createNamedStyle` / `deleteNamedStyle` change
+  the workbook's styles, not a cell -- and neither records an undo step, so a
+  failed run could not take them back; a delete destroys the person's own
+  definition.
+- **Structure and sheet-level settings.** Merges, inserts and deletes, sorting,
+  tab colour, page setup, print area, panes, view -- excluded as before (11.4).
+- **The restricted bound (BUG-0659).** A formatting rectangle that is not whole
+  lines is held to 100,000 cells (`MAX_RESTRICTED_FORMAT_RECT_CELLS`,
+  validators.ts), whatever row the granted run reached: the code is an
+  application's. Whole rows and columns stay unbounded (they are written as
+  row / column formats, O(lines)). The same bound now holds for every
+  restricted realm's `sheet.setRangeFormat` / `sheet.clearRangeFormat`: at
+  the backend's 4,000,000 every non-line position is a stored cell AND an undo
+  entry, and with a hundred undo steps a restricted script could keep 400
+  million entries alive in a loop with no rate limit. The user's own code (the
+  unlocked tier) keeps 4,000,000. A per-minute limit was considered and not
+  taken: a bound per call is what bounds the memory a step holds.
+
+**Rust co-decides.** The mount gate answers `formatAccess` beside `cellAccess`
+(`MountGateAnswer::format_access`, `application_code_gate.rs`), from one switch,
+`EXPLICIT_RUN_GRANTS_FORMATTING`, on exactly the runs it grants cell access;
+the run row says "so it could read and change cells, and how they look, on any
+sheet while it ran" (`formatAccess: true`). The grant ledger records it
+(`GrantedRun::formatting`), and the report door refuses formatting reported
+under a grant that did not carry it -- before taking the grant. The page formats
+only when Rust said so: an answer without `formatAccess` (an older backend) is
+cells only.
+
+**Never for a run a script starts.** Such a run has no pass, so its realm
+carries no flag at all: every formatting row of the table is refused at the
+tier with the old sentence, and it formats only the sheet on screen, as every
+restricted realm may. Pinned by `explicitRunGrant.test.ts` ("a run a SCRIPT
+started gets no formatting"), `explicitRunAdmission.test.ts` (f3) and
+`explicitRunEndToEnd.test.ts` ("the same formatting macro started by a
+SCRIPT"), and in Rust by `a_run_without_a_persons_door_is_recorded_as_restricted_and_says_why`.
+
+**On the trail.** The host records each formatting call the run made
+(`executeAccountingGrantedRun` -> `noteGrantedRunFormat`, host.ts): the sheet
+resolved before it ran, and the rectangles it reached (a size reaches its whole
+line). The ONE report carries them per sheet (`formats`: changes and bounds),
+and Rust writes one always-on `ScriptExecuted` row per formatted sheet --
+"changed the formatting of Sheet1!C:D (3 formatting changes)", `formatting:
+true`, `formatChanges`, the grant's application, macro, door and button
+(`explicit_run_audit.rs`). A rollback's account of other people's changes
+counts a cell the run formatted as the run's own (`formattedByRun`).
+
+**Undone whole.** Every formatting command a granted run reaches joins the
+open undo step (`apply_formatting` / the border presets / the named-style
+apply / `clear_range_with_options` / the line-size commands each begin an owned
+transaction that joins), so the savepoint (11.8) takes back cell formats,
+row / column format tiers and line sizes with the cells
+(`undo_savepoint_tests.rs` `a_run_that_formats_and_throws_takes_its_formatting_back_with_its_cells`).
+
+**The module runtime.** Its one formatting op is `Calcula.applyNamedStyle`,
+which an approved module macro you start already had (its manifest is its
+reach; a run a script starts is refused outright, 11.9). The interpreter cannot
+style the clone it runs on, so it QUEUES the style; Rust then applies every
+queued style itself, WITH the run's cells, in the run's ONE undo step, on the
+sheet the run had switched to when it queued it
+(`apply_run_with_queued_styles`, `scripting/commands.rs`): every style is gated
+first (the sheet, the style, the sheet's Format Cells option), so an ordinary
+refusal writes nothing at all; a failure after the first write takes the whole
+run back (`roll_back_open_changes_after`, no undo and no redo step), as 11.8
+does for an object-script run; and each style is recorded on the trail only
+once it was applied (`record_queued_formatting`) -- a refusal leaves a
+`rolledBack` row instead. The page no longer replays it (it used to: each style
+was an undo step of its own, a style that failed left the run's cells applied,
+and the trail had already recorded it as applied). A notebook cell's queued
+style is still replayed by the page after that cell's own step. Pinned by
+`scripting/queued_style_tests.rs`. The interpreter has no other formatting op; giving it `setRangeFormat`-like
+ops is a feature of its own, not part of this grant.
 
 ## 12. Bound properties: evaluated, never executed (WP-D, 2026-10-15)
 

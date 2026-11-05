@@ -13,6 +13,7 @@ impl Parser {
             "MIN" => AggregateOp::Min,
             "MAX" => AggregateOp::Max,
             "DISTINCTCOUNT" => AggregateOp::DistinctCount,
+            "DISTINCTCOUNTNOBLANK" => AggregateOp::DistinctCountNoBlank,
             "MEDIAN" => AggregateOp::Median,
             "STDEV" => AggregateOp::StdevSample,
             "STDEVP" => AggregateOp::StdevPop,
@@ -205,15 +206,21 @@ mod tests {
     #[test]
     fn parse_simple_count() {
         let expr = parse_measure_expression("COUNT(Sales[id])").unwrap();
-        assert_eq!(expr.to_sql_string().unwrap(), "COUNT(\"id\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "NULLIF(COUNT(\"id\"), 0)");
     }
 
     #[test]
     fn parse_distinctcount() {
         let expr = parse_measure_expression("DISTINCTCOUNT(Sales[product_id])").unwrap();
+        // DAX DISTINCTCOUNT counts BLANK as one value (round D).
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "COUNT(DISTINCT \"product_id\")"
+            "NULLIF((COUNT(DISTINCT \"product_id\") + MAX(CASE WHEN (\"product_id\") IS NULL THEN 1 ELSE 0 END)), 0)"
+        );
+        let expr = parse_measure_expression("DISTINCTCOUNTNOBLANK(Sales[product_id])").unwrap();
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "NULLIF(COUNT(DISTINCT \"product_id\"), 0)"
         );
     }
 
@@ -292,7 +299,7 @@ mod tests {
     #[test]
     fn parse_countrows() {
         let expr = parse_measure_expression("COUNTROWS(Sales)").unwrap();
-        assert_eq!(expr.to_sql_string().unwrap(), "COUNT(*)");
+        assert_eq!(expr.to_sql_string().unwrap(), "NULLIF(COUNT(*), 0)");
         assert!(expr.has_aggregate());
         assert!(expr.is_simple_aggregate());
     }

@@ -1097,9 +1097,11 @@ mod tests {
     }
 
     #[test]
-    fn an_alias_reports_under_its_primary_name() {
+    fn a_calcula_short_spelling_reports_under_its_own_name() {
+        // AVG is Calcula's own function, kept under the name typed (lane
+        // formc: it was a hidden alias stored as AVERAGE; Excel has no AVG).
         let r = verify("=AVG(A1:A3)", 0, 5);
-        assert_eq!(r.functions_used, vec!["AVERAGE".to_string()]);
+        assert_eq!(r.functions_used, vec!["AVG".to_string()]);
     }
 
     // ---- F2 ---------------------------------------------------------------

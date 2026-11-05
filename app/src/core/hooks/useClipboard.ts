@@ -49,8 +49,9 @@ import {
   getMergedRegions,
 } from "../lib/tauri-api";
 import { PASTE_ONCE, pasteMayTile, pasteTiles, type PasteTiles } from "../lib/pasteTiling";
+import { copiedCell, isDataTableFormula } from "../lib/dataTableCopy";
 import { gridCommands } from "../lib/gridCommands";
-import type { CellUpdateInput, FormulaShiftInput, UndoSavepoint } from "../lib/tauri-api";
+import type { CellUpdateInput, FormulaShiftInput, MovedFrom, PasteSource, UndoSavepoint } from "../lib/tauri-api";
 import {
   ownUndoTransaction,
   type OwnedUndoTransaction,
@@ -333,6 +334,12 @@ function rememberClipboard(data: ClipboardData): void {
 // SNAPSHOT_EAGER_REREAD_MAX_CELLS cells (a whole column) is read when a paste
 // asks rather than after every undo. A snapshot whose read FAILED is never
 // pasted: the paste is refused, a copy's as well as a cut's, and the mode ends.
+// Plain Paste, Cut + Paste and the drag moves and copies go one step further
+// (BUG-0657): each write names its SOURCE cell (`pasteSourceOf`,
+// `CellUpdateInput.source`) and the backend writes what that cell holds AT
+// THE WRITE, so a writer that never stops (an animation, a fast scheduled job)
+// cannot outrun the read; the snapshot then answers only for the format and
+// the fallback `value`.
 //
 // STRUCTURAL CHANGES, measured on live Excel 16 (2026-10-30, a fresh unsaved
 // workbook, a sentinel at the old address):
@@ -616,7 +623,7 @@ async function settledSnapshot(): Promise<void> {
 /** How many times a paste settles again for marks that keep landing while it waits. */
 const PASTE_SETTLE_ROUNDS = 5;
 
-/** How deep plain Paste has started itself again for a snapshot that changed under it (bounded by PASTE_SETTLE_ROUNDS). */
+/** How deep plain Paste has started itself again for a source that moved under it (bounded by PASTE_SETTLE_ROUNDS). */
 let pasteRestarts = 0;
 
 /** How many re-reads have put a snapshot in the clipboard (see `snapshotReadSerial`). */
@@ -627,9 +634,6 @@ let snapshotReads = 0;
  * snapshot the copy itself made has none.
  */
 const snapshotReadSerial = new WeakMap<ClipboardData, number>();
-
-/** The `snapshotReads` count when the outermost plain Paste began. */
-let pasteReadsAtStart = 0;
 
 /**
  * Whether `clip` was read from its source AFTER `readsBefore` -- during the
@@ -652,17 +656,77 @@ function snapshotReadDuringPaste(clip: ClipboardData, readsBefore: number): bool
 }
 
 /**
- * Whether the snapshot a paste took (`clip`, of the copy `copyTaken`) is no
- * longer what the clipboard says its source holds, while that same copy is
- * still pending: a mark landed that is still to be read (`snapshotAwaitsRead`),
- * or a re-read or a follow replaced the snapshot after the paste took it. A
- * copy or cut that ENDED meanwhile (nothing pending), a newer Copy, and a
- * snapshot whose positions were lost (it pastes what it has) do not count.
+ * Whether the copy a paste took (`clip`, of the copy `copyTaken`) no longer
+ * stands where `clip` says, while that same copy is still pending: it FOLLOWED
+ * a shift (an insert above it) or its positions were lost after the paste took
+ * it. A paste names its source cells by address (`CellUpdateInput.source`,
+ * BUG-0657), so it must name them where they stand at the write; it starts
+ * again from the top then (bounded). A copy or cut that ENDED meanwhile and a
+ * newer Copy do not count -- nor does a re-read of the same cells: their
+ * values are the backend's to read at the write.
  */
-function snapshotChangedDuringPaste(clip: ClipboardData, copyTaken: number): boolean {
-  if (internalClipboard === null || copyGeneration !== copyTaken) return false;
-  if (snapshotAwaitsRead()) return true;
-  return internalClipboard !== clip && !snapshotPositionsLost;
+function sourceMovedDuringPaste(clip: ClipboardData, copyTaken: number, positionsLostAtStart: boolean): boolean {
+  const now = internalClipboard;
+  if (now === null || copyGeneration !== copyTaken) return false;
+  if (snapshotPositionsLost !== positionsLostAtStart) return true;
+  return now !== clip && !sameSourcePositions(now, clip);
+}
+
+/** Whether two snapshots of one copy name the same source cells. */
+function sameSourcePositions(a: ClipboardData, b: ClipboardData): boolean {
+  const sa = a.sourceSelection;
+  const sb = b.sourceSelection;
+  if (sa.startRow !== sb.startRow || sa.endRow !== sb.endRow || sa.startCol !== sb.startCol || sa.endCol !== sb.endCol) {
+    return false;
+  }
+  if (a.sourceSheetIndex !== b.sourceSheetIndex || a.sourceSheetId !== b.sourceSheetId) return false;
+  if (a.sourceTarget?.kind !== b.sourceTarget?.kind || a.sourceTarget?.id !== b.sourceTarget?.id) return false;
+  if (a.sourceRows === b.sourceRows) return true;
+  return a.sourceRows.length === b.sourceRows.length && a.sourceRows.every((row, i) => row === b.sourceRows[i]);
+}
+
+/**
+ * THE SOURCE OF A PASTED WRITE (BUG-0657, `CellUpdateInput.source`): the cell a
+ * Paste, a Cut + Paste, a drag move or a Ctrl+drag copy writes FROM, so the
+ * backend writes what that cell holds AT THE WRITE -- read under the batch's own
+ * guards, before any of its writes -- rather than what the frontend last read.
+ * Excel pastes what the source holds at the paste [LIVE, misc19/probe3.ps1:
+ * with A1 = B1*2 copied, a write of 5 into B1 keeps the copy pending and Paste
+ * Values gives 10]; a re-read raced a writer that never stops (an animation, a
+ * fast scheduled job) and lost. `sheetIndex` is the source sheet's index NOW;
+ * `target` an object's cells (its own coordinates); `move` a MOVE, whose
+ * formula lands unshifted (its relocation re-points it), where a copy's is
+ * shifted by (destination - source). The write's `value` stays the fallback
+ * for what the backend cannot vouch for (a collection value).
+ */
+function pasteSourceOf(
+  sheetIndex: number,
+  row: number,
+  col: number,
+  opts: { target?: CellTargetRef; move?: boolean } = {},
+): PasteSource {
+  return {
+    sheetIndex,
+    row,
+    col,
+    ...(opts.target ? { target: opts.target } : {}),
+    ...(opts.move ? { unshifted: true } : {}),
+  };
+}
+
+/**
+ * The MOVE claim of a drag move's or a line move's write (`CellUpdateInput.
+ * moved`): the sheet cell it moves from, as a Cut + Paste's writes carry it.
+ * A batch whose claims move every cell of a data table's range by one offset
+ * MOVES the table (`data_tables::whole_table_moves`, NEW-drag-move-whole-table).
+ */
+function moveClaimOf(sheetIndex: number, row: number, col: number): MovedFrom {
+  return { sheetIndex, row, col };
+}
+
+/** Whether (row, col) lies in the rectangle (r0, c0)-(r1, c1), inclusive. */
+function inRect(row: number, col: number, r0: number, c0: number, r1: number, c1: number): boolean {
+  return row >= r0 && row <= r1 && col >= c0 && col <= c1;
 }
 
 /**
@@ -720,6 +784,24 @@ export async function settledInternalClipboard(): Promise<ClipboardData | null> 
  */
 export function snapshotIsUnreadable(clip: ClipboardData | null): boolean {
   return clip !== null && clip === internalClipboard && snapshotIsStale() && !snapshotPositionsLost && snapshotReadFailed;
+}
+
+/**
+ * Whether `clip`'s recorded source positions still name its source cells NOW,
+ * so a paste of it may name them (`CellUpdateInput.source`, BUG-0657) and the
+ * backend writes what they hold at the write: `clip` is the pending copy (or a
+ * re-read of the same cells), and no structural edit cut into it
+ * (`snapshotPositionsLost`). False for a copy that FOLLOWED a shift since
+ * `clip` was taken (its cells stand elsewhere now), a copy whose positions
+ * were lost, a mode that ended, and a newer copy -- a paste then writes the
+ * snapshot it has, as plain Paste does past its bounded restarts. Paste
+ * Special asks it when it plans its writes and again right before it sends
+ * them.
+ */
+export function clipboardSourceStandsAt(clip: ClipboardData): boolean {
+  const now = internalClipboard;
+  if (now === null || snapshotPositionsLost) return false;
+  return now === clip || sameSourcePositions(now, clip);
 }
 
 /**
@@ -791,7 +873,9 @@ async function refreshClipboardSnapshot(): Promise<boolean> {
       const now = read.get(`${rows[r]},${minCol + c}`);
       const before = clip.cells[r]?.[c] ?? null;
       if (now?.cell) {
-        cellRow.push(now.cell);
+        // A COPY carries a data table's body cell as its value (dataTableCopy.ts);
+        // a CUT keeps the marker, so its paste is refused as Excel refuses it.
+        cellRow.push(clip.isCut ? now.cell : copiedCell(now.cell));
         valueRow.push(now.value);
       } else if (before && !before.formula && (before.display ?? "") === "") {
         // Still empty, and the read cannot see a row or column format that
@@ -2331,7 +2415,10 @@ export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRa
       return { copied: false, reason: "tooLarge" };
     }
 
-    const { cells, sourceRows } = capture;
+    // A data table's body cell is copied as its VALUE (Excel [LIVE]; see
+    // dataTableCopy.ts): its `=TABLE(..)` marker is not a formula a paste may write.
+    const cells = capture.cells.map((row) => row.map((cell) => copiedCell(cell)));
+    const { sourceRows } = capture;
     if (cells.length === 0) {
       // Nothing capturable (every row skipped). Leave the previous clipboard
       // alone rather than replacing it with an empty payload that pastes
@@ -2678,9 +2765,9 @@ export function useClipboard(): UseClipboardReturn {
 
     // A read of a stale snapshot under way (an undo, a rename, a write onto
     // the source since the copy or cut -- see CLIPBOARD MODE): the paste waits
-    // for it, so it pastes what the source holds NOW. The read count is taken
-    // by the OUTERMOST paste only: a restart is the same gesture.
-    if (pasteRestarts === 0) pasteReadsAtStart = snapshotReads;
+    // for it (bounded), so the formats and the text it pastes are the source's
+    // NOW. The VALUES are not the frontend's to chase: every write names its
+    // source cell (`pasteSourceOf`) and the backend reads it at the write.
     await settledSnapshotForPaste();
 
     // Try to read from system clipboard first (via Tauri plugin). A write onto
@@ -2705,8 +2792,10 @@ export function useClipboard(): UseClipboardReturn {
     // while the paste is under way (an announcement landing between its awaits)
     // must not swap the source it is moving out from under it.
     const clip = internalClipboard;
-    // Which copy this paste took (see `snapshotChangedDuringPaste`).
+    // Which copy this paste took, and whether it still knew where its source
+    // stands (see `sourceMovedDuringPaste`).
     const copyTaken = copyGeneration;
+    const positionsLostAtTake = snapshotPositionsLost;
 
     // THE freshness rule (shared with every Paste Special variant): the
     // internal clipboard answers unless another program put newer text there.
@@ -2844,6 +2933,29 @@ export function useClipboard(): UseClipboardReturn {
     // pasted on Sheet2): a move BETWEEN sheets.
     const cutFromOtherSheet = cutSource !== null && !cutSource.isActive;
 
+    // WHERE EACH WRITE'S SOURCE STANDS NOW (BUG-0657, `pasteSourceOf`): the
+    // source sheet's index now (a cut's is `cutSource`), or an object's cells.
+    // A snapshot whose positions were lost names no source -- it pastes what it
+    // has (see STRUCTURAL CHANGES). Nothing else ever comes from outside this
+    // workbook: File > New / Open ends the mode, and another program's text is
+    // not the internal clipboard.
+    let sourceSheetNow: number | null = null;
+    if (usingInternalClipboard && clip && !positionsLostAtTake) {
+      if (clip.sourceTarget) {
+        // Not used with a target (an object's cells carry no sheet: their
+        // ClipboardData.sourceSheetIndex is -1, which the wire's index refuses).
+        sourceSheetNow = sheetContext.activeSheetIndex;
+      } else if (cutSource) {
+        sourceSheetNow = cutSource.index;
+      } else {
+        const where = await cutSourceSheetNow(clip, {
+          activeSheetIndex: sheetContext.activeSheetIndex,
+          activeSheetId: sheetContext.activeSheetId,
+        });
+        sourceSheetNow = where?.index ?? null;
+      }
+    }
+
     // Shift formulas for copy operations (not cut).
     // Copy adjusts relative references based on offset; cut moves cells as-is.
     const shiftedFormulaMap = new Map<string, string>();
@@ -2901,17 +3013,16 @@ export function useClipboard(): UseClipboardReturn {
       }
     }
 
-    // THE SNAPSHOT MUST STILL BE THE SOURCE'S as the write goes out (round 15,
-    // rev13B): a write onto the copied cells that landed after the settle above
-    // -- during the clipboard read, the merge read, the formula shift -- or
-    // marks that kept landing past the bounded settle leave `clip` holding
-    // what the source no longer holds. Nothing is written yet, so the paste
-    // starts again from the top (it settles again and takes the fresh
-    // snapshot), a bounded number of times. A source that never holds still
-    // is pasted as its last read during this paste found it, as Excel pastes
-    // what the source holds at the paste (`snapshotReadDuringPaste`); only a
-    // snapshot no read of this paste reached is refused, the copy kept pending.
-    if (usingInternalClipboard && clip && snapshotChangedDuringPaste(clip, copyTaken)) {
+    // THE SOURCE MUST STILL STAND WHERE THE PASTE NAMES IT as the write goes
+    // out: a write onto the copied cells that lands now changes nothing here
+    // (the backend reads the source at the write -- BUG-0657; this used to
+    // restart the paste for every such write, and refuse a source that never
+    // held still), but a copy that FOLLOWED a shift during the paste's awaits
+    // names other cells now. Nothing is written yet, so the paste starts again
+    // from the top, a bounded number of times; past the bound it pastes the
+    // snapshot it has and names no source.
+    let namesSources = sourceSheetNow !== null;
+    if (usingInternalClipboard && clip && sourceMovedDuringPaste(clip, copyTaken, positionsLostAtTake)) {
       if (pasteRestarts < PASTE_SETTLE_ROUNDS) {
         pasteRestarts += 1;
         try {
@@ -2920,12 +3031,7 @@ export function useClipboard(): UseClipboardReturn {
           pasteRestarts -= 1;
         }
       }
-      if (!snapshotReadDuringPaste(clip, pasteReadsAtStart)) {
-        void alertAsync(
-          "The copied cells kept changing while the paste was being prepared, so nothing was pasted. Paste again to paste what they hold now.",
-        );
-        return;
-      }
+      namesSources = false;
     }
 
     // The paste's hold lives OUTSIDE the try, so every exit -- the outer catch
@@ -3005,6 +3111,22 @@ export function useClipboard(): UseClipboardReturn {
                 };
               }
             }
+            // ...and what it is written FROM (BUG-0657): the backend writes
+            // what that cell holds at the write -- a copy's formula shifted to
+            // here (a tile's by its own offset), a cut's as it stands, a
+            // constant as its stored value -- and `value` below is only the
+            // fallback. The format still comes from the snapshot.
+            if (namesSources && clip && sourceSheetNow !== null) {
+              const sourceRow = clip.sourceRows[r];
+              if (sourceRow !== undefined) {
+                update.source = pasteSourceOf(
+                  sourceSheetNow,
+                  sourceRow,
+                  Math.min(clip.sourceSelection.startCol, clip.sourceSelection.endCol) + c,
+                  { target: clip.sourceTarget, move: wasCutOperation },
+                );
+              }
+            }
             if (formula) {
               // A PASTE, not an entry: the formula stays one even under a
               // Text-formatted (@) source style (CellUpdateInput.pasted).
@@ -3029,32 +3151,58 @@ export function useClipboard(): UseClipboardReturn {
         }
       }
 
-      // ...AND AT THE WRITE (round 16, clip7's remaining (a)): the check above
-      // runs before the step opens, and a write onto the copied cells that
-      // landed while it opened (beginUndoTransaction, a cut's markMovePoint)
-      // left `clip` holding what the source no longer holds. Checked again
-      // here, with no await left before the batch goes out: nothing is written
-      // yet, so the step is closed empty and the paste starts again from the
-      // top (bounded, as above). Past the bound it pastes the snapshot of its
-      // last read, as above, or is refused with the copy kept pending.
+      // ...AND AT THE WRITE: the check above runs before the step opens, and a
+      // copy that followed a shift while it opened (beginUndoTransaction, a
+      // cut's markMovePoint) names other cells now. Checked again here, with no
+      // await left before the batch goes out: nothing is written yet, so the
+      // step is closed empty and the paste starts again from the top (bounded,
+      // as above); past the bound the writes name no source.
+      if (usingInternalClipboard && clip && namesSources && sourceMovedDuringPaste(clip, copyTaken, positionsLostAtTake)) {
+        if (pasteRestarts < PASTE_SETTLE_ROUNDS) {
+          await tx.cancel().catch(() => {});
+          pasteRestarts += 1;
+          try {
+            return await paste(args, ctx);
+          } finally {
+            pasteRestarts -= 1;
+          }
+        }
+        for (const update of batchUpdates) delete update.source;
+      }
+
+      // A CUT ON ONE SHEET empties the DATA-TABLE BODY cells it vacates IN
+      // THIS BATCH (NEW-clear-cell-datatable-gate). A whole data table the cut
+      // moves is then gone from its old place the moment it lands in its new
+      // one: moved onto part of its own body (one row up, one column left),
+      // the tail of its old body used to stand beside the moved body with the
+      // same `TABLE(..)` call -- one table to the gate -- and the per-cell
+      // clear below, which Excel's rule refuses on part of a table ("Can't
+      // change part of a data table."), could not take it; moved anywhere
+      // else, the per-cell clear met the whole old body one cell at a time.
+      // The batch's gate judges these writes with the move (a table the cut
+      // moves only part of is refused there). The clear below still takes
+      // each vacated cell's format.
       if (
+        wasCutOperation &&
         usingInternalClipboard &&
         clip &&
-        snapshotChangedDuringPaste(clip, copyTaken) &&
-        (pasteRestarts < PASTE_SETTLE_ROUNDS || !snapshotReadDuringPaste(clip, pasteReadsAtStart))
+        cutSourceRef.current &&
+        !cutFromOtherSheet &&
+        !clip.sourceTarget &&
+        !destRef &&
+        cellsToPaste
       ) {
-        await tx.cancel().catch(() => {});
-        if (pasteRestarts >= PASTE_SETTLE_ROUNDS) {
-          void alertAsync(
-            "The copied cells kept changing while the paste was being prepared, so nothing was pasted. Paste again to paste what they hold now.",
-          );
-          return;
-        }
-        pasteRestarts += 1;
-        try {
-          return await paste(args, ctx);
-        } finally {
-          pasteRestarts -= 1;
+        const srcMinCol = Math.min(clip.sourceSelection.startCol, clip.sourceSelection.endCol);
+        for (let r = 0; r < pasteHeight; r++) {
+          const sourceRow = clip.sourceRows[r];
+          if (sourceRow === undefined) continue;
+          for (let c = 0; c < pasteWidth; c++) {
+            const cell = cellsToPaste[r]?.[c];
+            const sourceCol = srcMinCol + c;
+            if (isDataTableFormula(cell?.formula) && !inRect(sourceRow, sourceCol, targetRow, targetCol, targetRow + pasteHeight - 1, targetCol + pasteWidth - 1)) {
+              batchUpdates.push({ row: sourceRow, col: sourceCol, value: "" });
+            }
+          }
         }
       }
 
@@ -3448,7 +3596,26 @@ export function useClipboard(): UseClipboardReturn {
         // for every other one. Shifting them here moved the outside
         // references too: =A1 became =A2.
 
-        // 3. Write to destination cells
+        // 3. Write the destination in ONE batch (NEW-drag-move-whole-table),
+        // as a Cut + Paste writes it: every write carries its MOVE claim and
+        // names its SOURCE (BUG-0657), written as it stands at the write, its
+        // formula unshifted. The backend reads every source under the batch's
+        // guards BEFORE any write lands, so a source inside the destination is
+        // named too. The claims are what let a WHOLE data table move with the
+        // block (`data_tables::whole_table_moves`), as Excel moves it with Cut +
+        // Paste [LIVE, dtfollow/probe1.ps1]; written one cell at a time, the
+        // table's `=TABLE(..)` marker was refused as a typed formula ("That
+        // function isn't valid."). The data-table BODY cells the block vacates
+        // are emptied in the same batch, so the clear below (which Excel's rule
+        // refuses on part of a table) never meets an old body -- nor, for a
+        // table moved onto part of its own body, a tail of it standing beside
+        // the moved body as one table (see `paste`).
+        const destMinRow = targetRow;
+        const destMaxRow = targetRow + height - 1;
+        const destMinCol = targetCol;
+        const destMaxCol = targetCol + width - 1;
+        const updates: CellUpdateInput[] = [];
+        const styles: Array<{ row: number; col: number; styleIndex: number }> = [];
         for (let r = 0; r < height; r++) {
           for (let c = 0; c < width; c++) {
             const srcRow = srcMinRow + r;
@@ -3462,51 +3629,57 @@ export function useClipboard(): UseClipboardReturn {
             }
 
             const sourceCell = cellMap.get(`${srcRow},${srcCol}`);
+            // A formula or a constant's stored value is a PASTE (it keeps its
+            // kind in an @ destination); only a display-text fallback is an
+            // entry the user-input parser reads.
             const input = movedCellInput(sourceCell, sourceCell?.formula, stored);
-
-            try {
-              // A formula or a constant's stored value is a PASTE (it keeps its
-              // kind in an @ destination); only a display-text fallback goes
-              // through the user-input parser as an entry.
-              const updatedCells = input.pasted
-                ? await updateCellsBatch([{ row: destRow, col: destCol, ...input }])
-                : (await updateCell(destRow, destCol, input.value)).cells;
-
-              // Copy style from source cell
-              const styleIdx = sourceCell?.styleIndex ?? 0;
-              await setCellStyle(destRow, destCol, styleIdx);
-
-              for (const cell of updatedCells) {
-                if (cell.sheetIndex !== undefined) continue;
-                cellEvents.emit({
-                  row: cell.row,
-                  col: cell.col,
-                  oldValue: undefined,
-                  newValue: cell.display,
-                  formula: cell.formula ?? null,
-                }, "paste");
-              }
-            } catch (err) {
-              const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
-              // TAKEN BACK, never committed. Destination cells are written one
-              // at a time (and the source is not cleared until later), so
-              // committing here would record a half-finished gesture. A cancel
-              // is no better: it drops the undo record and KEEPS the writes that
-              // succeeded. They are taken back to the point marked above.
-              //
-              // Load-bearing: a mid-range write can be refused by sheet
-              // protection, so this path is routine.
-              await refuseMove(msg);
-              return;
-            }
+            updates.push({
+              row: destRow,
+              col: destCol,
+              ...input,
+              moved: moveClaimOf(sheetContext.activeSheetIndex, srcRow, srcCol),
+              source: pasteSourceOf(sheetContext.activeSheetIndex, srcRow, srcCol, { move: true }),
+            });
+            styles.push({ row: destRow, col: destCol, styleIndex: sourceCell?.styleIndex ?? 0 });
+          }
+        }
+        for (const cell of sourceCells) {
+          if (isDataTableFormula(cell.formula) && !inRect(cell.row, cell.col, destMinRow, destMinCol, destMaxRow, destMaxCol)) {
+            updates.push({ row: cell.row, col: cell.col, value: "" });
           }
         }
 
-        // 4. Clear source cells (excluding overlap with destination)
-        const destMinRow = targetRow;
-        const destMaxRow = targetRow + height - 1;
-        const destMinCol = targetCol;
-        const destMaxCol = targetCol + width - 1;
+        try {
+          const updatedCells = await updateCellsBatch(updates);
+          // Copy style from source cell
+          for (const { row, col, styleIndex } of styles) {
+            await setCellStyle(row, col, styleIndex);
+          }
+          for (const cell of updatedCells) {
+            if (cell.sheetIndex !== undefined) continue;
+            cellEvents.emit({
+              row: cell.row,
+              col: cell.col,
+              oldValue: undefined,
+              newValue: cell.display,
+              formula: cell.formula ?? null,
+            }, "paste");
+          }
+        } catch (err) {
+          const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+          // TAKEN BACK, never committed: committing here would record a
+          // half-finished gesture, and a cancel drops the undo record and KEEPS
+          // what was written. Everything goes back to the point marked above.
+          //
+          // Load-bearing: the batch can be refused by sheet protection or a
+          // data table the block holds only part of, so this path is routine.
+          await refuseMove(msg);
+          return;
+        }
+
+        // 4. Clear source cells (excluding overlap with destination): their
+        // values are gone already (the batch above), and this takes the rest
+        // of each cell -- its format -- as a move does.
 
         for (let r = srcMinRow; r <= srcMaxRow; r++) {
           for (let c = srcMinCol; c <= srcMaxCol; c++) {
@@ -3658,12 +3831,25 @@ export function useClipboard(): UseClipboardReturn {
         // rest, as Excel's move does (see moveCells).
 
         // 3. Write source data to target rows
+        // Each write names the SOURCE it moves (BUG-0657), written as it
+        // stands at the write -- except a source in the target rows, which the
+        // clear above has just emptied -- and carries its MOVE claim, as a Cut
+        // + Paste's writes do, so a WHOLE data table in the rows moves with
+        // them (`data_tables::whole_table_moves`, NEW-drag-move-whole-table).
         const updates: CellUpdateInput[] = [];
         for (const cell of sourceCells) {
           const newRow = targetRow + (cell.row - minRow);
           const input = movedCellInput(cell, cell.formula, stored);
           if (input.value) {
-            updates.push({ row: newRow, col: cell.col, ...input });
+            const stands = cell.row < targetRow || cell.row > targetEndRow;
+            const named = input.pasted && stands;
+            updates.push({
+              row: newRow,
+              col: cell.col,
+              ...input,
+              ...(named ? { source: pasteSourceOf(sheetContext.activeSheetIndex, cell.row, cell.col, { move: true }) } : {}),
+              ...(stands ? { moved: moveClaimOf(sheetContext.activeSheetIndex, cell.row, cell.col) } : {}),
+            });
           }
         }
         if (updates.length > 0) {
@@ -3804,12 +3990,23 @@ export function useClipboard(): UseClipboardReturn {
         // rest, as Excel's move does (see moveCells).
 
         // 3. Write source data to target columns
+        // Each write names the SOURCE it moves (BUG-0657) and carries its MOVE
+        // claim, as in moveRows -- except a source in the target columns, which
+        // the clear above emptied.
         const updates: CellUpdateInput[] = [];
         for (const cell of sourceCells) {
           const newCol = targetCol + (cell.col - minCol);
           const input = movedCellInput(cell, cell.formula, stored);
           if (input.value) {
-            updates.push({ row: cell.row, col: newCol, ...input });
+            const stands = cell.col < targetCol || cell.col > targetEndCol;
+            const named = input.pasted && stands;
+            updates.push({
+              row: cell.row,
+              col: newCol,
+              ...input,
+              ...(named ? { source: pasteSourceOf(sheetContext.activeSheetIndex, cell.row, cell.col, { move: true }) } : {}),
+              ...(stands ? { moved: moveClaimOf(sheetContext.activeSheetIndex, cell.row, cell.col) } : {}),
+            });
           }
         }
         if (updates.length > 0) {
@@ -3931,7 +4128,8 @@ export function useClipboard(): UseClipboardReturn {
       try {
         tx = ownUndoTransaction(await beginUndoTransaction(`Copy ${height * width} cells`), UNDO_CLOSES);
 
-        const sourceCells = await getViewportCells(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
+        // A data table's body cell is copied as its value (dataTableCopy.ts).
+        const sourceCells = (await getViewportCells(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol)).map((c) => copiedCell(c));
         // A copied constant is written from its STORED value (movedCellInput),
         // a copied formula shifted to where it lands (shiftedCopyFormulas).
         const stored = await storedValuesOf(sourceCells);
@@ -3952,12 +4150,18 @@ export function useClipboard(): UseClipboardReturn {
 
             const sourceCell = cellMap.get(`${srcRow},${srcCol}`);
             const input = movedCellInput(sourceCell, shifted.get(`${srcRow},${srcCol}`) ?? sourceCell?.formula, stored);
+            // The SOURCE this write copies (BUG-0657): written as it stands at
+            // the write, its formula shifted to here -- not for a source cell
+            // inside the destination, which an earlier write may have replaced.
+            const source = inRect(srcRow, srcCol, targetRow, targetCol, destEndRow, destEndCol)
+              ? undefined
+              : pasteSourceOf(sheetContext.activeSheetIndex, srcRow, srcCol);
 
             try {
               // A PASTE (formula or stored value) keeps its kind in an @
               // destination; only a display-text fallback is an entry.
               const updatedCells = input.pasted
-                ? await updateCellsBatch([{ row: destRow, col: destCol, ...input }])
+                ? await updateCellsBatch([{ row: destRow, col: destCol, ...input, ...(source ? { source } : {}) }])
                 : (await updateCell(destRow, destCol, input.value)).cells;
               const styleIdx = sourceCell?.styleIndex ?? 0;
               await setCellStyle(destRow, destCol, styleIdx);
@@ -4013,7 +4217,7 @@ export function useClipboard(): UseClipboardReturn {
         void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
-    [config.totalRows, config.totalCols, dispatch]
+    [config.totalRows, config.totalCols, dispatch, sheetContext.activeSheetIndex]
   );
 
   /**
@@ -4050,7 +4254,8 @@ export function useClipboard(): UseClipboardReturn {
       try {
         tx = ownUndoTransaction(await beginUndoTransaction(`Copy ${count} rows`), UNDO_CLOSES);
 
-        const sourceCells = await getCellsInRows(minRow, maxRow);
+        // A data table's body cell is copied as its value (dataTableCopy.ts).
+        const sourceCells = (await getCellsInRows(minRow, maxRow)).map((c) => copiedCell(c));
         // Read BEFORE the target is cleared (the two may overlap): a copied
         // constant is written from its STORED value (movedCellInput), a
         // copied formula shifted to where it lands (shiftedCopyFormulas).
@@ -4058,12 +4263,20 @@ export function useClipboard(): UseClipboardReturn {
         const shifted = await shiftedCopyFormulas(sourceCells, targetRow - minRow, 0);
         await clearRange(targetRow, 0, targetEndRow, config.totalCols - 1);
 
+        // Each write names the SOURCE it copies (BUG-0657) -- except a source
+        // in the target rows, which the clear above has just emptied.
         const updates: CellUpdateInput[] = [];
         for (const cell of sourceCells) {
           const newRow = targetRow + (cell.row - minRow);
           const input = movedCellInput(cell, shifted.get(`${cell.row},${cell.col}`) ?? cell.formula, stored);
           if (input.value) {
-            updates.push({ row: newRow, col: cell.col, ...input });
+            const named = input.pasted && (cell.row < targetRow || cell.row > targetEndRow);
+            updates.push({
+              row: newRow,
+              col: cell.col,
+              ...input,
+              ...(named ? { source: pasteSourceOf(sheetContext.activeSheetIndex, cell.row, cell.col) } : {}),
+            });
           }
         }
         if (updates.length > 0) {
@@ -4104,7 +4317,7 @@ export function useClipboard(): UseClipboardReturn {
         void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
-    [config.totalCols, dispatch]
+    [config.totalCols, dispatch, sheetContext.activeSheetIndex]
   );
 
   /**
@@ -4141,7 +4354,8 @@ export function useClipboard(): UseClipboardReturn {
       try {
         tx = ownUndoTransaction(await beginUndoTransaction(`Copy ${count} columns`), UNDO_CLOSES);
 
-        const sourceCells = await getCellsInCols(minCol, maxCol);
+        // A data table's body cell is copied as its value (dataTableCopy.ts).
+        const sourceCells = (await getCellsInCols(minCol, maxCol)).map((c) => copiedCell(c));
         // Read BEFORE the target is cleared (the two may overlap): a copied
         // constant is written from its STORED value (movedCellInput), a
         // copied formula shifted to where it lands (shiftedCopyFormulas).
@@ -4149,12 +4363,20 @@ export function useClipboard(): UseClipboardReturn {
         const shifted = await shiftedCopyFormulas(sourceCells, 0, targetCol - minCol);
         await clearRange(0, targetCol, config.totalRows - 1, targetEndCol);
 
+        // Each write names the SOURCE it copies (BUG-0657) -- except a source
+        // in the target columns, which the clear above has just emptied.
         const updates: CellUpdateInput[] = [];
         for (const cell of sourceCells) {
           const newCol = targetCol + (cell.col - minCol);
           const input = movedCellInput(cell, shifted.get(`${cell.row},${cell.col}`) ?? cell.formula, stored);
           if (input.value) {
-            updates.push({ row: cell.row, col: newCol, ...input });
+            const named = input.pasted && (cell.col < targetCol || cell.col > targetEndCol);
+            updates.push({
+              row: cell.row,
+              col: newCol,
+              ...input,
+              ...(named ? { source: pasteSourceOf(sheetContext.activeSheetIndex, cell.row, cell.col) } : {}),
+            });
           }
         }
         if (updates.length > 0) {
@@ -4195,7 +4417,7 @@ export function useClipboard(): UseClipboardReturn {
         void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
-    [config.totalRows, dispatch]
+    [config.totalRows, dispatch, sheetContext.activeSheetIndex]
   );
 
   // Only show marching ants on the sheet where the copy/cut originated

@@ -60,6 +60,7 @@ fn batch(wb: &Workbook, writes: &[(u32, u32, &str)]) {
             invariant: Some(true),
             pasted: None,
             moved: None,
+            source: None,
         })
         .collect();
     update_cells_batch_core(&wb.state, &wb.file, &wb.files, &wb.pivots, updates, None, None, None, None)

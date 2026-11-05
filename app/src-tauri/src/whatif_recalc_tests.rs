@@ -1974,7 +1974,8 @@ fn the_what_if_protection_gates_refuse_under_the_runs_locks() {
     // THE SOURCE HALF: no self-locking gate in front of the locks.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (file, doors) in [
-        ("src/data_tables.rs", &["pub(crate) fn data_table_one_var_impl(", "pub(crate) fn data_table_two_var_impl("][..]),
+        // Both data-table doors gate in their shared body (BUG-0652).
+        ("src/data_tables.rs", &["fn create_data_table("][..]),
         ("src/solver.rs", &["pub(crate) fn solver_solve_impl("][..]),
         ("src/goal_seek.rs", &["pub(crate) fn goal_seek_impl("][..]),
     ] {
@@ -2359,3 +2360,866 @@ fn a_data_table_under_manual_calculation_leaves_unrelated_stale_cells_stale() {
         "a data table under manual leaves the workbook pending (Excel)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BUG-0652: the LIVE data table
+// ---------------------------------------------------------------------------
+
+impl Wb {
+    /// One edit through the edit COMMAND's body (`update_cell_core`), which is
+    /// where an automatic-calculation edit refreshes the live data tables.
+    fn edit(&self, row: u32, col: u32, value: &str) -> Result<(), String> {
+        crate::commands::data::update_cell_core(
+            &self.state,
+            &self.file,
+            &self.files,
+            &self.slicer,
+            &self.pivots,
+            &self.pane,
+            &self.filters,
+            row,
+            col,
+            value.to_string(),
+            None,
+            None,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    fn formula(&self, sheet: usize, row: u32, col: u32) -> Option<String> {
+        self.state.grids.read().unwrap()[sheet].get_cell(row, col).and_then(|c| c.formula_string())
+    }
+
+    /// Calculate Sheet (Shift+F9) on the active sheet.
+    fn shift_f9(&self) {
+        crate::calculation::run_calculation_pass(
+            crate::calculation::CalcScope::ActiveSheet,
+            None,
+            &self.state,
+            &self.files,
+            &self.pivots,
+            &self.pane,
+            &self.filters,
+            None,
+        )
+        .expect("the sheet pass");
+    }
+
+    /// The classic one-variable table of probe1: A1 = 1, B1 = A1*2, inputs 5
+    /// and 7 in K2:K3, the formula `=B1` in L1, `N1 = SUM(L2:L3)` reading the
+    /// body; the table K1:L3 with column input A1.
+    fn one_var_k1_l3(&self) -> crate::api_types::DataTableResult {
+        self.set(0, 0, "1"); // A1
+        self.set(0, 1, "=A1*2"); // B1
+        self.set(1, 10, "5"); // K2
+        self.set(2, 10, "7"); // K3
+        self.set(0, 11, "=B1"); // L1
+        self.set(0, 13, "=SUM(L2:L3)"); // N1
+        crate::data_tables::data_table_one_var_impl(
+            &self.state,
+            &self.file,
+            &self.states(),
+            DataTableOneVarParams {
+                sheet_index: 0,
+                start_row: 0,
+                start_col: 10,
+                end_row: 2,
+                end_col: 11,
+                row_input_row: None,
+                row_input_col: None,
+                col_input_row: Some(0),
+                col_input_col: Some(0),
+            },
+        )
+    }
+}
+
+/// Excel [LIVE, whatifcalc/probe1, 2026-11-04]: the body of a data table is
+/// `{=TABLE(,A1)}` and follows its model under automatic calculation -- K2
+/// 5 -> 9 turns L2 from 10 into 18, and `B1` re-typed `=A1*3` turns L2 into
+/// 27 and L3 into 21, with `N1 = SUM(L2:L3)` following each time. Calcula
+/// wrote literal values that never moved again.
+///
+/// SABOTAGE: make `refresh_after_edit` return at once -- fails at "STALE".
+#[test]
+fn a_data_tables_body_is_live_under_automatic_calculation() {
+    let wb = Wb::new();
+    let r = wb.one_var_k1_l3();
+    assert!(r.error.is_none(), "data table: {:?}", r.error);
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"), "the body holds Excel's TABLE marker");
+    assert_eq!(wb.formula(0, 2, 11).as_deref(), Some("TABLE(,A1)"));
+    assert_eq!((wb.number(0, 1, 11), wb.number(0, 2, 11)), (10.0, 14.0));
+    assert_eq!(wb.number(0, 0, 13), 24.0, "N1 reads the body");
+
+    wb.edit(1, 10, "9").expect("K2 = 9");
+    assert_eq!(wb.number(0, 1, 11), 18.0, "STALE: L2 did not follow its input value K2 = 9");
+    assert_eq!(wb.number(0, 0, 13), 32.0, "N1 follows the refreshed body");
+
+    wb.edit(0, 1, "=A1*3").expect("B1 = A1*3");
+    assert_eq!((wb.number(0, 1, 11), wb.number(0, 2, 11)), (27.0, 21.0), "STALE: the body did not follow its model");
+    assert_eq!(wb.number(0, 0, 13), 48.0);
+    assert_eq!(wb.number(0, 0, 0), 1.0, "the input cell A1 is put back after every refresh");
+    assert_eq!(wb.number(0, 0, 1), 3.0, "B1 back at its own value");
+}
+
+/// Excel [LIVE]: a table created under manual calculation shows 0 until F9
+/// and the workbook is pending; an edit of its input values leaves it for F9
+/// too; Calculate Sheet (Shift+F9) refreshes the sheet's table and Calculate
+/// Now (F9) every one, ending xlDone. Calcula computed and wrote the body
+/// whatever the mode.
+///
+/// SABOTAGE: compute the body in `create_data_table` whatever the mode -- fails at
+/// "COMPUTED UNDER MANUAL"; make `refresh_after_calculation_pass` return at
+/// once -- fails at "F9 LEFT".
+#[test]
+fn a_data_table_under_manual_calculation_waits_for_f9() {
+    let wb = Wb::new();
+    wb.manual();
+    let r = wb.one_var_k1_l3();
+    assert!(r.error.is_none(), "data table: {:?}", r.error);
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"));
+    assert_eq!(
+        (wb.number(0, 1, 11), wb.number(0, 2, 11)),
+        (0.0, 0.0),
+        "COMPUTED UNDER MANUAL: Excel shows a new table's body as 0 until F9"
+    );
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "pending");
+
+    wb.f9();
+    assert_eq!((wb.number(0, 1, 11), wb.number(0, 2, 11)), (10.0, 14.0), "F9 LEFT the table uncalculated");
+    assert_eq!(wb.number(0, 0, 13), 24.0, "N1 reads the calculated body");
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "done", "F9 ends done (xlDone)");
+
+    wb.edit(1, 10, "6").expect("K2 = 6");
+    assert_eq!(wb.number(0, 1, 11), 10.0, "under manual an edit leaves the table for F9");
+    wb.shift_f9();
+    assert_eq!(wb.number(0, 1, 11), 12.0, "Shift+F9 refreshes the sheet's table (Excel: 12)");
+}
+
+/// Excel [LIVE, whatifcalc/probe1-2]: every body cell is part of one array --
+/// typing into one, clearing part of the body and pasting onto part of it are
+/// refused ("Cannot change part of a data table."), and `=TABLE(..)` cannot be
+/// typed anywhere ("That function isn't valid."). Clearing a rectangle that
+/// holds the WHOLE body removes the table.
+///
+/// SABOTAGE: make `check_cell_edit` answer `Ok(())` -- fails at "EDITED PART".
+#[test]
+fn part_of_a_data_table_cannot_be_changed() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    let part = engine::data_table::PART_OF_DATA_TABLE;
+
+    let typed = wb.edit(1, 11, "3");
+    assert_eq!(typed.err().as_deref(), Some(part), "EDITED PART: typing into L2 was not refused");
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"), "L2 is still the table's");
+    assert_eq!(
+        wb.edit(5, 5, "=TABLE(,A1)").err().as_deref(),
+        Some(engine::data_table::TABLE_NOT_VALID),
+        "a typed TABLE formula is refused"
+    );
+    assert_eq!(wb.edit(5, 5, "=1+TABLE(A1;)").err().as_deref(), Some(engine::data_table::TABLE_NOT_VALID));
+    assert!(wb.edit(5, 5, "=\"TABLE(\"").is_ok(), "control: the word inside a string is text");
+
+    // A paste onto part of the body (the shared batch core).
+    let batch = crate::commands::data::update_cells_batch_core(
+        &wb.state,
+        &wb.file,
+        &wb.files,
+        &wb.pivots,
+        vec![crate::api_types::CellUpdateInput {
+            row: 1,
+            col: 11,
+            value: "9".to_string(),
+            style_index: None,
+            invariant: Some(true),
+            pasted: Some(true),
+            moved: None,
+            source: None,
+        }],
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(batch.err().as_deref(), Some(part), "a paste onto L2 alone");
+
+    let clear = |r0: u32, c0: u32, r1: u32, c1: u32| {
+        crate::commands::data::clear_range_with_options_inner(
+            &wb.state,
+            &wb.file,
+            &wb.files,
+            &wb.pivots,
+            &wb.pane,
+            &wb.filters,
+            crate::api_types::ClearRangeParams {
+                start_row: r0,
+                start_col: c0,
+                end_row: r1,
+                end_col: c1,
+                apply_to: crate::api_types::ClearApplyTo::Contents,
+                sheet_index: None,
+                target: None,
+            },
+        )
+    };
+    assert_eq!(clear(1, 11, 1, 11).err().as_deref(), Some(part), "clearing L2 alone");
+    assert_eq!(
+        crate::commands::data::check_no_array_within(&wb.state, 0, 1, 10, 2, 11).err().as_deref(),
+        Some(part),
+        "a sort over the table (Excel refuses it even whole)"
+    );
+    // The whole body: the table goes.
+    clear(1, 11, 2, 12).expect("clearing a rectangle holding the whole body");
+    assert_eq!(wb.formula(0, 1, 11), None, "the table is gone with its body");
+    assert!(wb.edit(1, 11, "3").is_ok(), "and L2 is an ordinary cell again");
+}
+
+/// The body survives a structural edit as Excel's does: a row inserted above
+/// the table moves it and its input reference (`=TABLE(,A1)` becomes
+/// `=TABLE(,A2)` [LIVE]), and it keeps computing from there.
+#[test]
+fn a_data_table_follows_a_row_inserted_above_it() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    let timeline = crate::timeline_slicer::TimelineSlicerState::new();
+    crate::commands::structure::insert_rows_impl(
+        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer, &timeline, 0, 1, None,
+    )
+    .expect("insert a row above the table");
+    assert_eq!(wb.formula(0, 2, 11).as_deref(), Some("TABLE(,A2)"), "the input reference moved with the table");
+    wb.edit(2, 10, "9").expect("K3 = 9");
+    assert_eq!(wb.number(0, 2, 11), 18.0, "the moved table still follows its input values");
+}
+
+// ---------------------------------------------------------------------------
+// BUG-0652 follow-ups (lane dtfollow) and the rev-dt / rev-xlsx reviews
+// ---------------------------------------------------------------------------
+
+impl Wb {
+    fn timeline(&self) -> crate::timeline_slicer::TimelineSlicerState {
+        crate::timeline_slicer::TimelineSlicerState::new()
+    }
+
+    fn insert_rows(&self, at: u32, count: u32, sheet: Option<usize>) -> Result<(), String> {
+        crate::commands::structure::insert_rows_impl(
+            &self.state, &self.file, &self.pivots, &self.files, &self.pane, &self.filters, &self.slicer,
+            &self.timeline(), at, count, sheet,
+        )
+        .map(|_| ())
+    }
+
+    fn delete_rows(&self, at: u32, count: u32) -> Result<(), String> {
+        crate::commands::structure::delete_rows_impl(
+            &self.state, &self.file, &self.pivots, &self.files, &self.pane, &self.filters, &self.slicer,
+            &self.timeline(), at, count, None,
+        )
+        .map(|_| ())
+    }
+
+    fn insert_cols(&self, at: u32, count: u32) -> Result<(), String> {
+        crate::commands::structure::insert_columns_impl(
+            &self.state, &self.file, &self.pivots, &self.files, &self.pane, &self.filters, &self.slicer,
+            &self.timeline(), at, count, None,
+        )
+        .map(|_| ())
+    }
+
+    fn delete_cols(&self, at: u32, count: u32) -> Result<(), String> {
+        crate::commands::structure::delete_columns_impl(
+            &self.state, &self.file, &self.pivots, &self.files, &self.pane, &self.filters, &self.slicer,
+            &self.timeline(), at, count, None,
+        )
+        .map(|_| ())
+    }
+
+    fn shift_cells(
+        &self,
+        r0: u32,
+        c0: u32,
+        r1: u32,
+        c1: u32,
+        shift: crate::commands::structure::structure_cells::CellShift,
+    ) -> Result<(), String> {
+        crate::commands::structure::structure_cells::shift_cells_impl(
+            &self.state, &self.file, &self.pivots, &self.files, &self.pane, &self.filters, &self.slicer,
+            &self.timeline(), r0, c0, r1, c1, shift, false,
+        )
+        .map(|_| ())
+    }
+
+    fn delete_sheet(&self, index: usize) {
+        crate::sheets::delete_sheet_impl(
+            &self.state, &self.file, &self.pivots, &self.files, &self.pane, &self.filters, &self.slicer,
+            &self.timeline(), index, false, None,
+        )
+        .expect("delete the sheet");
+    }
+
+    /// A one-variable table on the active sheet, column input `input`.
+    fn one_var(&self, rect: (u32, u32, u32, u32), input: (u32, u32)) -> crate::api_types::DataTableResult {
+        crate::data_tables::data_table_one_var_impl(
+            &self.state,
+            &self.file,
+            &self.states(),
+            DataTableOneVarParams {
+                sheet_index: 0,
+                start_row: rect.0,
+                start_col: rect.1,
+                end_row: rect.2,
+                end_col: rect.3,
+                row_input_row: None,
+                row_input_col: None,
+                col_input_row: Some(input.0),
+                col_input_col: Some(input.1),
+            },
+        )
+    }
+}
+
+/// Excel [LIVE, Excel 16 over COM, 2026-11-05, dtfollow/probe1.ps1, table K1:L4
+/// with body L2:L4]: an edit that moves or deletes PART of the table's range --
+/// body, formula row, input column -- is refused "Can't change part of a data
+/// table.", by whole rows, whole columns and Insert / Delete Cells alike, and on
+/// a sheet that is not the active one; deleting the whole body is allowed (the
+/// table goes). Calcula split the table in two on a row inserted inside it, and
+/// deleted part of it. Every refusal leaves the document as it was.
+///
+/// SABOTAGE: make `data_tables::check_structural_edit` answer `Ok(())` -- fails
+/// at "INSERTED INSIDE".
+#[test]
+fn a_structural_edit_through_a_data_tables_range_is_refused() {
+    use crate::commands::structure::structure_cells::CellShift;
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none()); // K1:L3, body L2:L3
+    let part = Some(engine::data_table::PART_OF_DATA_TABLE);
+    crate::document_effect::mark_saved(&wb.file);
+
+    assert_eq!(wb.insert_rows(2, 1, None).err().as_deref(), part, "INSERTED INSIDE: row 3, inside the body");
+    assert_eq!(wb.insert_rows(1, 1, None).err().as_deref(), part, "row 2, between the formula row and the body");
+    assert_eq!(wb.insert_cols(11, 1).err().as_deref(), part, "column L, between the input column and the body");
+    assert_eq!(wb.delete_rows(2, 1).err().as_deref(), part, "row 3, part of the body");
+    assert_eq!(wb.delete_rows(0, 1).err().as_deref(), part, "row 1, the formula row");
+    assert_eq!(wb.delete_cols(10, 1).err().as_deref(), part, "column K, the input column");
+    assert_eq!(wb.shift_cells(2, 11, 2, 11, CellShift::Down).err().as_deref(), part, "L3 shifted down");
+    assert_eq!(wb.shift_cells(1, 10, 2, 10, CellShift::Right).err().as_deref(), part, "K2:K3 shifted right");
+    assert_eq!(wb.shift_cells(0, 11, 0, 11, CellShift::Up).err().as_deref(), part, "L1 deleted up (pulls the body)");
+    // On a sheet that is not the active one (the off-sheet path).
+    wb.switch_to(1);
+    assert_eq!(wb.insert_rows(2, 1, Some(0)).err().as_deref(), part, "an off-sheet insert inside the body");
+    wb.switch_to(0);
+    assert!(!wb.file.is_dirty(), "a refused structural edit leaves the document unmodified");
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"), "the table is whole");
+    assert_eq!(wb.formula(0, 2, 11).as_deref(), Some("TABLE(,A1)"));
+    assert_eq!(wb.formula(0, 3, 11), None, "no row was inserted into it");
+
+    // Allowed: cells shifted right of it, then the whole body deleted with its rows.
+    wb.shift_cells(1, 12, 1, 12, CellShift::Right).expect("M2 shifted right, beside the table");
+    wb.delete_rows(1, 2).expect("rows 2:3, the whole body");
+    assert_eq!(wb.formula(0, 1, 11), None, "the table went with its body");
+    assert_eq!(wb.formula(0, 0, 11).as_deref(), Some("B1"), "its formula row stays");
+}
+
+/// Excel [LIVE, dtfollow/probe2.ps1 and probe3.ps1, manual calculation]:
+/// deleting Sheet3 out of `=SUM(Sheet2:Sheet4!A1)` (111) leaves it at 111 and
+/// its reader `=A1*2` at 222, CalculationState xlPending, until F9 (101, 202);
+/// deleting a sheet no formula names leaves a calculated workbook xlDone.
+/// Calcula recalculated the whole workbook whatever the mode.
+///
+/// SABOTAGE: drop the manual branch in `delete_sheet_impl` (recalculate every
+/// sheet whatever the mode) -- fails at "RECALCULATED UNDER MANUAL".
+#[test]
+fn deleting_a_sheet_under_manual_calculation_leaves_its_readers_pending() {
+    let wb = Wb::new();
+    wb.add_sheet("Sheet3");
+    wb.add_sheet("Sheet4");
+    wb.add_sheet("Sheet5"); // read by nothing
+    wb.set_on(1, 0, 0, "1"); // Sheet2!A1
+    wb.set_on(2, 0, 0, "10"); // Sheet3!A1
+    wb.set_on(3, 0, 0, "100"); // Sheet4!A1
+    wb.set(0, 0, "=SUM(Sheet2:Sheet4!A1)"); // A1
+    wb.set(0, 1, "=A1*2"); // B1
+    assert_eq!(wb.number(0, 0, 0), 111.0, "precondition");
+    wb.manual();
+    wb.f9();
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "done", "precondition: calculated");
+    wb.delete_sheet(4);
+    assert_eq!(
+        crate::calculation::calculation_state_impl(&wb.state),
+        "done",
+        "a sheet no formula names leaves the workbook calculated (Excel xlDone)"
+    );
+    wb.delete_sheet(2);
+    assert_eq!(wb.number(0, 0, 0), 111.0, "RECALCULATED UNDER MANUAL: the span keeps its value until F9 (Excel)");
+    assert_eq!(wb.number(0, 0, 1), 222.0, "its reader keeps its value until F9 (Excel)");
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "pending", "xlPending");
+    wb.f9();
+    assert_eq!((wb.number(0, 0, 0), wb.number(0, 0, 1)), (101.0, 202.0), "F9 reads the span without Sheet3");
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "done");
+}
+
+/// Excel [LIVE, dtfollow/probe2.ps1]: a table created under manual calculation
+/// (body 0, xlPending) shows 10 / 14 after Goal Seek and after Solver, xlDone;
+/// under automatic a table whose model reads Goal Seek's changing cell follows
+/// the answer. The end-of-run pass skipped the refresh (the run holds the
+/// what-if single-flight the refresh takes).
+///
+/// SABOTAGE: make `data_tables::refresh_at_run_end` return at once -- fails at
+/// "GOAL SEEK LEFT".
+#[test]
+fn goal_seek_and_solver_end_with_every_data_table_refreshed() {
+    let wb = Wb::new();
+    wb.manual();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    wb.set(0, 5, "1"); // F1
+    wb.set(0, 6, "=F1*3"); // G1
+    assert_eq!((wb.number(0, 1, 11), wb.number(0, 2, 11)), (0.0, 0.0), "precondition: created under manual");
+    let r = crate::goal_seek::goal_seek_impl(&wb.state, &wb.file, &wb.states(), seek((0, 6), 12.0, (0, 5)));
+    assert!(r.error.is_none(), "{:?}", r.error);
+    assert_eq!((wb.number(0, 1, 11), wb.number(0, 2, 11)), (10.0, 14.0), "GOAL SEEK LEFT the table uncalculated");
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "done", "xlDone after the run");
+
+    // Solver, on a fresh table created under manual.
+    let wb = Wb::new();
+    wb.manual();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    wb.set(0, 5, "0"); // F1
+    wb.set(0, 6, "=(F1-3)^2"); // G1
+    let s = crate::solver::solver_solve_impl(
+        &wb.state,
+        &wb.file,
+        &wb.states(),
+        SolverParams {
+            sheet_index: 0,
+            objective_row: 0,
+            objective_col: 6,
+            objective: SolverObjective::Minimize,
+            target_value: None,
+            variable_cells: vec![SolverVariableCell { row: 0, col: 5 }],
+            constraints: Vec::new(),
+            method: SolverMethod::GrgNonlinear,
+            max_iterations: 500,
+            max_time: 100,
+            tolerance: 1e-9,
+        },
+    );
+    assert!(s.error.is_none(), "{:?}", s.error);
+    assert_eq!((wb.number(0, 1, 11), wb.number(0, 2, 11)), (10.0, 14.0), "Solver left the table uncalculated");
+
+    // Automatic: the table's model reads the changing cell.
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    wb.set(0, 5, "0"); // F1
+    wb.edit(0, 1, "=A1*2+F1").expect("B1 reads F1");
+    wb.set(0, 6, "=F1*3"); // G1
+    assert_eq!(wb.number(0, 1, 11), 10.0, "precondition");
+    let r = crate::goal_seek::goal_seek_impl(&wb.state, &wb.file, &wb.states(), seek((0, 6), 12.0, (0, 5)));
+    assert!(r.error.is_none(), "{:?}", r.error);
+    assert!(close(wb.number(0, 0, 5), 4.0, 0.01), "precondition: F1 = 4");
+    assert!(
+        close(wb.number(0, 1, 11), 14.0, 0.01),
+        "the table follows Goal Seek's answer (Excel: 14), got {}",
+        wb.number(0, 1, 11)
+    );
+}
+
+/// rev-dt-1 / rev-ui-1: a GROUPED (or multi-area) clear of part of a table's
+/// body on any targeted sheet refuses the whole group before anything is
+/// written, as the single-sheet clear refuses it. It cleared the other sheets
+/// and the body.
+///
+/// SABOTAGE: drop the data-table gate in `clear_range_on_sheets_inner`.
+#[test]
+fn a_grouped_clear_of_part_of_a_data_table_is_refused_whole() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    wb.set_on(1, 1, 11, "5"); // Sheet2!L2
+    let r = crate::commands::data::clear_range_on_sheets_inner(
+        &wb.state,
+        &wb.file,
+        &wb.files,
+        &wb.pivots,
+        &wb.pane,
+        &wb.filters,
+        &[1, 0],
+        &[(1, 11, 1, 11)],
+        crate::api_types::ClearApplyTo::Contents,
+    );
+    assert_eq!(r.err().as_deref(), Some(engine::data_table::PART_OF_DATA_TABLE), "CLEARED PART of the body");
+    assert_eq!(wb.number(1, 1, 11), 5.0, "Sheet2!L2 untouched: nothing of the group was written");
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"));
+}
+
+/// rev-dt-2: the group / off-sheet / script entry (`update_cell_on_sheets_as`)
+/// refuses typing into part of a body on any targeted sheet, and `=TABLE(..)`
+/// anywhere -- a script's `range("Sheet2!M5").setFormula("=TABLE(,A1)")`
+/// wrote the marker.
+///
+/// SABOTAGE: drop the data-table gate in `update_cell_on_sheets_as`.
+#[test]
+fn an_off_sheet_entry_cannot_change_part_of_a_data_table_or_type_its_marker() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    let write = |sheets: Vec<usize>, row: u32, col: u32, value: &str| {
+        crate::commands::data::update_cell_on_sheets_inner(
+            &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, sheets, row, col,
+            value.to_string(), None, None, None,
+        )
+    };
+    assert_eq!(
+        write(vec![1], 4, 12, "=TABLE(,A1)").err().as_deref(),
+        Some(engine::data_table::TABLE_NOT_VALID),
+        "WROTE THE MARKER on Sheet2"
+    );
+    assert_eq!(wb.formula(1, 4, 12), None, "nothing written on Sheet2");
+    wb.switch_to(1);
+    assert_eq!(
+        write(vec![0], 1, 11, "3").err().as_deref(),
+        Some(engine::data_table::PART_OF_DATA_TABLE),
+        "typed into part of a body on a background sheet"
+    );
+    wb.switch_to(0);
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"));
+}
+
+/// rev-dt-3: cutting the INPUT cell A1 to C1 rewrites the body to `TABLE(,C1)`;
+/// the relocation evaluated that marker with no position and stored #VALUE! in
+/// every body cell. Excel [LIVE, dtfollow/probe4.ps1]: the body shows 10 / 14
+/// as before, and K2 = 9 then makes L2 18. Under MANUAL calculation here, so no
+/// refresh repairs what the relocation itself stored (under automatic the
+/// refresh at the end of the command recomputes the body).
+///
+/// SABOTAGE: evaluate a TABLE-marker cell like any other in
+/// `relocate_cell_references_recording` -- fails at "#VALUE!".
+#[test]
+fn cutting_a_data_tables_input_cell_keeps_the_table_live() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    wb.manual();
+    // The cut's paste and source clear, then the move's relocation.
+    wb.edit(0, 2, "1").expect("C1 = 1 (the pasted A1)");
+    wb.edit(0, 0, "").expect("A1 cleared (the cut source)");
+    crate::commands::structure::relocate_cell_references_recording(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, 0, 0, 0, 0, 0, 2, None, true,
+    )
+    .expect("the move's relocation");
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,C1)"), "the input reference followed the move");
+    assert_eq!(wb.value(0, 1, 11), CellValue::Number(10.0), "#VALUE!: the body lost its values");
+    assert_eq!(wb.number(0, 2, 11), 14.0);
+    wb.edit(1, 10, "9").expect("K2 = 9");
+    wb.f9();
+    assert_eq!(wb.number(0, 1, 11), 18.0, "the moved table is still live (Excel 18)");
+}
+
+/// rev-dt-4: a body cell reads nothing through the dependency graph -- its
+/// values are the refresh's -- so a trial's write of the input cell no longer
+/// cascades through the whole body and its readers (O(n^2) per refresh).
+///
+/// SABOTAGE: drop the TABLE arm in `extract_references_recursive` -- fails at
+/// "REGISTERED".
+#[test]
+fn a_data_table_body_is_no_dependent_of_its_input_cell() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    crate::undo_commands::rebuild_all_dependencies(&wb.state);
+    let deps = wb.state.dependents.lock().unwrap();
+    let readers = deps.get(&(0, 0)).cloned().unwrap_or_default();
+    assert!(!readers.contains(&(1, 11)), "REGISTERED: L2 is a dependent of its input cell A1");
+    assert!(readers.contains(&(0, 1)), "control: B1 = A1*2 still reads A1");
+}
+
+/// rev-dt-4, MEASURED: a 50 x 50 two-variable table (2,500 trials), its body
+/// read by one SUM, created and then refreshed after an edit. The timings are
+/// written to `%TEMP%\dtfollow-timing.txt`; the bound only catches a return of
+/// the quadratic cascade.
+#[test]
+fn a_fifty_by_fifty_two_variable_table_refreshes_in_bounded_time() {
+    let wb = Wb::new();
+    wb.set(0, 0, "1"); // A1, row input
+    wb.set(0, 3, "1"); // D1, column input
+    wb.set(10, 10, "=A1*D1"); // K11, the formula in the corner
+    for i in 0..50u32 {
+        wb.set(10, 11 + i, &(i + 1).to_string()); // row input values
+        wb.set(11 + i, 10, &(i + 1).to_string()); // column input values
+    }
+    wb.set(0, 80, "=SUM(L12:BI61)");
+    let t0 = std::time::Instant::now();
+    let r = crate::data_tables::data_table_two_var_impl(
+        &wb.state,
+        &wb.file,
+        &wb.states(),
+        DataTableTwoVarParams {
+            sheet_index: 0,
+            start_row: 10,
+            start_col: 10,
+            end_row: 60,
+            end_col: 60,
+            row_input_row: 0,
+            row_input_col: 0,
+            col_input_row: 0,
+            col_input_col: 3,
+        },
+    );
+    let create = t0.elapsed();
+    assert!(r.error.is_none(), "{:?}", r.error);
+    assert_eq!(wb.number(0, 60, 60), 2500.0, "precondition: 50 x 50");
+    // The maps as a sheet switch or a reopened file builds them: every formula
+    // cell's precedents registered, the body's included.
+    crate::undo_commands::rebuild_all_dependencies(&wb.state);
+    let t1 = std::time::Instant::now();
+    wb.edit(10, 11, "2").expect("a row input value");
+    let refresh = t1.elapsed();
+    assert_eq!(wb.number(0, 11, 11), 2.0, "the edit refreshed the body");
+    let line = format!("50x50 two-variable: create {:?}, refresh after an edit {:?}\n", create, refresh);
+    let _ = std::fs::write(std::env::temp_dir().join("dtfollow-timing.txt"), &line);
+    assert!(refresh < std::time::Duration::from_secs(60), "{}", line);
+}
+
+/// rev-dt-6: a fill from a body cell writes its VALUE. Excel [LIVE,
+/// dtfollow/probe4.ps1]: FillDown L3:L5 from the body's L3 = 14 writes the
+/// number 14. Calcula copied the marker, which grew the table.
+///
+/// SABOTAGE: drop the marker strip in `fill_range_core`.
+#[test]
+fn a_fill_from_a_data_table_body_fills_its_values() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    crate::commands::data::fill_range_core(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, (2, 11, 2, 11), (3, 11, 4, 11),
+    )
+    .expect("fill down from L3");
+    assert_eq!(wb.formula(0, 3, 11), None, "FILLED THE MARKER into L4");
+    assert_eq!(wb.number(0, 3, 11), 14.0);
+    assert_eq!(wb.number(0, 4, 11), 14.0);
+}
+
+/// rev-dt-8: a refresh that cannot run (another what-if run holds the
+/// single-flight) leaves the workbook PENDING, so a save does not vouch for
+/// the uncalculated body; a completed Calculate Now refreshes it.
+///
+/// SABOTAGE: drop the stale mark in `refresh_live_tables`'s busy arm.
+#[test]
+fn a_skipped_data_table_refresh_leaves_the_workbook_pending() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "done", "precondition");
+    {
+        let _busy = crate::whatif_recalc::begin_whatif_run(&wb.state).expect("hold the single-flight");
+        wb.edit(1, 10, "9").expect("K2 = 9 while a run holds the inputs");
+        assert_eq!(wb.number(0, 1, 11), 10.0, "precondition: the refresh was skipped");
+        assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "pending", "LOOKS CALCULATED");
+    }
+    wb.f9();
+    assert_eq!(wb.number(0, 1, 11), 18.0);
+    assert_eq!(crate::calculation::calculation_state_impl(&wb.state), "done");
+}
+
+/// rev-dt-9: Excel [LIVE, dtfollow/probe4.ps1] lets a table use another table's
+/// body as its input column with the same input cell -- K1:L3 and L1:M3, both
+/// `=TABLE(,A1)`, M2 = 120 from L2 = 10. Read back as one rectangle the pair
+/// was computed from the wrong column; the second table's marker now names its
+/// identity (`TABLE(,A1,M2)`) and both stay live.
+///
+/// SABOTAGE: drop the identity in `create_data_table` (write the plain marker)
+/// -- fails at "MERGED".
+#[test]
+fn a_data_table_touching_another_with_the_same_inputs_keeps_its_own_identity() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    wb.set(0, 12, "=B1+100"); // M1
+    let r = wb.one_var((0, 11, 2, 12), (0, 0)); // L1:M3: input column L = the first body
+    assert!(r.error.is_none(), "Excel allows it: {:?}", r.error);
+    assert_eq!(wb.formula(0, 1, 12).as_deref(), Some("TABLE(,A1,M2)"), "the second table names its identity");
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"), "the first is Excel's form");
+    assert_eq!((wb.number(0, 1, 12), wb.number(0, 2, 12)), (120.0, 128.0), "MERGED: computed from the wrong input column");
+    wb.edit(1, 10, "9").expect("K2 = 9");
+    assert_eq!(wb.number(0, 1, 11), 18.0);
+    assert_eq!(wb.number(0, 1, 12), 136.0, "the second follows the first's new body (2*18+100)");
+}
+
+/// rev-xlsx-1: a Data Table whose body would sit inside a table (Insert > Table)
+/// is refused before anything is written. Excel [LIVE, rev-xlsx] refuses
+/// `Range.Table` over a ListObject's body, and a file holding a `dataTable`
+/// formula inside a table's ref is one Excel refuses to open.
+///
+/// SABOTAGE: drop the table-store gate in `create_data_table`.
+#[test]
+fn a_data_table_cannot_be_created_inside_a_table() {
+    let wb = Wb::new();
+    wb.set(0, 3, "Head1"); // D1
+    wb.set(0, 4, "Head2"); // E1
+    wb.set(0, 5, "Head3"); // F1
+    wb.set(0, 0, "1"); // A1
+    let t = crate::tables::create_table_core(
+        &wb.state,
+        &wb.file,
+        &wb.files,
+        &wb.pivots,
+        &wb.pane,
+        &wb.filters,
+        crate::tables::CreateTableParams {
+            name: "Tbl".to_string(),
+            start_row: 0,
+            start_col: 3,
+            end_row: 4,
+            end_col: 5,
+            has_headers: true,
+            style_options: None,
+            style_name: None,
+        },
+    );
+    assert!(t.success, "the table: {:?}", t.error);
+    crate::document_effect::mark_saved(&wb.file);
+    let r = wb.one_var((1, 3, 4, 4), (0, 0)); // D2:E5, body E3:E5 inside Tbl
+    assert_eq!(r.error.as_deref(), Some(crate::data_tables::DATA_TABLE_IN_TABLE), "WROTE A DATA TABLE inside a table");
+    assert_eq!(wb.formula(0, 2, 4), None, "nothing written");
+    assert!(!wb.file.is_dirty(), "the refusal leaves the document unmodified");
+}
+
+/// rev-dt-10: a table whose model reads ANOTHER table's body follows it in the
+/// same refresh, whichever comes first by position. E1:F3 (column input D1,
+/// `F1 = L2*D1`) sits before K1:L3, so one sweep computed it from L2's old value.
+///
+/// SABOTAGE: make the refresh run one round only.
+#[test]
+fn a_table_reading_another_tables_body_follows_it_in_the_same_refresh() {
+    let wb = Wb::new();
+    assert!(wb.one_var_k1_l3().error.is_none()); // L2 = 10
+    wb.set(0, 3, "1"); // D1
+    wb.set(1, 4, "1"); // E2
+    wb.set(2, 4, "2"); // E3
+    wb.set(0, 5, "=L2*D1"); // F1
+    assert!(wb.one_var((0, 4, 2, 5), (0, 3)).error.is_none());
+    assert_eq!((wb.number(0, 1, 5), wb.number(0, 2, 5)), (10.0, 20.0), "precondition");
+    wb.edit(1, 10, "9").expect("K2 = 9");
+    assert_eq!(wb.number(0, 1, 11), 18.0, "precondition: L2 refreshed");
+    assert_eq!((wb.number(0, 1, 5), wb.number(0, 2, 5)), (18.0, 36.0), "ONE REFRESH BEHIND: F2:F3 read L2's old value");
+}
+
+/// rev-dt-11: under manual calculation the zeros of a new table are written as
+/// an edit is: the body's readers wait for F9. Excel [LIVE, dtfollow/probe4.ps1]:
+/// `N1 = SUM(L2:L3)` read 50 before the table was created over L2:L3 under
+/// manual and still read 50 after.
+///
+/// SABOTAGE: write the new body with `RecalcMode::Always` whatever the mode.
+#[test]
+fn a_table_created_under_manual_does_not_recalculate_its_readers() {
+    let wb = Wb::new();
+    wb.set(1, 11, "50"); // L2
+    wb.manual();
+    assert!(wb.one_var_k1_l3().error.is_none());
+    assert_eq!(wb.number(0, 1, 11), 0.0, "precondition: the body shows 0");
+    assert_eq!(wb.number(0, 0, 13), 50.0, "RECALCULATED A READER under manual: N1 keeps 50 until F9 (Excel)");
+    wb.f9();
+    assert_eq!(wb.number(0, 0, 13), 24.0);
+}
+
+/// rev-dt-5: the restore after a refresh's trials puts back only an input cell
+/// that still holds the LAST trial's value; one the user typed into between two
+/// trials (the F9 refresh drops every lock between them) is left as typed.
+///
+/// SABOTAGE: make `cells_to_restore` keep every original.
+#[test]
+fn the_refresh_restore_leaves_an_input_cell_someone_else_changed() {
+    let originals = vec![
+        ((0, 0), Some(engine::Cell::new_number(1.0))),
+        ((0, 3), Some(engine::Cell::new_number(2.0))),
+    ];
+    let last = vec![((0, 0), CellValue::Number(7.0)), ((0, 3), CellValue::Number(9.0))];
+    // A1 still holds the trial's 7; D1 was retyped to 42 between trials.
+    let current = |pos: (u32, u32)| if pos == (0, 0) { CellValue::Number(7.0) } else { CellValue::Number(42.0) };
+    let kept = crate::data_tables::cells_to_restore(originals, &last, current);
+    assert_eq!(kept.iter().map(|(p, _)| *p).collect::<Vec<_>>(), vec![(0, 0)], "OVERWROTE the user's entry in D1");
+}
+
+/// Every edit route that can change what a table reads refreshes the live
+/// data tables under automatic calculation (BUG-0652 follow-up): fill, sort,
+/// grouped / off-sheet entries, a script's writes, a move's relocation, a sheet
+/// delete -- the routes that refreshed only on the next edit or F9. These are
+/// `tauri::State` command bodies a test cannot call, so their source is read.
+///
+/// SABOTAGE: delete the refresh from `fill_range`.
+#[test]
+fn every_edit_route_refreshes_the_live_data_tables() {
+    let data = include_str!("commands/data.rs").replace("\r\n", "\n");
+    let structure = include_str!("commands/structure.rs").replace("\r\n", "\n");
+    let scripting = include_str!("scripting/commands.rs").replace("\r\n", "\n");
+    let sheets = include_str!("sheets.rs").replace("\r\n", "\n");
+    // rev-dt2-1: the routes that recalculated and never refreshed. Every
+    // command that recalculates is FOUND by
+    // `data_table_refresh_tests::every_command_that_recalculates_refreshes_the_live_data_tables`;
+    // this list pins the bodies by name.
+    let cells = include_str!("commands/structure_cells.rs").replace("\r\n", "\n");
+    let merge = include_str!("merge_commands.rs").replace("\r\n", "\n");
+    let consolidate = include_str!("consolidate.rs").replace("\r\n", "\n");
+    let names = include_str!("named_ranges.rs").replace("\r\n", "\n");
+    let controls = include_str!("control_values.rs").replace("\r\n", "\n");
+    let body = |src: &str, sig: &str| -> String {
+        let start = src.find(sig).unwrap_or_else(|| panic!("{sig} not found"));
+        let rest = &src[start..];
+        rest[..rest.find("\n}\n").expect("end of fn")].to_string()
+    };
+    // NEW-double-refresh (round E): Sort, Remove Duplicates and Consolidate
+    // refreshed at their tail right after an entry point that refreshes on its
+    // own -- every table computed twice. They now refresh ONCE, through that
+    // entry point, and carry no tail refresh.
+    for (src, sig) in [
+        (&data, "pub fn sort_range("),
+        (&data, "pub fn remove_duplicates("),
+        (&consolidate, "pub fn consolidate_data("),
+    ] {
+        let text = body(src, sig);
+        assert!(
+            text.contains("recalc_after_active_sheet_bulk_rewrite("),
+            "{sig} no longer recalculates through the entry point that refreshes the live data tables"
+        );
+        assert!(!text.contains("data_tables::refresh_after_edit("), "{sig} refreshes the live data tables TWICE");
+    }
+    for (src, sig) in [
+        (&data, "pub fn fill_range("),
+        (&data, "pub(crate) fn update_cell_on_sheets_inner("),
+        (&scripting, "pub(crate) fn apply_script_modified_grids("),
+        (&structure, "pub(crate) fn relocate_cell_references_recording("),
+        (&sheets, "pub(crate) fn delete_sheet_impl("),
+        (&structure, "pub(crate) fn insert_rows_impl("),
+        (&structure, "pub(crate) fn insert_columns_impl("),
+        (&structure, "pub(crate) fn delete_rows_impl("),
+        (&structure, "pub(crate) fn delete_columns_impl("),
+        (&structure, "pub(crate) fn off_sheet_structural_edit("),
+        (&cells, "pub(crate) fn shift_cells_impl("),
+        (&merge, "pub fn merge_cells_core("),
+        (&names, "pub fn create_named_range("),
+        (&names, "pub(crate) fn update_named_range_core("),
+        (&names, "pub(crate) fn delete_named_range_core("),
+        (&names, "pub(crate) fn rename_named_range_core("),
+    ] {
+        assert!(body(src, sig).contains("data_tables::refresh_after_edit("), "{sig} does not refresh the live data tables");
+    }
+    // The shared entry points refresh at their own end (NEW-dt-refresh-root):
+    // a control's value, a clear, Find & Replace, a table command, a pivot, an
+    // AutoFilter, ... recalculate through one of them.
+    let calculation = include_str!("calculation.rs").replace("\r\n", "\n");
+    for (src, sig) in [
+        (&controls, "pub(crate) fn recalc_control_dependents_core("),
+        (&data, "pub(crate) fn recalc_after_active_sheet_bulk_rewrite("),
+        (&data, "pub(crate) fn recalc_after_off_sheet_write("),
+        (&calculation, "pub(crate) fn recalc_visibility_dependents_core("),
+    ] {
+        assert!(
+            body(src, sig).contains("data_tables::refresh_after_recalc("),
+            "{sig} does not end in the live data tables' refresh"
+        );
+    }
+}
+
+/// A cut of a WHOLE data table moves it; the whole-cell clear and a paste
+/// source respect a data table (round C, lane clipc). A child module so it
+/// reuses `Wb`.
+#[path = "data_table_move_tests.rs"]
+mod data_table_move_tests;
+
+/// Every edit route refreshes the live data tables, and the census that finds
+/// a route which does not (round C, lane dtrefresh, rev-dt2-1..5). A child
+/// module so it reuses `Wb`.
+#[path = "data_table_refresh_tests.rs"]
+mod data_table_refresh_tests;

@@ -875,6 +875,33 @@ describe("SplitMenuButton", () => {
     expect(menu()).not.toBeNull();
   });
 
+  it("disabled while FOCUS is in its menu: focus goes back to the half that opened it, not to <body> (BUG-0398)", () => {
+    // Open Merge & Center's menu with the keyboard, then something makes the
+    // sheet protected. The menu unmounted with the focused row in it and the
+    // browser dropped focus to <body>: the keyboard user was nowhere.
+    render(<Merge />);
+    key(byTestId("main"), "ArrowDown");
+    expect(document.activeElement).toBe(byTestId("center"));
+    render(<Merge disabled />);
+    expect(menu()).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(byTestId("main"));
+    // From the chevron, back to the chevron.
+    render(<Merge />);
+    key(byTestId("chevron"), "ArrowUp");
+    expect(document.activeElement).toBe(byTestId("unmerge"));
+    render(<Merge disabled />);
+    expect(document.activeElement).toBe(byTestId("chevron"));
+  });
+
+  it("disabled while focus is ELSEWHERE: focus is left where it is", () => {
+    render(<Merge />);
+    click(byTestId("chevron"));
+    (byTestId("elsewhere") as HTMLInputElement).focus();
+    render(<Merge disabled />);
+    expect(document.activeElement).toBe(byTestId("elsewhere"));
+  });
+
   it("a row can show a command's LIVE binding as its shortcut", () => {
     render(
       <SplitMenuButton icon={<Icon />} label="X" chevronTestId="chevron" onClick={() => undefined}>

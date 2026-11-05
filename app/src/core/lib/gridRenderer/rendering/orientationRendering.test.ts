@@ -230,6 +230,41 @@ describe("rotated text: anchored by both alignments", () => {
     expect(translate.y).toBeCloseTo(BOX.bottom - side / 2, 6);
   });
 
+  it("Wrap Text wraps Rotate Text Up at the cell HEIGHT, lines side by side (BUG-0363)", () => {
+    // 18 characters = 108px along the text; the content box is 76px tall, so
+    // Excel breaks it ("one two " / "three four") and stacks the lines across
+    // the cell. It used to be painted as one 108px run, cut by the cell.
+    const ops = render({ display: "one two three four", style: { textRotation: "rotate90", wrapText: true } });
+    expect(textOps(ops, "one two three four").length, "not painted as one run").toBe(0);
+    const first = rotationFor(ops, "one two ");
+    expect(first.rotate).toBeCloseTo(-Math.PI / 2, 9);
+    // One block, two lines: the second is painted right after the first, under
+    // the same translate + rotate.
+    const i = ops.indexOf(first.draw);
+    const next = ops[i + 1] as Extract<Op, { op: "fillText" }>;
+    expect(next.op).toBe("fillText");
+    expect(next.text).toBe("three four");
+    const second = { draw: next };
+    // Line 0 above line 1 in the rotated frame (= left of it on screen), both
+    // starting at the block's bottom end.
+    expect(second.draw.y - first.draw.y).toBeCloseTo(LINE_H, 6);
+    expect(first.draw.x).toBeCloseTo(-(10 * CHAR_WIDTH) / 2, 6);
+    expect(second.draw.x).toBeCloseTo(first.draw.x, 6);
+    // The block hugs the right edge (General +90): two line pitches wide.
+    expect(first.translate.x).toBeCloseTo(BOX.right - LINE_H, 6);
+  });
+
+  it("a hard break splits rotated text into lines too", () => {
+    const ops = render({ display: "ab\ncd", style: { textRotation: "rotate90" } });
+    expect(textOps(ops, "ab").length).toBe(1);
+    expect(textOps(ops, "cd").length).toBe(1);
+  });
+
+  it("with Wrap Text off a long rotated value stays one run (Excel: 18pt column)", () => {
+    const ops = render({ display: "one two three four", style: { textRotation: "rotate90" } });
+    expect(textOps(ops, "one two three four").length).toBe(1);
+  });
+
   it("a frozen pane paints rotated text too (it used to draw it horizontally)", () => {
     const { translate, rotate } = rotationFor(
       render({ display: TEXT, style: { textRotation: "rotate90" }, freezeRow: 3 }),
@@ -366,5 +401,15 @@ describe("font size", () => {
   it("a half-point size is painted at that size", () => {
     const ops = render({ display: "Half", style: { fontSize: 10.5 } });
     expect(textOps(ops, "Half")[0].font).toContain(`${(10.5 * 96) / 72}px`);
+  });
+
+  it("Shrink to Fit paints at the exact fitting size, not a whole point (BUG-0364)", () => {
+    // 20 characters = 120px at 11pt in a 94px content box: 11 * 94 / 120 pt.
+    // The painter used to floor that 8.62pt to 8pt.
+    const TEXT = "abcdefghijklmnopqrst";
+    const ops = render({ display: TEXT, style: { shrinkToFit: true } });
+    const painted = textOps(ops, TEXT)[0];
+    const points = (11 * (BOX.right - BOX.left)) / (TEXT.length * CHAR_WIDTH);
+    expect(painted.font).toContain(`${(points * 96) / 72}px`);
   });
 });

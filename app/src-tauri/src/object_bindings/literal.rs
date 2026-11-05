@@ -419,7 +419,16 @@ fn write_control(
         controls
             .iter()
             .find(|(_, meta)| object_json::control_uid(meta) == Some(object.id.as_str()))
-            .map(|(k, meta)| (*k, meta.control_type.clone(), meta.properties.get(&key).cloned()))
+            .map(|(k, meta)| {
+                (
+                    (*k, meta.control_type.clone(), meta.properties.get(&key).cloned()),
+                    meta.properties.get("containerBackgroundShow").cloned(),
+                )
+            })
+    };
+    let (anchor, current_show) = match anchor {
+        Some((anchor, show)) => (Some(anchor), show),
+        None => (None, None),
     };
     let Some(((sheet, row, col), control_type, current)) = anchor else {
         return Err(format!("There is no control with id '{}' in this workbook.", object.id));
@@ -443,15 +452,33 @@ fn write_control(
         }
         _ => control_property_string(&value),
     };
-    if current.as_ref().is_some_and(|p| p.value_type == "static" && p.value == text) {
+    // The navigator's solid-commit companion (BUG-0510 (1)): the same colour
+    // again on a hidden background is a change (it shows it), and the
+    // companion is part of the same step -- Ctrl+Z hides the background again
+    // along with the colour.
+    let companion = crate::controls::solid_background_companion(
+        &control_type,
+        &key,
+        &text,
+        current_show.as_ref().map(|p| p.value.as_str()),
+    );
+    if companion.is_none() && current.as_ref().is_some_and(|p| p.value_type == "static" && p.value == text) {
         return Ok(LiteralWriteOutcome::Unchanged);
     }
-    let previous = crate::undo_commands::ControlPropRestoreRow {
+    let mut previous = vec![crate::undo_commands::ControlPropRestoreRow {
         uid: object.id.clone(),
         key: (sheet, row, col),
         property: key.clone(),
         previous: current,
-    };
+    }];
+    if let Some((show_key, _)) = companion {
+        previous.push(crate::undo_commands::ControlPropRestoreRow {
+            uid: object.id.clone(),
+            key: (sheet, row, col),
+            property: show_key.to_string(),
+            previous: current_show,
+        });
+    }
     crate::controls::set_control_property_core(
         ctx.state,
         ctx.file_state,
@@ -463,7 +490,7 @@ fn write_control(
         "static".to_string(),
         text,
     )?;
-    crate::undo_commands::record_control_props_undo(ctx.state, vec![previous], "Set property");
+    crate::undo_commands::record_control_props_undo(ctx.state, previous, "Set property");
     Ok(LiteralWriteOutcome::Written { domains: vec!["controls"], layout: None })
 }
 

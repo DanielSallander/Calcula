@@ -9,6 +9,7 @@
 
 import type { BiHierarchyMeta } from "./backend";
 import type { MemberRef } from "./types";
+import type { NonFiniteNumber } from "./locale";
 import type { DesignStrategySummary } from "./designQueryAssist/types";
 import type { VisualContainerFormat } from "./visualContainer";
 import type { DrillThroughDefinition } from "./drillThrough";
@@ -346,6 +347,11 @@ export interface PivotCellData {
    *  text is not one member's own ("East Total"). Read it through
    *  `pivotCellItemKey` / `pivotCellDisplayText` (@api/pivotMembers). */
   member?: MemberRef;
+  /** Which non-finite number a value cell holds (a model measure's 1/0, -1/0,
+   *  0/0). Its `value` is then the text "#NUM!", as Excel's data-model
+   *  PivotTable shows it; a canvas visual writes Power BI's word instead,
+   *  through `nonFiniteNumberText` (@api/locale). */
+  nonFinite?: NonFiniteNumber;
 }
 
 /** Row data from the backend */
@@ -1212,13 +1218,23 @@ export interface PivotOverwriteUndoResponse {
   refreshDomains: string[];
 }
 
-/** Request to sort a pivot field */
+/** Request to sort a pivot field -- by its labels, or (with
+  *  `valuesHierarchy`) by the values of a data field along one line of the
+  *  other axis (BUG-0459, Excel's AutoSort). Mirrors `SortPivotFieldRequest`
+  *  in app/src-tauri/src/pivot/types.rs. */
 export interface SortPivotFieldRequest {
   pivotId: PivotId;
   fieldIndex: number;
   sortBy: SortBy;
+  /** The data field to sort by, by NAME (a `valueFieldNames` entry). Absent:
+   *  a label sort, which also clears a standing value sort. */
   valuesHierarchy?: string;
+  /** The line of the other axis, as member KEYS outermost first (empty: its
+   *  grand total). Ignored when `scopeGroupPath` is given. */
   pivotItemScope?: string[];
+  /** The line of the other axis as `[fieldIndex, valueId]` pairs -- the
+   *  clicked value cell's `groupPath` past its row's items. */
+  scopeGroupPath?: Array<[number, number]>;
 }
 
 /** Request to set pivot item visibility */

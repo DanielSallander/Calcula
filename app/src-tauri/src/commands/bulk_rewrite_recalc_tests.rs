@@ -658,7 +658,8 @@ fn every_bulk_cell_rewrite_seeds_the_shared_cascade() {
 
     // ACTIVE-sheet rewrites: seeds into `recalc_after_active_sheet_bulk_rewrite`.
     let active: &[(&str, &str)] = &[
-        ("clear_cell", DATA_RS),
+        // The `clear_cell` command delegates to this body (testability split).
+        ("clear_cell_core", DATA_RS),
         ("clear_range", DATA_RS),
         // The `clear_range_with_options` command is a one-line delegation to
         // this body (testability split, review A#1).
@@ -819,7 +820,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("cell_target.rs", "keep_backing_lock", "style_index only (puts back the cell's Locked flag on a protected host), inside update_cells_batch_on_target, whose phase B recalculates the backing sheet"),
         ("commands/styles.rs", "write_range_style_plan", "style_index and row/column style tiers only"),
         ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
-        ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
+        ("named_styles_cmd.rs", "apply_named_style_inner", "style_index only (the body of apply_named_style_impl / apply_named_style_on_sheet since rev-sec-1)"),
         ("computed_properties.rs", "apply_fill_color", "style_index only"),
         ("computed_properties.rs", "apply_style_change", "style_index only"),
         // (`mcp/tools.rs` `apply_cell_formatting` is no longer here: the AI's
@@ -872,7 +873,8 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         // -- Rewrites formula REFERENCES, not values ------------------------
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; no value moves"),
         ("tables.rs", "rename_table_column_in_formulas", "re-points a COLUMN specifier at the same cells; no value moves, and both callers recalculate anyway"),
-        ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; no value moves"),
+        ("tables.rs", "carry_column_rename", "the column rename's shared tail (lane tablec): re-points COLUMN specifiers through rename_table_column_in_formulas and rewrites stored formula TEXT; no value moves, and both callers (rename_table_column_core, enforce_table_header) run recalc_after_table_change after it"),
+        ("tables.rs", "copy_tables_to_copied_sheet", "re-points the COPIED sheet's structured references at the copied tables, which cover the same cells under new names; no value moves, and the copy is a sheet no formula elsewhere can name yet"),
     ];
     //
     // D8 CLOSED THE "KNOWN RESIDUAL" BLOCK — the four structural edits.

@@ -20,7 +20,11 @@
 //          (FormattingOptions), with the resolved hex beside it as the
 //          fallback the backend uses only when it does not know the slot
 //          (styles.rs applies the absolute colour first, the theme slot after,
-//          so a known slot always wins).
+//          so a known slot always wins). The BAR follows the slot too: on a
+//          document theme change (or another document opening) the remembered
+//          hex is re-resolved from the current palette (`refreshThemeChoices`,
+//          run by ColorSplitButton; BUG-0370 -- it used to keep the colour the
+//          slot had when it was picked).
 //
 //          "No Fill" removes the fill (`fill: { type: "none" }`); Font Color's
 //          "Automatic" writes the default text colour, theme dark 1 with no
@@ -108,11 +112,45 @@ export function colorFormatting(itemId: ColorItemId, choice: ColorChoice): Recor
   }
 }
 
+/**
+ * A remembered THEME choice re-resolved against the document's CURRENT theme
+ * palette (BUG-0370). The slot and tint are the colour; the hex beside them is
+ * only what that slot looked like when it was picked, and the bar used to show
+ * it -- so after a theme change the bar kept the old Accent 1 while the face
+ * (which sends the slot) applied the new one. A choice whose slot and tint the
+ * palette does not list, and every non-theme choice, is returned unchanged.
+ */
+export function resolveThemeChoice(
+  choice: ColorChoice,
+  palette: ReadonlyArray<{ slot: string; tint: number; resolvedColor: string }> | null | undefined,
+): ColorChoice {
+  if (choice.kind !== "theme" || !palette) return choice;
+  const entry = palette.find((p) => p.slot === choice.slot && p.tint === choice.tint);
+  if (!entry || entry.resolvedColor === choice.hex) return choice;
+  return { ...choice, hex: entry.resolvedColor };
+}
+
 /** What the bar paints for a choice: the colour, the automatic ink for
  *  Automatic, and nothing (an empty outline) for No Fill. */
 export function barColor(itemId: ColorItemId, choice: ColorChoice): string | null {
   if (choice.kind === "automatic") return itemId === "textColor" ? AUTOMATIC_TEXT_INK : null;
   return choice.hex;
+}
+
+/**
+ * The document's theme changed (or another document opened): re-resolve both
+ * buttons' remembered theme colours against `palette`, so the bar shows -- and
+ * the face's fallback hex carries -- the colour the slot has NOW (BUG-0370).
+ * The slot and tint, which are what the face really applies, never change.
+ */
+export function refreshThemeChoices(
+  palette: ReadonlyArray<{ slot: string; tint: number; resolvedColor: string }>,
+): void {
+  for (const store of Object.values(STORES)) {
+    const current = store.get();
+    const next = resolveThemeChoice(current, palette);
+    if (next !== current) store.set(next);
+  }
 }
 
 /** The face: apply the remembered colour. */

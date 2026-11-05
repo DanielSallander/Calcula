@@ -535,21 +535,27 @@ export function isFilterRow(rowType: PivotRowType): boolean {
 }
 
 /**
- * Creates a default field configuration.
+ * Creates a field configuration that carries ONLY the settings given.
+ *
+ * `update_pivot_fields` keeps every per-field setting a config does not send
+ * (BUG-0184; tri-state on the wire: absent keeps, a value sets) and a field
+ * new to the pivot starts at the engine's defaults (ascending, subtotals on,
+ * expanded, nothing hidden). This used to fill those defaults in itself --
+ * `sortOrder: "asc"`, `showSubtotals: true`, `hiddenItems: []` -- so a layout
+ * edit built from it reset a field the user had sorted descending, switched
+ * its subtotals off and CLEARED its item filter.
  */
 export function createFieldConfig(
   sourceIndex: number,
   name: string,
   options?: Partial<Omit<PivotFieldConfig, "sourceIndex" | "name">>
 ): PivotFieldConfig {
-  return {
-    sourceIndex,
-    name,
-    sortOrder: options?.sortOrder ?? "asc",
-    showSubtotals: options?.showSubtotals ?? true,
-    collapsed: options?.collapsed ?? false,
-    hiddenItems: options?.hiddenItems ?? [],
-  };
+  const config: PivotFieldConfig = { sourceIndex, name };
+  if (options?.sortOrder !== undefined) config.sortOrder = options.sortOrder;
+  if (options?.showSubtotals !== undefined) config.showSubtotals = options.showSubtotals;
+  if (options?.collapsed !== undefined) config.collapsed = options.collapsed;
+  if (options?.hiddenItems !== undefined) config.hiddenItems = options.hiddenItems;
+  return config;
 }
 
 /**

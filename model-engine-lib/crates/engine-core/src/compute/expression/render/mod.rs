@@ -26,8 +26,14 @@
 //! - The pipeline's condition rendering (engine-query) — `DataFusion`
 //!   dialect + [`LowercaseTableQualifier`].
 //!
-//! The generated SQL is byte-compatible with the four pre-unification
-//! renderers; the pinned-SQL tests in each crate are the oracle.
+//! The generated SQL was byte-compatible with the four pre-unification
+//! renderers; the pinned-SQL tests in each crate are the oracle. Since the
+//! open-ledger round C it renders arithmetic, counts and measure-level
+//! comparisons with DAX's BLANK semantics ([`crate::compute::dax_semantics`];
+//! the pins were re-taken deliberately), unless configured with
+//! [`SqlRenderer::with_relational_semantics`] (table transformations). Since
+//! round D every `CASE` condition goes through [`Dialect::case_condition`], so
+//! a NULL condition is FALSE on DataFusion too (`COALESCE(c, FALSE)`).
 
 mod conditional;
 mod dialect;
@@ -53,6 +59,18 @@ enum KeepRendering {
     /// `AGG(CASE WHEN predicates THEN operand END)`. Used for source
     /// pushdown SQL, where the KEEP condition travels with the expression.
     CaseWhen,
+}
+
+/// Whose rules a missing value follows in arithmetic and counting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Semantics {
+    /// DAX (the default; measures and calculated columns): `BLANK + 5 = 5`,
+    /// `x / 0 = Infinity`, a count of nothing is BLANK. See
+    /// [`crate::compute::dax_semantics`].
+    Dax,
+    /// SQL / Power Query M (table transformations): `null + 5 = null`, a
+    /// count of nothing is 0 — the arithmetic operators render as plain SQL.
+    Relational,
 }
 
 /// Renders column references for a particular execution environment.
@@ -162,6 +180,15 @@ pub struct SqlRenderer<'a, D: Dialect> {
     /// (`alias."col"`). Only the calculated-column THISROW materialization
     /// sets this; everywhere else a `ThisRow` node fails rendering closed.
     thisrow_alias: Option<String>,
+    /// DAX (default) or relational arithmetic / counting.
+    semantics: Semantics,
+    /// KEEP-as-CASE-WHEN mode: the conditions of the KEEPs enclosing the node
+    /// being rendered, innermost last. Every aggregate rendered inside a KEEP
+    /// takes them (`render_keep` pushes, renders the inner expression, pops),
+    /// so the filter reaches EVERY aggregate under the KEEP -- through
+    /// arithmetic, IF, a scalar function, a nested KEEP, COUNTROWS -- rather
+    /// than only the shapes a fixed arm list knew.
+    keep_scope: std::cell::RefCell<Vec<String>>,
 }
 
 impl<'a, D: Dialect> SqlRenderer<'a, D> {
@@ -177,7 +204,133 @@ impl<'a, D: Dialect> SqlRenderer<'a, D> {
             qualifier,
             keep: KeepRendering::PassThrough,
             thisrow_alias: None,
+            semantics: Semantics::Dax,
+            keep_scope: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Render arithmetic and counting with SQL's (Power Query M's) rules
+    /// instead of DAX's: `null + 5` is `null`, a count of nothing is `0`.
+    /// Table transformations use this; measures and calculated columns keep
+    /// the DAX default ([`crate::compute::dax_semantics`]).
+    #[must_use]
+    pub fn with_relational_semantics(mut self) -> Self {
+        self.semantics = Semantics::Relational;
+        self
+    }
+
+    /// Render a `BinaryOp` node through `render` for its operands, under the
+    /// configured [`Semantics`].
+    fn render_arithmetic(
+        &self,
+        expr: &Expression,
+        render: &mut dyn FnMut(&Expression) -> EngineResult<String>,
+    ) -> EngineResult<String> {
+        match (self.semantics, expr) {
+            (Semantics::Relational, Expression::BinaryOp { left, op, right }) => {
+                let l = render(left)?;
+                let r = render(right)?;
+                Ok(format!("({l} {} {r})", op.as_sql()))
+            }
+            _ => crate::compute::dax_semantics::render_binary(
+                expr,
+                self.dialect.divide_style(),
+                render,
+            ),
+        }
+    }
+
+    /// A rendered aggregate under the configured [`Semantics`]: a DAX
+    /// `DISTINCTCOUNT` counts BLANK as a value and a DAX count of nothing is
+    /// BLANK (`NULLIF(count, 0)`). `operand_sql` is the aggregate's rendered
+    /// operand (ignored by `COUNTROWS`).
+    fn measure_aggregate(
+        &self,
+        op: &crate::compute::aggregate::AggregateOp,
+        sql: String,
+        operand_sql: &str,
+    ) -> String {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::dax_semantics;
+        match self.semantics {
+            Semantics::Dax => {
+                let sql = if matches!(op, AggregateOp::DistinctCount) {
+                    dax_semantics::distinct_count_counting_blank(&sql, operand_sql, None)
+                } else {
+                    sql
+                };
+                dax_semantics::blank_zero_count(op, sql)
+            }
+            Semantics::Relational => sql,
+        }
+    }
+
+    /// [`Self::measure_aggregate`] for a conditional (`CASE WHEN condition`)
+    /// aggregate; `operand_sql` is the bare operand, not the `CASE WHEN`.
+    fn measure_aggregate_case_when(
+        &self,
+        op: &crate::compute::aggregate::AggregateOp,
+        sql: String,
+        condition: &str,
+        operand_sql: &str,
+    ) -> String {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::dax_semantics;
+        match self.semantics {
+            Semantics::Dax => {
+                let sql = if matches!(op, AggregateOp::DistinctCount) {
+                    let condition = self.dialect.case_condition(condition, true);
+                    dax_semantics::distinct_count_counting_blank(&sql, operand_sql, Some(&condition))
+                } else {
+                    sql
+                };
+                dax_semantics::blank_zero_count_case_when(op, sql)
+            }
+            Semantics::Relational => sql,
+        }
+    }
+
+    /// The condition of every KEEP enclosing the node being rendered in
+    /// KEEP-as-CASE-WHEN mode, `AND`-ed, or `None` outside any KEEP. See
+    /// [`SqlRenderer::with_keep_case_when`].
+    fn active_keep_condition(&self) -> Option<String> {
+        let scope = self.keep_scope.borrow();
+        match scope.len() {
+            0 => None,
+            1 => Some(scope[0].clone()),
+            _ => Some(
+                scope
+                    .iter()
+                    .map(|c| format!("({c})"))
+                    .collect::<Vec<_>>()
+                    .join(" AND "),
+            ),
+        }
+    }
+
+    /// `CASE WHEN keep THEN sql END` inside a KEEP scope, `sql` otherwise:
+    /// the operand of an aggregate-like node (COUNTIF, HASONEVALUE,
+    /// SELECTEDVALUE, FIRSTNONBLANK, LISTAGG, MAX_BY/MIN_BY, PERCENTILE) sees
+    /// only the rows the enclosing KEEPs keep.
+    fn keep_scoped(&self, sql: String) -> String {
+        match self.active_keep_condition() {
+            Some(condition) => format!("CASE WHEN {} THEN {sql} END", self.case_cond(&condition)),
+            None => sql,
+        }
+    }
+
+    /// A KEEP / filter predicate as the WHEN of a `CASE` in this dialect
+    /// ([`Dialect::case_condition`]): DataFusion spells it so NULL is FALSE.
+    fn case_cond(&self, predicate_sql: &str) -> String {
+        self.dialect.case_condition(predicate_sql, true)
+    }
+
+    /// A model expression's rendered condition (`IF`, `COUNTIF`) as the WHEN
+    /// of a `CASE` in this dialect; a non-predicate (a number used as a
+    /// condition) is cast to BOOLEAN first in DataFusion.
+    fn case_cond_of(&self, condition: &Expression, condition_sql: &str) -> String {
+        self.dialect
+            .case_condition(condition_sql, condition.is_boolean_predicate())
     }
 
     /// Render `THISROW(t[col])` references against the given anchor-row
@@ -193,6 +346,15 @@ impl<'a, D: Dialect> SqlRenderer<'a, D> {
     /// (`AGG(CASE WHEN predicates THEN operand END)`) instead of passing
     /// through. This is the source-pushdown behavior, where the KEEP
     /// condition must travel with the generated SQL.
+    ///
+    /// The condition applies to EVERY aggregate beneath the KEEP, however it
+    /// is nested (`COUNTROWS(t, KEEP(...))` renders `SUM(CASE WHEN c THEN 1
+    /// END)`, a KEEP inside a KEEP `AND`s both conditions). A node this mode
+    /// cannot render faithfully -- a KEEP with variables / expression
+    /// conditions / IN predicates, a CLEAR / RESET / USING / TRAVERSE /
+    /// USERELATIONSHIP reaching the plain renderer -- is an `Err`, never its
+    /// inner expression with the context silently dropped (the pushdown
+    /// planner keeps such measures local, so the error is a routing bug).
     #[must_use]
     pub fn with_keep_case_when(mut self) -> Self {
         self.keep = KeepRendering::CaseWhen;

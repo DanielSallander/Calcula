@@ -43,11 +43,11 @@
 //          (rather than also writing the line there) keeps Excel's ownership:
 //          the line belongs to the cells the user formatted, so Clear Formats
 //          on them removes it, and a neighbour that had no border gets no
-//          style written at all. That read is bounded by NEIGHBOUR_READ_LIMIT:
-//          the strip beside a WHOLE COLUMN is a million cells, and reading it
-//          through the frontend is not worth a border. Beyond the limit the
-//          neighbour's line is left (see the lane report; the right home for
-//          this rule is the backend's apply_border_preset).
+//          style written at all. The read goes in bands of NEIGHBOUR_READ_LIMIT
+//          cells; the strip beside a WHOLE COLUMN (row) -- a million cells --
+//          is never read: its coincident side is cleared by ONE write over the
+//          line, which the backend plans by row/column tiers and applies only
+//          where the line changes (BUG-0369; that strip's line used to be left).
 //
 //          THE CALLS. Range presets (No Border, All, Outside, Thick Outside)
 //          go through `applyBorderPreset`, which is range-aware (row/column
@@ -366,9 +366,33 @@ export function sharedEdgeStrip(rect: CellRect, edge: Edge, bounds: SheetBounds)
   }
 }
 
-/** The longest neighbour strip the runner reads: one full row of columns.
- *  The strip beside a whole column (a million rows) is not read. */
+/** The longest neighbour strip the runner reads in ONE call: one full row of
+ *  columns. A longer strip is read in bands of this many cells, and the strip
+ *  beside a WHOLE column (row) is not read at all -- its coincident side is
+ *  cleared by one tier-aware write (BUG-0369, `clearSharedEdge`). */
 export const NEIGHBOUR_READ_LIMIT = 16384;
+
+/** Whether `strip` runs the whole height (a column) or width (a row) of the sheet. */
+function spansTheSheet(strip: CellRect, bounds: SheetBounds): boolean {
+  const column = strip.startCol === strip.endCol && strip.startRow === 0 && strip.endRow >= bounds.rows - 1;
+  const row = strip.startRow === strip.endRow && strip.startCol === 0 && strip.endCol >= bounds.cols - 1;
+  return column || row;
+}
+
+/** `strip` (one row or one column) cut into reads of NEIGHBOUR_READ_LIMIT cells. */
+export function stripBands(strip: CellRect): CellRect[] {
+  const bands: CellRect[] = [];
+  if (strip.startRow === strip.endRow) {
+    for (let c = strip.startCol; c <= strip.endCol; c += NEIGHBOUR_READ_LIMIT) {
+      bands.push({ startRow: strip.startRow, endRow: strip.endRow, startCol: c, endCol: Math.min(strip.endCol, c + NEIGHBOUR_READ_LIMIT - 1) });
+    }
+  } else {
+    for (let r = strip.startRow; r <= strip.endRow; r += NEIGHBOUR_READ_LIMIT) {
+      bands.push({ startCol: strip.startCol, endCol: strip.endCol, startRow: r, endRow: Math.min(strip.endRow, r + NEIGHBOUR_READ_LIMIT - 1) });
+    }
+  }
+  return bands;
+}
 
 // ============================================================================
 // The runner
@@ -420,12 +444,31 @@ async function clearSharedEdge(
   const strip = sharedEdgeStrip(rect, edge, bounds);
   if (!strip) return [];
   const length = (strip.endRow - strip.startRow + 1) * (strip.endCol - strip.startCol + 1);
-  if (length > NEIGHBOUR_READ_LIMIT) return [];
+  if (length > NEIGHBOUR_READ_LIMIT && spansTheSheet(strip, bounds)) {
+    // A WHOLE COLUMN (row) beside the selection (BUG-0369): No Border on B:B
+    // removes the A|B line in Excel [LIVE, Excel 16, 2026-11-04, lane
+    // multiarea probe3: A1:A3 and A500000 right-bordered, column B > No
+    // Border -- every one of them reads xlNone]. Its million cells are not
+    // read: ONE write of the coincident side over the whole line, which the
+    // backend plans by row/column TIERS and writes only where the line
+    // actually changes (`plan_range_style`), so a neighbour with no border
+    // still gets nothing written, as below.
+    const rows = span(strip.startRow, strip.endRow);
+    const cols = span(strip.startCol, strip.endCol);
+    const result = await applyFormatting(rows, cols, { [strip.side]: NO_LINE }, { target });
+    return result.cells;
+  }
   // A floating grid's neighbours are ITS cells (the styled read resolves row
-  // and column tiers too); never the active sheet's under it.
-  const cells: CellData[] = target
-    ? (await getCellTargetCells(target, strip)).cells
-    : await getViewportCells(strip.startRow, strip.startCol, strip.endRow, strip.endCol);
+  // and column tiers too); never the active sheet's under it. A long strip
+  // that is not a whole line is read in bands of NEIGHBOUR_READ_LIMIT cells.
+  const cells: CellData[] = [];
+  for (const band of stripBands(strip)) {
+    cells.push(
+      ...(target
+        ? (await getCellTargetCells(target, band)).cells
+        : await getViewportCells(band.startRow, band.startCol, band.endRow, band.endCol)),
+    );
+  }
   const owners: CellData[] = [];
   for (const cell of cells) {
     let style = styleCache.get(cell.styleIndex);

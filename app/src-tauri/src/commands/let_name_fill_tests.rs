@@ -86,6 +86,7 @@ fn copy_paste(wb: &Workbook, (row, col): (u32, u32), (to_row, to_col): (u32, u32
             invariant: Some(true),
             pasted: Some(true),
             moved: None,
+            source: None,
         }],
         None,
         None,
@@ -142,12 +143,12 @@ const CASES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "=LAMBDA(b,SUM(B:B))(A1:A2)",
-        // Stored in the engine's inline-invoke shape; the formula bar shows
-        // LAMBDA(b,SUM(b:b))(B1:B2), as Excel does.
-        "=__INVOKE__(LAMBDA(B,SUM(B:B)),B1:B2)",
-        "=__INVOKE__(LAMBDA(B,SUM(B:B)),C1:C2)",
-        "=__INVOKE__(LAMBDA(B,SUM(B:B)),A2:A3)",
-        "=__INVOKE__(LAMBDA(B,SUM(B:B)),A41:A42)",
+        // An inline LAMBDA call renders as Excel spells it (lane formc: it
+        // rendered the engine's `__INVOKE__(lambda,args)` marker before).
+        "=LAMBDA(B,SUM(B:B))(B1:B2)",
+        "=LAMBDA(B,SUM(B:B))(C1:C2)",
+        "=LAMBDA(B,SUM(B:B))(A2:A3)",
+        "=LAMBDA(B,SUM(B:B))(A41:A42)",
     ),
 ];
 
@@ -194,4 +195,94 @@ fn the_filled_cells_compute_what_excel_shows() {
     assert_eq!(value(&wb, 1, 5), CellValue::Number(165.0), "F2 = SUM(A:B) = 165 in Excel");
     copy_paste(&wb, (1, 5), (1, 7));
     assert_eq!(value(&wb, 1, 7), CellValue::Number(1500.0), "H2 = SUM(C:D) = 1500 in Excel");
+}
+
+/// A LET / LAMBDA name SPELLED LIKE A CELL is a name to Fill and Copy+Paste,
+/// and so is every plain cell spelling in a formula that declares one.
+/// [LIVE, Excel 16, 2026-11-05, rev-parse probeA, Sheet2: B2 =LET(x1,5,x1*2)
+/// and C2 =LET(A1,5,A1+RC4) (stored `$D2`) copied up to row 1 and filled down
+/// to row 4 -- the names unchanged, `$D1` and `$D4`; XFC3 =LET(XFD1,5,XFD1*2)
+/// filled right onto XFD3 and Q7 =LET(Q5,2,Q5*3) onto R7, both unchanged, 10
+/// and 6.] Calcula renamed `x1` to `x2` on every fill, wrote `=LET(R5,2,R5*3)`
+/// into R7 -- a formula its own typed entry refuses -- and `#REF!` names at
+/// the sheet's edge.
+#[test]
+fn fill_and_copy_paste_keep_a_name_spelled_like_a_cell() {
+    let wb = workbook();
+    wb.set(1, 1, "=LET(x1,5,x1*2)"); // B2
+    wb.set(1, 2, "=LET(A1,5,A1+RC4)"); // C2, entered as $D2
+    assert_eq!(formula(&wb, 1, 2), "=LET(A1,5,A1+$D2)", "R1C1's RC4 is entered as $D2");
+    let kept = formula(&wb, 1, 1);
+
+    copy_paste(&wb, (1, 1), (0, 1)); // B2 -> B1
+    assert_eq!(formula(&wb, 0, 1), kept, "Copy+Paste up renamed the name");
+    // C2's copy up is the shift `=LET(A1,5,A1+$D1)` (pinned by
+    // `structure::cell_shaped_name_shift_tests`); the batch write then puts
+    // the pasted text through the TYPED-entry check, which refuses its `$`
+    // (reported separately), so it is not pasted here.
+    assert_eq!(
+        crate::commands::structure::shift_formula_internal(&formula(&wb, 1, 2), -1, 0),
+        "=LET(A1,5,A1+$D1)"
+    );
+
+    fill(&wb, (1, 1, 1, 2), (2, 1, 3, 2)); // B2:C2 filled down to row 4
+    assert_eq!(formula(&wb, 3, 1), kept, "Fill Down renamed the name");
+    assert_eq!(formula(&wb, 3, 2), "=LET(A1,5,A1+$D4)");
+    assert_eq!(value(&wb, 3, 1), CellValue::Number(10.0));
+
+    let xfc = engine::EXCEL_MAX_COL_INDEX - 1;
+    wb.set(2, xfc, "=LET(XFD1,5,XFD1*2)");
+    fill(&wb, (2, xfc, 2, xfc), (2, xfc + 1, 2, xfc + 1)); // onto XFD3
+    assert_eq!(formula(&wb, 2, xfc + 1), "=LET(XFD1,5,XFD1*2)", "Fill Right at the sheet's edge broke the name");
+    assert_eq!(value(&wb, 2, xfc + 1), CellValue::Number(10.0));
+
+    wb.set(6, 16, "=LET(Q5,2,Q5*3)"); // Q7
+    fill(&wb, (6, 16, 6, 16), (6, 17, 6, 17)); // onto R7
+    assert_eq!(formula(&wb, 6, 17), "=LET(Q5,2,Q5*3)", "Fill Right renamed Q5 to R5");
+    assert_eq!(value(&wb, 6, 17), CellValue::Number(6.0));
+
+    copy_paste(&wb, (1, 1), (40, 7)); // B2 -> H41
+    assert_eq!(formula(&wb, 40, 7), kept, "a copy across the sheet renamed the name");
+}
+
+/// NEW-typed-ref-error (lane formd), through the REAL `update_cell` door: a
+/// reference into a DELETED sheet cannot be TYPED ([LIVE] Excel 16 refuses
+/// `=#REF!A1` with 0x800A03EC), while a cell that already HOLDS one (here
+/// laid down by a paste, which reads a formula as a stored one) keeps it on
+/// F2 + Enter, as Excel's does. Kept in this file for its paste harness.
+#[test]
+fn a_stored_deleted_sheet_reference_survives_f2_enter_but_cannot_be_typed() {
+    let wb = workbook();
+    // A paste lays the formula down as stored (`parse_pasted_input`).
+    update_cells_batch_core(
+        &wb.state,
+        &wb.file,
+        &wb.files,
+        &wb.pivots,
+        vec![crate::api_types::CellUpdateInput {
+            row: 10,
+            col: 5,
+            value: "=#REF!A1".to_string(),
+            style_index: None,
+            invariant: Some(true),
+            pasted: Some(true),
+            moved: None,
+            source: None,
+        }],
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("the paste writes");
+    assert_eq!(formula(&wb, 10, 5), "=#REF!A1", "precondition: the cell holds the formula");
+    assert_eq!(value(&wb, 10, 5), CellValue::Error(CellError::Ref));
+    // F2 + Enter commits the formula bar's text unchanged: the formula stays.
+    wb.set(10, 5, "=#REF!A1");
+    assert_eq!(formula(&wb, 10, 5), "=#REF!A1", "F2 + Enter turned the stored formula into text");
+    assert_eq!(value(&wb, 10, 5), CellValue::Error(CellError::Ref));
+    // Typed into another cell it is refused, and the typed text is kept.
+    wb.set(11, 5, "=#REF!A1");
+    assert_eq!(formula(&wb, 11, 5), "", "a typed reference into a deleted sheet was accepted");
+    assert_eq!(value(&wb, 11, 5), CellValue::Text("=#REF!A1".to_string()));
 }

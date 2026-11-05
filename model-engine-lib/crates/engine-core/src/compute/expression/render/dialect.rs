@@ -19,6 +19,7 @@
 //! dialects return `Err` for those nodes.
 
 use crate::compute::aggregate::AggregateOp;
+use crate::compute::dax_semantics::{self, DivideStyle};
 use crate::compute::expression::{validate_call_name, Expression, ScalarFunction};
 use crate::error::{EngineError, EngineResult};
 
@@ -38,9 +39,48 @@ pub trait Dialect {
         operand_sql: &str,
     ) -> EngineResult<String>;
 
+    /// The WHEN condition of a `CASE` this dialect renders from a model
+    /// condition (a KEEP filter, an `IF`, a `COUNTIF`). The default is the
+    /// condition as written: a SQL-standard source (PostgreSQL, SQL Server)
+    /// never takes a branch whose condition is NULL. A dialect whose `CASE`
+    /// can take one spells the condition so NULL is FALSE
+    /// ([`DataFusionDialect`], see
+    /// [`crate::compute::sql_util::null_is_false_condition`]). `is_predicate`
+    /// says the condition is boolean by its shape.
+    fn case_condition(&self, condition_sql: &str, is_predicate: bool) -> String {
+        let _ = is_predicate;
+        condition_sql.to_string()
+    }
+
     /// The cast target used for safe division (`DIVIDE`): e.g. `DOUBLE` vs
     /// `DOUBLE PRECISION`.
     fn divide_cast(&self) -> &'static str;
+
+    /// How this dialect spells the DAX `/` operator's IEEE division by zero
+    /// (`x / 0` is `+/-Infinity`, `0 / 0` is `NaN`, never an error). The
+    /// default guards the zero denominator explicitly, which is correct for a
+    /// source whose floating-point division by zero is an error (PostgreSQL);
+    /// a dialect whose float division is already IEEE returns
+    /// [`DivideStyle::Ieee`]. See [`crate::compute::dax_semantics`].
+    fn divide_style(&self) -> DivideStyle {
+        DivideStyle::Guarded {
+            cast: self.divide_cast(),
+        }
+    }
+
+    /// Render a non-finite float literal (`+/-Infinity`, `NaN` — the constant
+    /// folder's answer to a DAX division by zero). The default is the SQL
+    /// standard string cast (`CAST('Infinity' AS DOUBLE PRECISION)`).
+    fn non_finite_float(&self, value: f64) -> String {
+        let text = if value.is_nan() {
+            "NaN"
+        } else if value > 0.0 {
+            "Infinity"
+        } else {
+            "-Infinity"
+        };
+        format!("CAST('{text}' AS {})", self.divide_cast())
+    }
 
     /// Render a `Date32` literal (days since the Unix epoch) as a date-typed
     /// SQL constant. DataFusion reinterprets an integer cast (`CAST(n AS DATE)`)
@@ -106,8 +146,34 @@ impl Dialect for DataFusionDialect {
         Ok(op.render_case_when_sql(condition, operand_sql))
     }
 
+    // DataFusion 44's `CASE WHEN c THEN col END` answers `col` when `c` is
+    // NULL; `COALESCE(c, FALSE)` is never NULL.
+    fn case_condition(&self, condition_sql: &str, is_predicate: bool) -> String {
+        crate::compute::sql_util::null_is_false_condition(condition_sql, is_predicate)
+    }
+
     fn divide_cast(&self) -> &'static str {
         "DOUBLE"
+    }
+
+    // Arrow's `div` kernel follows IEEE 754 for floating point (it errors on
+    // division by zero for integers only), and the DAX `/` casts both sides
+    // to DOUBLE, so no explicit zero guard is needed.
+    fn divide_style(&self) -> DivideStyle {
+        DivideStyle::Ieee
+    }
+
+    // DataFusion's string -> float cast is not relied on for the special
+    // values; the IEEE division spells them exactly.
+    fn non_finite_float(&self, value: f64) -> String {
+        let numerator = if value.is_nan() {
+            0
+        } else if value > 0.0 {
+            1
+        } else {
+            -1
+        };
+        format!("(CAST({numerator} AS DOUBLE) / CAST(0 AS DOUBLE))")
     }
 
     fn date_literal(&self, days: i32) -> EngineResult<String> {
@@ -123,9 +189,12 @@ impl Dialect for DataFusionDialect {
         denominator: &str,
         alternate: &str,
     ) -> EngineResult<String> {
-        // DataFusion plain SQL parenthesizes the division.
-        Ok(format!(
-            "CASE WHEN {denominator} = 0 THEN {alternate} ELSE (CAST({numerator} AS DOUBLE) / {denominator}) END"
+        // DAX DIVIDE: a zero OR BLANK denominator answers the alternate.
+        Ok(dax_semantics::safe_divide_sql(
+            numerator,
+            denominator,
+            alternate,
+            self.divide_cast(),
         ))
     }
 
@@ -205,8 +274,12 @@ impl Dialect for PostgresDialect {
         denominator: &str,
         alternate: &str,
     ) -> EngineResult<String> {
-        Ok(format!(
-            "CASE WHEN {denominator} = 0 THEN {alternate} ELSE CAST({numerator} AS DOUBLE PRECISION) / {denominator} END"
+        // DAX DIVIDE: a zero OR BLANK denominator answers the alternate.
+        Ok(dax_semantics::safe_divide_sql(
+            numerator,
+            denominator,
+            alternate,
+            self.divide_cast(),
         ))
     }
 

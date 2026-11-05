@@ -716,7 +716,7 @@ describe("getWorkbookCodeUnits — a macro written as an object script (F7)", ()
     expect(u.interpreterCapabilities).toBeNull();
     expect(u.module).toEqual({ runtime: "objectScript", cellAccessWhenYouRunIt: true });
     expect(u.residence).toContain("Macro written as an object script");
-    expect(u.residence).toContain("when you run it yourself it may also read and change cells on any sheet");
+    expect(u.residence).toContain("when you run it yourself it may also read and change cells, and how they look, on any sheet");
     expect(u.mounted).toBe(false);
     expect(codeUnitReachesBeyondGrid(u)).toBe(false);
   });

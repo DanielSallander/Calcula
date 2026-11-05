@@ -178,3 +178,45 @@ fn both_bi_grid_writers_use_the_shared_result_cell_writer() {
         assert!(!b.contains("try_parse_number"), "{name} kept the old guess");
     }
 }
+
+/// NEW-bi-nonfinite-cells: a DAX measure's `1/0`, `-1/0` and `0/0` reach the
+/// host as the machine text "inf", "-inf" and "NaN" (`f64`'s `Display`).
+/// [LIVE] Excel 16 shows `#NUM!` for all three, in CUBEVALUE and in a
+/// data-model PivotTable alike; Insert Result (and its refresh) wrote
+/// `Cell::new_number(inf)`.
+#[test]
+fn a_non_finite_measure_value_is_written_as_num_error() {
+    let schema = Arc::new(Schema::new(vec![Field::new("m", ArrowType::Float64, true)]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(Float64Array::from(vec![
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::NAN),
+            Some(2.5),
+        ]))],
+    )
+    .unwrap();
+    let result = batches_to_result(&[batch]);
+    let mut styles = StyleRegistry::new();
+    for (row, expected) in result.rows.iter().zip([
+        CellValue::Error(engine::CellError::Num),
+        CellValue::Error(engine::CellError::Num),
+        CellValue::Error(engine::CellError::Num),
+        CellValue::Number(2.5),
+    ]) {
+        let cells = written(&result.column_kinds, row, &de(), &mut styles);
+        assert_eq!(cells[0].value, expected, "{row:?}");
+    }
+    // A column of no known type reads only the host's own spellings as a
+    // number; "Infinity" or "nan" there stays someone's text.
+    let unknown = written(
+        &[],
+        &[Some("inf".to_string()), Some("Infinity".to_string()), Some("nan".to_string())],
+        &de(),
+        &mut styles,
+    );
+    assert_eq!(unknown[0].value, CellValue::Error(engine::CellError::Num));
+    assert_eq!(unknown[1].value, CellValue::Text("Infinity".to_string()));
+    assert_eq!(unknown[2].value, CellValue::Text("nan".to_string()));
+}

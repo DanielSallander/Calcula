@@ -357,3 +357,72 @@ fn a_pane_dropdowns_cell_range_source_follows_a_rename() {
         other => panic!("{:?}", other),
     }
 }
+
+/// BUG-0470. A rename or delete repair re-renders the WHOLE rule formula, and
+/// the lexer upper-cases a bare sheet name it re-reads: deleting Inputs turned
+/// the CF rule `=Data!A1&Inputs!B1` into `=DATA!A1&#REF!`, and a rename re-spelt
+/// the untouched `Data!A1` the same way. Excel spells every sheet as its tab
+/// does, so only the reference the operation touched may change.
+#[test]
+fn a_rule_repair_keeps_every_other_sheet_spelled_as_its_tab() {
+    use crate::conditional_formatting as cf;
+    use crate::data_validation as dv;
+    let state = crate::create_app_state();
+    let file = FileState::default();
+    add_sheet_inner(&state, &file, Some("Data".to_string()), ::persistence::SheetKind::Worksheet).expect("add Data");
+    add_sheet_inner(&state, &file, Some("Inputs".to_string()), ::persistence::SheetKind::Worksheet).expect("add Inputs");
+    activate_sheet(&state, 0).expect("back to Sheet1");
+    let pivots = PivotState::new();
+    let seed = test_seed_effect();
+    state.conditional_formats.write(&seed).unwrap().insert(
+        0,
+        vec![cf_def(1, cf::ConditionalFormatRule::Expression(cf::ExpressionRule { formula: "=Data!A1&Inputs!B1".to_string() }))],
+    );
+    state.data_validations.write(&seed).unwrap().insert(
+        0,
+        vec![dv::ValidationRange {
+            start_row: 0,
+            start_col: 0,
+            end_row: 9,
+            end_col: 0,
+            validation: dv::DataValidation {
+                rule: dv::DataValidationRule::Custom(dv::CustomRule {
+                    formula: "=COUNTIF(Data!A:A,A1)+Inputs!B1>1".to_string(),
+                }),
+                ..dv::DataValidation::default()
+            },
+        }],
+    );
+    let cf_formula = |state: &AppState| match &state.conditional_formats.read().unwrap()[&0][0].rule {
+        cf::ConditionalFormatRule::Expression(r) => r.formula.clone(),
+        other => panic!("{:?}", other),
+    };
+    let dv_formula = |state: &AppState| match &state.data_validations.read().unwrap()[&0][0].validation.rule {
+        dv::DataValidationRule::Custom(r) => r.formula.clone(),
+        other => panic!("{:?}", other),
+    };
+
+    rename_sheet_inner(&state, &file, &pivots, 2, "Facts".to_string(), false).expect("rename Inputs");
+    assert_eq!(cf_formula(&state), "=Data!A1&Facts!B1", "the rename re-spelt the untouched Data reference");
+    assert_eq!(dv_formula(&state), "=COUNTIF(Data!A:A,A1)+Facts!B1>1");
+
+    delete_sheet_impl(
+        &state,
+        &file,
+        &pivots,
+        &crate::persistence::UserFilesState::default(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        &crate::slicer::SlicerState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        2,
+        false,
+        None,
+    )
+    .expect("delete Facts");
+    // The deleted sheet's reference keeps its cell part behind `#REF!`, as
+    // Excel writes a rule [LIVE, 2026-11-05, sheetspill/probe1.ps1:
+    // `=A1>#REF!$B$1`].
+    assert_eq!(cf_formula(&state), "=Data!A1&#REF!B1", "the delete re-spelt the untouched Data reference");
+    assert_eq!(dv_formula(&state), "=COUNTIF(Data!A:A,A1)+#REF!B1>1");
+}

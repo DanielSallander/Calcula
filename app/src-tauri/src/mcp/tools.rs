@@ -1596,6 +1596,7 @@ fn apply_script_result(
                 cells_modified,
                 "mcp",
                 "",
+                crate::commands::data::RegionGate::Enforce,
             )?;
             // Notify the (out-of-band) frontend so the open grid refreshes — the
             // same Tauri-event bridge create_chart_from_spec uses for charts.

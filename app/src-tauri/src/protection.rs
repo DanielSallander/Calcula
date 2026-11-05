@@ -1258,14 +1258,66 @@ pub struct ProtectionCellRef {
 /// freezes the window, and a list longer than [`CAN_EDIT_CELLS_MAX`] is
 /// refused with a plain reason before any guard is taken (a whole-column
 /// paste is about 1M cells, well inside it).
+///
+/// `target` (BUG-0655): the cells are a FLOATING GRID's own cells -- asked
+/// of its backing sheet's lock flags under its HOST's protection (the host's
+/// allow-edit ranges do not reach the grid: `protection_view_for`), the same
+/// gate the grid's content write asks (`gate_target_cell_list`). A target that
+/// does not resolve, or a cell outside its write extent, cannot be edited.
+/// This is what lets a formatting-only paste onto a grid tell "only Format
+/// Cells refuses, every cell is unlocked" (Excel: silent) from a locked cell's
+/// refusal, as the sheet route does.
 #[tauri::command(async)]
 pub fn can_edit_cell(
     state: State<AppState>,
     row: u32,
     col: u32,
     cells: Option<Vec<ProtectionCellRef>>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> ProtectionCheckResult {
-    can_edit_cell_core(&state, row, col, cells)
+    match target {
+        Some(target) => can_edit_target_cells_core(&state, &target, row, col, cells),
+        None => can_edit_cell_core(&state, row, col, cells),
+    }
+}
+
+/// [`can_edit_cell`] with a `target`: the floating grid's own cells, under the
+/// host's protection. Holding nothing on entry; every guard is read and
+/// released (`resolve_cell_target`, then `gate_target_cell_list`).
+pub(crate) fn can_edit_target_cells_core(
+    state: &AppState,
+    target: &crate::api_types::CellTargetRef,
+    row: u32,
+    col: u32,
+    cells: Option<Vec<ProtectionCellRef>>,
+) -> ProtectionCheckResult {
+    let refused = |reason: String| ProtectionCheckResult { can_edit: false, reason: Some(reason) };
+    // The same bound, refused the same way before anything is read (the
+    // sheet form answers it before taking any guard).
+    if cells.as_ref().is_some_and(|list| list.len() > CAN_EDIT_CELLS_MAX) {
+        return can_edit_cell_core(state, row, col, cells);
+    }
+    let asked: Vec<(u32, u32)> = match cells {
+        Some(list) => list.iter().map(|c| (c.row, c.col)).collect(),
+        None => vec![(row, col)],
+    };
+    if asked.is_empty() {
+        return ProtectionCheckResult { can_edit: true, reason: None };
+    }
+    let t = match crate::cell_target::resolve_cell_target(state, target) {
+        Ok(t) => t,
+        Err(e) => return refused(e),
+    };
+    let (r0, c0, r1, c1) = asked.iter().fold((u32::MAX, u32::MAX, 0u32, 0u32), |(a, b, c, d), &(r, col)| {
+        (a.min(r), b.min(col), c.max(r), d.max(col))
+    });
+    if let Err(e) = crate::cell_target::ensure_in_extent(&t, r0, c0, r1, c1) {
+        return refused(e);
+    }
+    match crate::cell_target::gate_target_cell_list(state, &t, &asked) {
+        Ok(()) => ProtectionCheckResult { can_edit: true, reason: None },
+        Err(e) => refused(e),
+    }
 }
 
 /// The most cells one `can_edit_cell` list may name: four whole columns
@@ -1318,12 +1370,36 @@ pub(crate) fn can_edit_cell_core(
     }
 }
 
-/// Check if a specific action can be performed
+/// Check if a specific action can be performed.
+///
+/// `target` (BUG-0655): the action on a FLOATING GRID's cells, asked of its
+/// HOST's protection (`gate_host_action`, the gate the grid's own writes ask);
+/// a target that does not resolve cannot perform it.
 #[tauri::command]
 pub fn can_perform_action(
     state: State<AppState>,
     action: String,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> ProtectionCheckResult {
+    can_perform_action_core(&state, &action, target.as_ref())
+}
+
+/// [`can_perform_action`] over a plain reference, for the unit tier.
+pub(crate) fn can_perform_action_core(
+    state: &AppState,
+    action: &str,
+    target: Option<&crate::api_types::CellTargetRef>,
+) -> ProtectionCheckResult {
+    if let Some(target) = target {
+        let gate = crate::cell_target::resolve_cell_target(state, target).and_then(|t| {
+            let what = format!("perform '{action}'");
+            crate::cell_target::gate_host_action(state, t.host_index, t.backing_index, action, &what)
+        });
+        return match gate {
+            Ok(()) => ProtectionCheckResult { can_edit: true, reason: None },
+            Err(e) => ProtectionCheckResult { can_edit: false, reason: Some(e) },
+        };
+    }
     let active_sheet = *state.active_sheet.read().unwrap();
     let protection_storage = state.sheet_protection.read().unwrap();
 
@@ -1337,7 +1413,7 @@ pub fn can_perform_action(
         }
     };
 
-    if protection.is_action_allowed(&action) {
+    if protection.is_action_allowed(action) {
         ProtectionCheckResult {
             can_edit: true,
             reason: None,

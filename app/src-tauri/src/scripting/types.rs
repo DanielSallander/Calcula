@@ -564,6 +564,11 @@ pub enum RunScriptResponse {
         deferred_actions: Vec<script_engine::types::DeferredAction>,
         /// Application.screenUpdating value at end of script
         screen_updating: bool,
+        /// The run applied queued cell styles (`Calcula.applyNamedStyle`) in
+        /// its own undo step: the page re-reads its styles and repaints. Absent
+        /// (false) when it applied none.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        formatting_applied: bool,
     },
     /// Script encountered an error
     #[serde(rename_all = "camelCase")]

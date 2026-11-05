@@ -52,110 +52,20 @@ pub struct NamedRangeCoords {
 }
 
 impl NamedRange {
-    /// Validate that the name is a valid identifier.
-    /// Names must start with a letter or underscore, and contain only
-    /// letters, numbers, underscores, and periods.
+    /// Whether `name` is a name Excel would accept as a defined name -- the
+    /// whole rule, measured live, is `identity::is_valid_defined_name`.
+    /// Delegated rather than kept here so the `.calp` publish and pull doors
+    /// (core/calp cannot reach this crate) refuse exactly what this door
+    /// refuses: a package's `R1C1` or `Q1` is the name the Name Manager would
+    /// not accept, and its `.xlsx` export is a file Excel will not open.
     pub fn is_valid_name(name: &str) -> bool {
-        if name.is_empty() {
-            return false;
-        }
-
-        let mut chars = name.chars();
-
-        // First character must be letter or underscore
-        match chars.next() {
-            Some(c) if c.is_alphabetic() || c == '_' => {}
-            _ => return false,
-        }
-
-        // Remaining characters can be alphanumeric, underscore, or period
-        for c in chars {
-            if !c.is_alphanumeric() && c != '_' && c != '.' {
-                return false;
-            }
-        }
-
-        // Cannot be a valid cell reference (like A1, B2, etc.)
-        if NamedRange::looks_like_cell_reference(name) {
-            return false;
-        }
-
-        // Cannot be TRUE, FALSE, or reserved words
-        let upper = name.to_uppercase();
-        if upper == "TRUE" || upper == "FALSE" || upper == "NULL" {
-            return false;
-        }
-
-        true
+        identity::is_valid_defined_name(name)
     }
 
-    /// Check if a string looks like a cell reference (e.g., A1, BC123).
-    /// Valid Excel columns are A-XFD (1-16384) and rows are 1-1048576.
+    /// Whether a string reads as an A1 cell (e.g., A1, BC123).
+    #[cfg(test)]
     fn looks_like_cell_reference(s: &str) -> bool {
-        let upper = s.to_uppercase();
-        let bytes = upper.as_bytes();
-
-        // Find where letters end and digits begin
-        let mut letter_end = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b.is_ascii_uppercase() {
-                letter_end = i + 1;
-            } else {
-                break;
-            }
-        }
-
-        // Must have at least one letter
-        if letter_end == 0 {
-            return false;
-        }
-
-        // Must have at least one digit after the letters
-        if letter_end >= bytes.len() {
-            return false;
-        }
-
-        // All remaining characters must be digits
-        for &b in &bytes[letter_end..] {
-            if !b.is_ascii_digit() {
-                return false;
-            }
-        }
-
-        // Convert column letters to column number (A=1, B=2, ..., Z=26, AA=27, etc.)
-        //
-        // The ceiling is enforced INSIDE the loop, and that placement is the whole
-        // point. This ran the multiplication to the end of the letter run and only
-        // then compared against 16384 — so a name like "ABCDEFGHIJKLMNOP1"
-        // overflowed `u32` first. In a debug build that is a panic, and this
-        // function is reached from a `#[tauri::command]` on a thread that cannot
-        // unwind, so the panic ABORTED THE WHOLE APPLICATION
-        // (STATUS_STACK_BUFFER_OVERRUN) rather than rejecting the name. A user
-        // typing a long alphabetic name that ends in digits could kill the app and
-        // lose the workbook.
-        //
-        // Bailing at the ceiling also makes overflow unreachable by construction:
-        // `col_num` is at most 16384 on entry to each multiply, so the largest
-        // value the arithmetic can produce is 16384 * 26 + 26 = 426,010.
-        let col_str = &upper[..letter_end];
-        let mut col_num: u32 = 0;
-        for c in col_str.chars() {
-            col_num = col_num * 26 + (c as u32 - 'A' as u32 + 1);
-            // Excel max column is XFD = 16384. Past it, this is not a cell
-            // reference and no further digits can bring it back.
-            if col_num > 16384 {
-                return false;
-            }
-        }
-
-        // Parse the row number
-        let row_str = &upper[letter_end..];
-        if let Ok(row_num) = row_str.parse::<u32>() {
-            // Row must be between 1 and 1048576
-            row_num >= 1 && row_num <= 1048576
-        } else {
-            false
-        }
+        identity::defined_name_syntax::looks_like_a1_cell(s)
     }
 }
 
@@ -198,6 +108,11 @@ pub(crate) fn recalc_after_name_change(
     if changed.is_empty() {
         return;
     }
+    // THE LIVE DATA TABLES are refreshed by every caller at its tail
+    // (`data_tables::refresh_after_edit`), once: the two cascades below do not
+    // refresh on their own (NEW-dt-refresh-root; the census in
+    // `data_table_refresh_tests` holds each caller to that tail).
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
     // MANUAL CALCULATION: the user asked for stale values until F9, and a name
     // change is a value change like any other. Gated HERE rather than relying on
     // the helpers, because only one of the two honours the mode
@@ -205,15 +120,24 @@ pub(crate) fn recalc_after_name_change(
     // does not), and half a recalculation is worse than none — it would leave
     // the sheets you are NOT looking at fresh and the one you are looking at
     // stale.
+    let changed_keys: HashSet<String> = changed.iter().map(|n| identity::defined_name_key(n)).collect();
     if state
         .calculation_mode
         .lock()
         .map(|m| *m != "automatic")
         .unwrap_or(false)
     {
+        // ...and the workbook SAYS so when a formula reads the name
+        // (NEW-manual-visibility-pending): Excel [LIVE, backende/probe1.ps1 N1
+        // and N2, manual calculation]: repointing a name `=SUM(Vals)` reads
+        // gave xlPending, while repointing, adding or deleting a name nothing
+        // reads stayed xlDone -- with a data table on the sheet too (N3). This
+        // returned without a mark, so a save vouched for the stale readers.
+        if name_is_read_anywhere(state, &changed_keys) {
+            crate::calculation::note_stored_values_may_be_stale(state);
+        }
         return;
     }
-    let changed_keys: HashSet<String> = changed.iter().map(|n| identity::defined_name_key(n)).collect();
 
     // OFF-SHEET half first, mirroring `apply_changes`: the active-sheet cascade
     // below then reads values the other sheets have already settled on.
@@ -281,6 +205,27 @@ pub(crate) fn recalc_after_name_change(
     // those five callers to apply a cell list instead.
 }
 
+/// Whether some formula reads one of the names `changed_keys` (folded with
+/// `identity::defined_name_key`): the readers [`recalc_after_name_change`]
+/// would recalculate under automatic calculation -- the active sheet's through
+/// `name_dependents`, every other sheet's by asking its cells. Each lock is
+/// taken alone and released.
+fn name_is_read_anywhere(state: &AppState, changed_keys: &HashSet<String>) -> bool {
+    let active_reads = {
+        let name_dependents = state.name_dependents.lock().unwrap();
+        changed_keys.iter().any(|key| name_dependents.get(key).is_some_and(|cells| !cells.is_empty()))
+    };
+    if active_reads {
+        return true;
+    }
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    grids.iter().enumerate().any(|(idx, grid)| {
+        idx != active_sheet
+            && grid.cells.values().any(|cell| crate::name_resolution::cell_reads_any_name(cell, changed_keys))
+    })
+}
+
 /// Create a new named range.
 #[tauri::command]
 pub fn create_named_range(
@@ -312,9 +257,51 @@ pub fn create_named_range(
                 &ribbon_filter_state,
                 &[nr.name.clone()],
             );
+            // A LIVE DATA TABLE whose model reads the name follows it under
+            // automatic calculation (BUG-0652, rev-dt2-1). No guard is held;
+            // the grid re-reads on NAMED_RANGES_CHANGED, so the cells are not kept.
+            crate::data_tables::refresh_after_edit(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                &mut Vec::new(),
+            );
         }
     }
     result
+}
+
+/// Excel's message for a defined name's formula it will not take.
+pub(crate) const NAME_FORMULA_REFUSAL: &str = "There's a problem with this formula.";
+
+/// Why a name's formula is refused at ENTRY (Define Name, the Name Manager's
+/// edit, the MCP and script doors that run these bodies), or `None`.
+///
+/// [LIVE, Excel 16, 2026-11-05, rev-parse probes B and G: `Names.Add` refuses
+/// `=LAMBDA(a1,a1*2)`, `=LAMBDA(a1,a1+D1)`, `=LAMBDA(a1,a1+Sheet1!$D$1)`,
+/// `=LET(a1,5,a1+Sheet1!$D$1)`, `=LET(a1,5,a1+R1C4)` and the same LAMBDA set in
+/// R1C1 with "There's a problem with this formula.", and takes
+/// `=LAMBDA(x,x*2)`.] A name's formula has no cell to fall back to R1C1 in, so
+/// a LET name or LAMBDA parameter spelled like a cell is no name there at all;
+/// Calcula defined every one of them. The cell-entry checks
+/// (`parser::check_entered_formula`) apply as they do to a typed formula.
+///
+/// A formula that does not parse is left to the callers as before: only the
+/// shapes Excel's own entry refuses are refused here. Excel OPENS a workbook
+/// that carries such a name, so the load path never comes through here.
+fn refers_to_entry_refusal(refers_to: &str) -> Option<String> {
+    let ast = parser::parse(refers_to).ok()?;
+    if parser::parser::declares_cell_shaped_name(&ast) {
+        return Some(format!(
+            "{} A LET name or LAMBDA parameter spelled like a cell (such as A1) cannot be used in a defined name.",
+            NAME_FORMULA_REFUSAL
+        ));
+    }
+    parser::check_entered_formula(&ast)
+        .err()
+        .map(|e| format!("{} {}", NAME_FORMULA_REFUSAL, e.message))
 }
 
 /// Command body over plain references, so the dirty-flag contract is unit-testable
@@ -335,6 +322,12 @@ pub(crate) fn create_named_range_impl(
             named_range: None,
             error: Some(format!("Invalid name '{}'. Names must start with a letter or underscore, contain only letters, numbers, underscores, and periods, and cannot be cell references.", name)),
         };
+    }
+    // The formula's own entry checks, before any lock or effect (Excel
+    // refuses these in the Name Manager; a loaded name is never put through
+    // them).
+    if let Some(error) = refers_to_entry_refusal(&refers_to) {
+        return NamedRangeResult { success: false, named_range: None, error: Some(error) };
     }
 
     let key = identity::defined_name_key(&name);
@@ -489,6 +482,11 @@ pub(crate) fn update_named_range_core(
     comment: Option<String>,
     folder: Option<String>,
 ) -> NamedRangeResult {
+    // The formula's own entry checks, before any lock or effect: see
+    // [`refers_to_entry_refusal`].
+    if let Some(error) = refers_to_entry_refusal(&refers_to) {
+        return NamedRangeResult { success: false, named_range: None, error: Some(error) };
+    }
     let key = identity::defined_name_key(&name);
     let named_range = NamedRange {
         name: name.clone(),
@@ -553,6 +551,17 @@ pub(crate) fn update_named_range_core(
         pane_control_state,
         ribbon_filter_state,
         &[name],
+    );
+    // A LIVE DATA TABLE whose model reads the name follows it under automatic
+    // calculation (BUG-0652, rev-dt2-1). The grid re-reads on
+    // NAMED_RANGES_CHANGED, so the cells are not kept.
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &mut Vec::new(),
     );
 
     NamedRangeResult {
@@ -715,6 +724,16 @@ pub(crate) fn delete_named_range_core(
                 pane_control_state,
                 ribbon_filter_state,
                 &[name],
+            );
+            // A LIVE DATA TABLE whose model read the name follows it under
+            // automatic calculation (BUG-0652, rev-dt2-1).
+            crate::data_tables::refresh_after_edit(
+                state,
+                user_files_state,
+                pivot_state,
+                pane_control_state,
+                ribbon_filter_state,
+                &mut Vec::new(),
             );
 
             NamedRangeResult {
@@ -1095,6 +1114,16 @@ pub(crate) fn rename_named_range_core(
             pane_control_state,
             ribbon_filter_state,
             &[old_name.to_string(), new_name.to_string()],
+        );
+        // A LIVE DATA TABLE whose model reads either spelling follows the
+        // rename under automatic calculation (BUG-0652, rev-dt2-1).
+        crate::data_tables::refresh_after_edit(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &mut Vec::new(),
         );
     }
     result
@@ -1950,6 +1979,80 @@ mod tests {
         assert!(!NamedRange::is_valid_name("Data@2024")); // Invalid character
     }
 
+    /// Excel refuses every name that reads as a reference in EITHER notation
+    /// [LIVE, Excel 16 build 20326, 2026-11-05,
+    /// miscb-probe1..4.ps1: `Workbook.Names.Add(name, "=1")` per name]. Calcula
+    /// accepted `C`, `R`, `RC`, `R1C1`, `R2C3` and every other R1C1 shape.
+    #[test]
+    fn names_that_read_as_r1c1_references_are_refused_as_excel_does() {
+        let refused = [
+            "C", "c", "R", "r", "RC", "rc", "Rc", "R1C1", "r1c1", "R2C3", "R1", "C1", "RC1", "R1C",
+            "R1048576C16384", "R1C16385", "R1C99999999", "R1C1A", "R1C1R1C1",
+            "R1x", "R5abc", "R5_", "C5x", "C5_", "RC1x", "RC1_", "R1Cx", "R1C_", "RC16384x", "R5C0",
+            "R5C0x", "R1048576", "R1048576x", "R01", "R01C01", "RC01", "R1C0", "C16384x", "r1C",
+            "R1CC", "RC1C", "R1R", "C1C", "C1R", "R1C1.", "R1C1.x", "R1C.X", "R1C1.A",
+            // A1 cells and the constants.
+            "A1", "a1", "XFD1048576", "A01", "A001", "Q1", "xR1", "TRUE", "False", "true",
+        ];
+        for name in refused {
+            assert!(!NamedRange::is_valid_name(name), "Excel refuses the name {:?}", name);
+        }
+        assert_excels_accepted_names();
+    }
+
+    /// Lotus-style ranges: an A1 cell, periods, an A1 cell [LIVE, as above].
+    #[test]
+    fn names_that_read_as_dotted_ranges_are_refused_as_excel_does() {
+        let dotted = [
+            "A1.B1", "A1..B1", "A1.B1.C1", "A1.B1.x", "a1.b1", "AB1.CD2", "R1.A1", "A1.A1",
+            "XFD1048576.A1", "A01.B01", "R1.C1", "R5.C1",
+        ];
+        for name in dotted {
+            assert!(!NamedRange::is_valid_name(name), "Excel refuses the dotted range name {:?}", name);
+        }
+        assert_excels_accepted_names();
+    }
+
+    /// Names Excel ACCEPTS that look close to a reference [LIVE, as above].
+    fn assert_excels_accepted_names() {
+        let accepted = [
+            "R0C0", "R0", "C0", "RC0", "R0C", "R1048577C1", "R1048577", "R99999999C1", "R10485760",
+            "RCX", "RC_", "R_1", "CR", "RR", "CC", "_R1C1", "RC.", "C.", "R.", "_C", "C_", "Rr", "RCC",
+            "RCR", "Cr", "R5.", "R0C5", "RC0x", "C0x", "R00", "C1048577", "C99999999", "C16385x",
+            "C20000x", "RC16385x", "RC1048577", "R1.", "R1.x", "R1.A", "RC1.", "RC1.x", "C1.",
+            "C5.x", "R.C1", "x.R1C1", "x.R1", "R0.C1", "RC.C1", "R1.1", "R1._", "RC1.C", "C1.C",
+            "R5.5", "x.R1.y", "R1.C1x", "R1048577.C1", "C0.C1", "R1048576.", "C16384.x",
+            "A1.R1C1", "x.A1.B1", "A1.B1x", "XFE1.A1", "A1.XFE1", "A0.A1", "A1.B", "A1B", "A1_",
+            "XFE1", "A0", "A1048577", "XFD1048577", "AAAA1", "XFD1x", "Null", "NULL", "null",
+            "TRUE.x", "x.TRUE", "\u{df}1", "\u{df}", "Q1.Sales", "Data2024", "N", "A", "Z", "x", "_",
+        ];
+        for name in accepted {
+            assert!(NamedRange::is_valid_name(name), "Excel accepts the name {:?}", name);
+        }
+    }
+
+    /// 255 characters is Excel's longest name; 256 is refused [LIVE].
+    #[test]
+    fn a_defined_name_is_at_most_255_characters() {
+        assert!(NamedRange::is_valid_name(&"a".repeat(255)));
+        assert!(!NamedRange::is_valid_name(&"a".repeat(256)));
+    }
+
+    /// The create and rename doors both answer with the same rule.
+    #[test]
+    fn creating_or_renaming_to_an_r1c1_shaped_name_is_refused_and_leaves_the_document_clean() {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        let refused = create_named_range_impl(&state, &file, "R1C1".to_string(), None, "=1".to_string(), None, None);
+        assert!(!refused.success, "R1C1 was defined");
+        assert!(!file.is_dirty(), "a refused name dirtied the document");
+        let made = create_named_range_impl(&state, &file, "Rate".to_string(), None, "=1".to_string(), None, None);
+        assert!(made.success, "positive control: {:?}", made.error);
+        let renamed = rename_named_range_impl(&state, &file, "Rate", "RC");
+        assert!(!renamed.success, "Rate was renamed to RC");
+        assert!(state.named_ranges.read().unwrap().values().any(|n| n.name == "Rate"));
+    }
+
     #[test]
     fn test_cell_reference_detection() {
         assert!(NamedRange::looks_like_cell_reference("A1"));
@@ -2232,7 +2335,8 @@ mod rename_tests {
 
         assert_eq!(
             f.formula(0, 0, 0),
-            "LET(RATE,2,RATE*10)",
+            // The LET name keeps its declared spelling (lane formd).
+            "LET(rate,2,rate*10)",
             "the binding is a LOCAL that shadows the workbook name during \
              evaluation; rewriting it would change what the formula COMPUTES, \
              not merely how it reads"

@@ -138,6 +138,11 @@ export const SCRIPT_BOOKMARK_MUTATIONS_EVENT = "script:bookmark-mutations";
 export interface ScriptSideEffects {
   deferredActions?: DeferredAction[];
   bookmarkMutations?: BookmarkMutation[];
+  /**
+   * The run applied queued cell styles itself, in its own undo step (the module
+   * runtime's `Calcula.applyNamedStyle`): the grid's styles re-read.
+   */
+  formattingApplied?: boolean;
 }
 
 /**
@@ -147,6 +152,15 @@ export interface ScriptSideEffects {
  * Listeners re-validate the payload — see the normalize* helpers.
  */
 export function dispatchScriptSideEffects(effects: ScriptSideEffects): void {
+  // A module run's queued cell styles are applied by Rust with its cells, in
+  // ONE undo step (`apply_run_with_queued_styles`), and never replayed here:
+  // the page only re-reads the styles they may have added and repaints.
+  // (announceFormattingResult(null)'s two refreshes, without importing it: this
+  // module stays free of the cell-event graph its consumers mock.)
+  if (effects.formattingApplied === true) {
+    window.dispatchEvent(new CustomEvent("styles:refresh"));
+    window.dispatchEvent(new CustomEvent("grid:refresh"));
+  }
   const mutations = effects.bookmarkMutations;
   if (Array.isArray(mutations) && mutations.length > 0) {
     window.dispatchEvent(
@@ -373,6 +387,12 @@ export interface ScriptRunSuccess {
   deferredActions?: DeferredAction[];
   /** Application.screenUpdating value at end of script. */
   screenUpdating: boolean;
+  /**
+   * The run applied the cell styles it queued (`Calcula.applyNamedStyle`) in
+   * its own undo step -- a style that could not be applied ends the run with
+   * every change taken back. Omitted by Rust when it applied none.
+   */
+  formattingApplied?: boolean;
 }
 
 /** Failed script run. */

@@ -1517,17 +1517,11 @@ export interface MergedRegion {
 export interface MergeOptions {
   /** Excel's Merge Across: one merged region per ROW of the range. */
   across?: boolean;
-  /** Merges wholly inside the range are dissolved into the new one instead of
-   *  refusing; a PARTIAL overlap is still refused. */
-  absorb?: boolean;
-  /** Excel's value rule: a region whose top-left holds nothing takes the first
-   *  cell in reading order that does (value, formula and style move). */
-  keepFirstValue?: boolean;
   /** Run every gate and report the plan; change nothing, record nothing. */
   probe?: boolean;
 }
 
-/** A cell `merge_cells` moved into a merge's top-left (`keepFirstValue`). */
+/** A cell `merge_cells` moved into a merge's top-left (Excel's value rule, applied by every merge). */
 export interface MovedCell {
   fromRow: number;
   fromCol: number;
@@ -2251,6 +2245,17 @@ export interface ClearArea {
   startCol: number;
   endRow: number;
   endCol: number;
+}
+
+/**
+ * One further block of a multi-area formatting (BUG-0394): `applyFormatting`'s
+ * `moreAreas`, as the rows and columns of its cross product. Mirrors Rust
+ * `api_types::FormattingArea` (each list crosses the bridge as a list or an
+ * `IndexRun`, as `FormattingParams`' do).
+ */
+export interface FormattingArea {
+  rows: number[];
+  cols: number[];
 }
 
 // ============================================================================

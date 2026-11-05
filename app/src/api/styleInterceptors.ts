@@ -26,6 +26,13 @@ export interface IStyleOverride {
   borderLeftStyle?: string;
   borderRightColor?: string;
   borderRightStyle?: string;
+  /**
+   * Do not paint the cell's VALUE (its fill, borders and glyph overlays still
+   * paint): a conditional format's Show Bar Only / Show Icon Only. Every cell
+   * painter honours it -- the grid, its frozen and split panes, and a floating
+   * grid's `paintStyledCellBox`.
+   */
+  hideValue?: boolean;
 }
 
 /** Cell coordinates passed to interceptors */

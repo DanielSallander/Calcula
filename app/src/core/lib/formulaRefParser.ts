@@ -120,7 +120,21 @@ const BARE_START = String.raw`(?:[A-Za-z_]|(?![\x00-\x7F])\p{Alphabetic})`;
 const BARE_PART = String.raw`(?:[A-Za-z0-9_]|(?![\x00-\x7F])\p{Alphabetic})`;
 const SHEET_NAME_BARE = String.raw`${BARE_START}(?:${BARE_PART}|\.(?=${BARE_PART}))*`;
 const SHEET_NAME_QUOTED = String.raw`'(?:[^']|'')*'`;
-const SHEET_PREFIX = `((?:${SHEET_NAME_QUOTED}|${SHEET_NAME_BARE}(?::${SHEET_NAME_BARE})?)!)?`;
+// `#REF!` where a sheet was (`=#REF!A1`, `=SUM(#REF!A1:A3)`): the text Excel
+// and the backend write for a reference to a DELETED sheet
+// (parser::ast::REF_ERROR_SHEET). It names no sheet, so the reference has
+// nothing to highlight -- Excel colours nothing in `=#REF!A1`. Without this
+// alternative the pattern skipped the `#` and read the prefix as a sheet
+// called "REF", so the edit highlighted A1 on a real sheet named REF.
+const DELETED_SHEET_PREFIX = "#REF!";
+const SHEET_PREFIX = `((?:${SHEET_NAME_QUOTED}|${SHEET_NAME_BARE}(?::${SHEET_NAME_BARE})?)!|${DELETED_SHEET_PREFIX})?`;
+
+/** True when a matched prefix is the deleted-sheet `#REF!` (any case, as the parser reads it). */
+function isDeletedSheetPrefix(prefix: string | undefined): boolean {
+  // An ERROR LITERAL, not a sheet name: matched case-insensitively as the
+  // parser reads `#ref!`, never folded like a sheet name.
+  return prefix !== undefined && /^#REF!$/i.test(prefix);
+}
 
 /**
  * Parse a formula string and extract cell/range references for highlighting.
@@ -160,6 +174,8 @@ export function parseFormulaReferences(
     const row2 = match[5] ? parseInt(match[5], 10) - 1 : row1;
 
     if (row1 < 0 || col1 < 0) continue;
+    // A reference to a deleted sheet (`#REF!A1`) names no cell to highlight.
+    if (isDeletedSheetPrefix(sheetPrefix)) continue;
 
     const sheetName = extractSheetName(sheetPrefix);
 
@@ -228,6 +244,9 @@ export function parseFormulaReferencesWithPositions(
     const row2 = hasRange ? parseInt(match[9], 10) - 1 : row1;
 
     if (row1 < 0 || col1 < 0) continue;
+    // A reference to a deleted sheet (`#REF!A1`) names no cell to highlight
+    // or drag.
+    if (isDeletedSheetPrefix(sheetPrefix)) continue;
 
     const sheetName = extractSheetName(sheetPrefix);
 

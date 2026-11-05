@@ -565,6 +565,9 @@ pub fn materialize_saved_controls(
         };
         for mut entry in entries {
             remap_control_page_targets(&mut entry, page_targets);
+            // A dead container key (BUG-0491) does not survive a load or a
+            // pull: nothing paints it, so it is not carried on.
+            drop_dead_container_keys(&entry.control_type, &mut entry.properties);
             let key = (idx, entry.row, entry.col);
             // A pull REPLACES what sits at the key: whatever was there is not
             // a competitor for the uid, so it is removed first.
@@ -682,6 +685,129 @@ pub(crate) fn check_property_value(name: &str, value: &str) -> Result<(), String
         ));
     }
     Ok(())
+}
+
+/// ONLY THE CONTAINER KEYS A CONTROL PAINTS (BUG-0491). A control keeps a
+/// visual-container fact in a `container*` key only where its family paints
+/// that key: the closed per-type list is
+/// `visual_format::CONTROL_PAINTED_CONTAINER_FIELDS`, decided from the
+/// painters (Controls `readControlContainer` reads exactly it, drift-tested).
+/// Every other `container*` key on a control is DEAD -- a shape's, text box's,
+/// button's and picture's `containerBackground*` / `containerBorder{Show,Color,
+/// Width}` (their background IS `fill`, their border `stroke` / a button's
+/// `borderColor` and `strokeWidth`), a button's title, subtitle, padding and
+/// spacing, a shape's corner radius, a picture's or a navigator's subtitle and
+/// divider, a navigator's `containerPadding*` (its padding IS `padding`), and
+/// every container key on a type with no container (a checkbox). A dead key was
+/// stored, listed to the AI, carried in a `.calp`, and changed nothing.
+///
+/// `Some(sentence)` -- naming the key that holds the fact where one exists --
+/// for such a key on such a control; `None` for a painted key and for every key
+/// that is not a container key.
+pub(crate) fn dead_container_key(control_type: &str, key: &str) -> Option<String> {
+    if visual_format::control_paints_container_key(control_type, key) != Some(false) {
+        return None;
+    }
+    let what = match control_type {
+        "shape" => "a shape".to_string(),
+        "textBox" => "a text box".to_string(),
+        "button" => "a button".to_string(),
+        "image" => "a picture".to_string(),
+        PAGE_NAVIGATOR_CONTROL_TYPE => "a page navigator".to_string(),
+        other => format!("a '{other}' control"),
+    };
+    let painted_kind = matches!(control_type, "shape" | "textBox" | "button" | "image");
+    let border_colour = if control_type == "button" { "borderColor" } else { "stroke" };
+    let real: Option<&str> = match key {
+        "containerBackgroundColor" if painted_kind => Some("fill"),
+        "containerBackgroundShow" if painted_kind => Some("fill (\"none\" hides the background)"),
+        "containerBorderColor" if painted_kind => Some(border_colour),
+        "containerBorderWidth" if painted_kind => Some("strokeWidth"),
+        "containerBorderShow" if painted_kind => Some("strokeWidth (\"0\" hides the border)"),
+        "containerTitleText" if control_type == "button" => Some("text (a button's caption)"),
+        k if control_type == PAGE_NAVIGATOR_CONTROL_TYPE && k.starts_with("containerPadding") => Some("padding"),
+        _ => None,
+    };
+    Some(match real {
+        Some(real) => format!(
+            "'{key}' is not how {what} keeps that setting: nothing would paint it. Write '{real}' instead."
+        ),
+        None => format!("'{key}' is not a setting {what} has: nothing on {what} paints it."),
+    })
+}
+
+/// [`dead_container_key`] for a WRITE of `value`: a non-empty value is refused.
+/// `""` stays allowed (the family default) -- the door then DROPS the key
+/// ([`drop_dead_container_keys`]), so it is never stored.
+pub(crate) fn dead_container_spelling(control_type: &str, key: &str, value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    dead_container_key(control_type, key)
+}
+
+/// Remove every dead `container*` key ([`dead_container_key`]) from a control's
+/// properties; answers how many were removed. Run by every door that stores a
+/// control's properties -- the property write, the create / replace door, the
+/// Format pane's batch -- and by load and every pull
+/// ([`materialize_saved_controls`]), so a dead key a document still carries is
+/// gone on its next write and never re-saved, and a `.calp` cannot carry one.
+pub(crate) fn drop_dead_container_keys(control_type: &str, properties: &mut HashMap<String, ControlPropertyValue>) -> usize {
+    let before = properties.len();
+    properties.retain(|key, _| dead_container_key(control_type, key).is_none());
+    before - properties.len()
+}
+
+/// THE SOLID-COMMIT RULE ON A PAGE NAVIGATOR (BUG-0510 (1)). Setting a
+/// background colour means "paint this colour" (round 2, ruling Q9 --
+/// `object_bindings::container_literal::apply_solid_background` for the
+/// families with a container record, `solidBackgroundPatch` in the Format
+/// pane). A navigator keeps its container in flat keys and its background is
+/// OFF by default (`navigatorModel.ts`), so a script, MCP or binding-literal
+/// write of `containerBackgroundColor` alone reported a colour as written that
+/// nothing showed. A control has no gradient (it is not a flat key), so the
+/// one companion write is `containerBackgroundShow = "true"`.
+///
+/// `Some((key, value))` -- the companion to write with it -- for a NON-EMPTY
+/// colour write on a navigator whose background `current_show` does not
+/// already show; `None` otherwise (`""` is the family default, not a colour).
+pub(crate) fn solid_background_companion(
+    control_type: &str,
+    key: &str,
+    value: &str,
+    current_show: Option<&str>,
+) -> Option<(&'static str, &'static str)> {
+    (control_type == PAGE_NAVIGATOR_CONTROL_TYPE
+        && key == "containerBackgroundColor"
+        && !value.trim().is_empty()
+        && current_show != Some("true"))
+    .then_some(("containerBackgroundShow", "true"))
+}
+
+/// [`dead_container_spelling`] for a BINDING on a control: refused at the
+/// binding's `set` like a literal write at the control's door, so a formula
+/// cannot follow a key the control never paints either. `Ok` for every other
+/// kind and path, and for a control that does not exist (the caller's own
+/// lookup reports that).
+pub(crate) fn refuse_dead_container_binding(
+    state: &AppState,
+    object: &crate::api_types::ObjectBindingRef,
+    path: &str,
+) -> Result<(), String> {
+    if object.kind != crate::api_types::ObjectBindingKind::Control {
+        return Ok(());
+    }
+    let Some(key) = path.strip_prefix("/properties/").filter(|k| !k.contains('/')) else {
+        return Ok(());
+    };
+    let control_type = {
+        let controls = state.controls.read().map_err(|e| e.to_string())?;
+        controls.values().find(|m| m.uid == object.id).map(|m| m.control_type.clone())
+    };
+    match control_type.and_then(|t| dead_container_spelling(&t, key, "bound")) {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
 }
 
 /// May a property write proceed, given the type the control ALREADY has and the
@@ -852,6 +978,12 @@ pub(crate) fn set_control_property_with(
         &control_type,
     )
     .map_err(|why| format!("Control at sheet {} r{}c{}: {}", sheet_index, row, col, why))?;
+    // A container key the control's type does not paint (BUG-0491), refused
+    // by the type the control has (or is being created as).
+    let effective_type = pending.get(&key).map(|m| m.control_type.as_str()).unwrap_or(control_type.as_str());
+    if let Some(why) = dead_container_spelling(effective_type, &property_name, &value) {
+        return Err(format!("Control at sheet {} r{}c{}: {}", sheet_index, row, col, why));
+    }
     if !pending.contains_key(&key) {
         create_gate?;
     }
@@ -923,10 +1055,24 @@ pub(crate) fn set_control_property_with(
             metadata.uid = mint_control_uid();
         }
 
+        // A navigator's solid background colour also shows the background
+        // (BUG-0510 (1)); decided against what is stored BEFORE this write.
+        let companion = solid_background_companion(
+            &metadata.control_type,
+            &property_name,
+            &value,
+            metadata.properties.get("containerBackgroundShow").map(|p| p.value.as_str()),
+        );
         metadata.properties.insert(
             property_name,
             ControlPropertyValue { value_type, value },
         );
+        if let Some((show_key, show_value)) = companion {
+            metadata.properties.insert(
+                show_key.to_string(),
+                ControlPropertyValue { value_type: "static".to_string(), value: show_value.to_string() },
+            );
+        }
         // THE AUTHOR'S CODE REPLACES THE APPLICATION'S, WHOLE. A button runs one
         // action (a click checks `macroRef` first, then `onSelect`), so keeping
         // the application's other held slot would publish a button whose action
@@ -937,6 +1083,10 @@ pub(crate) fn set_control_property_with(
                 metadata.properties.remove(*held);
             }
         }
+        // A dead container key is never stored (BUG-0491): a `""` write of one
+        // drops it, and so does any write to a control that still carried one.
+        let control_type = metadata.control_type.clone();
+        drop_dead_container_keys(&control_type, &mut metadata.properties);
         metadata.clone()
     };
     // The store guard is dropped before the undo stack is taken (never both).
@@ -999,6 +1149,24 @@ pub(crate) fn set_control_metadata_core(
     if metadata.control_type.is_empty() {
         return Err("A control must have a controlType.".to_string());
     }
+    // ONLY THE CONTAINER KEYS THIS TYPE PAINTS (BUG-0491): the create door is
+    // a write door like any other. A non-empty dead key is refused, naming the
+    // real key, before the effect; a `""` one is dropped.
+    {
+        let mut dead: Vec<&String> = metadata
+            .properties
+            .iter()
+            .filter(|(name, prop)| dead_container_spelling(&metadata.control_type, name, &prop.value).is_some())
+            .map(|(name, _)| name)
+            .collect();
+        dead.sort();
+        if let Some(name) = dead.first() {
+            let why = dead_container_key(&metadata.control_type, name).unwrap_or_default();
+            return Err(format!("Control at sheet {} r{}c{}: {}", sheet_index, row, col, why));
+        }
+    }
+    let control_type = metadata.control_type.clone();
+    drop_dead_container_keys(&control_type, &mut metadata.properties);
     // `editObjects`, like `delete_chart` and the geometry batch (wave-B B5):
     // creating or replacing a control on a sheet whose protection does not
     // allow editing objects is refused, before the effect.
@@ -1775,7 +1943,9 @@ fn encode_appearance_changes(
 /// nothing, the same control twice, a code / held / action key, a structural
 /// key ([`CONTROL_STRUCTURAL_PROPERTIES`]), a value over the size cap or an
 /// inline-image hazard ([`check_property_value`]), a `container*` value
-/// `visual_format::check_control_container_value` refuses, a protected sheet
+/// `visual_format::check_control_container_value` refuses, a non-empty
+/// `container*` key the control's type does not paint
+/// ([`dead_container_spelling`], BUG-0491; a `""` one removes it), a protected sheet
 /// that does not allow editing objects, and any control that does not exist
 /// (the batch never creates one). Every write is stored as `"static"`. Values
 /// already stored exactly are skipped; a batch that changes nothing leaves
@@ -1819,14 +1989,31 @@ pub(crate) fn set_control_appearance_core(
             sheet, row, col
         ));
     }
+    // A container key the control's type does not paint (BUG-0491), by each
+    // control's own type -- the whole batch, before any write.
+    for ((sheet, row, col), writes) in &encoded {
+        let control_type = pending[&(*sheet, *row, *col)].control_type.as_str();
+        for (name, value) in writes {
+            if let Some(why) = dead_container_spelling(control_type, name, value) {
+                return Err(format!(
+                    "Control at sheet {} r{}c{}: {} Nothing in the format batch was written.",
+                    sheet, row, col, why
+                ));
+            }
+        }
+    }
+    // A `""` write of a dead container key REMOVES it (BUG-0491): a change only
+    // when the key is there.
     let changed: Vec<&(ControlKey, Vec<(String, String)>)> = encoded
         .iter()
         .filter(|(key, writes)| {
             let meta = &pending[key];
             writes.iter().any(|(name, value)| {
-                meta.properties
-                    .get(name)
-                    .map_or(true, |p| p.value_type != "static" || p.value != *value)
+                let removes = value.is_empty() && dead_container_key(&meta.control_type, name).is_some();
+                match meta.properties.get(name) {
+                    None => !removes,
+                    Some(p) => removes || p.value_type != "static" || p.value != *value,
+                }
             })
         })
         .collect();
@@ -1861,6 +2048,9 @@ pub(crate) fn set_control_appearance_core(
                         ControlPropertyValue { value_type: "static".to_string(), value: value.clone() },
                     );
                 }
+                // A dead container key is never stored (BUG-0491).
+                let control_type = meta.control_type.clone();
+                drop_dead_container_keys(&control_type, &mut meta.properties);
             }
         }
     }
@@ -2434,6 +2624,8 @@ pub(crate) fn resolve_control_properties_core(
     let navigator = meta.control_type == PAGE_NAVIGATOR_CONTROL_TYPE;
     let mut per_button: Vec<(crate::object_bindings::page_overrides::PerButtonPath, crate::api_types::ResolvedBinding)> =
         Vec::new();
+    let mut show_bound = false;
+    let mut bound_colour: Option<String> = None;
     for (path, value) in values {
         if let Some(target) = crate::object_bindings::page_overrides::per_button_path(&path) {
             if navigator {
@@ -2452,8 +2644,27 @@ pub(crate) fn resolve_control_properties_core(
         };
         let is_text = catalog::match_path(ObjectBindingKind::Control, &path)
             .is_ok_and(|row| row.value_type == BindableValueType::Text);
+        if key == "containerBackgroundShow" {
+            show_bound = true;
+        }
         if let Some(text) = overlay_text(&value, is_text) {
+            if key == "containerBackgroundColor" {
+                bound_colour = Some(text.clone());
+            }
             resolved.insert(key, text);
+        }
+    }
+    // A BOUND solid background colour paints like a written one (BUG-0510): on
+    // a navigator, whose background is off by default, it shows the background
+    // -- unless the background's visibility is itself bound, which then decides.
+    if let Some(colour) = bound_colour {
+        if !show_bound {
+            let shown = resolved.get("containerBackgroundShow").map(String::as_str);
+            if let Some((show_key, show_value)) =
+                solid_background_companion(&meta.control_type, "containerBackgroundColor", &colour, shown)
+            {
+                resolved.insert(show_key.to_string(), show_value.to_string());
+            }
         }
     }
     if !per_button.is_empty() {

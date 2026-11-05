@@ -18,7 +18,7 @@ DISTINCTCOUNT(table[column], context_op1, context_op2, ...)
 
 ## Return value
 
-A whole number.
+A whole number, or BLANK when there is nothing to count -- a DAX count is never 0 ("When the function finds no rows to count, it returns a BLANK", Microsoft DAX reference).
 
 ## Remarks
 

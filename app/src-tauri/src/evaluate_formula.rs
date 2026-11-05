@@ -690,7 +690,7 @@ pub fn eval_formula_init(
             let resolved = if crate::ast_has_named_refs(&parser_ast) {
                 let named_ranges_map = state.named_ranges.read().unwrap();
                 let mut visited = std::collections::HashSet::new();
-                let r = crate::resolve_names_in_ast(&parser_ast, &named_ranges_map, active_sheet, &mut visited);
+                let r = crate::resolve_names_in_ast_at(&parser_ast, &named_ranges_map, active_sheet, (row, col), &mut visited);
                 drop(named_ranges_map);
                 r
             } else {

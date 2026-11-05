@@ -25,8 +25,13 @@ pub(super) fn aggregate_op_to_function(
         engine_core::compute::aggregate::AggregateOp::Average => Some(AggregateFunction::Avg),
         engine_core::compute::aggregate::AggregateOp::Min => Some(AggregateFunction::Min),
         engine_core::compute::aggregate::AggregateOp::Max => Some(AggregateFunction::Max),
+        // DAX DISTINCTCOUNT counts BLANK as one value; DISTINCTCOUNTNOBLANK
+        // does not (the connector renders each).
         engine_core::compute::aggregate::AggregateOp::DistinctCount => {
             Some(AggregateFunction::CountDistinct)
+        }
+        engine_core::compute::aggregate::AggregateOp::DistinctCountNoBlank => {
+            Some(AggregateFunction::CountDistinctNoBlank)
         }
         engine_core::compute::aggregate::AggregateOp::CountRows => {
             Some(AggregateFunction::CountAll)
@@ -46,8 +51,63 @@ pub(super) fn aggregate_op_to_function(
 /// Check if an expression contains RESET, UseRelationship, or other context ops
 /// that cannot be pushed to a source. KEEP is pushable (rendered as conditional
 /// aggregation); a CLEAR over a fact-internal measure is also treated as
-/// pushable here (it widens the aggregation grain, which the connector renders).
+/// pushable here (it widens the aggregation grain, which the connector renders)
+/// -- but only where the connector's window renderer reaches it
+/// ([`clear_outside_window_reach`]).
 pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
+    has_unpushable_node(expr) || clear_outside_window_reach(expr, true)
+}
+
+/// Whether a CLEAR / CLEAREXCEPT sits where the PostgreSQL connector's window
+/// renderer (`pg_dialect::expr_to_sql_with_clear`, engine-connectors) does
+/// not reach it. That renderer turns a CLEAR into `AGG(inner) OVER (PARTITION
+/// BY ...)` only while it walks the CLEAR / arithmetic / DIVIDE / IF /
+/// COALESCE / block spine above it; beneath anything else -- a KEEP
+/// (`SUM(x, CLEAR(t), KEEP(...))` is a KEEP over the CLEAR), a scalar
+/// function (`ROUND(SUM(x, CLEAR(t)), 2)`), a comparison -- it hands the
+/// subtree to the plain renderer, which cannot render a window and would drop
+/// the CLEAR, answering the UNCLEARED value. Such a measure is evaluated
+/// locally. `reachable` is true while the walk is still on that spine.
+fn clear_outside_window_reach(expr: &Expression, reachable: bool) -> bool {
+    match expr {
+        Expression::Clear { expr: inner, .. } | Expression::ClearExcept { expr: inner, .. } => {
+            !reachable || clear_outside_window_reach(inner, true)
+        }
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => {
+            clear_outside_window_reach(numerator, reachable)
+                || clear_outside_window_reach(denominator, reachable)
+                || alternate
+                    .as_ref()
+                    .is_some_and(|a| clear_outside_window_reach(a, reachable))
+        }
+        Expression::BinaryOp { left, right, .. } => {
+            clear_outside_window_reach(left, reachable)
+                || clear_outside_window_reach(right, reachable)
+        }
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            clear_outside_window_reach(condition, reachable)
+                || clear_outside_window_reach(then_expr, reachable)
+                || clear_outside_window_reach(else_expr, reachable)
+        }
+        Expression::Coalesce(exprs) => exprs
+            .iter()
+            .any(|e| clear_outside_window_reach(e, reachable)),
+        Expression::Block { .. } => clear_outside_window_reach(&expr.inline_bindings(), reachable),
+        other => other.contains_clear(),
+    }
+}
+
+/// The node-kind half of [`has_unpushable_ops`]: context operations, two-stage
+/// constructs and local-only functions that no source SQL can express.
+fn has_unpushable_node(expr: &Expression) -> bool {
     match expr {
         Expression::ClearInner { .. }
         | Expression::ClearOuter { .. }
@@ -59,7 +119,7 @@ pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
         | Expression::Using { .. }
         | Expression::KeepIn { .. } => true,
         Expression::Clear { expr, .. } | Expression::ClearExcept { expr, .. } => {
-            has_unpushable_ops(expr)
+            has_unpushable_node(expr)
         }
         Expression::Keep {
             expr,
@@ -73,11 +133,11 @@ pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
             !variables.is_empty()
                 || !conditions.is_empty()
                 || !in_predicates.is_empty()
-                || has_unpushable_ops(expr)
+                || has_unpushable_node(expr)
         }
-        Expression::Iterate { expression, .. } => has_unpushable_ops(expression),
+        Expression::Iterate { expression, .. } => has_unpushable_node(expression),
         Expression::IfError { expr, alternate } => {
-            has_unpushable_ops(expr) || has_unpushable_ops(alternate)
+            has_unpushable_node(expr) || has_unpushable_node(alternate)
         }
         Expression::DateTimeFunc { args, .. } => args.iter().any(has_unpushable_ops),
         Expression::IsInScope { .. } => false,
@@ -95,37 +155,44 @@ pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
         // approximate on the public surface.)
         Expression::Percentile { .. } => true,
         Expression::HasOneValue { column } | Expression::FirstValue { column, .. } => {
-            has_unpushable_ops(column)
+            has_unpushable_node(column)
         }
         Expression::SelectedValue { column, alternate } => {
-            has_unpushable_ops(column) || alternate.as_ref().is_some_and(|a| has_unpushable_ops(a))
+            has_unpushable_node(column) || alternate.as_ref().is_some_and(|a| has_unpushable_node(a))
         }
         Expression::BinaryOp { left, right, .. }
         | Expression::Comparison { left, right, .. }
         | Expression::And(left, right)
         | Expression::Or(left, right)
-        | Expression::Xor(left, right) => has_unpushable_ops(left) || has_unpushable_ops(right),
+        | Expression::Xor(left, right) => has_unpushable_node(left) || has_unpushable_node(right),
         Expression::SafeDivide {
             numerator,
             denominator,
             alternate,
         } => {
-            has_unpushable_ops(numerator)
-                || has_unpushable_ops(denominator)
-                || alternate.as_ref().is_some_and(|a| has_unpushable_ops(a))
+            has_unpushable_node(numerator)
+                || has_unpushable_node(denominator)
+                || alternate.as_ref().is_some_and(|a| has_unpushable_node(a))
         }
-        Expression::Not(inner) | Expression::IsBlank(inner) => has_unpushable_ops(inner),
-        Expression::Aggregate { operand, .. } => has_unpushable_ops(operand),
+        Expression::Not(inner) | Expression::IsBlank(inner) => has_unpushable_node(inner),
+        Expression::Aggregate { operand, .. } => has_unpushable_node(operand),
         Expression::If {
             condition,
             then_expr,
             else_expr,
         } => {
-            has_unpushable_ops(condition)
-                || has_unpushable_ops(then_expr)
-                || has_unpushable_ops(else_expr)
+            has_unpushable_node(condition)
+                || has_unpushable_node(then_expr)
+                || has_unpushable_node(else_expr)
         }
         Expression::Coalesce(exprs) => exprs.iter().any(has_unpushable_ops),
+        // DAX FORMAT is the local UDF `calcula_format` (BUG-0522): no source
+        // speaks DAX's format-string language (PostgreSQL's TO_CHAR does not),
+        // so an expression containing it is evaluated locally.
+        Expression::TextFunc {
+            function: engine_core::compute::expression::TextFunction::Format,
+            ..
+        } => true,
         Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
             args.iter().any(has_unpushable_ops)
         }
@@ -153,29 +220,29 @@ pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
             bindings
                 .iter()
                 .chain(query_scoped_bindings.iter())
-                .any(|(_, e)| has_unpushable_ops(e))
-                || has_unpushable_ops(result)
+                .any(|(_, e)| has_unpushable_node(e))
+                || has_unpushable_node(result)
         }
         Expression::Switch {
             expr,
             cases,
             default,
         } => {
-            has_unpushable_ops(expr)
+            has_unpushable_node(expr)
                 || cases
                     .iter()
-                    .any(|(v, r)| has_unpushable_ops(v) || has_unpushable_ops(r))
-                || default.as_ref().is_some_and(|d| has_unpushable_ops(d))
+                    .any(|(v, r)| has_unpushable_node(v) || has_unpushable_node(r))
+                || default.as_ref().is_some_and(|d| has_unpushable_node(d))
         }
         // New pushable expression types.
         Expression::Greatest(args) | Expression::Least(args) => args.iter().any(has_unpushable_ops),
-        Expression::NullIf { expr, value } => has_unpushable_ops(expr) || has_unpushable_ops(value),
-        Expression::CountIf { condition } => has_unpushable_ops(condition),
+        Expression::NullIf { expr, value } => has_unpushable_node(expr) || has_unpushable_node(value),
+        Expression::CountIf { condition } => has_unpushable_node(condition),
         Expression::ListAgg { column, delimiter } => {
-            has_unpushable_ops(column) || has_unpushable_ops(delimiter)
+            has_unpushable_node(column) || has_unpushable_node(delimiter)
         }
         Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
-            has_unpushable_ops(value) || has_unpushable_ops(sort_by)
+            has_unpushable_node(value) || has_unpushable_node(sort_by)
         }
         // Window/rank functions and QUERY require two-stage evaluation — not pushable.
         // Time-intelligence sugar (ToDate/PeriodShift) lowers to window
@@ -325,8 +392,11 @@ fn expression_to_source_sql_with_clear(
                 Some(a) => expression_to_source_sql_with_clear(a, registry, group_by)?,
                 None => "NULL".to_string(),
             };
-            Ok(format!(
-                "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
+            Ok(engine_core::compute::dax_semantics::safe_divide_sql(
+                &n,
+                &d,
+                &alt,
+                "DOUBLE PRECISION",
             ))
         }
         Expression::ClearExcept {
@@ -368,11 +438,15 @@ fn expression_to_source_sql_with_clear(
 
             Ok(format!("SUM({inner_sql}) {over_clause}"))
         }
-        Expression::BinaryOp { left, op, right } => {
-            let l = expression_to_source_sql_with_clear(left, registry, group_by)?;
-            let r = expression_to_source_sql_with_clear(right, registry, group_by)?;
-            Ok(format!("({l} {} {r})", op.as_sql()))
-        }
+        // DAX BLANK arithmetic (`engine_core::compute::dax_semantics`), in the
+        // PostgreSQL spelling (its float division by zero is an error).
+        Expression::BinaryOp { .. } => engine_core::compute::dax_semantics::render_binary(
+            expr,
+            engine_core::compute::dax_semantics::DivideStyle::Guarded {
+                cast: "DOUBLE PRECISION",
+            },
+            &mut |e| expression_to_source_sql_with_clear(e, registry, group_by),
+        ),
         Expression::If {
             condition,
             then_expr,
@@ -571,13 +645,87 @@ mod tests {
         );
 
         let sql = expression_to_source_sql(&expr, &registry).unwrap();
+        // Re-pinned DELIBERATELY for DAX's BLANK semantics (round C): a count
+        // is BLANK, never 0, DIVIDE answers its alternate for a zero OR BLANK
+        // denominator, and a BLANK measure-level value compares as 0 against a
+        // number (`engine_core::compute::dax_semantics`).
         assert_eq!(
             sql,
-            "CASE WHEN (SUM(CASE WHEN \"product\".\"category\" = 'O''Brien' \
-             THEN \"amount\" END) > 1000) THEN 'it''s high' \
-             ELSE CASE WHEN COUNT(\"id\") = 0 THEN NULL \
-             ELSE CAST(SUM(\"amount\") AS DOUBLE PRECISION) / COUNT(\"id\") END END"
+            "CASE WHEN (COALESCE(SUM(CASE WHEN \"product\".\"category\" = 'O''Brien' \
+             THEN \"amount\" END), 0) > 1000) THEN 'it''s high' \
+             ELSE CASE WHEN COALESCE(NULLIF(COUNT(\"id\"), 0), 0) = 0 THEN NULL \
+             ELSE (CAST(SUM(\"amount\") AS DOUBLE PRECISION) / NULLIF(COUNT(\"id\"), 0)) END END"
         );
+    }
+
+    #[test]
+    fn pushed_arithmetic_follows_dax_blank_semantics() {
+        // Round C (NEW-dax-blank-arithmetic / NEW-dax-divide-zero /
+        // NEW-dax-count-empty-blank): the PostgreSQL pushdown renders the same
+        // DAX table as the local path -- BLANK reads as 0 in `+` / `-` unless
+        // every term is BLANK, a count is BLANK never 0, and `/` answers
+        // +/-Infinity or NaN for a zero or BLANK denominator, never
+        // PostgreSQL's "division by zero" error.
+        use engine_core::compute::aggregate::AggregateOp;
+        use engine_core::compute::expression::{agg, col, lit_int};
+
+        let registry = mock_registry_star(0);
+        let plus_one = agg(AggregateOp::Sum, col("amount")).add(lit_int(1));
+        assert_eq!(
+            expression_to_source_sql_with_clear(&plus_one, &registry, &[]).unwrap(),
+            "(COALESCE(SUM(\"amount\"), 0) + 1)"
+        );
+        let share = agg(AggregateOp::Count, col("id")).divide(agg(AggregateOp::Count, col("id")));
+        assert_eq!(
+            expression_to_source_sql_with_clear(&share, &registry, &[]).unwrap(),
+            "CASE WHEN COALESCE(NULLIF(COUNT(\"id\"), 0), 0) = 0 THEN \
+             CAST(SIGN(NULLIF(COUNT(\"id\"), 0)) AS DOUBLE PRECISION) * \
+             CAST('Infinity' AS DOUBLE PRECISION) ELSE \
+             CAST(NULLIF(COUNT(\"id\"), 0) AS DOUBLE PRECISION) / NULLIF(COUNT(\"id\"), 0) END"
+        );
+    }
+
+    #[test]
+    fn a_clear_the_window_renderer_cannot_reach_stays_local() {
+        // Open-ledger round D: the connector renders a CLEAR as a window only
+        // along the arithmetic / DIVIDE / IF / COALESCE spine; beneath a KEEP
+        // (`SUM(x, CLEAR(t), KEEP(...))`) or a scalar function the plain
+        // renderer took over and DROPPED the CLEAR -- a pushed measure that
+        // answered the uncleared value. Such a measure is now evaluated
+        // locally.
+        use engine_core::compute::aggregate::AggregateOp;
+        use engine_core::compute::expression::{agg, clear, col, keep, lit_int, scalar_fn};
+        use engine_core::compute::expression::ScalarFunction;
+        use engine_core::model::ClearTarget;
+
+        let cleared = || {
+            clear(
+                agg(AggregateOp::Sum, col("amount")),
+                vec![ClearTarget::Table("Products".into())],
+            )
+        };
+        let bikes = || {
+            vec![FilterPredicate::new(
+                "Products",
+                "category",
+                ComparisonOp::Equal,
+                "Bikes",
+            )]
+        };
+        assert!(has_unpushable_ops(&keep(cleared(), bikes())));
+        assert!(has_unpushable_ops(&scalar_fn(
+            ScalarFunction::Round,
+            vec![cleared(), lit_int(2)],
+        )));
+        // Reachable: a CLEAR at the top, over a KEEP, or in arithmetic.
+        assert!(!has_unpushable_ops(&cleared()));
+        assert!(!has_unpushable_ops(&clear(
+            keep(agg(AggregateOp::Sum, col("amount")), bikes()),
+            vec![ClearTarget::Table("Products".into())],
+        )));
+        assert!(!has_unpushable_ops(
+            &agg(AggregateOp::Sum, col("amount")).divide(cleared())
+        ));
     }
 
     #[test]

@@ -23,6 +23,10 @@ import { getLayoutSurface, onLayoutSurfaceChanged, GRID_SCROLLBAR_GUTTER_PX } fr
 import { useSpreadsheet } from "./useSpreadsheet";
 import { SheetViewMemory, listenForSheetSwitches } from "./sheetSwitchListeners";
 import { gridPointerMouseDown, gridPointerDoubleClick, editBlocksGridFocus } from "./gridPointerEntry";
+import { useGridTouch } from "./useGridTouch";
+
+/** The grid area owns every touch (the touch bridge, BUG-0276). */
+const TOUCH_ACTION_NONE: React.CSSProperties = { touchAction: "none" };
 import { notifyPointModeViewChanged } from "../../lib/pointModeView";
 import {
   getAllColumnWidths,
@@ -1393,6 +1397,15 @@ function SpreadsheetContent({
     [handleMouseUp, splitDrag, splitConfig]
   );
 
+  // TOUCH (BUG-0276): a tap selects, a drag on a cell pans, a drag on an
+  // object, handle, grip, header or the fill handle drags it, a long press opens
+  // the context menu -- routed into the mouse doors above by the touch bridge
+  // (core/lib/touchBridge.ts). `touch-action: none` on the grid area (below) is
+  // what stops the browser claiming every touch drag for its own panning.
+  // (`config` is the header-ruled one above: the touch hit tests ask the same
+  // gutters the mouse door does.)
+  useGridTouch(containerRef, () => ({ config, viewport, dimensions, selection, zoom: gridState.zoom, canvas: canvasRef.current?.getCanvas() ?? null }));
+
   // Determine effective cursor: split bar takes priority
   const effectiveCursor = splitDrag
     ? (splitDrag.axis === "row" ? "row-resize" : "col-resize")
@@ -1415,7 +1428,7 @@ function SpreadsheetContent({
         onMouseUp={wrappedMouseUp}
         onMouseLeave={handleMouseLeave}
         onDoubleClick={wrappedDoubleClick}
-        style={effectiveCursor ? { cursor: effectiveCursor } : undefined}
+        style={effectiveCursor ? { cursor: effectiveCursor, touchAction: "none" } : TOUCH_ACTION_NONE}
         onWheel={handleWheel}
         onContextMenu={handleContextMenu}
       >

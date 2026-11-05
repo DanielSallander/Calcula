@@ -499,6 +499,62 @@ pub fn control_container_key_pointer(key: &str) -> Option<&'static str> {
         .map(|(p, _)| *p)
 }
 
+/// WHICH `container*` KEYS EACH CONTROL TYPE PAINTS (BUG-0491), as field ids
+/// ("shadow.blur") or whole groups ("shadow" = every `shadow.*` field). A
+/// control type keeps a container fact in a `container*` key only for the
+/// fields listed here; every other `container*` key on it is DEAD -- stored, it
+/// would be listed to the AI and carried in a `.calp` while nothing paints it
+/// -- so every write door refuses it (`controls::dead_container_key`) and load,
+/// pull and the next write drop it. A type with no row (a checkbox, a
+/// dropdown, any other kind) has no container, so every key is dead on it.
+///
+/// Decided FROM THE PAINTERS, never by hand: it is the Controls family's
+/// `controlFieldOffered(controlContainerCapabilities(kind), id)` for every
+/// field whose key `controlContainerKey` spells `container*`, and Controls'
+/// `readControlContainer` reads ONLY these keys, so what a door accepts is
+/// exactly what paints. A shape's, text box's, button's and picture's
+/// background and border live in `fill` / `stroke` (a button's
+/// `borderColor`) / `strokeWidth`, a navigator's padding in its `padding` key
+/// -- those are not `container*` keys and so are not rows. A button has no
+/// title and no padding (its caption is its `text`), a shape no corner radius
+/// (its path is its outline), a picture and a navigator no subtitle or
+/// divider (and so no spacing below them).
+///
+/// ONE ROW PER LINE, exactly this spelling: the TS drift test
+/// (`app/extensions/Controls/__tests__/controlContainerKeysDrift.test.ts`)
+/// parses it and diffs it against `@api/visualContainer`'s
+/// `CONTROL_PAINTED_CONTAINER_FIELDS` and against the Controls painters.
+pub const CONTROL_PAINTED_CONTAINER_FIELDS: &[(&str, &[&str])] = &[
+    ("shape", &["padding", "lockAspect", "title", "subtitle", "divider", "spacing", "background.transparency", "shadow"]),
+    ("textBox", &["padding", "lockAspect", "title", "subtitle", "divider", "spacing", "background.transparency", "shadow"]),
+    ("button", &["lockAspect", "background.transparency", "border.radius", "shadow"]),
+    ("image", &["padding", "lockAspect", "title", "spacing.custom", "spacing.belowTitle", "background.transparency", "border.radius", "shadow"]),
+    ("pageNavigator", &["lockAspect", "title", "spacing.custom", "spacing.belowTitle", "background", "border", "shadow"]),
+];
+
+/// Does a control of `control_type` paint the container field `field_id`
+/// ("title.fontSize") from its `container*` key? See
+/// [`CONTROL_PAINTED_CONTAINER_FIELDS`].
+pub fn control_paints_container_field(control_type: &str, field_id: &str) -> bool {
+    CONTROL_PAINTED_CONTAINER_FIELDS
+        .iter()
+        .find(|(t, _)| *t == control_type)
+        .is_some_and(|(_, tokens)| {
+            tokens.iter().any(|token| {
+                *token == field_id
+                    || field_id.strip_prefix(token).is_some_and(|rest| rest.starts_with('.'))
+            })
+        })
+}
+
+/// For a `container*` key: `Some(true)` when `control_type` paints it,
+/// `Some(false)` when it is dead on that type. `None` for any key that is not
+/// one of `CONTROL_CONTAINER_PROPERTY_KEYS` (not this rule's business).
+pub fn control_paints_container_key(control_type: &str, key: &str) -> Option<bool> {
+    let pointer = control_container_key_pointer(key)?;
+    Some(control_paints_container_field(control_type, &field_id(pointer)))
+}
+
 // ---------- leaf checks ----------
 
 /// `""` (the family default) | `#rgb` | `#rrggbb` | `#rrggbbaa`, hex in either case.
@@ -1542,6 +1598,34 @@ mod tests {
             assert!(!CONTROL_CONTAINER_PROPERTY_KEYS.contains(&existing), "{existing}");
             assert_eq!(control_container_key_pointer(existing), None);
         }
+    }
+
+    /// BUG-0491: every token of the painted table names a real field or a real
+    /// group, the table answers per field, and a type with no row paints none.
+    #[test]
+    fn the_painted_container_table_names_real_fields_and_answers_per_type() {
+        let ids: Vec<String> = FIELD_POINTERS.iter().map(|(p, _)| field_id(p)).collect();
+        for (control_type, tokens) in CONTROL_PAINTED_CONTAINER_FIELDS {
+            for token in tokens.iter() {
+                let real = ids.iter().any(|id| id == token || id.starts_with(&format!("{token}.")));
+                assert!(real, "{control_type}: '{token}' is no field and no group");
+            }
+        }
+        assert_eq!(control_paints_container_key("shape", "containerShadowBlur"), Some(true));
+        assert_eq!(control_paints_container_key("shape", "containerBorderRadius"), Some(false), "a shape's path is its outline");
+        assert_eq!(control_paints_container_key("shape", "containerBackgroundColor"), Some(false), "a shape's background is fill");
+        assert_eq!(control_paints_container_key("button", "containerTitleShow"), Some(false), "a button has no title");
+        assert_eq!(control_paints_container_key("button", "containerPaddingTop"), Some(false), "nor padding");
+        assert_eq!(control_paints_container_key("button", "containerBorderRadius"), Some(true));
+        assert_eq!(control_paints_container_key("image", "containerSpacingBelowTitle"), Some(true));
+        assert_eq!(control_paints_container_key("image", "containerSpacingBelowSubtitle"), Some(false), "a picture has no subtitle");
+        assert_eq!(control_paints_container_key("pageNavigator", "containerBackgroundColor"), Some(true));
+        assert_eq!(control_paints_container_key("pageNavigator", "containerPaddingTop"), Some(false), "a navigator's padding is `padding`");
+        assert_eq!(control_paints_container_key("checkbox", "containerShadowShow"), Some(false), "no row, no container");
+        assert_eq!(control_paints_container_key("shape", "fill"), None, "not a container key");
+        // "title" is a group, never a prefix of a longer word.
+        assert!(!control_paints_container_field("shape", "titleX"));
+        assert!(control_paints_container_field("shape", "title.wrap"));
     }
 
     #[test]

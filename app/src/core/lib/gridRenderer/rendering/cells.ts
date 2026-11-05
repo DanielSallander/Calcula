@@ -5,7 +5,7 @@
 // UPDATED: Added vertical alignment, text wrapping, text rotation, and empty cell background rendering
 
 import type { RenderState } from "../types";
-import type { RichTextRun, AccountingLayout, UnderlineStyle, StyleData, CellData } from "../../../types";
+import type { RichTextRun, AccountingLayout, UnderlineStyle, StyleData, CellData, VisibleRange } from "../../../types";
 import { formulaA1ToR1C1 } from "../../r1c1";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
@@ -55,13 +55,15 @@ import { wrapText, splitHardBreaks, hasHardBreak } from "../layout/autoFit";
 // in the row" are one fact, not two copies that agree by coincidence.
 import {
   parseTextOrientation,
-  layoutRotatedText,
+  layoutRotatedLines,
+  rotatedWrapLength,
   layoutStackedText,
   ORIENTATION_LINE_HEIGHT_FACTOR,
   type TextOrientation,
   type OrientationBox,
 } from "../layout/textOrientation";
 import { alignmentWithIndent, effectiveIndentPx, indentedTextBox } from "../layout/cellIndent";
+import { shrinkToFitFontSize } from "../layout/shrinkToFit";
 import { layoutAccountingRuns } from "./accountingLayout";
 
 /**
@@ -74,10 +76,11 @@ const MAX_FONT_SIZE_POINTS = 409;
 /**
  * Paint rotated or STACKED text inside a cell's content box.
  *
- * Shared by BOTH painters -- `drawCellText` (the ordinary grid) and
- * `drawCellTextZone` (every frozen or split pane) -- because a frozen header
- * row is exactly where rotated column titles live, and the pane painter used to
- * draw every value horizontally. The placement is `layoutRotatedText` /
+ * Shared by both cell painters -- `drawCellText` (the grid and, since
+ * BUG-0362, every frozen or split pane) and `paintStyledCellBox` (a floating
+ * grid's cells) -- because a frozen header row is exactly where rotated column
+ * titles live, and the old pane painter used to draw every value horizontally.
+ * The placement is `layoutRotatedLines` /
  * `layoutStackedText` (layout/textOrientation.ts, where Excel's measured rules
  * are written down): both alignments are honoured and a run longer than the
  * cell is anchored by them and cut by the caller's clip, never pre-shortened.
@@ -94,6 +97,7 @@ export function drawOrientedText(
   hAlign: string,
   vAlign: string,
   fontSizePx: number,
+  wrap = false,
 ): void {
   const lineHeight = fontSizePx * ORIENTATION_LINE_HEIGHT_FACTOR;
   ctx.textAlign = "left";
@@ -110,10 +114,16 @@ export function drawOrientedText(
     for (const g of glyphs) ctx.fillText(g.text, g.x, g.y);
     return;
   }
-  const textWidth = ctx.measureText(text).width;
-  const placement = layoutRotatedText({
+  // WRAP TEXT AND HARD BREAKS (BUG-0363): rotated text breaks along its own
+  // direction -- at the box's height, which is where Excel breaks it -- and
+  // the lines stack across the cell (layout/textOrientation.ts,
+  // `layoutRotatedLines`). One line is placed exactly as a single run always was.
+  const lines = wrap
+    ? wrapText(ctx, text, rotatedWrapLength(orientation.degrees, box))
+    : splitHardBreaks(text);
+  const placement = layoutRotatedLines({
     degrees: orientation.degrees,
-    textWidth,
+    lines: lines.map((line) => ({ text: line, width: ctx.measureText(line).width })),
     lineHeight,
     box,
     hAlign,
@@ -122,7 +132,7 @@ export function drawOrientedText(
   ctx.save();
   ctx.translate(placement.cx, placement.cy);
   ctx.rotate(placement.radians);
-  ctx.fillText(text, -textWidth / 2, 0);
+  for (const line of placement.lines) ctx.fillText(line.text, line.x, line.y);
   ctx.restore();
 }
 
@@ -569,8 +579,9 @@ export function borderLineWidth(style: string): number {
  * The style a cell actually shows, after every registered interceptor — which is
  * how CONDITIONAL FORMATTING reaches the renderer — has had its say.
  *
- * Exported because TWO painters need it: `drawCellText` for the ordinary grid and
- * `drawCellTextZone` for every frozen or split pane. The pane painter consulted
+ * Exported because it was shared by TWO painters, `drawCellText` for the ordinary
+ * grid and `drawCellTextZone` for every frozen or split pane, until BUG-0362 made
+ * the pane path `drawCellText` itself. The pane painter consulted
  * no interceptors at all until 2026-08-19 (BUG-0105), so freezing a pane reverted
  * every conditionally-formatted cell in it to its static style — no fills, no
  * font colours, no data bars.
@@ -606,9 +617,11 @@ export function resolveEffectiveStyle(
 
 /**
  * The four EDGE borders a cell actually shows, after conditional formatting has
- * had its say. Exported because TWO painters need it and a copy would drift:
- * `drawCellText` (the ordinary grid) and `drawCellTextZone` (every frozen or
- * split pane). The second one drew no borders at all until 2026-08-19 — BUG-0102.
+ * had its say. Exported because more than one painter needs it and a copy would
+ * drift: `drawCellText` (the grid and every frozen or split pane) and
+ * `paintStyledCellEdges` (a floating grid). The old separate pane painter,
+ * `drawCellTextZone`, drew no borders at all until 2026-08-19 — BUG-0102 — and
+ * was folded into `drawCellText` by BUG-0362.
  *
  * Diagonals are deliberately NOT included: they are interior lines, they stay
  * inside the per-cell clip, and only the four edges participate in the
@@ -833,15 +846,60 @@ export function drawBorderLine(
 }
 
 /**
+ * One frozen or split PANE: the cell range it shows and the canvas rectangle it
+ * is painted into. `range.offsetX/offsetY` are relative to the rectangle's
+ * top-left corner, exactly as `calculateVisibleRange` reports them relative to
+ * the header gutters.
+ */
+export interface CellPaintPane {
+  range: VisibleRange;
+  clipX: number;
+  clipY: number;
+  clipWidth: number;
+  clipHeight: number;
+}
+
+/**
  * Draw text content for all visible cells.
  * Applies cell styles from styleCache including colors, fonts, and formatting.
  * Handles merged cells by drawing master cells with expanded dimensions.
  * Applies style interceptors for features like conditional formatting.
+ *
+ * ONE CELL PAINTER FOR THE GRID AND FOR EVERY PANE (BUG-0362). With `pane`
+ * omitted this paints the ordinary, unfrozen grid: the visible range of the
+ * viewport, inside the header gutters. With `pane` it paints that one frozen or
+ * split pane -- its range, inside its rectangle -- and it is the SAME code for
+ * every cell. There used to be a second painter for panes (`drawCellTextZone`
+ * in core.ts) that had been brought level one feature at a time (borders,
+ * conditional formats, decorations, rotation, indent, accounting) and was still
+ * narrower than this one: it centred every value vertically, never wrapped,
+ * never showed '####', painted rich text as one plain run and decided General
+ * alignment with a regex. Freezing the top row moved every bottom-aligned
+ * header to the middle of its row. A second copy of a painter drifts on the
+ * first change to either, so there is one.
+ *
+ * What a pane changes is geometry only: where the range starts, what the cell
+ * bounds are clamped to, the clip a deferred over-selection decoration replays
+ * in, and the clip of the border pass. The insertion/deletion slide is not
+ * applied inside a pane (it never was): the pane boundary is fixed while the
+ * rows slide, and a row sliding across a freeze line would paint in two panes.
  */
-export function drawCellText(state: RenderState): DeferredCellDecoration[] {
-  const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache, insertionAnimation } = state;
-  const rowHeaderWidth = rowHeaderGutter(config);
-  const colHeaderHeight = colHeaderGutter(config);
+export function drawCellText(state: RenderState, pane?: CellPaintPane): DeferredCellDecoration[] {
+  const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache } = state;
+  const insertionAnimation = pane ? undefined : state.insertionAnimation;
+  // The rectangle this pass paints into, and where its range's first cell
+  // starts. For the ordinary grid that is everything right of and below the
+  // header gutters; for a pane it is the pane.
+  const areaLeft = pane ? pane.clipX : rowHeaderGutter(config);
+  const areaTop = pane ? pane.clipY : colHeaderGutter(config);
+  const areaRight = pane ? pane.clipX + pane.clipWidth : width;
+  const areaBottom = pane ? pane.clipY + pane.clipHeight : height;
+  // A decoration deferred above the selection chrome replays long after this
+  // pass's clip is gone, so a pane's one carries the pane (see
+  // DeferredCellDecoration); the ordinary grid needs none.
+  const decorationClip = pane
+    ? { x: pane.clipX, y: pane.clipY, width: pane.clipWidth, height: pane.clipHeight }
+    : null;
   // One measure closure for the whole frame — `fitNumericDisplay` is pure and
   // takes measurement as a callback, and allocating that callback per CELL would
   // be a fresh function object per visible cell per frame. `ctx.font` is set by
@@ -850,7 +908,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
 
-  const range = calculateVisibleRange(viewport, config, width, height, dimensions);
+  const range = pane ? pane.range : calculateVisibleRange(viewport, config, width, height, dimensions);
 
   // Padding inside cells. paddingX = 3 matches Excel's left text inset
   // (~2px pad + the 1px gridline) so the first glyph lands where Excel's does.
@@ -947,14 +1005,14 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
   const mergeIndex = buildMergeSlaveIndex(cells as Map<string, { rowSpan?: number; colSpan?: number }>);
 
   // Iterate through visible cells
-  let baseY = colHeaderHeight + range.offsetY;
+  let baseY = areaTop + range.offsetY;
   for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
     const rowHeight = getRowHeight(row, config, dimensions);
 
     // Apply row animation offset for rows at or after the change point
     const y = row >= rowAnimIndex && rowAnimIndex >= 0 ? baseY + rowAnimOffset : baseY;
 
-    let baseX = rowHeaderWidth + range.offsetX;
+    let baseX = areaLeft + range.offsetX;
     for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
       const colWidth = getColumnWidth(col, config, dimensions);
 
@@ -994,10 +1052,10 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // No cell data at all - but still apply style interceptors (e.g., table banding)
       // and cell decorations (e.g., sparklines) for cells that have no backend data.
       if (!cell) {
-        const cellLeft = Math.max(x, rowHeaderWidth);
-        const cellTop = Math.max(y, colHeaderHeight);
-        const cellRight = Math.min(x + colWidth, width);
-        const cellBottom = Math.min(y + rowHeight, height);
+        const cellLeft = Math.max(x, areaLeft);
+        const cellTop = Math.max(y, areaTop);
+        const cellRight = Math.min(x + colWidth, areaRight);
+        const cellBottom = Math.min(y + rowHeight, areaBottom);
         if (cellRight > cellLeft && cellBottom > cellTop) {
           // Apply style interceptors for empty cells (e.g., table banded rows)
           if (useInterceptors) {
@@ -1032,7 +1090,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
             };
             if (useDecorations) applyCellDecorations(decorationContext);
             if (useOverSelection) {
-              if (isCoveredByChrome(chromeRects, row, col)) deferred.push({ context: decorationContext, clip: null });
+              if (isCoveredByChrome(chromeRects, row, col)) deferred.push({ context: decorationContext, clip: decorationClip });
               else applyCellDecorations(decorationContext, "over-selection");
             }
           }
@@ -1129,16 +1187,21 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       }
 
       // Skip if cell is not visible (considering animation offset)
-      if (x + actualWidth < rowHeaderWidth || x > width || y + actualHeight < colHeaderHeight || y > height) {
+      //
+      // STRICT, so a cell that merely TOUCHES the area's edge is skipped: in a
+      // pane, the row just below the pane's bottom edge starts exactly on it, and
+      // with a non-strict test it ran as a zero-height cell whose deferred
+      // decoration was replayed into the pane's clip.
+      if (x + actualWidth <= areaLeft || x >= areaRight || y + actualHeight <= areaTop || y >= areaBottom) {
         baseX += colWidth;
         continue;
       }
 
       // Calculate visible cell bounds
-      const cellLeft = Math.max(x, rowHeaderWidth);
-      const cellTop = Math.max(y, colHeaderHeight);
-      const cellRight = Math.min(x + actualWidth, width);
-      const cellBottom = Math.min(y + actualHeight, height);
+      const cellLeft = Math.max(x, areaLeft);
+      const cellTop = Math.max(y, areaTop);
+      const cellRight = Math.min(x + actualWidth, areaRight);
+      const cellBottom = Math.min(y + actualHeight, areaBottom);
 
       // Get style data from the styleCache using the cell's styleIndex
       const styleIndex = cell.styleIndex ?? 0;
@@ -1165,8 +1228,8 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
 
       // Build base style info for interceptors
       // Note: interceptors use boolean underline, so convert enum to bool for them
-      // ONE definition, shared with the pane painter — see resolveEffectiveStyle.
-      let effectiveStyle: BaseStyleInfo = resolveEffectiveStyle(
+      // ONE definition, shared with the floating-grid painter — see resolveEffectiveStyle.
+      const effectiveStyle: BaseStyleInfo = resolveEffectiveStyle(
         displayValue,
         baseCellStyle,
         styleIndex,
@@ -1372,7 +1435,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
             adjX += adjWidth;
             overflowCol++;
           }
-          overflowRight = Math.min(x + overflowW, width);
+          overflowRight = Math.min(x + overflowW, areaRight);
         }
       }
 
@@ -1401,8 +1464,8 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       for (const oc of overflowedCells) {
         if (oc.styleIndex > 0) {
           const ocStyle = getStyleFromCache(styleCache, oc.styleIndex);
-          const ocLeft = Math.max(oc.x, rowHeaderWidth);
-          const ocRight = Math.min(oc.x + oc.width, width);
+          const ocLeft = Math.max(oc.x, areaLeft);
+          const ocRight = Math.min(oc.x + oc.width, areaRight);
           if (ocRight > ocLeft) {
             // Background
             const ocFill = ocStyle.fill;
@@ -1473,7 +1536,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         const decorationContext: CellDecorationContext = { ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: displayValue, styleIndex, styleCache };
         if (useDecorations) applyCellDecorations(decorationContext);
         if (useOverSelection) {
-          if (isCoveredByChrome(chromeRects, row, col)) deferred.push({ context: decorationContext, clip: null });
+          if (isCoveredByChrome(chromeRects, row, col)) deferred.push({ context: decorationContext, clip: decorationClip });
           else applyCellDecorations(decorationContext, "over-selection");
         }
       }
@@ -1492,8 +1555,11 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         continue;
       }
 
-      // If cell has no text to display, restore and skip text rendering
-      if (isEmpty) {
+      // If cell has no text to display, restore and skip text rendering. A
+      // conditional format's Show Bar Only / Show Icon Only (`hideValue`) ends
+      // here too: the fill, borders and decorations above are painted, and the
+      // glyph overlay paints the bar or icon; only the value is withheld.
+      if (isEmpty || effectiveStyle.hideValue === true) {
         ctx.restore();
         baseX += colWidth;
         continue;
@@ -1509,13 +1575,9 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       if (shrinkToFit && isHorizontal && availableWidth > 0 && !isEmpty) {
         const testFont = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
         ctx.font = testFont;
-        const textWidth = ctx.measureText(displayValue).width;
-        if (textWidth > availableWidth) {
-          const scaledSize = Math.max(1, Math.floor(fontSize * (availableWidth / textWidth)));
-          if (scaledSize < fontSize) {
-            fontSize = scaledSize;
-          }
-        }
+        // Continuous, as Excel scales it (layout/shrinkToFit.ts); this used to
+        // floor the size to a whole point.
+        fontSize = shrinkToFitFontSize(fontSize, ctx.measureText(displayValue).width, availableWidth);
       }
 
       // Build font string. fontSize is in POINTS; buildCellFont converts to px.
@@ -1537,8 +1599,9 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // the vertical alignment, size the run to `cell height - padding`, and
       // knew nothing of stacked text ("vertical", Excel's Vertical Text), which
       // therefore painted horizontally. Placement now follows Excel's measured
-      // rules (layout/textOrientation.ts) through the helper the pane painter
-      // shares. The box is the TRUE cell geometry; the clip set up above cuts it.
+      // rules (layout/textOrientation.ts) through the helper the floating-grid
+      // painter shares. The box is the TRUE cell geometry; the clip set up above
+      // cuts it. Wrap Text wraps it along its own direction (BUG-0363).
       if (orientation.kind !== "horizontal") {
         drawOrientedText(
           ctx,
@@ -1553,6 +1616,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
           baseCellStyle.textAlign,
           vAlign,
           fontSizePx,
+          baseCellStyle.wrapText === true,
         );
         ctx.restore();
         baseX += colWidth;
@@ -1846,10 +1910,14 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
   // drawn after this pass), and which is a no-op when headings are hidden and
   // both gutters are 0. It is kept so this pass does not DEPEND on that
   // ordering. Do not delete it as dead code.
+  //
+  // In a PANE the clip is load-bearing: a border straddling the freeze line
+  // must not paint its outer half over the neighbouring pane, which this pass
+  // has not painted and which may show other rows entirely.
   if (deferredBorders.size > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(rowHeaderWidth, colHeaderHeight, width - rowHeaderWidth, height - colHeaderHeight);
+    ctx.rect(areaLeft, areaTop, areaRight - areaLeft, areaBottom - areaTop);
     ctx.clip();
     for (const b of deferredBorders.values()) {
       drawBorderLine(ctx, b.x1, b.y1, b.x2, b.y2, b.border);

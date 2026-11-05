@@ -64,7 +64,6 @@ import {
   clearCommentsInRange,
   clearHyperlinksInRange,
   clearNotesInRange,
-  clearRange,
   clearRangeOnSheets,
   clearRangeWithOptions,
   commitUndoTransaction,
@@ -224,10 +223,12 @@ async function enteredAsOneCellEdit(blocks: Block[]): Promise<boolean> {
  * area's refusal (review finding (c), 2026-10-04). Phase by phase, a refused
  * area stops the gesture before ANY comment, note or link anywhere is removed.
  *
- * What this does NOT give, WITHOUT a sheet group, is Excel's whole-selection
- * refusal: the areas before the refused one have had their first-phase write
- * (for Clear All, their contents and formats). Those are committed as the
- * gesture's ONE undo step, so one Ctrl+Z restores them (runClearGesture).
+ * Each phase is ONE call for every block (BUG-0394): the cell clear sends the
+ * other blocks as `moreAreas`, and the backend gates EVERY block before it
+ * writes any (BUG-0395) -- Excel's whole-selection refusal [LIVE, 2026-11-04:
+ * A1 unlocked and C1 locked on a protected sheet, both selected, Delete
+ * refuses and A1 keeps its value]. Only Remove Hyperlinks still goes block
+ * by block (it reads each block's links first).
  *
  * `group` is the sheet group (groupedSheetsFor). Its write is the VERY FIRST
  * one: ONE `clearRangeOnSheets` over every block, listing the active sheet
@@ -260,39 +261,60 @@ async function writesFor(
       clearRangeOnSheets(sheets, first.startRow, first.startCol, first.endRow, first.endCol, { applyTo, moreAreas }),
     );
   }
-  for (const b of blocks) {
-    const { startRow: r0, startCol: c0, endRow: r1, endCol: c1 } = b;
+  // EVERY BLOCK IN ONE CALL PER PHASE (BUG-0394 / BUG-0395). The cell clear
+  // takes the other blocks as `moreAreas`: the backend gates every block
+  // before it writes any (one refusing block clears none -- Excel [LIVE],
+  // 2026-11-04) and runs ONE dependents cascade; the comment, note and
+  // hyperlink clears take them the same way. Delete over a Go To Special
+  // result (up to MAX_MATCH_AREAS = 10,000 areas) was that many calls, each
+  // with its own cascade. Delete is Clear CONTENTS, as in Excel: the cells
+  // keep their formats (it went through `clearRange`, which removed them).
+  if (blocks.length > 0 && kind !== "removeHyperlinks") {
+    const [first, ...rest] = blocks;
+    const { startRow: r0, startCol: c0, endRow: r1, endCol: c1 } = first;
+    const more = rest.map(({ startRow, startCol, endRow, endCol }) => ({ startRow, startCol, endRow, endCol }));
+    // One block keeps the one-block call it always made.
+    const cells = (applyTo: "contents" | "formats" | "all"): Write => () =>
+      more.length > 0
+        ? clearRangeWithOptions(r0, c0, r1, c1, applyTo, undefined, { moreAreas: more })
+        : clearRangeWithOptions(r0, c0, r1, c1, applyTo);
+    const annotations =
+      (clear: (r0: number, c0: number, r1: number, c1: number, moreAreas?: typeof more) => Promise<number>): Write =>
+      () =>
+        more.length > 0 ? clear(r0, c0, r1, c1, more) : clear(r0, c0, r1, c1);
     switch (kind) {
       case "clearContents":
-        add(0, () => clearRange(r0, c0, r1, c1));
+        add(0, cells("contents"));
         break;
       case "clearFormatting":
-        add(0, () => clearRangeWithOptions(r0, c0, r1, c1, "formats"));
+        add(0, cells("formats"));
         break;
       case "clearComments":
-        add(0, () => clearCommentsInRange(r0, c0, r1, c1));
-        add(1, () => clearNotesInRange(r0, c0, r1, c1));
+        add(0, annotations(clearCommentsInRange));
+        add(1, annotations(clearNotesInRange));
         break;
       case "clearHyperlinks":
-        add(0, () => clearHyperlinksInRange(r0, c0, r1, c1));
+        add(0, annotations(clearHyperlinksInRange));
         break;
       case "clearAll":
-        add(0, () => clearRangeWithOptions(r0, c0, r1, c1, "all"));
-        add(1, () => clearCommentsInRange(r0, c0, r1, c1));
-        add(2, () => clearNotesInRange(r0, c0, r1, c1));
-        add(3, () => clearHyperlinksInRange(r0, c0, r1, c1));
+        add(0, cells("all"));
+        add(1, annotations(clearCommentsInRange));
+        add(2, annotations(clearNotesInRange));
+        add(3, annotations(clearHyperlinksInRange));
         break;
-      case "removeHyperlinks": {
-        const linked = await linkedCellsIn(b);
-        if (linked.length === 0) break;
-        // The FORMATS of each linked cell -- never of the block: a cell without
-        // a link keeps its formatting. Then the links themselves.
-        for (const { row, col } of linked) {
-          add(0, () => clearRangeWithOptions(row, col, row, col, "formats"));
-        }
-        add(1, () => clearHyperlinksInRange(r0, c0, r1, c1));
-        break;
+    }
+  }
+  if (kind === "removeHyperlinks") {
+    for (const b of blocks) {
+      const { startRow: r0, startCol: c0, endRow: r1, endCol: c1 } = b;
+      const linked = await linkedCellsIn(b);
+      if (linked.length === 0) continue;
+      // The FORMATS of each linked cell -- never of the block: a cell without
+      // a link keeps its formatting. Then the links themselves.
+      for (const { row, col } of linked) {
+        add(0, () => clearRangeWithOptions(row, col, row, col, "formats"));
       }
+      add(1, () => clearHyperlinksInRange(r0, c0, r1, c1));
     }
   }
   // A block that added nothing (Remove Hyperlinks without a link) leaves no
@@ -347,12 +369,11 @@ export async function runClearGesture(kind: ClearGestureKind, host: ClearGesture
     if (bracket) {
       tx = ownUndoTransaction(await beginUndoTransaction(STEP_LABELS[kind]), UNDO_CLOSES);
     }
-    // One backend call per area per phase, in sequence, on the active sheet:
-    // Delete over a scattered Go To Special result (up to MAX_MATCH_AREAS =
-    // 10,000 areas) is that many clear calls, each with its own targeted
-    // dependents pass, inside this ONE undo step (review finding (d),
-    // 2026-10-04; the count is pinned in the tests). The sheet group's other
-    // sheets are ONE call for every area (writesFor).
+    // One backend call per PHASE for every area (BUG-0394; writesFor): Delete
+    // over a scattered Go To Special result (up to MAX_MATCH_AREAS = 10,000
+    // areas) is ONE clear call with ONE dependents pass, where it was one call
+    // and one pass per area (the count is pinned in the tests). The sheet
+    // group's other sheets are ONE call for every area too.
     for (const write of writes) {
       await write();
       landed++;

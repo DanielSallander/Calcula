@@ -111,7 +111,7 @@ beforeEach(() => {
 
 describe("every refusal is SHOWN", () => {
   it("Clear Contents: the backend's reason is alerted (Delete on a protected sheet)", async () => {
-    api.clearRange.mockRejectedValue("The cell is on a protected sheet.");
+    api.clearRangeWithOptions.mockRejectedValue("The cell is on a protected sheet.");
     await runClearGesture("clearContents", host(sel(0, 0, 2, 2)));
     expect(dialogs.alertAsync).toHaveBeenCalledWith("The cell is on a protected sheet.");
     expect(emit).not.toHaveBeenCalled();
@@ -143,9 +143,12 @@ describe("every refusal is SHOWN", () => {
 // ---------------------------------------------------------------------------
 
 describe("Clear Contents / Clear Formats / Clear Hyperlinks: one write per block", () => {
-  it("Clear Contents clears the range, as one backend step, and announces a 'clear'", async () => {
+  // Delete is Clear CONTENTS (Excel keeps the formats): the contents clear,
+  // never `clearRange`, which removed the cells' formats with their values.
+  it("Clear Contents clears the range's CONTENTS, as one backend step, and announces a 'clear'", async () => {
     await runClearGesture("clearContents", host(sel(3, 1, 0, 2)));
-    expect(api.clearRange.mock.calls).toEqual([[0, 1, 3, 2]]);
+    expect(api.clearRangeWithOptions.mock.calls).toEqual([[0, 1, 3, 2, "contents"]]);
+    expect(api.clearRange, "clearRange removes formats too").not.toHaveBeenCalled();
     expect(api.beginUndoTransaction, "one write is its own undo step").not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledTimes(1);
     expect(emit.mock.calls[0][1]).toBe("clear");
@@ -161,15 +164,15 @@ describe("Clear Contents / Clear Formats / Clear Hyperlinks: one write per block
     expect(writes()).toEqual(["clearHyperlinksInRange"]);
   });
 
-  it("every Ctrl+click block is cleared (the Delete key used to clear only the last one), as ONE undo step", async () => {
+  it("every Ctrl+click block is cleared (the Delete key used to clear only the last one), in ONE call (BUG-0394)", async () => {
     await runClearGesture("clearContents", host(sel(5, 5, 5, 5, [{ startRow: 0, startCol: 0, endRow: 1, endCol: 1 }])));
-    // The main block (the active cell's) first -- @api selectionBlocks' one order.
-    expect(api.clearRange.mock.calls).toEqual([
-      [5, 5, 5, 5],
-      [0, 0, 1, 1],
+    // The main block (the active cell's) first -- @api selectionBlocks' one
+    // order -- and the others as `moreAreas`: the backend gates every block
+    // before it writes any and makes it ONE undo step itself.
+    expect(api.clearRangeWithOptions.mock.calls).toEqual([
+      [5, 5, 5, 5, "contents", undefined, { moreAreas: [{ startRow: 0, startCol: 0, endRow: 1, endCol: 1 }] }],
     ]);
-    expect(api.beginUndoTransaction).toHaveBeenCalledTimes(1);
-    expect(api.commitUndoTransaction).toHaveBeenCalledWith(9);
+    expect(api.beginUndoTransaction, "one call is its own undo step").not.toHaveBeenCalled();
   });
 });
 
@@ -335,38 +338,41 @@ describe("the host refreshes once the writes land", () => {
 
 describe("Clear All over several areas, a LATER area refused", () => {
   const twoAreas = () => sel(0, 0, 0, 0, [{ startRow: 5, startCol: 5, endRow: 5, endCol: 5 }]);
+  const second = [{ startRow: 5, startCol: 5, endRow: 5, endCol: 5 }];
 
-  it("every area's contents+formats write runs before any comment, note or link is removed", async () => {
+  it("ONE contents+formats call for every area runs before any comment, note or link is removed", async () => {
     await runClearGesture("clearAll", host(twoAreas()));
     expect(writes()).toEqual([
       "clearRangeWithOptions",
-      "clearRangeWithOptions",
-      "clearCommentsInRange",
       "clearCommentsInRange",
       "clearNotesInRange",
-      "clearNotesInRange",
-      "clearHyperlinksInRange",
       "clearHyperlinksInRange",
     ]);
+    expect(api.clearRangeWithOptions.mock.calls).toEqual([[0, 0, 0, 0, "all", undefined, { moreAreas: second }]]);
+    expect(api.clearCommentsInRange.mock.calls).toEqual([[0, 0, 0, 0, second]]);
+    expect(api.clearNotesInRange.mock.calls).toEqual([[0, 0, 0, 0, second]]);
+    expect(api.clearHyperlinksInRange.mock.calls).toEqual([[0, 0, 0, 0, second]]);
   });
 
-  it("the second area refused: no comment, note or link anywhere is removed; what landed is ONE step; shown", async () => {
-    api.clearRangeWithOptions.mockImplementation(async (r0: number) => {
-      if (r0 === 5) throw "The cell is on a protected sheet.";
-      return {};
-    });
+  // BUG-0395: the backend refuses the WHOLE multi-area clear when one area
+  // refuses (Excel [LIVE] 2026-11-04) -- so nothing landed, and the empty step
+  // is cancelled. (It used to clear area by area: the first area's contents
+  // and formats were gone before the second refused.)
+  it("BUG-0395 the second area refused: NOTHING is cleared anywhere, the step is cancelled, and it is shown", async () => {
+    api.clearRangeWithOptions.mockRejectedValue("The cell is on a protected sheet.");
     await runClearGesture("clearAll", host(twoAreas()));
+    expect(api.clearRangeWithOptions).toHaveBeenCalledTimes(1);
     expect(api.clearCommentsInRange, "comments went before the refusal").not.toHaveBeenCalled();
     expect(api.clearNotesInRange, "notes went before the refusal").not.toHaveBeenCalled();
     expect(api.clearHyperlinksInRange, "links went before the refusal").not.toHaveBeenCalled();
-    expect(api.commitUndoTransaction, "what landed must stay undoable").toHaveBeenCalledWith(9);
-    expect(api.cancelUndoTransaction).not.toHaveBeenCalled();
+    expect(api.cancelUndoTransaction, "nothing landed: the empty step goes").toHaveBeenCalledWith(9);
+    expect(api.commitUndoTransaction).not.toHaveBeenCalled();
     expect(dialogs.alertAsync).toHaveBeenCalledWith("The cell is on a protected sheet.");
   });
 
-  it("Clear Comments and Notes: every area's comments, then every area's notes", async () => {
+  it("Clear Comments and Notes: every area's comments in one call, then every area's notes", async () => {
     await runClearGesture("clearComments", host(twoAreas()));
-    expect(writes()).toEqual(["clearCommentsInRange", "clearCommentsInRange", "clearNotesInRange", "clearNotesInRange"]);
+    expect(writes()).toEqual(["clearCommentsInRange", "clearNotesInRange"]);
   });
 
   it("Remove Hyperlinks: every linked cell's formats, then the links", async () => {
@@ -387,9 +393,10 @@ describe("Clear All over several areas, a LATER area refused", () => {
 // ---------------------------------------------------------------------------
 // How many backend calls a scattered selection costs (finding (d))
 // ---------------------------------------------------------------------------
-// There is no multi-range clear in the backend: one call per area per kind of
-// write, sequential, inside ONE undo step. Pinned so a change in the count is
-// a decision, not an accident (a batch command would turn these into one).
+// BUG-0394: every area goes in ONE call per kind of write (the backend's
+// `moreAreas`, one undo step and one dependents cascade). It was one call per
+// area per kind of write -- 50 clears for 50 areas, 200 for Clear All. Pinned
+// so a change in the count is a decision, not an accident.
 
 describe("backend calls per area (pinned)", () => {
   const scattered = (n: number) =>
@@ -401,17 +408,19 @@ describe("backend calls per area (pinned)", () => {
       Array.from({ length: n - 1 }, (_, i) => ({ startRow: 2 * (i + 1), startCol: 0, endRow: 2 * (i + 1), endCol: 0 })),
     );
 
-  it("Delete over 50 Go To Special areas: 50 clears, ONE undo step, ONE announcement, ONE refresh", async () => {
+  it("BUG-0394 Delete over 50 Go To Special areas: ONE clear, ONE announcement, ONE refresh", async () => {
     await runClearGesture("clearContents", host(scattered(50)));
-    expect(api.clearRange).toHaveBeenCalledTimes(50);
-    expect(api.beginUndoTransaction).toHaveBeenCalledTimes(1);
-    expect(api.commitUndoTransaction).toHaveBeenCalledTimes(1);
+    expect(api.clearRangeWithOptions).toHaveBeenCalledTimes(1);
+    const sent = api.clearRangeWithOptions.mock.calls[0];
+    expect(sent[4]).toBe("contents");
+    expect((sent[6] as { moreAreas: unknown[] }).moreAreas).toHaveLength(49);
+    expect(api.clearRange).not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledTimes(1);
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
-  it("Clear All over 50 areas: 4 writes per area", async () => {
+  it("BUG-0394 Clear All over 50 areas: 4 writes in all", async () => {
     await runClearGesture("clearAll", host(scattered(50)));
-    expect(writes()).toHaveLength(200);
+    expect(writes()).toHaveLength(4);
   });
 });

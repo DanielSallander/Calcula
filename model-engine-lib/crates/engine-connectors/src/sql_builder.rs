@@ -251,19 +251,49 @@ fn aggregate_select_clause(dialect: &impl SqlDialect, request: &FetchRequest) ->
         .map(|c| dialect.quote_ident(c))
         .collect();
 
+    // The pushed aggregates are a measure's: a DAX count answers BLANK, never 0
+    // ("When the table argument contains no rows, the function returns BLANK"
+    // -- COUNTROWS; the same for COUNT and DISTINCTCOUNT), so each count is
+    // rendered `NULLIF(count, 0)`, as the engine's own renderers do
+    // (`engine_core::compute::dax_semantics::blank_zero_count`).
     for agg in &request.aggregates {
         let func = agg.function.as_sql();
         let col = &agg.column;
         let default_alias = format!("{}_{}", func.to_lowercase(), col);
         let alias = agg.alias.as_deref().unwrap_or(&default_alias);
         if agg.function == AggregateFunction::CountDistinct {
+            // DAX DISTINCTCOUNT counts BLANK as one value ("The DISTINCTCOUNT
+            // function counts the BLANK value" -- Microsoft); SQL's
+            // COUNT(DISTINCT) skips NULL, so the BLANK value is added back
+            // (`engine_core::compute::dax_semantics::distinct_count_counting_blank`).
+            let column = dialect.quote_ident(col);
             select_parts.push(format!(
-                "{func}(DISTINCT {}) AS {}",
+                "NULLIF({}, 0) AS {}",
+                engine_core::compute::dax_semantics::distinct_count_counting_blank(
+                    &format!("{func}(DISTINCT {column})"),
+                    &column,
+                    None,
+                ),
+                dialect.quote_ident(alias)
+            ));
+        } else if agg.function == AggregateFunction::CountDistinctNoBlank {
+            // DAX DISTINCTCOUNTNOBLANK: SQL's own COUNT(DISTINCT).
+            select_parts.push(format!(
+                "NULLIF({func}(DISTINCT {}), 0) AS {}",
                 dialect.quote_ident(col),
                 dialect.quote_ident(alias)
             ));
         } else if agg.function == AggregateFunction::CountAll {
-            select_parts.push(format!("COUNT(*) AS {}", dialect.quote_ident(alias)));
+            select_parts.push(format!(
+                "NULLIF(COUNT(*), 0) AS {}",
+                dialect.quote_ident(alias)
+            ));
+        } else if agg.function == AggregateFunction::Count {
+            select_parts.push(format!(
+                "NULLIF({func}({}), 0) AS {}",
+                dialect.quote_ident(col),
+                dialect.quote_ident(alias)
+            ));
         } else {
             select_parts.push(format!(
                 "{func}({}) AS {}",

@@ -1,9 +1,10 @@
 //! FILENAME: app/src-tauri/src/scripting/explicit_run_audit.rs
 //! PURPOSE: The persistent trail of an application macro a PERSON ran with
 //! cell access (owner decision B): the grants the mount door opens (follow-up
-//! F3), the ONE report of which cells each granted run wrote (F15), and the
-//! row for a run the page refused before it started because the macro reaches
-//! outside cell access (F8).
+//! F3), the ONE report of which cells each granted run wrote (F15) -- and,
+//! since the owner widened the grant to formatting (2026-11-04), what it
+//! FORMATTED -- and the row for a run the page refused before it started
+//! because the macro reaches outside the grant (F8).
 //! CONTEXT: A module-runtime run of an application's macro leaves structured,
 //! always-on grid-mutation rows (`record_script_grid_mutation`: surface, id,
 //! sheet, cell count, bounds), because Rust applies its writes. A granted
@@ -83,6 +84,9 @@ pub(crate) struct GrantedRun {
     pub door: ExplicitRunDoor,
     /// The button a click ran it from, as the store described it.
     pub button: Option<ButtonAttribution>,
+    /// The grant also covered FORMATTING (`MountGateAnswer::format_access`).
+    /// A report may name formatting only for a grant that carried it.
+    pub formatting: bool,
 }
 
 #[derive(Debug, Default)]
@@ -121,6 +125,13 @@ impl ExplicitRunGrants {
         }
         ledger.open.push_back((id, run));
         Some(id)
+    }
+
+    /// Whether the waiting grant `id` covers formatting, WITHOUT taking it;
+    /// `None` when no such grant is waiting.
+    pub(crate) fn peek_formatting(&self, id: u64) -> Option<bool> {
+        let ledger = self.inner.lock().ok()?;
+        ledger.open.iter().find(|(open, _)| *open == id).map(|(_, run)| run.formatting)
     }
 
     /// Take a grant out for its report: `None` when no grant with that id is
@@ -165,6 +176,26 @@ pub struct ExplicitRunSheetWrites {
     pub last_col: u32,
 }
 
+/// One sheet a granted run FORMATTED (owner, 2026-11-04), as the page counted
+/// it: how many formatting calls reached it, and the bounding box of what they
+/// reached (0-based, inclusive; a row height reaches its whole row).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExplicitRunSheetFormats {
+    /// The TRUE state-vector index of the sheet.
+    pub sheet: usize,
+    pub changes: u32,
+    pub first_row: u32,
+    pub last_row: u32,
+    pub first_col: u32,
+    pub last_col: u32,
+}
+
+/// The last 0-based row / column of a sheet (Excel's grid), which formatting
+/// bounds may reach and never pass.
+const LAST_ROW_INDEX: u32 = 1_048_575;
+const LAST_COL_INDEX: u32 = 16_383;
+
 /// The page's ONE report of a granted run's writes, sent when the grant
 /// expires (the run's `setup` settled) or the realm ends first.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -199,6 +230,10 @@ pub struct ExplicitRunWritesReport {
     /// still leaves one row saying it changed no cells (a completed run's run
     /// row already says it ran).
     pub sheets: Vec<ExplicitRunSheetWrites>,
+    /// One entry per sheet FORMATTED, each sheet at most once (owner,
+    /// 2026-11-04). Refused from a grant that did not cover formatting.
+    #[serde(default)]
+    pub formats: Vec<ExplicitRunSheetFormats>,
 }
 
 /// Record a granted run's writes: one always-on `ScriptExecuted` row per sheet
@@ -231,6 +266,33 @@ fn validate_report(report: &ExplicitRunWritesReport) -> Result<(), String> {
                 .to_string(),
         );
     }
+    if report.formats.len() > MAX_REPORTED_SHEETS {
+        return Err(format!("The report names {} formatted sheets; nothing was recorded.", report.formats.len()));
+    }
+    let mut formatted: HashSet<usize> = HashSet::new();
+    for f in &report.formats {
+        if !formatted.insert(f.sheet) {
+            return Err(format!("The report names formatting on sheet {} twice; nothing was recorded.", f.sheet + 1));
+        }
+        if f.first_row > f.last_row || f.first_col > f.last_col {
+            return Err(format!(
+                "The report's formatting bounds for sheet {} are inverted; nothing was recorded.",
+                f.sheet + 1
+            ));
+        }
+        if f.last_row > LAST_ROW_INDEX || f.last_col > LAST_COL_INDEX {
+            return Err(format!(
+                "The report's formatting bounds for sheet {} lie outside the sheet; nothing was recorded.",
+                f.sheet + 1
+            ));
+        }
+        if f.changes == 0 {
+            return Err(format!(
+                "The report names formatting on sheet {} with no change; nothing was recorded.",
+                f.sheet + 1
+            ));
+        }
+    }
     let mut seen: HashSet<usize> = HashSet::new();
     for s in &report.sheets {
         if !seen.insert(s.sheet) {
@@ -260,6 +322,15 @@ pub(crate) fn audit_explicit_run_writes_core(
     report: &ExplicitRunWritesReport,
 ) -> Result<usize, String> {
     validate_report(report)?;
+    // FORMATTING ONLY FROM A GRANT THAT HAD IT, asked BEFORE the grant is
+    // taken, so a report that claims more than its run was given cannot spend
+    // it. (Peeked, not taken: a refused report keeps the grant for the right one.)
+    if !report.formats.is_empty() && grants.peek_formatting(report.grant_id) == Some(false) {
+        return Err(format!(
+            "The report names formatting for grant {}, whose run had cell access only; nothing was recorded.",
+            report.grant_id
+        ));
+    }
     let run = grants.take(report.grant_id).ok_or_else(|| {
         format!(
             "No run with cell access is waiting to report under grant {}: it was never granted, it was already \
@@ -267,7 +338,7 @@ pub(crate) fn audit_explicit_run_writes_core(
             report.grant_id
         )
     })?;
-    if report.sheets.is_empty() && report.completed {
+    if report.sheets.is_empty() && report.formats.is_empty() && report.completed {
         // It ran and wrote nothing: its run row already says it ran.
         return Ok(0);
     }
@@ -287,7 +358,7 @@ pub(crate) fn audit_explicit_run_writes_core(
             if n == 1 { "was" } else { "were" }
         )
     };
-    if report.sheets.is_empty() {
+    if report.sheets.is_empty() && report.formats.is_empty() {
         // A GRANTED RUN THAT CHANGED NOTHING AND DID NOT COMPLETE (review of
         // M6b): it never started (no undo step could be marked, the mount was
         // superseded) or it stopped before it wrote. The run row written at
@@ -301,12 +372,13 @@ pub(crate) fn audit_explicit_run_writes_core(
             tail.push(format!("{} of its calls failed", report.failed_calls));
         }
         let description = format!(
-            "'{}' from the application '{}'{}, which you started from {}, changed no cells: it stopped before \
+            "'{}' from the application '{}'{}, which you started from {}, changed no cells{}: it stopped before \
              it finished, or never started{}",
             run.macro_id,
             run.application,
             button_phrase,
             door_phrase(door),
+            if run.formatting { " and no formatting" } else { "" },
             if tail.is_empty() { String::new() } else { format!("; {}", tail.join("; ")) }
         );
         let mut extra: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
@@ -416,7 +488,82 @@ pub(crate) fn audit_explicit_run_writes_core(
             extra,
         );
     }
-    Ok(report.sheets.len())
+    // WHAT IT FORMATTED (owner, 2026-11-04): one always-on `ScriptExecuted` row
+    // per sheet, in the same shape with `formatting: true` and the number of
+    // formatting changes in place of a cell count -- a whole-column format is
+    // one change, never a million cells.
+    for f in &report.formats {
+        let name = names.get(f.sheet).cloned().unwrap_or_else(|| format!("Sheet{}", f.sheet + 1));
+        let description = format!(
+            "'{}' from the application '{}'{}, which you started from {}, changed the formatting of {}!{} \
+             ({} formatting change{}){}",
+            run.macro_id,
+            run.application,
+            button_phrase,
+            door_phrase(door),
+            name,
+            formatted_range(f),
+            f.changes,
+            if f.changes == 1 { "" } else { "s" },
+            caveat
+        );
+        let mut extra: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        extra.insert("surface".into(), Value::from(OBJECT_SCRIPT_SURFACE));
+        extra.insert("surfaceId".into(), Value::from(run.macro_id.as_str()));
+        extra.insert("sheet".into(), Value::from(f.sheet));
+        extra.insert("formatting".into(), Value::from(true));
+        extra.insert("formatChanges".into(), Value::from(f.changes));
+        extra.insert("firstRow".into(), Value::from(f.first_row));
+        extra.insert("lastRow".into(), Value::from(f.last_row));
+        extra.insert("firstCol".into(), Value::from(f.first_col));
+        extra.insert("lastCol".into(), Value::from(f.last_col));
+        extra.insert("application".into(), Value::from(run.application.as_str()));
+        extra.insert("macroId".into(), Value::from(run.macro_id.as_str()));
+        extra.insert("startedBy".into(), Value::from("you"));
+        extra.insert("door".into(), Value::from(door_label(door)));
+        extra.insert("cellAccess".into(), Value::from(true));
+        extra.insert("formatAccess".into(), Value::from(true));
+        extra.insert("grantId".into(), Value::from(report.grant_id));
+        extra.insert("completed".into(), Value::from(report.completed));
+        if !report.completed {
+            extra.insert("rolledBack".into(), Value::from(report.rolled_back));
+        }
+        if report.others_undone > 0 {
+            extra.insert("othersUndone".into(), Value::from(report.others_undone));
+        }
+        if report.failed_calls > 0 {
+            extra.insert("failedCalls".into(), Value::from(report.failed_calls));
+        }
+        if let Some(button) = &run.button {
+            extra.insert("button".into(), serde_json::to_value(button).unwrap_or(Value::Null));
+        }
+        crate::calp_commands::record_audit_event_with_extra(
+            state,
+            calp::audit::AuditEvent::ScriptExecuted,
+            description,
+            extra,
+        );
+    }
+    Ok(report.sheets.len() + report.formats.len())
+}
+
+/// A formatted sheet's bounds in A1 words: whole columns as `C:E`, whole rows
+/// as `5:7`, the whole sheet as `1:1048576`, anything else as `A1:B2`.
+pub(crate) fn formatted_range(f: &ExplicitRunSheetFormats) -> String {
+    let whole_rows = f.first_col == 0 && f.last_col >= LAST_COL_INDEX;
+    let whole_cols = f.first_row == 0 && f.last_row >= LAST_ROW_INDEX;
+    if whole_rows {
+        return format!("{}:{}", f.first_row + 1, f.last_row + 1);
+    }
+    if whole_cols {
+        let letters = |c: u32| a1(0, c).trim_end_matches(|ch: char| ch.is_ascii_digit()).to_string();
+        return format!("{}:{}", letters(f.first_col), letters(f.last_col));
+    }
+    if f.first_row == f.last_row && f.first_col == f.last_col {
+        a1(f.first_row, f.first_col)
+    } else {
+        format!("{}:{}", a1(f.first_row, f.first_col), a1(f.last_row, f.last_col))
+    }
 }
 
 // ============================================================================

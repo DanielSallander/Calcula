@@ -77,6 +77,7 @@ fn landed(row: u32, col: u32, value: &str, style_index: usize, moved_from: Optio
         invariant: Some(true),
         pasted: Some(true),
         moved: moved_from.map(|(row, col)| MovedFrom { sheet_index: 0, row, col, target: None }),
+        source: None,
     }
 }
 
@@ -211,7 +212,7 @@ fn blank_write_without_a_style_keeps_the_cells_own_format() {
         }
         write(
             &wb,
-            CellUpdateInput { row: 0, col: 0, value: String::new(), style_index: None, invariant: Some(true), pasted: None, moved: None },
+            CellUpdateInput { row: 0, col: 0, value: String::new(), style_index: None, invariant: Some(true), pasted: None, moved: None, source: None },
         )
         .unwrap_or_else(|e| panic!("protection {protection:?}: clearing A1's value: {e}"));
         assert_eq!(value(&wb, 0, 0), CellValue::Empty, "protection {protection:?}: the value went");

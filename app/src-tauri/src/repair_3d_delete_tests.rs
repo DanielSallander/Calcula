@@ -41,20 +41,32 @@ fn contains(expr: &ParserExpr, pred: &dyn Fn(&ParserExpr) -> bool) -> bool {
     }
 }
 
+/// Did the delete reach the reference: the text reads `#REF!` where the sheet
+/// was, names Data no more, and still parses (the formula is KEPT, as Excel
+/// keeps `=@#REF!A1:A3` and `=SUM(#REF!D1#)` [LIVE, sheetspill/probe1.ps1]).
+fn reads_ref_where_data_was(text: &str) -> bool {
+    text.contains("#REF!") && !text.to_uppercase().contains("DATA!") && parse_formula(text).is_ok()
+}
+
 #[test]
 fn a_delete_turns_a_reference_wrapped_in_every_node_into_ref() {
     let after = vec!["Sheet1".to_string(), "Other".to_string()];
     for (formula, node, is_node) in wrapped_cases() {
         let ast = parse_formula(formula).unwrap_or_else(|e| panic!("fixture: `{}` must parse: {}", formula, e));
         assert!(is_node(&ast), "fixture: `{}` is not a {}", formula, node);
-        assert_eq!(
-            crate::repair_3d_refs_on_delete(formula, "Data", &after),
-            None,
-            "deleting Data left the reference inside a {} alive: `{}`",
+        let repaired = crate::repair_3d_refs_on_delete(formula, "Data", &after)
+            .unwrap_or_else(|| panic!("deleting Data emptied the {} `{}` instead of keeping its formula", node, formula));
+        assert!(
+            reads_ref_where_data_was(&repaired),
+            "deleting Data left the reference inside a {} alive: `{}` -> `{}`",
             node,
-            formula
+            formula,
+            repaired
         );
     }
+    // The exact Excel spellings of the two the probe measured.
+    assert_eq!(crate::repair_3d_refs_on_delete("=@Data!A1:A3", "Data", &after).as_deref(), Some("=@#REF!A1:A3"));
+    assert_eq!(crate::repair_3d_refs_on_delete("=SUM(Data!A1#)", "Data", &after).as_deref(), Some("=SUM(#REF!A1#)"));
 }
 
 /// The same wrappers around a reference to a sheet that STAYS are left alone:
@@ -84,7 +96,8 @@ fn a_delete_reaches_a_reference_inside_a_list_literal() {
 }
 
 /// End to end through the command: a wrapped reference on Sheet1 to the deleted
-/// sheet becomes `#REF!`, exactly like a plain one.
+/// sheet reads `#REF!` where the sheet was, exactly like a plain one, and the
+/// cell KEEPS its formula.
 #[test]
 fn deleting_a_sheet_turns_its_wrapped_references_into_ref() {
     use crate::document_effect::test_seed_effect;
@@ -118,11 +131,11 @@ fn deleting_a_sheet_turns_its_wrapped_references_into_ref() {
     for (row, (formula, node, _)) in cases.iter().enumerate() {
         let cell = grid.get_cell(row as u32, 0).expect("the formula cell");
         let now = cell.formula_string_raw().unwrap_or_default();
-        // A reference to a deleted sheet turns the whole formula into `#REF!`
-        // (`repair_all_formulas`: the error value, no formula left), exactly as
-        // a plain `=Data!A1` does.
+        // The reference reads `#REF!` where the sheet was and the formula
+        // stays (Excel's `=@#REF!A1:A3`, `=SUM(#REF!A1#)`), exactly as a plain
+        // `=Data!A1` becomes `=#REF!A1`.
         assert!(
-            matches!(cell.value, CellValue::Error(CellError::Ref)) && !now.to_uppercase().contains("DATA!"),
+            cell.ast.is_some() && reads_ref_where_data_was(&now),
             "after deleting Data the {} `{}` reads `{}` = {:?}",
             node,
             formula,
@@ -138,7 +151,8 @@ fn deleting_a_sheet_turns_its_wrapped_references_into_ref() {
 //
 // Excel moves a deleted endpoint INWARD, to its neighbour inside the range:
 // with Sheet1, Mid, Data, Last, Other, deleting Data turns `SUM(Mid:Data!B1)`
-// into `SUM(Mid:Mid!B1)` and `SUM(Data:Last!B1)` into `SUM(Last:Last!B1)`.
+// into `SUM(Mid!B1)` and `SUM(Data:Last!B1)` into `SUM(Last!B1)` (a span left
+// with one sheet is written as that sheet's reference, as Excel does).
 // `find_adjacent_sheet` answered with the workbook's LAST sheet for a deleted
 // end and its FIRST sheet for a deleted start, whatever the range was: the
 // first became `SUM(Mid:Other!B1)` and the second `SUM(Sheet1:Last!B1)`, so
@@ -178,15 +192,19 @@ fn delete_sheet_at(state: &AppState, index: usize) {
 fn a_deleted_3d_endpoint_moves_inward_to_its_neighbour_in_the_range() {
     use crate::document_effect::test_seed_effect;
     let state = endpoint_book();
-    // (formula on Sheet1, what it must read after Data is deleted; None = #REF!).
+    // (formula on Sheet1, what it must read after Data is deleted).
     // `Last:Data` spells the range backwards: Data is still its FIRST tab.
+    // A span left with ONE sheet is that sheet's plain reference, as Excel
+    // writes it [LIVE, sheetspill/probe1.ps1: `=SUM(Sheet2:Sheet3!A1)` with
+    // Sheet2 deleted reads `=SUM(Sheet3!A1)`]; one naming only the deleted
+    // sheet keeps its cell part behind `#REF!`.
     let cases: [(&str, Option<&str>); 6] = [
-        ("=SUM(Mid:Data!B1)", Some("SUM(Mid:Mid!B1)")),
-        ("=SUM(Data:Last!B1)", Some("SUM(Last:Last!B1)")),
+        ("=SUM(Mid:Data!B1)", Some("SUM(Mid!B1)")),
+        ("=SUM(Data:Last!B1)", Some("SUM(Last!B1)")),
         ("=SUM(Data:Other!B1)", Some("SUM(Last:Other!B1)")),
         ("=SUM(Mid:Last!B1)", Some("SUM(Mid:Last!B1)")),
-        ("=SUM(Last:Data!B1)", Some("SUM(Last:Last!B1)")),
-        ("=SUM(Data:Data!B1)", None),
+        ("=SUM(Last:Data!B1)", Some("SUM(Last!B1)")),
+        ("=SUM(Data:Data!B1)", Some("SUM(#REF!B1)")),
     ];
     for (row, (formula, _)) in cases.iter().enumerate() {
         let cell = engine::Cell::new_formula(formula.to_string());
@@ -201,21 +219,14 @@ fn a_deleted_3d_endpoint_moves_inward_to_its_neighbour_in_the_range() {
     for (row, (formula, expected)) in cases.iter().enumerate() {
         let cell = grid.get_cell(row as u32, 0).expect("the formula cell");
         let now = cell.formula_string_raw().unwrap_or_default();
-        match expected {
-            Some(expected) => assert!(
-                calp::sheet_renames::same_formula_text(&now, expected),
-                "deleting Data turned `{}` into `{}`; Excel moves the endpoint inward: `{}`",
-                formula,
-                now,
-                expected
-            ),
-            None => assert!(
-                matches!(cell.value, CellValue::Error(CellError::Ref)) && cell.ast.is_none(),
-                "`{}` names ONLY the deleted sheet and must become #REF!, not `{}`",
-                formula,
-                now
-            ),
-        }
+        let expected = expected.expect("every case keeps its formula");
+        assert!(
+            calp::sheet_renames::same_formula_text(&now, expected),
+            "deleting Data turned `{}` into `{}`; Excel moves the endpoint inward: `{}`",
+            formula,
+            now,
+            expected
+        );
     }
 }
 
@@ -230,18 +241,24 @@ fn the_endpoint_that_stays_is_spelled_as_the_workbook_spells_it() {
     // Sheet1, Mid, Data, Last, Other: Data stood at index 2.
     assert_eq!(
         repair_formula_text_on_delete_at("=SUM(Mid:Data!B1)>0", "Data", 2, &after).as_deref(),
-        Some("=SUM(Mid:Mid!B1)>0"),
+        Some("=SUM(Mid!B1)>0"),
         "a conditional format's rule (the store path)"
     );
     assert_eq!(
         repair_formula_text_on_delete_at("=SUM(Data:Last!B1)>A1", "Data", 2, &after).as_deref(),
-        Some("=SUM(Last:Last!B1)>A1"),
+        Some("=SUM(Last!B1)>A1"),
         "a custom validation (the store path, the START deleted)"
     );
     assert_eq!(
         repair_3d_refs_on_delete_at("=SUM(Mid:Data!B1)", "Data", 2, &after).as_deref(),
-        Some("=SUM(Mid:Mid!B1)"),
+        Some("=SUM(Mid!B1)"),
         "a cell or defined name (the whole-formula path)"
+    );
+    // A span that keeps two sheets keeps spanning, spelled as the workbook
+    // spells the endpoint that stayed.
+    assert_eq!(
+        repair_3d_refs_on_delete_at("=SUM(Data:Other!B1)", "Data", 2, &after).as_deref(),
+        Some("=SUM(Last:Other!B1)")
     );
     // An UNTOUCHED 3D reference keeps the caller's own text.
     assert_eq!(
@@ -270,8 +287,154 @@ fn a_defined_names_3d_endpoint_moves_inward_too() {
     delete_sheet_at(&state, data);
     let refers_to = state.named_ranges.read().unwrap()["SPAN"].refers_to.clone();
     assert!(
-        calp::sheet_renames::same_formula_text(&refers_to, "=SUM(Mid:Mid!B1)+SUM(Last:Last!B1)"),
+        calp::sheet_renames::same_formula_text(&refers_to, "=SUM(Mid!B1)+SUM(Last!B1)"),
         "the defined name reads `{}` after Data was deleted",
         refers_to
     );
+}
+
+// ---------------------------------------------------------------------------
+// NEW-sheet-delete-ref-constant: the formula is KEPT, as Excel keeps it
+// ---------------------------------------------------------------------------
+//
+// Excel 16 [LIVE, 2026-11-05, sheetspill/probe1.ps1; dtfollow/probe3.ps1]:
+// deleting Sheet2 turns `=Sheet2!A1` into `=#REF!A1` -- the formula stays, the
+// sheet becomes `#REF!` -- and `=SUM(Sheet2!A1:A3)+1` into
+// `=SUM(#REF!A1:A3)+1`. Under MANUAL calculation each keeps showing its old
+// value (10, 61) until F9; under automatic it shows #REF! at once, and so does
+// a cell reading it (`=C1*2`). A defined name reads `=#REF!$A$1`, a rule
+// `=A1>#REF!$B$1`. Calcula turned every such cell into a #REF! CONSTANT: the
+// formula was gone and the value changed at once even under manual.
+
+/// Sheet1 (formulas) and Data (A1:A3 = 10, 20, 30), Sheet1 active, every value
+/// CALCULATED before the delete, in `mode`.
+fn ref_book(mode: &str) -> AppState {
+    use crate::document_effect::test_seed_effect;
+    let state = crate::create_app_state();
+    let file = crate::persistence::FileState::default();
+    crate::sheets::add_sheet_inner(&state, &file, Some("Data".to_string()), ::persistence::SheetKind::Worksheet)
+        .expect("add Data");
+    crate::sheets::activate_sheet(&state, 0).expect("back to Sheet1");
+    {
+        let mut grids = state.grids.write(&test_seed_effect()).unwrap();
+        for (row, n) in [(0u32, 10.0), (1, 20.0), (2, 30.0)] {
+            grids[1].set_cell(row, 0, engine::Cell::new_number(n));
+        }
+    }
+    for (row, formula) in [(0u32, "=Data!A1"), (1, "=SUM(Data!A1:A3)+1"), (2, "=C1*2"), (3, "=Data!$A$1+1")] {
+        let cell = engine::Cell::new_formula(formula.to_string());
+        assert!(cell.ast.is_some(), "fixture: `{}` must parse", formula);
+        state.grid.write(&test_seed_effect()).unwrap().set_cell(row, 2, cell.clone());
+        state.grids.write(&test_seed_effect()).unwrap()[0].set_cell(row, 2, cell);
+    }
+    crate::undo_commands::rebuild_all_dependencies(&state);
+    crate::calculation::recalculate_sheet_values(
+        &state,
+        &crate::persistence::UserFilesState::default(),
+        &crate::pivot::PivotState::new(),
+        0,
+        None,
+    );
+    for (row, n) in [(0u32, 10.0), (1, 61.0), (2, 20.0), (3, 11.0)] {
+        assert_eq!(
+            state.grid.read().unwrap().get_cell(row, 2).map(|c| c.value.clone()),
+            Some(CellValue::Number(n)),
+            "fixture: C{} did not calculate",
+            row + 1
+        );
+    }
+    *state.calculation_mode.lock().unwrap() = mode.to_string();
+    state
+}
+
+fn c_column(state: &AppState) -> Vec<(String, CellValue)> {
+    let grid = state.grid.read().unwrap();
+    (0..4u32)
+        .map(|row| {
+            let cell = grid.get_cell(row, 2).expect("the formula cell");
+            (cell.formula_string_raw().unwrap_or_default(), cell.value.clone())
+        })
+        .collect()
+}
+
+#[test]
+fn deleting_a_sheet_keeps_each_formula_with_ref_where_the_sheet_was() {
+    let state = ref_book("automatic");
+    delete_sheet_at(&state, 1);
+    let now = c_column(&state);
+    let texts: Vec<&str> = now.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["#REF!A1", "SUM(#REF!A1:A3)+1", "C1*2", "#REF!$A$1+1"],
+        "Excel keeps every formula and writes #REF! where the deleted sheet was"
+    );
+    // Automatic: the recalculation the delete runs shows #REF! at once, in the
+    // repaired cells and in the cell that reads one of them.
+    for (row, (text, value)) in now.iter().enumerate() {
+        assert_eq!(*value, CellValue::Error(CellError::Ref), "C{} `{}` shows {:?}", row + 1, text, value);
+    }
+}
+
+#[test]
+fn under_manual_calculation_the_deleted_sheets_readers_keep_their_values_until_f9() {
+    let state = ref_book("manual");
+    delete_sheet_at(&state, 1);
+    let now = c_column(&state);
+    assert_eq!(now[0].0, "#REF!A1", "the formula is kept");
+    for (row, n) in [(0usize, 10.0), (1, 61.0), (2, 20.0), (3, 11.0)] {
+        assert_eq!(
+            now[row].1,
+            CellValue::Number(n),
+            "under manual calculation C{} must keep its old value until F9, as Excel does",
+            row + 1
+        );
+    }
+    // F9: now every one of them is #REF!.
+    crate::calculation::recalculate_sheet_values(
+        &state,
+        &crate::persistence::UserFilesState::default(),
+        &crate::pivot::PivotState::new(),
+        0,
+        None,
+    );
+    for (row, (text, value)) in c_column(&state).iter().enumerate() {
+        assert_eq!(*value, CellValue::Error(CellError::Ref), "after F9 C{} `{}` shows {:?}", row + 1, text, value);
+    }
+}
+
+#[test]
+fn a_deleted_sheets_name_and_rule_formulas_read_ref_where_the_sheet_was() {
+    use crate::conditional_formatting as cf;
+    use crate::document_effect::test_seed_effect;
+    let state = ref_book("automatic");
+    state.named_ranges.write(&test_seed_effect()).unwrap().insert(
+        "MYCELL".to_string(),
+        crate::named_ranges::NamedRange {
+            name: "MyCell".to_string(),
+            sheet_index: None,
+            refers_to: "=Data!$A$1:$A$3".to_string(),
+            comment: None,
+            folder: None,
+        },
+    );
+    state.conditional_formats.write(&test_seed_effect()).unwrap().insert(
+        0,
+        vec![cf::ConditionalFormatDefinition {
+            id: 1,
+            priority: 1,
+            rule: cf::ConditionalFormatRule::Expression(cf::ExpressionRule { formula: "=A1>Data!$B$1".to_string() }),
+            format: cf::ConditionalFormat::default(),
+            ranges: vec![],
+            stop_if_true: false,
+            enabled: true,
+        }],
+    );
+    delete_sheet_at(&state, 1);
+    // [LIVE] `=#REF!$A$1:$A$3` and `=A1>#REF!$B$1`.
+    assert_eq!(state.named_ranges.read().unwrap()["MYCELL"].refers_to, "=#REF!$A$1:$A$3");
+    let rule = match &state.conditional_formats.read().unwrap()[&0][0].rule {
+        cf::ConditionalFormatRule::Expression(r) => r.formula.clone(),
+        other => panic!("{:?}", other),
+    };
+    assert_eq!(rule, "=A1>#REF!$B$1");
 }

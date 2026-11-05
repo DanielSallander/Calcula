@@ -23,7 +23,13 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
-import { isBindablePath, isObjectBindingKind, type ObjectBindingKind } from "@api/objectBindings";
+import {
+  CONTAINER_ROOT_POINTER,
+  isBindablePath,
+  isObjectBindingKind,
+  rowsOf,
+  type ObjectBindingKind,
+} from "@api/objectBindings";
 import { VISUAL_CONTAINER_FIELD_IDS } from "@api/visualContainer";
 
 const EXT_ROOT = path.resolve(__dirname, "../../..");
@@ -138,6 +144,43 @@ describe("every family provider's bindable container pointers are WP-D catalog r
     walk(EXT_ROOT);
     const listed = new Set(PROVIDER_FILES.map((p) => p.file));
     expect(found.filter((f) => !listed.has(f))).toEqual([]);
+  });
+});
+
+/**
+ * THE OTHER DIRECTION (BUG-0491): the catalog binds no container field its
+ * family's provider declines. A field the family never paints (a slicer's
+ * subtitle, a floating grid's divider, a one-line header's `title.wrap`) is
+ * `null` in the provider's table; a catalog row for it let a script, MCP or
+ * the AI bind or write a fact that paints nothing. Every Container row of a
+ * container kind must therefore be a pointer the provider's table names.
+ */
+export function rowsTheProviderDeclines(src: string, kind: ObjectBindingKind): string[] {
+  const literal = exportedLiteral(src, "CONTAINER_BINDING_PATHS");
+  if (literal === null) return ["no `export const CONTAINER_BINDING_PATHS = { ... }` literal"];
+  const named = new Set(pointersIn(literal));
+  return rowsOf(kind)
+    .filter((r) => r.origin === "container" && !named.has(r.pointer))
+    .map((r) => `${kind} ${r.pointer} is a catalog row the provider does not offer`);
+}
+
+describe("the catalog binds no container field a family's provider declines (BUG-0491)", () => {
+  for (const { file, kind } of PROVIDER_FILES) {
+    if (CONTAINER_ROOT_POINTER[kind] === null) continue;
+    it(`${file} (${kind})`, () => {
+      const src = fs.readFileSync(path.join(EXT_ROOT, file), "utf8");
+      expect(rowsTheProviderDeclines(src, kind)).toEqual([]);
+    });
+  }
+
+  it("has teeth: a provider that declines a field the catalog still binds is reported", () => {
+    const planted = `
+      export const CONTAINER_BINDING_KIND = "slicer";
+      export const CONTAINER_BINDING_PATHS = { "border.radius": "/container/border/radius" };
+    `;
+    const declined = rowsTheProviderDeclines(planted, "slicer");
+    expect(declined).toContain("slicer /container/border/color is a catalog row the provider does not offer");
+    expect(declined).not.toContain("slicer /container/border/radius is a catalog row the provider does not offer");
   });
 });
 

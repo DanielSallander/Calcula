@@ -26,6 +26,8 @@
 // path may set, clear or infer that link: the controller calls the same Tauri
 // commands the ribbon calls, and the relink happens inside them.
 
+import { getAutoFilter, getHiddenRows } from "./backend";
+
 /** Where a filter sits and what it is currently doing. Mirrors the backend's
  *  AutoFilterInfo plus the hidden-row set, which is what a caller actually
  *  wants to know ("what did that do?") and which the info alone does not say. */
@@ -247,4 +249,46 @@ export function publishAutoFilterStatus(next: AutoFilterStatus): void {
       console.error("[autoFilterService] status listener threw:", err);
     }
   }
+}
+
+// ============================================================================
+// FILTER MODE -- Excel's Worksheet.FilterMode, for the gestures that change
+// with it
+// ============================================================================
+//
+// Excel switches two gestures on the SHEET's filter mode, not on whether the
+// cells in hand are hidden -- measured live (Excel 16, 2026-11-05, lane uic
+// probe1..probe3):
+//   - AutoSum's Sum writes =SUBTOTAL(9,...) instead of =SUM(...) ANYWHERE on a
+//     sheet in filter mode: inside the filtered range, in other columns, below
+//     it, as a row total, in a one-cell guess -- and also when the criteria
+//     hide no row at all. A filter with its buttons showing but no criteria,
+//     rows hidden by hand and collapsed outline rows do NOT switch it, and a
+//     filter on ANOTHER sheet does not either. An in-place Advanced Filter
+//     does.
+//   - Ctrl+Enter skips EVERY hidden row of its selection while the sheet is in
+//     filter mode -- the filter's, and rows hidden by hand inside or outside
+//     the filtered range -- and fills hidden rows like any other otherwise.
+// So both ask this one question instead of looking at hidden rows.
+
+/**
+ * Whether the ACTIVE sheet is in filter mode (Excel's `Worksheet.FilterMode`):
+ * its AutoFilter has criteria applied -- even criteria that hide nothing -- or
+ * an Advanced Filter hides rows in place. Read from the backend each time (no
+ * cached status), so it is right straight after a filter change or a sheet
+ * switch. A failed read answers false: the gesture then behaves as on an
+ * unfiltered sheet, which is what it did before it asked.
+ *
+ * Known gap: an Advanced Filter applied in place that hides NO row is not
+ * seen (the backend keeps only its hidden rows), where Excel is in filter mode.
+ */
+export async function isActiveSheetFilterMode(): Promise<boolean> {
+  const [info, hidden] = await Promise.all([
+    getAutoFilter().catch(() => null),
+    getHiddenRows().catch(() => [] as number[]),
+  ]);
+  if (info && info.enabled && info.isDataFiltered) return true;
+  // The AutoFilter's own hidden rows exist only under criteria (handled above),
+  // so any hidden row left is an Advanced Filter's.
+  return hidden.length > 0;
 }

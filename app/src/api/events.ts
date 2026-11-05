@@ -304,6 +304,11 @@ export const AppEvents = {
 
   // Locale events
   LOCALE_CHANGED: "app:locale-changed",
+  // Every BI model engine now writes DAX FORMAT in the app locale (after each
+  // locale change; @api/locale onBiFormatCultureApplied). A listener that
+  // RE-QUERIES a model after a locale switch waits for this, never for
+  // LOCALE_CHANGED alone, which fires before that walk ends.
+  BI_FORMAT_CULTURE_APPLIED: "app:bi-format-culture-applied",
 
   // Status bar text events
   STATUS_BAR_TEXT_CHANGED: "app:status-bar-text-changed",

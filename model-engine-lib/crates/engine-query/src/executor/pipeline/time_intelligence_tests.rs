@@ -1541,8 +1541,10 @@ async fn compound_yoy_delta_subtracts_prior_year() {
     // 2024: monthly total = 3m. YTD(Dec) = 3*78 = 234. PRIORYEAR(Dec) = 2023
     // Dec monthly total = 360. Delta = 234 - 360 = -126.
     assert_eq!(result[&(2024, 12)], Some(-126.0));
-    // 2023 has no prior year → PRIORYEAR is NULL → the delta is NULL.
-    assert_eq!(result[&(2023, 6)], None);
+    // 2023 has no prior year → PRIORYEAR is BLANK, and DAX reads a BLANK
+    // term of `-` as 0 (`BLANK() - 10 = -10`, round C), so the delta is the
+    // YTD itself: 30 * 6 * 7 / 2 = 630. (SQL's NULL - x = NULL said BLANK.)
+    assert_eq!(result[&(2023, 6)], Some(630.0));
 }
 
 #[tokio::test]

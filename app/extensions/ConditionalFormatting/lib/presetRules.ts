@@ -26,13 +26,21 @@ export function colorScaleRule(preset: PresetColorScale): ConditionalFormatRule 
   } as ConditionalFormatRule;
 }
 
-/** A Data Bars preset as a rule: automatic shortest / longest bar. */
+/**
+ * A Data Bars preset as a rule: automatic shortest / longest bar, an automatic
+ * axis, Excel's red negative bars and black axis. A GRADIENT preset has a solid
+ * border in its own colour (and its negative bars a red one); a SOLID preset has
+ * none -- the painter draws a border only when the rule carries one (BUG-0511).
+ */
 export function dataBarRule(color: string, gradientFill: boolean): ConditionalFormatRule {
   return {
     type: "dataBar",
     minValueType: "autoMin",
     maxValueType: "autoMax",
     fillColor: color,
+    ...(gradientFill ? { borderColor: color, negativeBorderColor: "#FF0000" } : {}),
+    negativeFillColor: "#FF0000",
+    axisColor: "#000000",
     axisPosition: "automatic",
     direction: "context",
     showValue: true,

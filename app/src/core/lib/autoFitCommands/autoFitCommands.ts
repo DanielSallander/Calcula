@@ -249,7 +249,14 @@ export async function runAutoFitColumnWidth(host: AutoFitCommandHost, args?: unk
   const changes: SizeChange[] = [];
   for (const col of columns) {
     const cells = [...(cellsByCol.get(col)?.values() ?? [])];
-    const optimal = measureOptimalColumnWidth(col, cells, styles, theme, config.minColumnWidth);
+    // ONLY THE SELECTED ROWS of this column (BUG-0351): an extension's content
+    // elsewhere in it -- a PivotTable in A20:C40 with A1 selected -- sizes
+    // nothing (Excel fits the selected cells). A whole-column block: all rows.
+    const covering = blocks.filter((b) => within(col, b.startCol, b.endCol));
+    const rows = covering.some((b) => b.startRow === 0 && b.endRow >= config.totalRows - 1)
+      ? undefined
+      : covering.map((b) => ({ startRow: b.startRow, endRow: b.endRow }));
+    const optimal = measureOptimalColumnWidth(col, cells, styles, theme, config.minColumnWidth, true, rows);
     // Nothing to fit: Excel leaves the width alone.
     if (optimal === null) continue;
     const current = dims?.columnWidths.get(col) ?? config.defaultCellWidth;

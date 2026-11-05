@@ -3,6 +3,31 @@
 use super::*;
 
 impl Expression {
+    /// Is this node a boolean predicate by its shape (a comparison, AND / OR /
+    /// NOT / XOR, `ISBLANK`, `IN`, a boolean literal, `HASONEVALUE`,
+    /// `ISINSCOPE` / `ISFILTERED` / `ISSELECTEDMEASURE`)? Anything else may be
+    /// a number used as a condition (`IF(COUNTROWS(t), ...)`). Used to spell a
+    /// DataFusion `CASE` condition
+    /// ([`crate::compute::sql_util::null_is_false_condition`]); a `false` for
+    /// a node that is in fact boolean only adds a no-op cast.
+    pub fn is_boolean_predicate(&self) -> bool {
+        matches!(
+            self,
+            Expression::Comparison { .. }
+                | Expression::And(..)
+                | Expression::Or(..)
+                | Expression::Not(_)
+                | Expression::Xor(..)
+                | Expression::IsBlank(_)
+                | Expression::InList { .. }
+                | Expression::LiteralBool(_)
+                | Expression::HasOneValue { .. }
+                | Expression::IsInScope { .. }
+                | Expression::IsFiltered { .. }
+                | Expression::IsSelectedMeasure { .. }
+        )
+    }
+
     /// Returns `true` if this expression contains any `Aggregate` nodes.
     pub fn has_aggregate(&self) -> bool {
         match self {
@@ -122,6 +147,19 @@ impl Expression {
             // arguments may contain aggregates.
             Expression::Call { args, .. } => args.iter().any(|a| a.has_aggregate()),
         }
+    }
+
+    /// Returns `true` if this tree contains a `CLEAR` or `CLEAREXCEPT` node
+    /// ([`Expression::Clear`] / [`Expression::ClearExcept`]) anywhere. The
+    /// pushdown planner uses it to keep a CLEAR the source-SQL window renderer
+    /// cannot reach (one beneath a KEEP, a scalar function, ...) local.
+    pub fn contains_clear(&self) -> bool {
+        matches!(
+            self,
+            Expression::Clear { .. } | Expression::ClearExcept { .. }
+        ) || super::child_expressions(self)
+            .iter()
+            .any(|c| c.contains_clear())
     }
 
     /// Returns `true` if this expression contains any context manipulation nodes

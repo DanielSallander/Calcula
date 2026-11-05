@@ -40,7 +40,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => {}),
 }));
 
-import { clearRange, clearRangeOnSheets, clearRangeWithOptions, type RecordedGridEvent } from "@api/lib";
+import { clearRangeOnSheets, clearRangeWithOptions, type RecordedGridEvent } from "@api/lib";
 import { vClearRange } from "@api/scriptHost/validators";
 import { resetRecorderForTests, startRecording, stopRecording } from "../lib/actionRecorder";
 import { macroRecorderBackend } from "../lib/macroRecorderBackend";
@@ -66,9 +66,12 @@ async function recordGroupedClear(applyTo: "formats" | "all" | "contents"): Prom
   // What clearGestures.ts writes for a grouped clear: ONE group call listing
   // the active sheet too (it gates every sheet and writes the others), then
   // the active sheet's own clear.
+  // (Changed deliberately, NEW-clear-range-record: the contents case used the
+  // bare `clearRange` bridge, which the recorder heard as "contents" -- but
+  // `clear_range` removes formats too, so it records as "all" now; the
+  // gesture's own Clear Contents goes through `clearRangeWithOptions`.)
   await clearRangeOnSheets([0, 2], 0, 0, 1, 1, { applyTo });
-  if (applyTo === "contents") await clearRange(0, 0, 1, 1);
-  else await clearRangeWithOptions(0, 0, 1, 1, applyTo);
+  await clearRangeWithOptions(0, 0, 1, 1, applyTo);
   return stopRecording();
 }
 

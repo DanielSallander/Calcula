@@ -453,6 +453,11 @@ pub fn consolidate_data(
             &[dest_sheet],
         );
     }
+    // A LIVE DATA TABLE whose model reads the destination follows the
+    // consolidation under automatic calculation, as after any edit (BUG-0652,
+    // rev-dt2-1): both recalculations above refresh the tables at their end,
+    // ONCE (NEW-double-refresh -- a second `refresh_after_edit` here
+    // recomputed every table again).
 
     result
 }

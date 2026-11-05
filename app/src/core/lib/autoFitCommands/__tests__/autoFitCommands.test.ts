@@ -162,6 +162,25 @@ describe("AutoFit Column Width", () => {
     expect(onColumnResized).toHaveBeenCalledWith(0, 50);
   });
 
+  // BUG-0351: the measurer is told WHICH rows are fitted, so an extension's
+  // content elsewhere in the column (a PivotTable in A20:C40) sizes nothing.
+  it("BUG-0351 the selected rows of each column reach the measurer (whole columns: none)", async () => {
+    sheet = [
+      [0, 0, "abc"],
+      [4, 0, "de"],
+    ];
+    await runAutoFitColumnWidth(host(sel(0, 0, 0, 0, "cells", [{ startRow: 4, startCol: 0, endRow: 6, endCol: 0 }])));
+    const [, , , , , include, rows] = measure.measureOptimalColumnWidth.mock.calls[0];
+    expect(include).toBe(true);
+    expect(rows).toEqual([
+      { startRow: 0, endRow: 0 },
+      { startRow: 4, endRow: 6 },
+    ]);
+    measure.measureOptimalColumnWidth.mockClear();
+    await runAutoFitColumnWidth(host(sel(0, 0, ROWS - 1, 0, "columns")));
+    expect(measure.measureOptimalColumnWidth.mock.calls[0][6]).toBeUndefined();
+  });
+
   it("on WHOLE columns fits every cell in them", async () => {
     sheet = [
       [0, 0, "short"],

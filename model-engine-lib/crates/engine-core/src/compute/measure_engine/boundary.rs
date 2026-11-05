@@ -97,53 +97,8 @@ impl<'a> MeasureEngine<'a> {
             ));
         }
 
-        // Build a combining query.
-        // Start from the first sub-result table.
-        let first_table = &sub_results[0];
-        let group_cols: Vec<String> = group_by
-            .iter()
-            .map(|tc| quote_ident_double(&tc.column))
-            .collect();
-
-        let mut from_clause = first_table.clone();
-        for sub_table in &sub_results[1..] {
-            if group_cols.is_empty() {
-                from_clause.push_str(&format!(" CROSS JOIN {sub_table}"));
-            } else {
-                let join_conds: Vec<String> = group_cols
-                    .iter()
-                    .map(|c| format!("{first_table}.{c} = {sub_table}.{c}"))
-                    .collect();
-                from_clause.push_str(&format!(
-                    " FULL OUTER JOIN {sub_table} ON {}",
-                    join_conds.join(" AND ")
-                ));
-            }
-        }
-
-        let mut select_parts: Vec<String> = group_cols
-            .iter()
-            .map(|c| format!("{first_table}.{c}"))
-            .collect();
-        select_parts.push(format!(
-            "{result_sql} AS {}",
-            quote_ident_double(measure_name)
-        ));
-
-        let combine_sql = format!("SELECT {} FROM {}", select_parts.join(", "), from_clause);
-
-        let df = ctx.sql(&combine_sql).await?;
-        let batches = df.collect().await?;
-
-        if batches.is_empty() {
-            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
-                arrow::datatypes::Schema::empty(),
-            )));
-        }
-
-        let schema = batches[0].schema();
-        let combined = concat_batches(&schema, &batches)?;
-        Ok(combined)
+        let combine_sql = combine_sub_results_sql(&sub_results, group_by, &result_sql, measure_name);
+        collect_with_schema(ctx.sql(&combine_sql).await?).await
     }
 
     /// Recursively decompose a compound expression, evaluating each leaf
@@ -191,7 +146,15 @@ impl<'a> MeasureEngine<'a> {
                             counter,
                         )
                         .await?;
-                    Ok(format!("({l} {} {r})", op.as_sql()))
+                    // DAX BLANK arithmetic: see `compute::dax_semantics`.
+                    Ok(crate::compute::dax_semantics::binary_sql(
+                        &l,
+                        *op,
+                        &r,
+                        crate::compute::dax_semantics::never_blank(left),
+                        crate::compute::dax_semantics::never_blank(right),
+                        crate::compute::dax_semantics::DivideStyle::Ieee,
+                    ))
                 }
                 Expression::SafeDivide {
                     numerator,
@@ -240,8 +203,8 @@ impl<'a> MeasureEngine<'a> {
                     } else {
                         "NULL".to_string()
                     };
-                    Ok(format!(
-                        "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE) / {d} END"
+                    Ok(crate::compute::dax_semantics::safe_divide_sql(
+                        &n, &d, &alt, "DOUBLE",
                     ))
                 }
                 Expression::If {
@@ -288,6 +251,12 @@ impl<'a> MeasureEngine<'a> {
                             counter,
                         )
                         .await?;
+                    // DataFusion: a NULL condition must be FALSE
+                    // (`sql_util::null_is_false_condition`).
+                    let c = crate::compute::sql_util::null_is_false_condition(
+                        &c,
+                        condition.is_boolean_predicate(),
+                    );
                     Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
                 }
                 Expression::ScalarFunc { function, args } => {
@@ -329,6 +298,76 @@ impl<'a> MeasureEngine<'a> {
                         evaluated.push(a);
                     }
                     Ok(format!("COALESCE({})", evaluated.join(", ")))
+                }
+
+                // A measure-level comparison / AND / OR / XOR: each operand
+                // is its own sub-aggregate with its own context (resolved as
+                // one leaf, the KEEPs of both sides merged onto both).
+                Expression::Comparison { left, op, right } => {
+                    let l = self
+                        .decompose_and_evaluate(
+                            left,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    let r = self
+                        .decompose_and_evaluate(
+                            right,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    let l = crate::compute::dax_semantics::comparison_operand(l, left, right);
+                    let r = crate::compute::dax_semantics::comparison_operand(r, right, left);
+                    Ok(format!("({l} {} {r})", op.as_sql()))
+                }
+                Expression::And(left, right)
+                | Expression::Or(left, right)
+                | Expression::Xor(left, right) => {
+                    let l = self
+                        .decompose_and_evaluate(
+                            left,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    let r = self
+                        .decompose_and_evaluate(
+                            right,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    Ok(match expr {
+                        Expression::Or(..) => format!("({l} OR {r})"),
+                        Expression::Xor(..) => format!("(({l} AND NOT {r}) OR (NOT {l} AND {r}))"),
+                        _ => format!("({l} AND {r})"),
+                    })
                 }
 
                 // Leaf: an expression that may have context ops (KEEP/CLEAR/etc.)
@@ -466,17 +505,10 @@ impl<'a> MeasureEngine<'a> {
             bounds_group.join(", ")
         );
 
-        let bounds_df = ctx.sql(&bounds_sql).await?;
-        let bounds_batches = bounds_df.collect().await?;
-
-        if bounds_batches.is_empty() {
-            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
-                arrow::datatypes::Schema::empty(),
-            )));
-        }
-
-        let bounds_schema = bounds_batches[0].schema();
-        let bounds_combined = concat_batches(&bounds_schema, &bounds_batches)?;
+        // An empty bounds table keeps its columns: the sub-result below is
+        // then empty WITH its group and aggregate columns, which the combiner
+        // reads (a column-less batch failed it with FieldNotFound).
+        let bounds_combined = collect_with_schema(ctx.sql(&bounds_sql).await?).await?;
         ctx.register_batch(&bounds_name, bounds_combined)?;
 
         // Step 2: CROSS JOIN fact × bounds + safe dim JOINs.
@@ -568,18 +600,7 @@ impl<'a> MeasureEngine<'a> {
             main_group.join(", ")
         );
 
-        let main_df = ctx.sql(&main_sql).await?;
-        let main_batches = main_df.collect().await?;
-
-        if main_batches.is_empty() {
-            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
-                arrow::datatypes::Schema::empty(),
-            )));
-        }
-
-        let schema = main_batches[0].schema();
-        let combined = concat_batches(&schema, &main_batches)?;
-        Ok(combined)
+        collect_with_schema(ctx.sql(&main_sql).await?).await
     }
 
     /// Evaluate a sub-aggregate with only safe dims (standard JOIN approach).
@@ -665,17 +686,81 @@ impl<'a> MeasureEngine<'a> {
             sql.push_str(&group_parts.join(", "));
         }
 
-        let df = ctx.sql(&sql).await?;
-        let batches = df.collect().await?;
-
-        if batches.is_empty() {
-            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
-                arrow::datatypes::Schema::empty(),
-            )));
-        }
-
-        let schema = batches[0].schema();
-        let combined = concat_batches(&schema, &batches)?;
-        Ok(combined)
+        collect_with_schema(ctx.sql(&sql).await?).await
     }
+}
+
+/// Run `df` and return its rows as one batch, EMPTY BUT WITH ITS COLUMNS when
+/// it produced none. DataFusion may hand back no batch at all for an empty
+/// result; a column-less batch registered in its place made every later SQL
+/// over it fail with `FieldNotFound` (open-ledger round E,
+/// NEW-boundary-combiner-keys).
+async fn collect_with_schema(df: datafusion::prelude::DataFrame) -> EngineResult<RecordBatch> {
+    let schema = std::sync::Arc::new(df.schema().as_arrow().clone());
+    let batches = df.collect().await?;
+    match batches.first() {
+        None => Ok(RecordBatch::new_empty(schema)),
+        Some(first) => {
+            let schema = first.schema();
+            Ok(concat_batches(&schema, &batches)?)
+        }
+    }
+}
+
+/// The SQL that joins the sub-results of a compound measure on their group
+/// keys and evaluates `result_sql` over them.
+///
+/// A FULL outer combine: a group ANY sub-result produced is a row, keyed by
+/// the first sub-result that has it (`COALESCE` over all of them, in order),
+/// and a sub-result without the group reads NULL there -- BLANK, which the
+/// compound's DAX arithmetic handles (`BLANK + 30 = 30`). Each later
+/// sub-result joins on the keys combined so far with `IS NOT DISTINCT FROM`,
+/// so the BLANK member's NULL key matches itself. The keys were taken from
+/// the FIRST sub-result only, so a group it lacked came back keyed NULL.
+fn combine_sub_results_sql(
+    sub_results: &[String],
+    group_by: &[TableColumn],
+    result_sql: &str,
+    measure_name: &str,
+) -> String {
+    let group_cols: Vec<String> = group_by
+        .iter()
+        .map(|tc| quote_ident_double(&tc.column))
+        .collect();
+    // `COALESCE(t0.c, ..., t{n-1}.c)`: the key of column `c` over the first
+    // `n` sub-results.
+    let key_over = |c: &str, n: usize| -> String {
+        if n == 1 {
+            format!("{}.{c}", sub_results[0])
+        } else {
+            let parts: Vec<String> = sub_results[..n].iter().map(|t| format!("{t}.{c}")).collect();
+            format!("COALESCE({})", parts.join(", "))
+        }
+    };
+
+    let mut from_clause = sub_results[0].clone();
+    for (i, sub_table) in sub_results.iter().enumerate().skip(1) {
+        if group_cols.is_empty() {
+            from_clause.push_str(&format!(" CROSS JOIN {sub_table}"));
+        } else {
+            let join_conds: Vec<String> = group_cols
+                .iter()
+                .map(|c| format!("{} IS NOT DISTINCT FROM {sub_table}.{c}", key_over(c, i)))
+                .collect();
+            from_clause.push_str(&format!(
+                " FULL OUTER JOIN {sub_table} ON {}",
+                join_conds.join(" AND ")
+            ));
+        }
+    }
+
+    let mut select_parts: Vec<String> = group_cols
+        .iter()
+        .map(|c| format!("{} AS {c}", key_over(c, sub_results.len())))
+        .collect();
+    select_parts.push(format!(
+        "{result_sql} AS {}",
+        quote_ident_double(measure_name)
+    ));
+    format!("SELECT {} FROM {}", select_parts.join(", "), from_clause)
 }

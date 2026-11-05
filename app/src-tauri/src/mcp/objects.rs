@@ -782,8 +782,9 @@ pub fn update_table(
     ))
 }
 
-/// Delete a structured table (the undoable UI command; the cells stay, the
-/// table object and its autofilter go).
+/// Delete a structured table (the undoable UI command; Excel's
+/// `ListObject.Delete`: the table, its cells and its autofilter go, and every
+/// reference to it becomes `#REF!`).
 pub fn delete_table(handle: &AppHandle, table_id: &str) -> Result<String, String> {
     require_tier(handle, "delete_table")?;
     let id = parse_entity_id(table_id, "table", "list_tables")?;

@@ -542,7 +542,7 @@ fn a_rename_carries_a_pane_dropdowns_range_source_and_a_refused_one_does_not() {
 //
 // A cell and a defined name keep a 3D reference whose endpoint is deleted by
 // moving that endpoint inward (Excel's rule, `repair_3d_refs_on_delete_at`):
-// `SUM(Mid:Data!B1)` becomes `SUM(Mid:Mid!B1)`. The rule stores and the
+// `SUM(Mid:Data!B1)` becomes `SUM(Mid!B1)`. The rule stores and the
 // override layer went through the `.calp` gone-walker alone, which turns such
 // a reference into `#REF!` -- so a conditional format read `=SUM(#REF!)>0`
 // beside a cell that still summed Mid, and an override's CURRENT text became
@@ -606,7 +606,7 @@ fn a_3d_reference_losing_an_endpoint_reads_alike_in_the_cell_and_every_store() {
 
     let cell_now =
         state.grid.read().unwrap().get_cell(0, 0).and_then(|c| c.formula_string_raw()).unwrap_or_default();
-    assert!(same(&cell_now, "SUM(Mid:Mid!B1)"), "fixture: the CELL's endpoint moved inward: `{}`", cell_now);
+    assert!(same(&cell_now, "SUM(Mid!B1)"), "fixture: the CELL's endpoint moved inward: `{}`", cell_now);
 
     let cfs = state.conditional_formats.read().unwrap();
     let rule = match &cfs[&0][0].rule {
@@ -614,7 +614,7 @@ fn a_3d_reference_losing_an_endpoint_reads_alike_in_the_cell_and_every_store() {
         other => panic!("{:?}", other),
     };
     assert!(
-        same(&rule, "=SUM(Mid:Mid!B1)>0"),
+        same(&rule, "=SUM(Mid!B1)>0"),
         "the cell kept `{}` but its conditional format became `{}`",
         cell_now,
         rule
@@ -624,15 +624,15 @@ fn a_3d_reference_losing_an_endpoint_reads_alike_in_the_cell_and_every_store() {
         dv::DataValidationRule::Custom(r) => r.formula.clone(),
         other => panic!("{:?}", other),
     };
-    assert!(same(&custom, "=SUM(Last:Last!B1)>A1"), "a custom validation became `{}`", custom);
+    assert!(same(&custom, "=SUM(Last!B1)>A1"), "a custom validation became `{}`", custom);
     let text = bound_caption(&state);
-    assert!(same(&text, "=SUM(Mid:Mid!B1)"), "a control's bound caption became `{}`", text);
+    assert!(same(&text, "=SUM(Mid!B1)"), "a control's bound caption became `{}`", text);
 
     let layer = state.override_layer.read().unwrap();
     let ovr = &layer.overrides[0];
     let current = formula_text(&ovr.current);
     assert!(
-        same(&current, "SUM(Mid:Mid!B1)*2") && !current.starts_with('='),
+        same(&current, "SUM(Mid!B1)*2") && !current.starts_with('='),
         "the override's CURRENT text -- written over the cell at the next refresh -- became `{}`",
         current
     );

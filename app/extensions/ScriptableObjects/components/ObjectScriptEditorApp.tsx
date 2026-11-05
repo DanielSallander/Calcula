@@ -548,7 +548,7 @@ export function macroWriteRefusal(doc: {
  * at the restricted tier with no pass (`hostStartModuleScriptDebugSession`),
  * so `context.api` is null -- but a run YOU start from a door that carries a
  * person's pass gets more: a macro written as an object script may change the
- * cells of any sheet, and one for the workbook script runtime runs there with
+ * cells of any sheet and how they look, and one for the workbook script runtime runs there with
  * that runtime's reach. "What you step through is exactly what a button runs"
  * is true of the BYTES and no longer of the reach, so the chip says both.
  * Exported for objectScriptEditorMacros.test.tsx.
@@ -567,7 +567,7 @@ export function macroTierChipTitle(
         (runtime === "objectScript"
           ? "That is less than a run you start yourself: from Developer ▸ Macros ▸ Run, " +
             "by clicking a button that runs it, or from the command line it may also read " +
-            "and change the cells of any sheet, and nothing more — and if it stops " +
+            "and change the cells of any sheet, and how they look, and nothing more — and if it stops " +
             "part-way, every change it made is undone."
           : "That is not how a run you start yourself runs it: from Developer ▸ Macros ▸ " +
             "Run, a button that runs it, the command line or a view bookmark of your own, " +

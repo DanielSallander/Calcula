@@ -1775,8 +1775,14 @@ impl QueryExecutor {
         let mut context_join_tables: Vec<String> = Vec::new();
         // Measures using CASE WHEN filters — need HAVING to exclude NULL groups.
         let mut case_when_measures: Vec<String> = Vec::new();
+        // Every measure that is a plain (non-window) column of the inner
+        // SELECT: a group shows when ANY of them is non-BLANK.
+        let mut having_measures: Vec<String> = Vec::new();
         // Aliased JOINs from USERELATIONSHIP overrides.
         let mut override_joins: Vec<OverrideJoinEntry> = Vec::new();
+        // One-row CROSS JOINs carrying the grand totals of compound measures
+        // (`hoist_clear_scalars`, BUG-0444), appended after every other JOIN.
+        let mut clear_scalar_joins: Vec<String> = Vec::new();
 
         // Two-level-query state for percent-of-parent measures: `hoist_cols` are
         // inner-query columns (raw aggregates + partitioned windows), and
@@ -1791,18 +1797,11 @@ impl QueryExecutor {
             let name = measure.name();
             let expr = measure.expression();
 
-            // Check if this is a compound expression (BinaryOp, SafeDivide, etc.)
-            // with context ops in sub-expressions. In that case, each sub-aggregate
-            // may have independent filter contexts that must not be merged.
-            let is_compound_with_context = expr.has_context_ops()
-                && matches!(
-                    expr,
-                    Expression::BinaryOp { .. }
-                        | Expression::SafeDivide { .. }
-                        | Expression::ScalarFunc { .. }
-                        | Expression::Coalesce(_)
-                        | Expression::If { .. }
-                );
+            // Check if this is a compound expression (BinaryOp, SafeDivide, a
+            // measure-level comparison, etc.) with context ops in
+            // sub-expressions. In that case, each sub-aggregate may have
+            // independent filter contexts that must not be merged.
+            let is_compound_with_context = super::sql::is_compound_with_context(expr);
 
             // A compound measure resolves each sub-aggregate's context
             // independently (`resolve_compound_sql` / `hoist_measure_sql`),
@@ -1841,6 +1840,7 @@ impl QueryExecutor {
             let sql_fragment = if is_compound_with_context {
                 // Compound expression: resolve each sub-aggregate independently.
                 case_when_measures.push(name.to_string());
+                having_measures.push(name.to_string());
                 let expr_sql = resolve_compound_sql(
                     expr,
                     model,
@@ -1850,7 +1850,11 @@ impl QueryExecutor {
                     &mut context_join_tables,
                     &mut override_joins,
                 )?;
-                format!("{expr_sql} AS {}", quote_ident_double(name))
+                format!(
+                    "{} AS {}",
+                    super::sql::hoist_clear_scalars(&expr_sql, &mut clear_scalar_joins),
+                    quote_ident_double(name)
+                )
             } else {
                 // Standard path: resolve the whole expression as a unit.
                 let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
@@ -1976,7 +1980,11 @@ impl QueryExecutor {
                     stripped_expr.to_case_when_sql(&condition, measure_table)?
                 } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
                     let fact = measure.table().to_lowercase();
-                    op.render_sql(&format!("{fact}.{}", quote_ident_double(col)))
+                    // A count answers BLANK, never 0 (DAX).
+                    engine_core::compute::dax_semantics::measure_aggregate_sql(
+                        &op,
+                        &format!("{fact}.{}", quote_ident_double(col)),
+                    )
                 } else {
                     stripped_expr.to_sql_string()?
                 };
@@ -2012,6 +2020,7 @@ impl QueryExecutor {
                             // Track measures with CASE WHEN for the HAVING clause.
                             case_when_measures.push(name.to_string());
                         }
+                        having_measures.push(name.to_string());
                         format!("{inner_sql} AS {}", quote_ident_double(name))
                     }
                 }
@@ -2242,12 +2251,17 @@ impl QueryExecutor {
             }
             if let Ok(rel) = model.find_relationship(fact_model_name, dim_table) {
                 if rel.is_safe_for_direct_join() {
-                    add_join(
-                        dim_table,
-                        &mut sql,
-                        &mut joined_tables,
-                        &mut join_descriptions,
-                    )?;
+                    // A LEFT JOIN: the table is read only by a measure's own
+                    // CASE WHEN condition (a NULL dimension row is FALSE
+                    // there), so a fact row with no dimension row still
+                    // counts for every OTHER measure. An inner join dropped it
+                    // from all of them (open-ledger round E,
+                    // NEW-shared-query-dimension-keep).
+                    let left_is_from = rel.from_table() == fact_model_name;
+                    let on_clause = rel.build_on_clause(fact_table, &dim_lower, left_is_from);
+                    sql.push_str(&format!(" LEFT JOIN {dim_lower} ON {on_clause}"));
+                    join_descriptions.push(on_clause);
+                    joined_tables.insert(dim_lower);
                 } else {
                     // Unsafe relationship: prefer scalar boundary check,
                     // fall back to EXISTS subquery.
@@ -2320,6 +2334,13 @@ impl QueryExecutor {
             }
         }
 
+        // Grand totals of compound measures: one-row derived tables, after
+        // every JOIN that references the fact table (BUG-0444).
+        for join in &clear_scalar_joins {
+            sql.push(' ');
+            sql.push_str(join);
+        }
+
         // WHERE clause for EXISTS/boundary semi-join conditions (unsafe relationships).
         if !exists_conditions.is_empty() {
             sql.push_str(" WHERE ");
@@ -2343,10 +2364,14 @@ impl QueryExecutor {
 
             // HAVING clause: exclude groups where all CASE-WHEN measures are NULL.
             // Without this, groups with no matching rows produce NULL aggregates
-            // instead of being omitted (as a WHERE-based filter would).
+            // instead of being omitted (as a WHERE-based filter would). A group
+            // stays when ANY measure of the query answers in it: tested on the
+            // CASE-WHEN measures alone, a KEEP measure's BLANK hid a group
+            // another measure answered (grouped by Product, a Bikes KEEP hid
+            // the Helmets row of the plain total; open-ledger round E).
             let mut having_clauses: Vec<String> = Vec::new();
             if !case_when_measures.is_empty() {
-                let having_parts: Vec<String> = case_when_measures
+                let having_parts: Vec<String> = having_measures
                     .iter()
                     .map(|m| format!("{} IS NOT NULL", quote_ident_double(m)))
                     .collect();
@@ -2397,6 +2422,10 @@ impl QueryExecutor {
                     model,
                     &std::collections::HashMap::new(),
                 )?;
+                // A NULL probe condition is FALSE (DataFusion's CASE, see
+                // `sql_util::null_is_false_condition`).
+                let probe_condition =
+                    engine_core::compute::sql_util::null_is_false_condition(&probe_condition, true);
                 having_clauses.push(format!(
                     "SUM(CASE WHEN {probe_condition} THEN 1 ELSE 0 END) > 0"
                 ));
@@ -2699,7 +2728,24 @@ impl QueryExecutor {
             } else {
                 format!("{table_lc}.{}", quote_ident_double(col))
             };
-            let agg_sql = op.render_sql(&operand);
+            // The measure's DAX answer, as the query's own measure columns
+            // render it: DISTINCTCOUNT counts BLANK as a value (SQL's
+            // `COUNT(DISTINCT x)` skips it, so the scalar was one short
+            // whenever the column held a BLANK). A count of nothing stays the
+            // literal 0 here rather than DAX's BLANK: a BLANK scalar is this
+            // resolver's v1 error ("resolved to NULL"), while 0 is what DAX
+            // reads a BLANK as in every comparison and in `+` / `-`, which is
+            // how a segmentation uses its scalar.
+            use engine_core::compute::aggregate::AggregateOp;
+            let agg_sql = if matches!(op, AggregateOp::DistinctCount) {
+                engine_core::compute::dax_semantics::distinct_count_counting_blank(
+                    &op.render_sql(&operand),
+                    &operand,
+                    None,
+                )
+            } else {
+                op.render_sql(&operand)
+            };
             let probe_sql = format!("SELECT {agg_sql} AS __ctx_scalar FROM {table_lc}");
             let batches = ctx.sql(&probe_sql).await?.collect().await?;
             let scalar = if batches.is_empty() || batches[0].num_rows() == 0 {

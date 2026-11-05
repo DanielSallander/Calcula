@@ -289,6 +289,33 @@ describe("a selected range: the totals Excel writes", () => {
     expect(writesOf(await sel(spec, "A3:B3"))).toEqual({ A3: "=SUM(A1:A2)", B3: "=SUM(B1:B2)" });
     expect(writesOf(await sel(spec, "C1:C2"))).toEqual({ C1: "=SUM(A1:B1)", C2: "=SUM(A2:B2)" });
   });
+  // BUG-0397, measured live 2026-11-04 (Excel 16, lane multiarea probe1): an
+  // EMPTY selection takes the ACTIVE cell's guess, filled relatively.
+  it("BUG-0397 A8:A9 under A5:A7: A9 is A8's guess filled down, not its own", async () => {
+    const spec = { A5: 1, A6: 2, A7: 3 };
+    expect(writesOf(await sel(spec, "A8:A9"))).toEqual({ A8: "=SUM(A4:A7)", A9: "=SUM(A5:A8)" });
+    const topActive = await planAutoSum("SUM", { startRow: 8, startCol: 0, endRow: 7, endCol: 0 }, readerOf(spec), ",");
+    expect(writesOf(topActive)).toEqual({ A8: "=SUM(A5:A7)", A9: "=SUM(A6:A8)" });
+    const three = await planAutoSum("SUM", { startRow: 9, startCol: 0, endRow: 7, endCol: 0 }, readerOf(spec), ",");
+    expect(writesOf(three)).toEqual({ A8: "=SUM(A5:A7)", A9: "=SUM(A6:A8)", A10: "=SUM(A7:A9)" });
+  });
+  it("BUG-0397 A4:B4 under text (A) and numbers (B): the active cell decides", async () => {
+    const spec = { A1: "a", A2: "b", A3: "c", B1: 1, B2: 2, B3: 3 };
+    // B4 active: its guess, filled LEFT across A4's text column.
+    expect(writesOf(await sel(spec, "A4:B4"))).toEqual({ A4: "=SUM(A1:A3)", B4: "=SUM(B1:B3)" });
+    // A4 active: no guess there -- Excel opens the edit and writes nothing.
+    const aActive = await planAutoSum("SUM", { startRow: 3, startCol: 1, endRow: 3, endCol: 0 }, readerOf(spec), ",");
+    expect(editOf(aActive)).toMatchObject({ at: "A4", text: "=SUM()" });
+  });
+  it("BUG-0397 a header over one column is filled over, as Excel's relative fill does", async () => {
+    const spec = { A1: 1, A2: 2, A3: 3, B1: "h", B2: 5, B3: 6 };
+    const aActive = await planAutoSum("SUM", { startRow: 3, startCol: 1, endRow: 3, endCol: 0 }, readerOf(spec), ",");
+    expect(writesOf(aActive)).toEqual({ A4: "=SUM(A1:A3)", B4: "=SUM(B1:B3)" });
+  });
+  it("BUG-0397 a reference filled off the sheet is #REF!", async () => {
+    // A3 active (=SUM(A1:A2)); filled one row up, A2's would start at row 0.
+    expect(writesOf(await sel({ A1: 5 }, "A2:A3"))).toEqual({ A2: "=SUM(#REF!)", A3: "=SUM(A1:A2)" });
+  });
   it("M7 / M8 / M13 no numbers to total: an edit of the active cell, as for one cell", async () => {
     expect(editOf(await sel({ A1: "a", B1: "b", A2: "c", B2: "d" }, "A1:B2"))).toMatchObject({ text: "=SUM()" });
     expect(editOf(await sel({}, "A1:B2"))).toMatchObject({ at: "B2", text: "=SUM()" });
@@ -441,5 +468,93 @@ describe("several areas (Ctrl+click / Go To Special > Blanks), measured live", (
     const single = await areas({ A1: 1, A2: 2, A3: 3 }, ["A1:A3"]);
     expect(areaWrites(single)).toEqual({ A4: "=SUM(A1:A3)" });
     expect(editOf(await areas({ A1: 1, A2: 2, A3: 3 }, ["A4"]))).toMatchObject({ at: "A4", text: "=SUM(A1:A3)" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A SHEET IN FILTER MODE (rev-ui-3): measured live 2026-11-05 (Excel 16, lane
+// uic probe1 / probe2, ExecuteMso("AutoSum") and the Average / Count Numbers /
+// Max / Min rows over fresh workbooks). A1 = "H", A2:A6 = 1..5, AutoFilter
+// `<>3` hides row 4: AutoSum over A2:A6 writes A7 =SUBTOTAL(9,A2:A6) -- 12,
+// where =SUM would show 15. Whether the sheet is in filter mode is the
+// reader's question (lib/liveReader.ts asks @api/autoFilterService).
+// ---------------------------------------------------------------------------
+
+function filteredReader(spec: Spec, filterMode = true): AutoSumCellReader {
+  return { ...readerOf(spec), filterMode: async () => filterMode };
+}
+
+describe("a sheet in filter mode: Sum is SUBTOTAL(9, ...)", () => {
+  const list = { A1: "H", A2: 1, A3: 2, A4: 3, A5: 4, A6: 5 };
+  const grid = {
+    A1: "H", B1: "I", C1: "J",
+    A2: 1, B2: 10, C2: 100, A3: 2, B3: 20, C3: 200, A4: 3, B4: 30, C4: 300,
+    A5: 4, B5: 40, C5: 400, A6: 5, B6: 50, C6: 500,
+  };
+  const fsel = (spec: Spec, ref: string, fn: AutoSumFn = "SUM") => planAutoSum(fn, range(ref), filteredReader(spec), ",");
+  const fone = (spec: Spec, target: string, sep = ",") => {
+    const { row, col } = addr(target);
+    return planAutoSum("SUM", { startRow: row, startCol: col, endRow: row, endCol: col }, filteredReader(spec), sep);
+  };
+
+  it("S1 a column of the filtered list: the total below is SUBTOTAL(9, ...)", async () => {
+    expect(writesOf(await fsel(list, "A2:A6"))).toEqual({ A7: "=SUBTOTAL(9,A2:A6)" });
+  });
+
+  it("S2 / Q1 / S4 / S5 Average, Count Numbers, Max and Min keep their own names", async () => {
+    expect(writesOf(await fsel(list, "A2:A6", "AVERAGE"))).toEqual({ A7: "=AVERAGE(A2:A6)" });
+    expect(writesOf(await fsel(list, "A2:A6", "COUNT"))).toEqual({ A7: "=COUNT(A2:A6)" });
+    expect(writesOf(await fsel(list, "A2:A6", "MAX"))).toEqual({ A7: "=MAX(A2:A6)" });
+    expect(writesOf(await fsel(list, "A2:A6", "MIN"))).toEqual({ A7: "=MIN(A2:A6)" });
+  });
+
+  it("S12 / S13 / S14 / S15 row totals, column totals and the corner", async () => {
+    expect(writesOf(await fsel(grid, "A2:C2"))).toEqual({ D2: "=SUBTOTAL(9,A2:C2)" });
+    expect(writesOf(await fsel(grid, "A2:C6"))).toEqual({
+      A7: "=SUBTOTAL(9,A2:A6)", B7: "=SUBTOTAL(9,B2:B6)", C7: "=SUBTOTAL(9,C2:C6)",
+    });
+    const both = writesOf(await fsel(grid, "A2:D7"));
+    expect(both.D2).toBe("=SUBTOTAL(9,A2:C2)");
+    expect(both.A7).toBe("=SUBTOTAL(9,A2:A6)");
+    expect(both.D7).toBe("=SUBTOTAL(9,A7:C7)");
+  });
+
+  it("S16 / S17 the one-cell edit, in the user's separators, caret before the bracket", async () => {
+    expect(editOf(await fone(list, "A7"))).toEqual({ at: "A7", text: "=SUBTOTAL(9,A2:A6)", caret: "=SUBTOTAL(9,A2:A6".length });
+    expect(editOf(await fone(list, "A8")).text).toBe("=SUBTOTAL(9,A2:A7)");
+    expect(editOf(await fone(list, "A7", ";")).text).toBe("=SUBTOTAL(9;A2:A6)");
+  });
+
+  it("S18 empty cells under the list: the active cell's guess filled, as SUBTOTAL", async () => {
+    expect(writesOf(await planAutoSum("SUM", { startRow: 7, startCol: 0, endRow: 6, endCol: 0 }, filteredReader(list), ","))).toEqual({
+      A7: "=SUBTOTAL(9,A2:A6)", A8: "=SUBTOTAL(9,A3:A7)",
+    });
+  });
+
+  it("Q4 / Q5 the subtotals above, SUM or SUBTOTAL, are totalled as SUBTOTAL(9, ...)", async () => {
+    const sums = { A1: "H", A2: 1, A3: 2, A4: "=SUM(A2:A3)", A5: 4, A6: 5, A7: "=SUM(A5:A6)" };
+    expect(editOf(await fone(sums, "A8")).text).toBe("=SUBTOTAL(9,A7,A4)");
+    const subs = { A1: "H", A2: 1, A3: 2, A4: "=SUBTOTAL(9,A2:A3)", A5: 4, A6: 5, A7: "=SUBTOTAL(9,A5:A6)" };
+    expect(editOf(await fone(subs, "A8")).text).toBe("=SUBTOTAL(9,A7,A4)");
+  });
+
+  it("Go To Special > Blanks on a filtered sheet: each blank its SUBTOTAL, an earlier one stopping the next run", async () => {
+    const twoRuns = { A1: 1, A2: 2, A3: 3, A5: 50, A6: 60, A7: 70 };
+    const plan = await planAutoSumAreas("SUM", [range("A4"), range("A8")], filteredReader(twoRuns), ",");
+    expect(areaWrites(plan)).toEqual({ A4: "=SUBTOTAL(9,A1:A3)", A8: "=SUBTOTAL(9,A5:A7)" });
+    const blocks = await planAutoSumAreas("SUM", [range("A1:A3"), range("A5:A7")], filteredReader(twoRuns), ",");
+    expect(areaWrites(blocks)).toEqual({ A4: "=SUBTOTAL(9,A1:A3)", A8: "=SUBTOTAL(9,A5:A7)" });
+  });
+
+  it("S6 / S8 / S20 / Q6 not in filter mode (hand-hidden rows, a filter that filters nothing, another sheet's): SUM", async () => {
+    expect(writesOf(await planAutoSum("SUM", range("A2:A6"), filteredReader(list, false), ","))).toEqual({ A7: "=SUM(A2:A6)" });
+    expect(writesOf(await sel(list, "A2:A6"))).toEqual({ A7: "=SUM(A2:A6)" });
+  });
+});
+
+describe("one cell: a SUBTOTAL above is a subtotal (Q3, measured live)", () => {
+  it("A3 / A6 =SUBTOTAL(9, ...) on an unfiltered sheet: the guess sums them, nearest first", async () => {
+    const spec = { A1: 1, A2: 2, A3: "=SUBTOTAL(9,A1:A2)", A4: 4, A5: 5, A6: "=SUBTOTAL(9,A4:A5)" };
+    expect(editOf(await one(spec, "A7")).text).toBe("=SUM(A6,A3)");
   });
 });

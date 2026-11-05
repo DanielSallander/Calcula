@@ -44,16 +44,30 @@ export interface AutoFitRowContribution {
   requiredHeight?: number;
 }
 
+/** An inclusive run of rows. */
+export interface AutoFitRowSpan {
+  startRow: number;
+  endRow: number;
+}
+
 export interface AutoFitContributor {
   /** Unique id (used for unregistration and error attribution). */
   id: string;
   /**
    * Report space requirements for a column being auto-fitted.
    * Return null when the contributor renders nothing in this column.
+   *
+   * `rows` (BUG-0351): the rows being fitted -- Home > Format > AutoFit Column
+   * Width fits only the SELECTED cells (Excel), so A1 selected must not size
+   * column A for a PivotTable in A20:C40. Absent, the whole column is fitted
+   * (the header double-click). A contributor should measure only its content
+   * inside `rows`; whatever it reports is clipped to them anyway (see
+   * collectAutoFitColumnContributions).
    */
   measureColumn?: (
     col: number,
-    measureCtx: CanvasRenderingContext2D
+    measureCtx: CanvasRenderingContext2D,
+    rows?: readonly AutoFitRowSpan[]
   ) => AutoFitColumnContribution | null;
   /**
    * Report space requirements for a row being auto-fitted.
@@ -104,19 +118,62 @@ export function hasAutoFitContributors(): boolean {
  */
 export function collectAutoFitColumnContributions(
   col: number,
-  measureCtx: CanvasRenderingContext2D
+  measureCtx: CanvasRenderingContext2D,
+  rows?: readonly AutoFitRowSpan[]
 ): AutoFitColumnContribution[] {
   const results: AutoFitColumnContribution[] = [];
   for (const contributor of contributors) {
     if (!contributor.measureColumn) continue;
     try {
-      const contribution = contributor.measureColumn(col, measureCtx);
-      if (contribution) results.push(contribution);
+      const contribution = contributor.measureColumn(col, measureCtx, rows);
+      if (contribution) {
+        const clipped = rows ? clipToRows(contribution, rows) : contribution;
+        if (clipped) results.push(clipped);
+      }
     } catch (error) {
       console.error(`[AutoFit] Error in contributor "${contributor.id}" (column):`, error);
     }
   }
   return results;
+}
+
+/**
+ * A column contribution restricted to the fitted `rows` (BUG-0351): its
+ * claimed spans are cut to them, its per-cell chrome outside them dropped, and
+ * a required width is kept only when some claimed span still reaches into the
+ * fitted rows -- a contributor that rendered nothing there (a PivotTable lower
+ * down the column) sizes nothing. A width with NO claimed span at all says
+ * nothing about where it applies, so it is kept as reported. Null when
+ * nothing is left.
+ */
+function clipToRows(
+  contribution: AutoFitColumnContribution,
+  rows: readonly AutoFitRowSpan[]
+): AutoFitColumnContribution | null {
+  const inRows = (row: number) => rows.some((r) => row >= r.startRow && row <= r.endRow);
+  const out: AutoFitColumnContribution = {};
+  if (contribution.claimedRowRanges) {
+    const claimed: AutoFitRowSpan[] = [];
+    for (const span of contribution.claimedRowRanges) {
+      for (const r of rows) {
+        const startRow = Math.max(span.startRow, r.startRow);
+        const endRow = Math.min(span.endRow, r.endRow);
+        if (startRow <= endRow) claimed.push({ startRow, endRow });
+      }
+    }
+    if (claimed.length > 0) out.claimedRowRanges = claimed;
+    if (contribution.requiredWidth !== undefined && claimed.length > 0) out.requiredWidth = contribution.requiredWidth;
+  } else if (contribution.requiredWidth !== undefined) {
+    out.requiredWidth = contribution.requiredWidth;
+  }
+  if (contribution.extraCellWidth) {
+    const extra = new Map<number, number>();
+    for (const [row, width] of contribution.extraCellWidth) {
+      if (inRows(row)) extra.set(row, width);
+    }
+    if (extra.size > 0) out.extraCellWidth = extra;
+  }
+  return out.claimedRowRanges || out.requiredWidth !== undefined || out.extraCellWidth ? out : null;
 }
 
 /** Collect row contributions from all registered contributors. */

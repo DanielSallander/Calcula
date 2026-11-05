@@ -209,17 +209,43 @@ pub(crate) enum FiltersRoute {
 }
 
 /// Execute a design query headlessly and return the resulting pivot view.
+///
+/// `for_report` (optional, default false): answer as a GRID REPORT would --
+/// the query's own FILTERS kept as a filter area ([`FiltersRoute::FilterArea`])
+/// and `rowCount` the rows the report writes (`report::report_visible_rows`).
+/// The report editors' dry run ("describe the report in words") asks it, so
+/// it counts the filter-area rows the report will write; on the chart route
+/// they run inside the engine and the dry run came out up to one row per
+/// FILTERS field short of the report (BUG-0450). Writes nothing either way.
 #[tauri::command]
 pub async fn run_design_query(
     state: State<'_, crate::AppState>,
     bi_state: State<'_, BiState>,
     request: DesignQueryRequest,
+    for_report: Option<bool>,
 ) -> Result<PivotViewResponse, String> {
     // The app locale for the display text and member labels (leaf lock:
     // taken, cloned and dropped before anything else).
     let display_locale = crate::pivot::utils::display_locale_of(&state);
-    let (def, mut cache, view) = compute_design_query_view(&bi_state, &request).await?;
-    let mut response = view_to_response(&view, &def, &mut cache, &display_locale);
+    design_query_response(&bi_state, &request, for_report.unwrap_or(false), &display_locale).await
+}
+
+/// The body of [`run_design_query`], over plain references.
+pub(crate) async fn design_query_response(
+    bi_state: &BiState,
+    request: &DesignQueryRequest,
+    for_report: bool,
+    display_locale: &engine::LocaleSettings,
+) -> Result<PivotViewResponse, String> {
+    let (def, mut cache, view) = if for_report {
+        compute_design_query_view_for_report(bi_state, request).await?
+    } else {
+        compute_design_query_view(bi_state, request).await?
+    };
+    let mut response = view_to_response(&view, &def, &mut cache, display_locale);
+    if for_report {
+        response.row_count = crate::report::report_visible_rows(&view);
+    }
     fill_group_members(&mut response, &design_query_field_keys(&def), &cache);
     Ok(response)
 }
@@ -355,6 +381,7 @@ fn carry_display_settings(def: &mut pivot_engine::PivotDefinition, real: &pivot_
     for field in transient {
         let Some(old) = real_fields.iter().find(|o| o.name == field.name) else { continue };
         field.sort_order = old.sort_order;
+        field.value_sort = old.value_sort.clone();
         field.show_subtotals = old.show_subtotals;
         field.collapsed = old.collapsed;
         field.collapsed_items = old.collapsed_items.clone();

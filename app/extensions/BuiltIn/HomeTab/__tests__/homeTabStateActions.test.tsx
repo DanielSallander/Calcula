@@ -381,8 +381,13 @@ describe("applyFormat, the formatting door", () => {
 
 describe("a Ctrl+click / Go To Special selection: every block, ONE undo step", () => {
   /** The [rows, cols, formatting] of every applyFormatting call. */
+  /** Every block written, as [rows, cols, formatting] -- a call's `moreAreas`
+   *  (BUG-0394: the sheet's other blocks ride the one call) expanded in order. */
   function writes(): unknown[][] {
-    return h.applyFormatting.mock.calls.map((c) => c.slice(0, 3));
+    return h.applyFormatting.mock.calls.flatMap((c) => {
+      const more = ((c[3] as { moreAreas?: Array<{ rows: number[]; cols: number[] }> } | undefined)?.moreAreas ?? []);
+      return [c.slice(0, 3), ...more.map((a) => [a.rows, a.cols, c[2]])];
+    });
   }
 
   it("Bold over A1 + Ctrl+click C3 bolds BOTH blocks inside one owned transaction", async () => {
@@ -393,6 +398,7 @@ describe("a Ctrl+click / Go To Special selection: every block, ONE undo step", (
       [[0], [0], { bold: true }],
       [[2], [2], { bold: true }],
     ]);
+    expect(h.applyFormatting, "BUG-0394: every block in ONE call").toHaveBeenCalledTimes(1);
     expect(h.beginUndoTransaction.mock.calls).toEqual([["bold"]]);
     expect(h.commitUndoTransaction.mock.calls).toEqual([[7]]);
     expect(h.cancelUndoTransaction).not.toHaveBeenCalled();
@@ -431,18 +437,20 @@ describe("a Ctrl+click / Go To Special selection: every block, ONE undo step", (
     expect(h.commitUndoTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it("a block refused part-way: what landed is committed (one Ctrl+Z restores it), the refusal is said once", async () => {
+  // BUG-0394: the blocks go in ONE call, which the backend refuses WHOLE
+  // (every block's refusal is decided before any is written), so there is no
+  // "part-way" left: a refusal lands nothing and the empty step is cancelled.
+  it("a multi-block format the backend refuses lands nothing: the step is cancelled, the refusal said once", async () => {
     await mount({}, { startRow: 0, startCol: 0, endRow: 0, endCol: 0, additionalRanges: [{ startRow: 5, startCol: 5, endRow: 5, endCol: 5 }] });
-    h.applyFormatting
-      .mockImplementationOnce(async () => ({ cells: [{ row: 0, col: 0, display: "x" }], styles: [] }))
-      .mockRejectedValueOnce(new Error("F6 is on a locked range."));
+    h.applyFormatting.mockRejectedValueOnce(new Error("F6 is on a locked range."));
     let answer: unknown;
     await act(async () => {
       answer = await latest!.applyFormat({ italic: true }, "Italic");
     });
-    expect(answer, "a write landed").toBe(true);
-    expect(h.commitUndoTransaction).toHaveBeenCalledTimes(1);
-    expect(h.cancelUndoTransaction).not.toHaveBeenCalled();
+    expect(answer, "nothing landed").toBe(false);
+    expect(h.applyFormatting).toHaveBeenCalledTimes(1);
+    expect(h.cancelUndoTransaction).toHaveBeenCalledTimes(1);
+    expect(h.commitUndoTransaction).not.toHaveBeenCalled();
     expect(h.alertAsync.mock.calls).toEqual([["F6 is on a locked range."]]);
   });
 

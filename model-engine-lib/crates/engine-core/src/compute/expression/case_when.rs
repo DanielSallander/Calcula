@@ -43,10 +43,12 @@ mod tests {
     fn complex_expression_pinned_case_when_sql() {
         // Equivalence oracle for the unified renderer migration: KEEP + IF +
         // arithmetic + aggregate + literals with embedded quotes. Pinned from
-        // the pre-unification implementation — must never change. Note the
-        // legacy quirk this locks in: the IF condition's aggregate falls back
-        // to plain rendering (no CASE WHEN wrap), while the ELSE branch's
-        // aggregate is wrapped and fact-qualified.
+        // the pre-unification implementation. Re-pinned DELIBERATELY in the
+        // open-ledger round E: the IF condition's aggregate fell back to plain
+        // rendering (no CASE WHEN wrap), so an IF whose condition reads a
+        // filtered sum compared the UNFILTERED one (NEW-keep-in-if-condition).
+        // Both aggregates are now wrapped and fact-qualified (a KEEP left in
+        // an aggregate operand is seen through, as plain rendering does).
         let expr = if_expr(
             compare(
                 agg(
@@ -70,8 +72,9 @@ mod tests {
         assert_eq!(
             expr.to_case_when_sql("products.\"category\" = 'O''Brien'", "fact_sales")
                 .unwrap(),
-            "CASE WHEN (SUM(\"amount\") > 1000) THEN 'it''s high' \
-             ELSE (SUM(CASE WHEN products.\"category\" = 'O''Brien' \
+            "CASE WHEN COALESCE((COALESCE(SUM(CASE WHEN COALESCE(products.\"category\" = \
+             'O''Brien', FALSE) THEN fact_sales.\"amount\" END), 0) > 1000), FALSE) THEN \
+             'it''s high' ELSE (SUM(CASE WHEN COALESCE(products.\"category\" = 'O''Brien', FALSE) \
              THEN fact_sales.\"amount\" END) * 0.5) END"
         );
     }
@@ -87,7 +90,7 @@ mod tests {
         assert_eq!(
             expr.to_case_when_sql("dim.\"year\" = 2014", "fact_sales")
                 .unwrap(),
-            "SUM(CASE WHEN dim.\"year\" = 2014 THEN 1 END)"
+            "SUM(CASE WHEN COALESCE(dim.\"year\" = 2014, FALSE) THEN 1 END)"
         );
     }
 }

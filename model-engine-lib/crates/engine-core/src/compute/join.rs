@@ -140,7 +140,9 @@ pub async fn aggregate_over_relationship(
         AggregateOp::Count => count(col(aggregate_column)),
         AggregateOp::Min => min(col(aggregate_column)),
         AggregateOp::Max => max(col(aggregate_column)),
-        AggregateOp::DistinctCount => count_distinct(col(aggregate_column)),
+        AggregateOp::DistinctCount | AggregateOp::DistinctCountNoBlank => {
+            count_distinct(col(aggregate_column))
+        }
         AggregateOp::CountRows => {
             use datafusion::prelude::lit as df_lit;
             count(df_lit(1))

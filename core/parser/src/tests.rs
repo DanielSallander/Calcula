@@ -2377,3 +2377,138 @@ fn a_dotless_i_in_a_function_name_reads_as_i() {
         other => panic!("not a call: {other:?}"),
     }
 }
+// ========================================
+// THE NAME A FUNCTION WAS TYPED WITH (lane legacystats, 2026-11-05)
+// ========================================
+
+/// **A FUNCTION IS STORED UNDER THE NAME IT WAS TYPED WITH.**
+///
+/// [LIVE] Excel 16 (SCRATCH/legacystats/p1.json): `=TDIST(1.5,10,1)` stays
+/// `=TDIST(1.5,10,1)` in the formula bar and in the file, `=STDEV.P(..)` stays
+/// `=STDEV.P(..)` (`_xlfn.STDEV.P`), `=FORECAST.LINEAR(..)` stays itself. Calcula
+/// resolved a compatibility name to the modern function (`TDIST` -> `T.DIST`,
+/// `NORMSDIST` -> `NORM.S.DIST`, `FDIST` -> `F.DIST`, ...) and a modern name to
+/// the compatibility one (`STDEV.P` -> `STDEVP`, `RANK.EQ` -> `RANK`,
+/// `FORECAST.LINEAR` -> `FORECAST`): the formula the user typed came back
+/// renamed, and where the two take different arguments it was evaluated as the
+/// other function (`TDIST(x,df,1)` as `T.DIST(x,df,TRUE)`, the LEFT tail).
+///
+/// Every catalog (non-alias) name must resolve to a built-in whose canonical
+/// name -- what the formula bar, `.cala` and `.xlsx` show -- is that name.
+///
+/// SABOTAGE (legacystats-name / legacystats-alias): `NORMSDIST` resolved to
+/// `NormSDist`, `STDEV.P` to `StdevP` -- fails with that one rename listed.
+#[test]
+fn every_catalog_function_is_stored_under_the_name_it_was_typed_with() {
+    use crate::ast::BuiltinFunction as BF;
+    let mut renamed = Vec::new();
+    let mut checked = 0usize;
+    for meta in BF::all_catalog_entries().iter().filter(|m| !m.is_alias) {
+        let func = BF::from_name(meta.name);
+        checked += 1;
+        if matches!(func, BF::Custom(_)) || !func.to_canonical_name().eq_ignore_ascii_case(meta.name) {
+            renamed.push(format!("{} -> {}", meta.name, func.to_canonical_name()));
+        }
+    }
+    assert!(checked > 450, "only {} catalog entries checked", checked);
+    assert!(renamed.is_empty(), "TYPED UNDER ONE NAME, STORED UNDER ANOTHER ({}): {:?}", renamed.len(), renamed);
+}
+
+/// Each compatibility function is its own built-in, distinct from the modern
+/// function, with its OWN arity -- [LIVE] Excel 16 types `TDIST` with 3
+/// arguments only, `NORMSDIST` with 1, `FDIST` 3, `BETADIST` 3 to 5,
+/// `LOGNORMDIST` 3, `HYPGEOMDIST` 4, `NEGBINOMDIST` 3, `POISSON` 3,
+/// `CONFIDENCE` 3, `ZTEST` 2 to 3 (the .xlsx export's live arity table) --
+/// and `POISSONDIST` / `CHISQDIST`, which Excel does not have (#NAME?), are
+/// no built-ins.
+///
+/// SABOTAGE (legacystats-arity): the catalog gives NORMSDIST an optional
+/// cumulative flag -- fails at its arity, (1, 2) for Excel's (1, 1).
+#[test]
+fn a_compatibility_function_is_its_own_function_with_its_own_arity() {
+    use crate::ast::BuiltinFunction as BF;
+    for (legacy, modern, arity) in [
+        ("TDIST", "T.DIST", (3, Some(3))),
+        ("NORMSDIST", "NORM.S.DIST", (1, Some(1))),
+        ("FDIST", "F.DIST", (3, Some(3))),
+        ("BETADIST", "BETA.DIST", (3, Some(5))),
+        ("LOGNORMDIST", "LOGNORM.DIST", (3, Some(3))),
+        ("HYPGEOMDIST", "HYPGEOM.DIST", (4, Some(4))),
+        ("NEGBINOMDIST", "NEGBINOM.DIST", (3, Some(3))),
+        ("CHIDIST", "CHISQ.DIST.RT", (2, Some(2))),
+        ("POISSON", "POISSON.DIST", (3, Some(3))),
+        ("CONFIDENCE", "CONFIDENCE.NORM", (3, Some(3))),
+        ("ZTEST", "Z.TEST", (2, Some(3))),
+        ("STDEVP", "STDEV.P", (1, None)),
+    ] {
+        let f = BF::from_name(legacy);
+        assert!(!matches!(f, BF::Custom(_)), "{legacy} is not a built-in");
+        assert_ne!(f, BF::from_name(modern), "{legacy} is stored as {modern}");
+        match parse(&format!("={legacy}(1,2,3)")).expect("parses") {
+            Expression::FunctionCall { func, .. } => assert_eq!(func.to_canonical_name(), legacy),
+            other => panic!("{legacy}: not a call: {other:?}"),
+        }
+        assert_eq!(crate::builtin_arity(legacy), Some(arity), "{legacy}'s arity");
+    }
+    for not_excel in ["POISSONDIST", "CHISQDIST"] {
+        assert!(matches!(BF::from_name(not_excel), BF::Custom(_)), "{not_excel} is no Excel function");
+    }
+}
+
+/// `#REF!A1` -- a reference whose SHEET was deleted, as Excel keeps it
+/// [LIVE, Excel 16, 2026-11-05, sheetspill/probe1.ps1]: the cell part
+/// survives behind `#REF!`. It parses into the reference node with the
+/// deleted-sheet marker as its sheet (`ast::REF_ERROR_SHEET`), never into a
+/// real sheet's name -- a sheet may be CALLED `#REF!`, and `'#REF!'!A1` is it.
+#[test]
+fn a_reference_to_a_deleted_sheet_parses_with_the_marker_sheet() {
+    use crate::ast::{is_ref_error_sheet, REF_ERROR_SHEET};
+    let marker = Some(REF_ERROR_SHEET.to_string());
+    match parse("=#REF!A1").expect("`=#REF!A1` must parse") {
+        Expression::CellRef { sheet, col, row, col_absolute: false, row_absolute: false, .. } => {
+            assert_eq!((sheet, col.as_str(), row), (marker.clone(), "A", 1));
+        }
+        other => panic!("`=#REF!A1` parsed as {other:?}"),
+    }
+    match parse("=#REF!$A$1").expect("absolute") {
+        Expression::CellRef { sheet, col_absolute: true, row_absolute: true, .. } => assert!(is_ref_error_sheet(&sheet)),
+        other => panic!("`=#REF!$A$1` parsed as {other:?}"),
+    }
+    for (formula, what) in [
+        ("=#REF!A1:A3", "range"),
+        ("=#REF!$A$1:$A$3", "absolute range"),
+        ("=#REF!A:A", "column range"),
+        ("=#REF!1:1", "row range"),
+    ] {
+        let sheet = match parse(formula).unwrap_or_else(|e| panic!("`{formula}` must parse: {e}")) {
+            Expression::Range { sheet, .. } | Expression::ColumnRef { sheet, .. } | Expression::RowRef { sheet, .. } => sheet,
+            other => panic!("`{formula}` ({what}) parsed as {other:?}"),
+        };
+        assert!(is_ref_error_sheet(&sheet), "`{formula}` ({what}) carries {sheet:?}");
+    }
+    // Inside larger formulas, and behind the spill and implicit-intersection
+    // operators -- every spelling the probe's Excel produced.
+    for formula in [
+        "=SUM(#REF!A1:A3)+1",
+        "=#REF!$A$1+Sheet3!A1",
+        "=SUM(#REF!D1#)",
+        "=@#REF!A1:A3",
+        "=#REF!A1:A2 #REF!A1:B1",
+        "=SUM(#REF!A1,#REF!A2)",
+        "=#ref!a1",
+    ] {
+        assert!(parse(formula).is_ok(), "`{formula}` must parse");
+    }
+    // The error LITERAL is unchanged wherever no reference touches it, and a
+    // space makes Excel's intersection of the error with A1.
+    assert_eq!(parse("=#REF!").unwrap(), Expression::Literal(Value::Error("#REF!".to_string())));
+    assert!(matches!(parse("=#REF!+1").unwrap(), Expression::BinaryOp { op: BinaryOperator::Add, .. }));
+    assert!(matches!(parse("=#REF! A1").unwrap(), Expression::BinaryOp { op: BinaryOperator::Intersect, .. }));
+    // A sheet CALLED `#REF!` is that sheet, not the marker.
+    match parse("='#REF!'!A1").unwrap() {
+        Expression::CellRef { sheet, .. } => assert_eq!(sheet.as_deref(), Some("#REF!")),
+        other => panic!("{other:?}"),
+    }
+    // Another error literal never qualifies a reference.
+    assert!(parse("=#N/AA1").is_err());
+}

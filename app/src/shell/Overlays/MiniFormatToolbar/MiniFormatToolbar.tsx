@@ -364,9 +364,15 @@ export function MiniFormatToolbar({
             })
           : null;
       try {
-        for (const block of blocks) {
-          const { rows, cols } = rowsColsOf(block);
-          results.push(await applyFormatting(rows, cols, formatting as never, { target }));
+        if (!target && blocks.length > 1) {
+          // The sheet's blocks in ONE call, the others as `moreAreas` (BUG-0394).
+          const [first, ...more] = blocks.map(rowsColsOf);
+          results.push(await applyFormatting(first.rows, first.cols, formatting as never, { target, moreAreas: more }));
+        } else {
+          for (const block of blocks) {
+            const { rows, cols } = rowsColsOf(block);
+            results.push(await applyFormatting(rows, cols, formatting as never, { target }));
+          }
         }
         await tx?.commit();
       } catch (err) {

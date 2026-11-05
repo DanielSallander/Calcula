@@ -185,6 +185,56 @@ Three things fall out of decomposition, and all three matter:
    give users back the ability to build their own solution, and an application
    an AI can read is an application its owner can change.
 
+#### Data-source identity (owner decision, 2026-11-04)
+
+A model inside an application (`models/{ds}/`) is named by a **data-source id**,
+and every pivot, model slicer, ribbon filter, grid report, design-query chart and
+binding that reads it names it by that id. The contract, by analogy with source
+control:
+
+- **The id is owned by the application that publishes it, and is stable across
+  that application's versions** -- like a repository keeping its identity across
+  commits -- so a subscriber's bindings survive every republish and a refresh
+  re-uses the one connection it has.
+- **A working copy pushing back to its own application keeps the id** -- a
+  branch pushing to its own line. A checkout mints a session connection, but the
+  push files the model under the id it came from (`published_data_source_id`).
+- **Anything published as a different application gets its own derived id** --
+  a fork: a new application published from a workbook that subscribes to
+  another, a working copy published under another name or into another
+  workspace, a model-only dataset, and a model a *subscription* brought into a
+  working copy. The derived id is `data_source_key_for_application(application,
+  source id)`: deterministic (the fork's next version keeps it), distinct per
+  application and per source, never the source's own. The decision is
+  `data_source_rekeys_for_target` and every store the package carries is
+  rewritten to match (`rekey_carried_data_sources`), all in
+  `app/src-tauri/src/calp_commands.rs`.
+- **Ids are never shared across applications, and a package carrying an id
+  another subscription (or a live connection) already claims is refused**,
+  `CALP_DATA_SOURCE_SHARED`, before anything is written -- on subscribe,
+  checkout and refresh (`refuse_data_source_already_served`), and on open, which
+  connects neither claimant (`materialize_verified_application_connections`).
+
+**Why the derivation is not the security boundary.** The id in a package is a
+string its publisher writes; a hostile publisher does not need to forge a
+derived id, it can simply write another application's id verbatim (both inputs
+of the derivation are visible in the workspace anyway). Binding the derivation
+to the signing key or the workspace would therefore stop nobody, and it would
+break the stability clause: a co-publisher publishes with a different key, and
+one workspace reached as a UNC path and as a mapped drive does not always
+canonicalize to one scope (`workspace_id.rs`), so either binding would re-key a
+fork between two of its versions and strand its subscribers' bindings (the
+BUG-0589 symptoms). What makes "one publisher can never stand in for another's
+model" true is the subscriber-side refusal above, which judges the id whatever
+produced it: the worst a squatting publisher can do is get a subscription
+REFUSED by name, never read silently. The identity of the application itself
+is the signed, TOFU-pinned publisher key per (workspace, application name).
+Pinned clause by clause by
+`the_data_source_identity_contract_holds_clause_by_clause`
+(`app/src-tauri/src/calp_materialize_tests.rs`). The contract is about
+DATA-SOURCE ids; writeback column ids and object ids (charts, ribbon filters)
+carried into a new application are not re-keyed by it.
+
 ### 2.3 The three roles a `.cala` can hold
 
 Per application, a workbook is exactly one of:
@@ -1222,6 +1272,18 @@ Two safety rules, both of them about not overstating what was checked:
   push summary and the version history. A later refinement can walk the
   dependency graph and warn; recalculating and telling the truth about what was
   merged is the honest answer today.
+
+**Where a push is audited.** A push that lands is an always-recorded
+`Published` row in the audit trail of the workbook that pushed -- a trail saved
+inside that `.cala`. When File > Open / New replaced that workbook before the
+push finished, the row has no document to go to (writing it into the workbook
+now on screen would claim a push it never made), so it goes to THIS COMPUTER's
+append-only trail instead, `%LOCALAPPDATA%\Calcula\collaboration-audit.jsonl`
+(`app/src-tauri/src/machine_audit.rs`, BUG-0653), with `reason:
+documentReplaced`, beside the push's `CALP_PUSH_DOCUMENT_REPLACED` warning. The
+audit viewer lists it under "This computer" (`calp_get_audit_log` with
+`includeMachine`); Clear never removes it. The model-only publish follows the
+same rule.
 
 ## 5. Gates
 

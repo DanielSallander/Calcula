@@ -83,6 +83,11 @@ mod implicit_intersection_tests;
 #[cfg(test)]
 mod offset_sheet_tests;
 
+/// A reference whose sheet was DELETED (`=#REF!A1`, Excel's spelling) renders
+/// back as Excel writes it and evaluates `#REF!` in every context.
+#[cfg(test)]
+mod ref_error_sheet_tests;
+
 /// Sheet lookups follow Excel's sheet-name case rule (`identity::sheet_name_key`):
 /// two names Excel keeps apart (`Straße`, `STRASSE`) are two sheets to a formula.
 #[cfg(test)]
@@ -175,6 +180,38 @@ mod locale_text_function_tests;
 #[cfg(test)]
 mod locale_corpus_tests;
 
+/// Excel's compatibility statistical functions (`TDIST`, `NORMSDIST`, ...)
+/// keep their own names and give Excel's values (lane legacystats).
+#[cfg(test)]
+mod legacy_stats_tests;
+#[cfg(test)]
+mod distribution_argument_tests;
+#[cfg(test)]
+mod lambda_helper_error_tests;
+#[cfg(test)]
+mod typed_name_rendering_tests;
+#[cfg(test)]
+mod rounding_multiple_tests;
+#[cfg(test)]
+mod reference_argument_tests;
+/// Lane formd: T.TEST / BETA.INV small tails, MAP over several arrays, and
+/// TEXTBEFORE / TEXTAFTER / TEXTSPLIT delimiter sets, against [LIVE] Excel 16.
+#[cfg(test)]
+mod tail_precision_tests;
+#[cfg(test)]
+mod map_multi_array_tests;
+#[cfg(test)]
+mod text_delimiter_tests;
+/// Lane formd: LET / LAMBDA names shown as declared, sheet-qualified R1C1,
+/// and `Tbl[]` (the whole table), against [LIVE] Excel 16.
+#[cfg(test)]
+mod formula_spelling_tests;
+
+/// Excel's R1C1 fallback: a formula declaring a cell-shaped LET / LAMBDA
+/// name is read in R1C1 notation, all of it (lane legacystats).
+#[cfg(test)]
+mod r1c1_fallback_tests;
+
 pub mod array_lift;
 pub mod budget;
 pub mod cell;
@@ -182,6 +219,9 @@ pub mod control_values;
 pub mod coord;
 pub mod cube;
 pub mod custom_format;
+/// Excel's live What-If Data Table: the `TABLE(row_input, col_input)` marker
+/// every body cell holds, and the body rectangles it forms.
+pub mod data_table;
 pub mod date_serial;
 pub mod dependency_extractor;
 pub mod dependency_graph;

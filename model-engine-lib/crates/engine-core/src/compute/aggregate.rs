@@ -25,8 +25,20 @@ pub enum AggregateOp {
     Min,
     /// Maximum value.
     Max,
-    /// Count of distinct non-null values.
+    /// DAX `DISTINCTCOUNT`: the number of distinct values, where a measure
+    /// counts BLANK as one more value ("The DISTINCTCOUNT function counts the
+    /// BLANK value. To skip the BLANK value, use the DISTINCTCOUNTNOBLANK
+    /// function." -- Microsoft, DISTINCTCOUNT function (DAX)). The raw SQL
+    /// spelling ([`AggregateOp::render_sql`]) is SQL's `COUNT(DISTINCT x)`,
+    /// which skips NULL; the measure renderers add the BLANK value through
+    /// [`crate::compute::dax_semantics::distinct_count_counting_blank`]. A
+    /// table transformation's Group By keeps SQL's count.
     DistinctCount,
+    /// DAX `DISTINCTCOUNTNOBLANK`: the number of distinct NON-BLANK values
+    /// ("Unlike DISTINCTCOUNT function, DISTINCTCOUNTNOBLANK does not count
+    /// the BLANK value" -- Microsoft, DISTINCTCOUNTNOBLANK function (DAX)).
+    /// SQL: `COUNT(DISTINCT x)`.
+    DistinctCountNoBlank,
     /// Count of all rows (including nulls): `COUNT(*)`.
     CountRows,
     /// Median (50th percentile) of non-null values.
@@ -56,6 +68,7 @@ impl std::fmt::Display for AggregateOp {
             AggregateOp::Min => write!(f, "MIN"),
             AggregateOp::Max => write!(f, "MAX"),
             AggregateOp::DistinctCount => write!(f, "COUNT_DISTINCT"),
+            AggregateOp::DistinctCountNoBlank => write!(f, "COUNT_DISTINCT_NOBLANK"),
             AggregateOp::CountRows => write!(f, "COUNT"),
             AggregateOp::Median => write!(f, "median"),
             AggregateOp::StdevSample => write!(f, "stddev"),
@@ -73,13 +86,18 @@ impl AggregateOp {
     /// using DataFusion-compatible function names (the dialect used for local
     /// execution SQL).
     ///
-    /// Shapes: `COUNT(DISTINCT x)` for [`AggregateOp::DistinctCount`],
-    /// `COUNT(*)` for [`AggregateOp::CountRows`] (the operand is ignored), and
-    /// `NAME(x)` using the [`Display`](std::fmt::Display) name for everything
-    /// else (e.g. `SUM(x)`, `median(x)`, `stddev(x)`).
+    /// Shapes: `COUNT(DISTINCT x)` for [`AggregateOp::DistinctCount`] and
+    /// [`AggregateOp::DistinctCountNoBlank`] (SQL's count, which skips NULL;
+    /// a measure adds DISTINCTCOUNT's BLANK value through
+    /// [`crate::compute::dax_semantics`]), `COUNT(*)` for
+    /// [`AggregateOp::CountRows`] (the operand is ignored), and `NAME(x)`
+    /// using the [`Display`](std::fmt::Display) name for everything else
+    /// (e.g. `SUM(x)`, `median(x)`, `stddev(x)`).
     pub fn render_sql(&self, operand_sql: &str) -> String {
         match self {
-            AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand_sql})"),
+            AggregateOp::DistinctCount | AggregateOp::DistinctCountNoBlank => {
+                format!("COUNT(DISTINCT {operand_sql})")
+            }
             AggregateOp::CountRows => "COUNT(*)".to_string(),
             _ => format!("{self}({operand_sql})"),
         }
@@ -105,7 +123,9 @@ impl AggregateOp {
             AggregateOp::Average => format!("AVG({operand_sql})"),
             AggregateOp::Min => format!("MIN({operand_sql})"),
             AggregateOp::Max => format!("MAX({operand_sql})"),
-            AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand_sql})"),
+            AggregateOp::DistinctCount | AggregateOp::DistinctCountNoBlank => {
+                format!("COUNT(DISTINCT {operand_sql})")
+            }
             AggregateOp::CountRows => "COUNT(*)".to_string(),
             AggregateOp::Median => {
                 format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand_sql})")
@@ -126,7 +146,12 @@ impl AggregateOp {
     /// [`AggregateOp::render_sql`]. [`AggregateOp::CountRows`] becomes
     /// `SUM(CASE WHEN condition THEN 1 END)` (a conditional `COUNT(*)`); its
     /// operand is ignored.
+    ///
+    /// `condition` is a boolean predicate; it renders as `COALESCE(condition,
+    /// FALSE)`, because DataFusion's `CASE WHEN c THEN col END` answers `col`
+    /// when `c` is NULL ([`crate::compute::sql_util::null_is_false_condition`]).
     pub fn render_case_when_sql(&self, condition: &str, operand_sql: &str) -> String {
+        let condition = crate::compute::sql_util::null_is_false_condition(condition, true);
         match self {
             AggregateOp::CountRows => format!("SUM(CASE WHEN {condition} THEN 1 END)"),
             _ => self.render_sql(&format!("CASE WHEN {condition} THEN {operand_sql} END")),
@@ -224,7 +249,11 @@ async fn run_single_aggregate(
         AggregateOp::Count => count(col(column_name)),
         AggregateOp::Min => min(col(column_name)),
         AggregateOp::Max => max(col(column_name)),
-        AggregateOp::DistinctCount => count_distinct(col(column_name)),
+        // A column primitive (not a measure): SQL's distinct count of the
+        // non-null values for both.
+        AggregateOp::DistinctCount | AggregateOp::DistinctCountNoBlank => {
+            count_distinct(col(column_name))
+        }
         AggregateOp::CountRows => {
             // COUNT(*) — count all rows regardless of nulls.
             // Use count(lit(1)) as DataFusion equivalent of COUNT(*).
@@ -679,16 +708,16 @@ mod tests {
     fn render_case_when_sql_wraps_operand_in_condition() {
         assert_eq!(
             AggregateOp::Sum.render_case_when_sql("d.\"year\" = 2014", "f.\"amount\""),
-            "SUM(CASE WHEN d.\"year\" = 2014 THEN f.\"amount\" END)"
+            "SUM(CASE WHEN COALESCE(d.\"year\" = 2014, FALSE) THEN f.\"amount\" END)"
         );
         assert_eq!(
             AggregateOp::DistinctCount.render_case_when_sql("c", "x"),
-            "COUNT(DISTINCT CASE WHEN c THEN x END)"
+            "COUNT(DISTINCT CASE WHEN COALESCE(c, FALSE) THEN x END)"
         );
         // Conditional COUNT(*) counts matching rows; operand is ignored.
         assert_eq!(
             AggregateOp::CountRows.render_case_when_sql("c", "ignored"),
-            "SUM(CASE WHEN c THEN 1 END)"
+            "SUM(CASE WHEN COALESCE(c, FALSE) THEN 1 END)"
         );
     }
 

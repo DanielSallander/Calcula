@@ -264,6 +264,10 @@ pub fn calp_push_merge_apply(
             cells_applied as u32,
             "calpMerge",
             &format!("{}@{}", ctx.package_name, head_str),
+            // THEIR cells laid over ours: the head's pivot output can
+            // legitimately differ from this one's inside a pivot region
+            // (lane gatesc's caveat), so the region gate is the merge's to waive.
+            crate::commands::data::RegionGate::VersionOverlay,
         )?;
     }
 

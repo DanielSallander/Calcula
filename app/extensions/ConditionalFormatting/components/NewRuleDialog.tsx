@@ -30,6 +30,7 @@ import type {
   IconSetType,
 } from "@api";
 import { tryAddRule } from "../lib/ruleWrites";
+import { DIALOG_THEME as DT } from "../../_shared/lib/dialogTheme";
 import type { CellTargetRef } from "@api/cellTarget";
 import { colorScaleRule, dataBarRule, iconSetRule } from "../lib/presetRules";
 import {
@@ -54,7 +55,7 @@ const overlayStyle: React.CSSProperties = {
   left: 0,
   right: 0,
   bottom: 0,
-  backgroundColor: "rgba(0, 0, 0, 0.45)",
+  backgroundColor: DT.overlay,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -62,11 +63,11 @@ const overlayStyle: React.CSSProperties = {
 };
 
 const dialogStyle: React.CSSProperties = {
-  backgroundColor: "#f0f0f0",
-  color: "#333",
-  border: "1px solid #888",
+  backgroundColor: DT.bg,
+  color: DT.text,
+  border: `1px solid ${DT.border}`,
   borderRadius: 4,
-  boxShadow: "0 4px 16px rgba(0, 0, 0, 0.3)",
+  boxShadow: DT.shadow,
   width: 560,
   maxHeight: "85vh",
   padding: 16,
@@ -85,14 +86,14 @@ const titleStyle: React.CSSProperties = {
 const sectionLabelStyle: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 600,
-  color: "#444",
+  color: DT.textSecondary,
   margin: 0,
 };
 
 const categoryListStyle: React.CSSProperties = {
-  border: "1px solid #ccc",
+  border: `1px solid ${DT.divider}`,
   borderRadius: 3,
-  backgroundColor: "#fff",
+  backgroundColor: DT.panelBg,
   maxHeight: 160,
   overflowY: "auto",
 };
@@ -101,19 +102,19 @@ const categoryItemStyle: React.CSSProperties = {
   padding: "8px 12px",
   fontSize: 13,
   cursor: "pointer",
-  borderBottom: "1px solid #e8e8e8",
+  borderBottom: `1px solid ${DT.divider}`,
 };
 
 const selectedCategoryStyle: React.CSSProperties = {
   ...categoryItemStyle,
-  backgroundColor: "#d4e8fc",
+  backgroundColor: DT.selectedBg,
   fontWeight: 500,
 };
 
 const configPanelStyle: React.CSSProperties = {
-  border: "1px solid #ccc",
+  border: `1px solid ${DT.divider}`,
   borderRadius: 3,
-  backgroundColor: "#fff",
+  backgroundColor: DT.panelBg,
   padding: 12,
   minHeight: 80,
   display: "flex",
@@ -129,21 +130,21 @@ const rowStyle: React.CSSProperties = {
 
 const selectStyle: React.CSSProperties = {
   padding: "4px 8px",
-  border: "1px solid #aaa",
+  border: `1px solid ${DT.inputBorder}`,
   borderRadius: 3,
   fontSize: 13,
-  color: "#333",
-  backgroundColor: "#fff",
+  color: DT.inputText,
+  backgroundColor: DT.inputBg,
 };
 
 const inputStyle: React.CSSProperties = {
   flex: 1,
   padding: "4px 8px",
-  border: "1px solid #aaa",
+  border: `1px solid ${DT.inputBorder}`,
   borderRadius: 3,
   fontSize: 13,
-  color: "#333",
-  backgroundColor: "#fff",
+  color: DT.inputText,
+  backgroundColor: DT.inputBg,
 };
 
 const buttonRowStyle: React.CSSProperties = {
@@ -155,26 +156,26 @@ const buttonRowStyle: React.CSSProperties = {
 
 const buttonStyle: React.CSSProperties = {
   padding: "5px 16px",
-  border: "1px solid #aaa",
+  border: `1px solid ${DT.buttonBorder}`,
   borderRadius: 3,
   fontSize: 13,
   cursor: "pointer",
-  backgroundColor: "#fff",
-  color: "#333",
+  backgroundColor: DT.buttonBg,
+  color: DT.buttonText,
 };
 
 const primaryButtonStyle: React.CSSProperties = {
   ...buttonStyle,
-  backgroundColor: "#0078d4",
-  color: "#fff",
-  borderColor: "#0060b0",
+  backgroundColor: DT.primaryBg,
+  color: DT.primaryText,
+  borderColor: DT.primaryBg,
 };
 
 const errorStyle: React.CSSProperties = {
   fontSize: 12,
-  color: "#a4262c",
-  backgroundColor: "#fde7e9",
-  border: "1px solid #f1bbbc",
+  color: DT.errorFg,
+  backgroundColor: DT.errorBg,
+  border: `1px solid ${DT.errorFg}`,
   borderRadius: 3,
   padding: "6px 8px",
 };
@@ -496,9 +497,9 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                       <option key={i} value={i}>{bar.name}</option>
                     ))}
                   </select>
-                  <div style={{
+                  <div data-colour-data style={{
                     width: 24, height: 16, borderRadius: 2,
-                    border: "1px solid #aaa",
+                    border: `1px solid ${DT.border}`,
                     backgroundColor: PRESET_DATA_BAR_COLORS[dataBarColorIndex],
                   }} />
                 </div>
@@ -704,12 +705,13 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
               </select>
             </div>
 
-            {/* Format preview */}
+            {/* Format preview: colour DATA (a cell's look), not chrome. */}
             <div
+              data-colour-data
               style={{
                 padding: "6px 12px",
                 borderRadius: 3,
-                border: "1px solid #ccc",
+                border: `1px solid ${DT.border}`,
                 fontSize: 13,
                 backgroundColor: PRESET_STYLES[formatIndex].backgroundColor || "#fff",
                 color: PRESET_STYLES[formatIndex].textColor || "#000",
@@ -722,10 +724,10 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
 
         {/* Color scale preview for formatByValues */}
         {selectedCategory === "formatByValues" && formatByValuesType === "colorScale" && (
-          <div style={{
+          <div data-colour-data style={{
             height: 20,
             borderRadius: 3,
-            border: "1px solid #ccc",
+            border: `1px solid ${DT.border}`,
             background: (() => {
               const p = PRESET_COLOR_SCALES[colorScalePresetIndex];
               if (p.midColor) {
@@ -738,10 +740,10 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
 
         {/* Data bar preview for formatByValues */}
         {selectedCategory === "formatByValues" && formatByValuesType === "dataBar" && (
-          <div style={{
+          <div data-colour-data style={{
             height: 20,
             borderRadius: 3,
-            border: "1px solid #ccc",
+            border: `1px solid ${DT.border}`,
             background: `linear-gradient(to right, ${PRESET_DATA_BAR_COLORS[dataBarColorIndex]}, ${PRESET_DATA_BAR_COLORS[dataBarColorIndex]}40)`,
           }} />
         )}

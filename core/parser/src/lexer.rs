@@ -44,6 +44,11 @@ pub struct Lexer<'a> {
     /// clears it, and the parser saves and restores it around each atom so a
     /// nested range cannot leak its dots to the expression containing it.
     trim_flags: u8,
+    /// The TYPED spelling of the identifier most recently read, before the
+    /// case fold (`read_identifier`). The parser keeps it for a LET name or
+    /// LAMBDA parameter, which Excel shows as declared (lane formd,
+    /// `parser::respell_bound_names`).
+    last_identifier_spelling: String,
 }
 
 /// Every error literal a formula may contain, longest first.
@@ -75,6 +80,7 @@ impl<'a> Lexer<'a> {
             input: input.chars().peekable(),
             had_leading_ws: false,
             trim_flags: 0,
+            last_identifier_spelling: String::new(),
         }
     }
 
@@ -250,6 +256,12 @@ impl<'a> Lexer<'a> {
         self.had_leading_ws
     }
 
+    /// The typed spelling (before the case fold) of the identifier most
+    /// recently read. See `last_identifier_spelling`.
+    pub fn last_identifier_spelling(&self) -> &str {
+        &self.last_identifier_spelling
+    }
+
     /// Handles operators starting with '<': <, <=, <>
     fn read_less_than_operator(&mut self) -> Token {
         match self.input.peek() {
@@ -339,6 +351,19 @@ impl<'a> Lexer<'a> {
                 number_str.push(ch);
                 self.input.next();
             } else if ch == '.' && !has_dot {
+                // A DOT FOLLOWED BY `:` IS THE ROW RANGE's LEADING TRIM, NOT A
+                // DECIMAL POINT. `=SUM(1.:3)` is Excel's `_TRO_LEADING(1:3)` and
+                // `=SUM(2.:.3)` its `_TRO_ALL(2:3)` [LIVE, Excel 16: 695 and
+                // 1180 over the probe sheet]; taking the dot into the number
+                // here read `1.` as the number one and silently stored
+                // `SUM(1:3)` / `SUM(2:.3)`. No number is ever written `1.` in
+                // front of a `:`, so leaving the dot for the trim-operator arm
+                // of `next_token` costs nothing else.
+                let mut look = self.input.clone();
+                look.next();
+                if look.peek() == Some(&':') {
+                    break;
+                }
                 has_dot = true;
                 number_str.push(ch);
                 self.input.next();
@@ -432,6 +457,74 @@ impl<'a> Lexer<'a> {
         Some(suffix)
     }
 
+    /// The rest of an R1C1 RELATIVE reference after the identifier `head`
+    /// (`R`, `C`, `RC` or `R<n>C`), starting at the `[` the input is on, or
+    /// `None` when what follows is not one. Consumes nothing.
+    ///
+    /// A bracket holds an optionally signed whole number and nothing else
+    /// ([LIVE] Excel 16 refuses `R[ -1]C` and `R[1.5]C`); after `R[k]` a `C`,
+    /// `C<n>` or `C[k]` may follow. The token must end there: a letter, digit,
+    /// `_`, `.` or `[` after it means it is something else.
+    fn peek_r1c1_offsets(&self, head: &str) -> Option<String> {
+        let upper = head.to_ascii_uppercase();
+        let digits_after_r = upper.strip_prefix('R').and_then(|r| r.strip_suffix('C'));
+        let row_head = upper == "R";
+        let col_head = upper == "C"
+            || upper == "RC"
+            || digits_after_r.is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()));
+        if !row_head && !col_head {
+            return None;
+        }
+        let mut look = self.input.clone();
+        let mut out = String::new();
+        fn bracket(look: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut String) -> Option<()> {
+            if look.next()? != '[' {
+                return None;
+            }
+            out.push('[');
+            if let Some(&sign @ ('+' | '-')) = look.peek() {
+                out.push(sign);
+                look.next();
+            }
+            let mut any = false;
+            while let Some(&c) = look.peek() {
+                if !c.is_ascii_digit() {
+                    break;
+                }
+                out.push(c);
+                look.next();
+                any = true;
+            }
+            if !any || look.next()? != ']' {
+                return None;
+            }
+            out.push(']');
+            Some(())
+        }
+        bracket(&mut look, &mut out)?;
+        if row_head {
+            if let Some(&c @ ('C' | 'c')) = look.peek() {
+                out.push(c);
+                look.next();
+                if look.peek() == Some(&'[') {
+                    bracket(&mut look, &mut out)?;
+                } else {
+                    while let Some(&d) = look.peek() {
+                        if !d.is_ascii_digit() {
+                            break;
+                        }
+                        out.push(d);
+                        look.next();
+                    }
+                }
+            }
+        }
+        match look.peek() {
+            Some(&c) if is_letter(c) || c.is_ascii_digit() || c == '.' || c == '[' => None,
+            _ => Some(out),
+        }
+    }
+
     fn read_identifier(&mut self, first_char: char) -> Token {
         let mut ident = String::from(first_char);
 
@@ -474,7 +567,22 @@ impl<'a> Lexer<'a> {
         // character is kept as written: a sheet qualifier still finds its sheet
         // (every sheet lookup folds again with `sheet_names_equal`) and a defined
         // name its name (`defined_name_key` folds it too).
+        // R1C1's RELATIVE reference (`R[-1]C4`, `RC[-6]`, `C[1]`, `R[2]`,
+        // `R1C[2]`) is ONE token: [LIVE] Excel 16 reads it in an A1 formula
+        // too (`=R[-1]C4*1` in J254 is stored `=$D253*1`, `=SUM(C[-6])` in J84
+        // `=SUM(D:D)`, lower case alike). Lexed as `R` + `[` it became a
+        // structured reference or a parse error. The identifier carries the
+        // spelling; `resolve_r1c1_names` turns it into the reference at entry.
+        if self.input.peek() == Some(&'[') {
+            if let Some(rest) = self.peek_r1c1_offsets(&ident) {
+                for _ in 0..rest.chars().count() {
+                    self.input.next();
+                }
+                ident.push_str(&rest);
+            }
+        }
         let folded: String = ident.chars().map(fold_identifier_char).collect();
+        self.last_identifier_spelling = ident;
         match folded.as_str() {
             "TRUE" => Token::Boolean(true),
             "FALSE" => Token::Boolean(false),
@@ -485,7 +593,7 @@ impl<'a> Lexer<'a> {
 
 /// One identifier character under the sheet-name case rule, except that a
 /// non-ASCII character is never folded INTO ASCII (see `read_identifier`).
-fn fold_identifier_char(ch: char) -> char {
+pub(crate) fn fold_identifier_char(ch: char) -> char {
     let folded = identity::fold_sheet_name_char(ch);
     if !ch.is_ascii() && folded.is_ascii() {
         ch

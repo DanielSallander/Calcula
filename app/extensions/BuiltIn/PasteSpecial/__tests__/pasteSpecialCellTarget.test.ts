@@ -7,8 +7,8 @@
 //          through `applyFormatting(.., { target })` -- never a per-cell write
 //          to the active sheet. Paste Link names its source. What has no route
 //          onto a grid's cells (column widths) is refused in one sentence with
-//          nothing written; Paste Formatting writes each source style index
-//          through `setCellStyle(.., { target })` (BUG-0513).
+//          nothing written; Paste Formatting writes every source style index
+//          in ONE `setCellStyles(.., { target })` (BUG-0513, BUG-0345).
 // CONTEXT: The selection owner is REAL (@api/selectionOwner), shaped like the
 //          floating grid's.
 
@@ -53,6 +53,7 @@ vi.mock("@api/lib", async (importOriginal) => {
     getStyle: vi.fn(async (index: number) => ({ numberFormat: `fmt-${index}` })),
     updateCell: write("updateCell"),
     setCellStyle: write("setCellStyle"),
+    setCellStyles: write("setCellStyles"),
     setColumnWidth: write("setColumnWidth"),
     getColumnWidth: vi.fn(async () => 64),
     updateCellsBatch: (...a: unknown[]) => h.batch(...a),
@@ -218,15 +219,22 @@ describe("the paste variants on a floating grid's cells", () => {
     expect(h.writes).not.toHaveBeenCalled();
   });
 
-  it("Paste Formatting lands on the grid's cells: each source style index through the target, no content (BUG-0513)", async () => {
+  it("Paste Formatting lands on the grid's cells: every source style index in ONE targeted batch, no content (BUG-0513, BUG-0345)", async () => {
     await handlers.get(CoreCommands.PASTE_FORMATTING)!();
     expect(h.alert, "Paste Formatting was refused on the grid").not.toHaveBeenCalled();
     expect(h.batch, "a style-only paste wrote content").not.toHaveBeenCalled();
     expect(h.writes.mock.calls).toEqual([
       // ONE check of every cell the paste formats, before the first is written.
       ["setCellStyle", 3, 0, 0, { target: REF, checkArea: { startRow: 3, startCol: 0, endRow: 3, endCol: 1 } }],
-      ["setCellStyle", 3, 0, 2, { target: REF }],
-      ["setCellStyle", 3, 1, 5, { target: REF }],
+      // ...then every style in ONE call (it was one setCellStyle per cell).
+      [
+        "setCellStyles",
+        [
+          { row: 3, col: 0, styleIndex: 2 },
+          { row: 3, col: 1, styleIndex: 5 },
+        ],
+        { target: REF },
+      ],
     ]);
   });
 
@@ -248,15 +256,18 @@ describe("the paste variants on a floating grid's cells", () => {
     expect(data.target.ref).toEqual(REF);
   });
 
-  it("positive control: on the sheet, Paste Formulas writes the active sheet per cell, no target", async () => {
+  it("positive control: on the sheet, Paste Formulas writes the ACTIVE sheet in ONE batch, no target (BUG-0345)", async () => {
     frSelection = null;
     await handlers.get(CoreCommands.PASTE_FORMULAS)!();
-    // The constant (no stored values in this copy): its display text, an entry.
-    expect(h.writes.mock.calls.filter((c) => c[0] === "updateCell")).toHaveLength(1);
-    // The formula: one per-cell batch on the ACTIVE sheet (no target), as a paste.
+    expect(h.writes.mock.calls.filter((c) => c[0] === "updateCell"), "a cell was written on its own").toHaveLength(0);
+    // The constant (no stored values in this copy) is its display text, an
+    // entry; the formula a paste -- both in one batch on the active sheet.
     expect(h.batch).toHaveBeenCalledTimes(1);
     const { updates, opts } = batchCall();
     expect(opts).toEqual({ target: undefined });
-    expect(updates).toEqual([{ row: 40, col: 41, value: "=B2+1@39,39", pasted: true }]);
+    expect(updates).toEqual([
+      { row: 40, col: 40, value: "10" },
+      { row: 40, col: 41, value: "=B2+1@39,39", pasted: true },
+    ]);
   });
 });

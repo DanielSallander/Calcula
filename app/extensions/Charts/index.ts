@@ -318,6 +318,7 @@ import {
 } from "./lib/chartPointer";
 import { clearAllWidgetValues, getWidgetValue, setWidgetValue, nextWidgetValue } from "./handlers/chartWidgetValues";
 import { onAppEvent } from "@api/events";
+import { onBiFormatCultureApplied } from "@api/locale";
 import { ChartEvents } from "./lib/chartEvents";
 import {
   CHART_FORMAT_SELECTION_COMMAND,
@@ -2756,6 +2757,12 @@ function activate(context: ExtensionContext): void {
   // `readDesignQueryData` runs `run_design_query` on every render, whose
   // member labels and formatted values the backend writes in the locale of
   // that moment, so dropping the rasters IS the design-query cache clear.
+  // A model chart's data is a MODEL query, and Rust gives the model engines
+  // the new DAX FORMAT culture in a walk that ends AFTER `locale:changed`: a
+  // read made at once can carry FORMAT text in the old culture, so the charts
+  // re-read again when the walk ends (@api/locale onBiFormatCultureApplied).
+  // The two events come in either order and the ticks paint with this
+  // window's locale, so both re-read.
   const handleLocaleChanged = () => {
     invalidateAllChartCaches();
     context.events.emit(AppEvents.GRID_REFRESH);
@@ -2763,6 +2770,7 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     onAppEvent(AppEvents.LOCALE_CHANGED, handleLocaleChanged),
   );
+  cleanupFunctions.push(onBiFormatCultureApplied(handleLocaleChanged));
 
   // -----------------------------------------------------------------------
   // Chart Series Reference Drag/Resize

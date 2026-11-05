@@ -11,6 +11,7 @@ exports[`AppEvents > all event values match snapshot 1`] = `
   "BEFORE_NEW": "app:before-new",
   "BEFORE_OPEN": "app:before-open",
   "BEFORE_SAVE": "app:before-save",
+  "BI_FORMAT_CULTURE_APPLIED": "app:bi-format-culture-applied",
   "BI_MODEL_CHANGED": "app:bi-model-changed",
   "BI_REFRESH_COMPLETED": "app:bi-refresh-completed",
   "CALC_PROGRESS": "app:calc-progress",

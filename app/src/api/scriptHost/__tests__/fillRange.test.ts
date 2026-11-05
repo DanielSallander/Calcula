@@ -74,6 +74,8 @@ function makeLib(sourceCells: ViewportCell[]) {
       activeIndex: 0,
     })),
     getViewportCells: vi.fn(async () => sourceCells),
+    // The merge question the executor asks before it writes (fillMergeRefusal).
+    getMergedRegions: vi.fn(async () => mergedRegions),
     getUndoState: vi.fn(async () => ({ transactionOpen: false })),
     beginUndoTransaction: vi.fn(async () => { undo.push("begin"); }),
     commitUndoTransaction: vi.fn(async () => { undo.push("commit"); }),
@@ -176,6 +178,55 @@ describe("fillRangeFromScript — drag parity", () => {
       [1, 0, 1, 1],
       [2, 0, 2, 1],
     ]);
+    mergedRegions = [];
+  });
+
+  // NEW-script-fill-merge (round D, lane pastec): Excel [LIVE, Excel 16 COM,
+  // 2026-11-05, pastec/probe-fill2.ps1] -- AutoFill over a merge that is not
+  // the band's own pattern refuses "To do this, all the merged cells need to be
+  // the same size." and changes nothing; FillDown over it raises nothing and
+  // changes nothing. The fill used to write every cell and then repeat the
+  // band's merges over the merges in the way.
+  // SABOTAGE (pastec-ts4): `fillMergeRefusal(...)` -> `null` in
+  // fillRangeFromScript -> the cells are written and the merge is replicated.
+  it("series over a merge the band does not have: refused with Excel's sentence, nothing written", async () => {
+    mergedRegions = [{ startRow: 2, startCol: 0, endRow: 2, endCol: 1 }]; // A3:B3, the band A1:B1 is plain
+    engineMergeCalls.length = 0;
+    const { lib, updates, undo } = makeLib([
+      { row: 0, col: 0, display: "1" },
+      { row: 0, col: 1, display: "2" },
+    ]);
+    await expect(
+      fillRangeFromScript(lib, SCRIPT, 0, 0, 3, 1, { type: "series" }, undefined),
+    ).rejects.toThrow("To do this, all the merged cells need to be the same size.");
+    expect(updates).toEqual([]);
+    expect(undo).toEqual([]);
+    expect(engineMergeCalls).toEqual([]);
+    mergedRegions = [];
+  });
+
+  it("copy (FillDown) over a merge the band partly overlaps: nothing written, count 0, no undo step", async () => {
+    // A1:B1 merged band; B2:C2 merged in the way (Excel's FILLDOWN2 case).
+    mergedRegions = [
+      { startRow: 0, startCol: 0, endRow: 0, endCol: 1 },
+      { startRow: 1, startCol: 1, endRow: 1, endCol: 2 },
+    ];
+    engineMergeCalls.length = 0;
+    const { lib, updates, undo } = makeLib([{ row: 0, col: 0, display: "h" }]);
+    expect(await fillRangeFromScript(lib, SCRIPT, 0, 0, 2, 1, {}, undefined)).toEqual({ count: 0 });
+    expect(updates).toEqual([]);
+    expect(undo).toEqual([]);
+    expect(engineMergeCalls).toEqual([]);
+    mergedRegions = [];
+  });
+
+  it("a granted macro's fill (moduleParity) is stopped by the same merges", async () => {
+    mergedRegions = [{ startRow: 1, startCol: 0, endRow: 1, endCol: 1 }];
+    const { lib, updates } = makeLib([{ row: 0, col: 0, display: "1" }]);
+    await expect(
+      fillRangeFromScript(lib, SCRIPT, 0, 0, 2, 1, { type: "series" }, undefined, { moduleParity: true }),
+    ).rejects.toThrow("To do this, all the merged cells need to be the same size.");
+    expect(updates).toEqual([]);
     mergedRegions = [];
   });
 

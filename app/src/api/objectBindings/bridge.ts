@@ -61,6 +61,7 @@ import {
   type ResolvedTupleFilter,
 } from "../reportFilters";
 import { getReportPagesSnapshot, onReportPagesChanged } from "../reportPages";
+import { onBiFormatCultureApplied } from "../locale";
 import { listModelVisuals, modelVisualOf } from "../modelVisuals";
 import { getGridStateSnapshot } from "../../core/state/GridContext";
 import type {
@@ -510,13 +511,14 @@ export function installObjectBindingsBridge(): () => void {
   offs.push(onAppEvent(AppEvents.BI_REFRESH_COMPLETED, () => void requestMeasureRefresh()));
   // App locale switch (P2 S7): a binding's display text (a formatted number,
   // a measure's General text) is written by the backend in the app locale, so
-  // the bindings re-resolve and the measures re-read.
-  offs.push(
-    onAppEvent(AppEvents.LOCALE_CHANGED, () => {
-      void requestReload();
-      void requestMeasureRefresh();
-    }),
-  );
+  // the bindings re-resolve at once. The MEASURES re-read only when Rust says
+  // every model engine has the new FORMAT culture (rev-backend-5), through the
+  // one seam every model re-query after a locale switch uses
+  // (@api/locale onBiFormatCultureApplied): `locale:changed` fires before
+  // that walk ends, and a measure re-read at once could compute FORMAT text in
+  // the OLD culture with nothing re-reading it after.
+  offs.push(onAppEvent(AppEvents.LOCALE_CHANGED, () => void requestReload()));
+  offs.push(onBiFormatCultureApplied(() => void requestMeasureRefresh()));
 
   let unlistenTauri: (() => void) | null = null;
   listenTauriEvent<ObjectBindingsChangedPayload>(BACKEND_OBJECT_BINDINGS_EVENT, onBackendChanged)

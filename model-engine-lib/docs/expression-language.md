@@ -238,7 +238,7 @@ These functions provide branching logic and NULL handling in measure expressions
 
 **Safe division with zero-denominator handling.**
 
-Returns an alternate value (default: BLANK/NULL) when the denominator is zero.
+Returns an alternate value (default: BLANK/NULL) when the denominator is zero or BLANK.
 
 **Text syntax:**
 ```
@@ -347,6 +347,8 @@ let expr = expr::switch(
 ### BLANK / ISBLANK
 
 **BLANK** returns a NULL value. **ISBLANK** tests whether an expression is NULL.
+
+**BLANK in arithmetic follows DAX, not SQL** (in measures and calculated columns; a table transformation keeps SQL's `null + 5 = null`). Microsoft's table: `BLANK + BLANK = BLANK`, `BLANK + 5 = 5`, `BLANK * 5 = BLANK`, `5 / BLANK = Infinity`, `0 / BLANK = NaN`, `BLANK / BLANK = BLANK`; and `BLANK - 10 = -10`, `BLANK / 3 = BLANK`, `-BLANK = BLANK`. A `+` / `-` chain is BLANK only when every term is. `/` always answers a decimal (`3 / 2` is `1.5`) and never fails: `x / 0` is `+/-Infinity`, `0 / 0` is `NaN` (use DIVIDE for BLANK instead). `COUNT`, `DISTINCTCOUNT` and `COUNTROWS` answer BLANK, never 0, when there is nothing to count; a measure-level value that is BLANK compares as `0` / `""` / `FALSE` against a literal (`IF(COUNTROWS(t) = 0, ...)`, `SWITCH(COUNTROWS(t), 0, ...)`). The one implementation is `engine_core::compute::dax_semantics`.
 
 **Text syntax:**
 ```

@@ -37,6 +37,7 @@ import { pointsToPixels, buildCellFont } from "../fonts";
 import { wrapText, splitHardBreaks, hasHardBreak } from "../layout/autoFit";
 import { parseTextOrientation } from "../layout/textOrientation";
 import { alignmentWithIndent, effectiveIndentPx, indentedTextBox } from "../layout/cellIndent";
+import { shrinkToFitFontSize } from "../layout/shrinkToFit";
 import { classifyCellContent, fitNumericDisplay, type CellContentKind } from "./overflowMarker";
 import {
   drawOrientedText,
@@ -242,7 +243,8 @@ function paintCellText(
 ): void {
   const { cell, style } = paint;
   const display = cell.display ?? "";
-  if (display === "") return;
+  // Show Bar Only / Show Icon Only: the glyph is painted, the value is not.
+  if (display === "" || effective.hideValue === true) return;
 
   const left = box.x;
   const top = box.y;
@@ -306,11 +308,8 @@ function paintCellText(
   // ---- Shrink to fit (before any '####' decision, as Excel orders it).
   if (style.shrinkToFit === true && isHorizontal && availableWidth > 0) {
     ctx.font = buildCellFont(fontStyle, fontWeight, fontSize * zoom, fontFamily);
-    const w = ctx.measureText(display).width;
-    if (w > availableWidth) {
-      const scaled = Math.max(1, Math.floor(fontSize * (availableWidth / w)));
-      if (scaled < fontSize) fontSize = scaled;
-    }
+    // The grid painter's rule, continuous as Excel scales (layout/shrinkToFit.ts).
+    fontSize = shrinkToFitFontSize(fontSize, ctx.measureText(display).width, availableWidth);
   }
 
   const sizePoints = fontSize * zoom;
@@ -330,6 +329,7 @@ function paintCellText(
       style.textAlign,
       vAlign,
       fontSizePx,
+      style.wrapText === true,
     );
     return;
   }

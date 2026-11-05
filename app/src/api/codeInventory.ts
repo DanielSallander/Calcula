@@ -288,7 +288,8 @@ export interface CodeUnit {
    * macro that came in an APPLICATION runs restricted, and a run YOU start from
    * a door that carries a person's pass (Developer > Macros > Run, a button that
    * runs it, the command line) may also read and change the cells of any sheet,
-   * and nothing more (scriptHost/explicitRunGrant.ts). Per-workbook trust keys
+   * and how they look (owner, 2026-11-04), and nothing more
+   * (scriptHost/explicitRunGrant.ts). Per-workbook trust keys
    * every module unit by the module store, whatever its surface.
    */
   module?: { readonly runtime: "objectScript" | "workbookScript"; readonly cellAccessWhenYouRunIt: boolean };
@@ -415,8 +416,8 @@ function firstLineLabel(source: string, cap = 48): string {
  * (objectScriptRunner.ts) -- the `object-script` surface, never the
  * interpreter. Its tier is its origin's: the user's own runs unlocked; an
  * application's runs restricted, and a run YOU start from a door that carries a
- * person's pass may also read and change the cells of any sheet, and nothing
- * more. Its ceiling is its own `// @capability` pragmas, exactly what the
+ * person's pass may also read and change the cells of any sheet, and how they
+ * look, and nothing more. Its ceiling is its own `// @capability` pragmas, exactly what the
  * runner mounts it with; it is never standing, so never mounted here.
  */
 function objectScriptMacroUnit(
@@ -432,7 +433,7 @@ function objectScriptMacroUnit(
     residence:
       `Macro written as an object script — ${describeModuleScriptScope(summary.scope)}; ` +
       (distributed
-        ? "runs once per start, restricted -- and when you run it yourself it may also read and change cells on any sheet"
+        ? "runs once per start, restricted -- and when you run it yourself it may also read and change cells, and how they look, on any sheet"
         : "runs once per start, at the unlocked tier"),
     provenance: distributed ? "distributed" : "local",
     sourcePackage: distributed ? pkg : null,

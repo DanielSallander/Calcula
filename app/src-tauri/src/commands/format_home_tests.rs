@@ -2082,6 +2082,7 @@ impl Book {
                 invariant: None,
                 pasted: None,
                 moved: None,
+                source: None,
             })
             .collect();
         crate::commands::data::update_cells_batch_core(

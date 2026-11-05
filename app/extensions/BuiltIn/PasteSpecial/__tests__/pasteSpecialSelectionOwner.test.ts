@@ -103,7 +103,7 @@ const QUICK = [
 ];
 
 describe("Paste Special while a selection owner holds the selection", () => {
-  it("Paste Special... (Ctrl+Alt+V, Ctrl+Shift+V, the Edit menu) does not open the dialog; one toast", async () => {
+  it("Paste Special... (Ctrl+Alt+V, the Edit menu) does not open the dialog; one toast", async () => {
     owns = true;
     await handlers.get(CoreCommands.PASTE_SPECIAL)!();
     expect(h.openDialog, "Paste Special opened over Core's hidden selection").not.toHaveBeenCalled();

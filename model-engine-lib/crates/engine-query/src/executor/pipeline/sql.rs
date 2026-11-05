@@ -3,16 +3,125 @@
 
 use datafusion::prelude::SessionContext;
 use engine_core::compute::aggregate::AggregateOp;
+use engine_core::compute::dax_semantics::{self, DivideStyle};
 use engine_core::compute::context::{
     format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter, LEVEL_AXIS,
 };
 use engine_core::compute::expression::{
     DataFusionDialect, Expression, LowercaseTableQualifier, SqlRenderer,
 };
-use engine_core::compute::sql_util::quote_ident_double;
+use engine_core::compute::sql_util::{null_is_false_condition, quote_ident_double};
 use engine_core::model::DataModel;
 
 use crate::error::QueryResult;
+
+/// The alias `resolve_compound_sql` gives the aggregate of a grand-total
+/// (RESET / full-axis CLEAR) scalar subquery -- the mark
+/// [`hoist_clear_scalars`] finds it by.
+const CLEAR_SCALAR_ALIAS: &str = "__clear_scalar";
+
+/// Move every grand-total scalar subquery of a finished compound-measure SQL
+/// fragment out of the expression and into a one-row `CROSS JOIN` derived
+/// table, returning the rewritten fragment (BUG-0444).
+///
+/// `resolve_compound_sql` renders a RESET / full-axis-CLEAR total inside a
+/// compound measure as an uncorrelated scalar subquery,
+/// `(SELECT <agg> AS __clear_scalar FROM <fact>)`. DataFusion (44) cannot plan
+/// that subquery once it ALSO appears in the HAVING clause -- and it always
+/// does: the grouped query's `HAVING ("<measure>" IS NOT NULL)` expands the
+/// alias back into the expression, so the subquery is decorrelated twice
+/// (`__scalar_sq_1`, `__scalar_sq_2`) and, when the query reads only the fact
+/// table (grouped by a FACT column), `optimize_projections` drops one of the
+/// two while the plan still names it: "No field named
+/// `__scalar_sq_1.__clear_scalar`". A cross-joined one-row table is the same
+/// number with no subquery left in the expression: each occurrence becomes
+/// `MAX(__csN.__clear_scalar)` (the column is constant, and `MAX` makes it
+/// legal in a grouped SELECT and HAVING), and `joins` receives one
+/// `CROSS JOIN (SELECT ...) AS __csN` per DISTINCT subquery, for the caller to
+/// append after its own JOINs. Whenever the fact table has a row, the two are
+/// equivalent row for row: the derived table has exactly one row (an
+/// aggregate without GROUP BY), so it neither multiplies nor removes a fact
+/// row, and it reads the same registered fact batch the scalar subquery read.
+///
+/// NOT over an EMPTY fact table. `FROM <fact> CROSS JOIN <one row>` then has
+/// no rows, so an ungrouped query (or a ROLLUP grand-total row) aggregates
+/// `MAX(__csN.__clear_scalar)` over nothing and reads the total as NULL
+/// (BLANK), where the inline subquery read the empty set's aggregate. For SUM,
+/// AVG, MIN, MAX and the statistical aggregates that was NULL already; for the
+/// COUNT family it was 0. BLANK is kept deliberately (rev-backend-7): it is
+/// DAX's own answer -- COUNTROWS, COUNT and DISTINCTCOUNT of an empty table
+/// are BLANK -- and it makes the share `COUNTROWS(f) / COUNTROWS(f, RESET())`
+/// BLANK, as BLANK / BLANK is in DAX, where 0 / 0 is an integer divide-by-zero
+/// that fails the whole query. Pinned end to end by
+/// `clear_reset_tests::a_reset_total_over_an_empty_fact_table_is_blank`.
+///
+/// The scan honours single-quoted literals and double-quoted identifiers, so
+/// a parenthesis inside a filter value never unbalances it.
+pub(super) fn hoist_clear_scalars(sql: &str, joins: &mut Vec<String>) -> String {
+    let tail = format!(" AS {CLEAR_SCALAR_ALIAS} FROM ");
+    // (start of '(', index of the matching ')') of each grand-total subquery.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    let bytes = sql.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if let Some(q) = quote {
+            // A doubled quote ('' or "") toggles out and straight back in.
+            if b == q {
+                quote = None;
+            }
+            continue;
+        }
+        match b {
+            b'\'' | b'"' => quote = Some(b),
+            b'(' => open.push(i),
+            b')' => {
+                if let Some(start) = open.pop() {
+                    let content = &sql[start + 1..i];
+                    let is_clear_scalar = content.starts_with("SELECT ")
+                        && content.rfind(&tail).is_some_and(|p| {
+                            let table = &content[p + tail.len()..];
+                            !table.is_empty()
+                                && table
+                                    .bytes()
+                                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.')
+                        });
+                    if is_clear_scalar {
+                        ranges.push((start, i));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if ranges.is_empty() {
+        return sql.to_string();
+    }
+    ranges.sort_unstable();
+    let mut out = String::with_capacity(sql.len());
+    let mut cursor = 0;
+    for (start, end) in ranges {
+        if start < cursor {
+            // Nested inside a range already replaced (cannot happen: the inner
+            // aggregate of a grand-total subquery is a plain aggregate).
+            continue;
+        }
+        let subquery = &sql[start..=end];
+        let join = format!("CROSS JOIN {subquery} AS __cs");
+        let idx = match joins.iter().position(|j| j.starts_with(&join)) {
+            Some(idx) => idx,
+            None => {
+                joins.push(format!("{join}{}", joins.len()));
+                joins.len() - 1
+            }
+        };
+        out.push_str(&sql[cursor..start]);
+        out.push_str(&format!("MAX(__cs{idx}.{CLEAR_SCALAR_ALIAS})"));
+        cursor = end + 1;
+    }
+    out.push_str(&sql[cursor..]);
+    out
+}
 
 /// Build a SQL condition string from resolved filters.
 /// Build a map of table name → SQL alias for USERELATIONSHIP overrides.
@@ -91,24 +200,6 @@ pub(super) fn build_override_alias_map(
         alias_map.insert(dim_table.to_string(), alias);
     }
     alias_map
-}
-
-/// Build SQL conditions, using aliases from USERELATIONSHIP overrides.
-fn build_condition_sql_with_aliases(
-    filters: &[ResolvedFilter],
-    fact_table: &str,
-    fact_model_name: &str,
-    model: &DataModel,
-    alias_map: &std::collections::HashMap<String, String>,
-) -> QueryResult<String> {
-    build_condition_sql_impl(
-        filters,
-        &[],
-        fact_table,
-        fact_model_name,
-        model,
-        Some(alias_map),
-    )
 }
 
 pub(super) fn build_condition_sql(
@@ -451,6 +542,39 @@ pub(super) fn wrap_axis_clear(
     Ok(format!("{reagg}({inner_sql}) {over}"))
 }
 
+/// Is `expr` a compound measure whose sub-aggregates may carry INDEPENDENT
+/// contexts -- a combinator `resolve_compound_sql` / `hoist_measure_sql`
+/// recurse through -- holding a context operation? Such a measure must not be
+/// resolved as one context (which merges, or drops, its subterms' KEEPs). A
+/// measure-level comparison / logical node joined the list in the open-ledger
+/// round E: resolved as a unit, `SUM(x, KEEP(...)) > SUM(y)` lost its KEEP.
+pub(super) fn is_compound_with_context(expr: &Expression) -> bool {
+    expr.has_context_ops()
+        && matches!(
+            expr,
+            Expression::BinaryOp { .. }
+                | Expression::SafeDivide { .. }
+                | Expression::ScalarFunc { .. }
+                | Expression::Coalesce(_)
+                | Expression::If { .. }
+                | Expression::Comparison { .. }
+                | Expression::And(..)
+                | Expression::Or(..)
+                | Expression::Xor(..)
+                | Expression::Not(_)
+                | Expression::IsBlank(_)
+        )
+}
+
+/// `AND` / `OR` / `XOR` of two rendered operands (`expr` says which).
+fn logical_sql(expr: &Expression, l: &str, r: &str) -> String {
+    match expr {
+        Expression::Or(..) => format!("({l} OR {r})"),
+        Expression::Xor(..) => format!("(({l} AND NOT {r}) OR (NOT {l} AND {r}))"),
+        _ => format!("({l} AND {r})"),
+    }
+}
+
 pub(super) fn resolve_compound_sql(
     expr: &Expression,
     model: &DataModel,
@@ -461,28 +585,23 @@ pub(super) fn resolve_compound_sql(
     override_joins: &mut Vec<OverrideJoinEntry>,
 ) -> QueryResult<String> {
     match expr {
-        // Compound expressions: recurse into each operand independently.
-        Expression::BinaryOp { left, op, right } => {
-            let l = resolve_compound_sql(
-                left,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
-            let r = resolve_compound_sql(
-                right,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
-            Ok(format!("({l} {} {r})", op.as_sql()))
-        }
+        // Compound expressions: recurse into each operand independently, with
+        // DAX BLANK arithmetic (`engine_core::compute::dax_semantics`).
+        Expression::BinaryOp { .. } => dax_semantics::render_binary(
+            expr,
+            DivideStyle::Ieee,
+            &mut |e| {
+                resolve_compound_sql(
+                    e,
+                    model,
+                    fact_table,
+                    fact_model_name,
+                    group_columns,
+                    context_join_tables,
+                    override_joins,
+                )
+            },
+        ),
         Expression::SafeDivide {
             numerator,
             denominator,
@@ -518,9 +637,7 @@ pub(super) fn resolve_compound_sql(
                 )?,
                 None => "NULL".to_string(),
             };
-            Ok(format!(
-                "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE) / {d} END"
-            ))
+            Ok(dax_semantics::safe_divide_sql(&n, &d, &alt, "DOUBLE"))
         }
         Expression::ScalarFunc { function, args } => {
             let mapped = args
@@ -588,6 +705,7 @@ pub(super) fn resolve_compound_sql(
                 context_join_tables,
                 override_joins,
             )?;
+            let c = null_is_false_condition(&c, condition.is_boolean_predicate());
             Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
         }
         Expression::IsBlank(inner) => {
@@ -614,6 +732,43 @@ pub(super) fn resolve_compound_sql(
             )?;
             Ok(format!("(NOT {i})"))
         }
+        // A measure-level comparison / AND / OR / XOR: each operand resolves
+        // its own context, so `IF(SUM(x, KEEP(...)) > SUM(y), ...)` filters
+        // only the left sum. Resolved as ONE context (the arm below) the KEEP
+        // reached the conditional renderer's comparison fallback and was
+        // dropped (NEW-keep-in-if-condition, open-ledger round E).
+        Expression::Comparison { left, op, right } => {
+            let mut recurse = |e: &Expression| {
+                resolve_compound_sql(
+                    e,
+                    model,
+                    fact_table,
+                    fact_model_name,
+                    group_columns,
+                    context_join_tables,
+                    override_joins,
+                )
+            };
+            let l = dax_semantics::comparison_operand(recurse(left)?, left, right);
+            let r = dax_semantics::comparison_operand(recurse(right)?, right, left);
+            Ok(format!("({l} {} {r})", op.as_sql()))
+        }
+        Expression::And(left, right) | Expression::Or(left, right) | Expression::Xor(left, right) => {
+            let mut recurse = |e: &Expression| {
+                resolve_compound_sql(
+                    e,
+                    model,
+                    fact_table,
+                    fact_model_name,
+                    group_columns,
+                    context_join_tables,
+                    override_joins,
+                )
+            };
+            let l = recurse(left)?;
+            let r = recurse(right)?;
+            Ok(logical_sql(expr, &l, &r))
+        }
 
         // Expressions with context ops: resolve independently via the context resolver.
         _ if expr.has_context_ops() => {
@@ -627,6 +782,11 @@ pub(super) fn resolve_compound_sql(
                     context_join_tables.push(f.table.clone());
                 }
             }
+            // A KEEP's expression conditions (`IN {...}`, column-vs-column)
+            // filter the aggregate too; they were ignored here.
+            for cond in &ctx.conditions {
+                collect_qualified_tables(cond, fact_model_name, context_join_tables);
+            }
 
             // Collect alias map from USERELATIONSHIP overrides.
             let alias_map =
@@ -634,7 +794,7 @@ pub(super) fn resolve_compound_sql(
 
             // Inner aggregate SQL: CASE WHEN when KEEP filters are present, else
             // the plain aggregate (recurse into the stripped expression).
-            let inner_sql = if effective.is_empty() {
+            let inner_sql = if effective.is_empty() && ctx.conditions.is_empty() {
                 resolve_compound_sql(
                     &stripped,
                     model,
@@ -645,8 +805,9 @@ pub(super) fn resolve_compound_sql(
                     override_joins,
                 )?
             } else {
-                let condition = build_condition_sql_with_aliases(
+                let condition = build_condition_sql_with_conditions(
                     &effective,
+                    &ctx.conditions,
                     fact_table,
                     fact_model_name,
                     model,
@@ -681,9 +842,13 @@ pub(super) fn resolve_compound_sql(
                     // does not use — otherwise DataFusion's scalar-subquery
                     // decorrelation sees two `sum(...)` columns and reports an
                     // ambiguous reference.
+                    //
+                    // The caller moves this subquery into a CROSS JOIN with
+                    // `hoist_clear_scalars` (BUG-0444): left inline, DataFusion
+                    // cannot plan it once HAVING repeats the measure.
                     let fact_lc = fact_model_name.to_lowercase();
                     Ok(format!(
-                        "(SELECT {inner_sql} AS __clear_scalar FROM {fact_lc})"
+                        "(SELECT {inner_sql} AS {CLEAR_SCALAR_ALIAS} FROM {fact_lc})"
                     ))
                 }
                 // Partitioned (percent-of-parent) or a cleared aggregate that
@@ -705,8 +870,12 @@ pub(super) fn resolve_compound_sql(
         Expression::Aggregate { operation, operand } => {
             // COUNT(*) ignores its operand (a bare table reference, which is
             // not renderable as scalar SQL) — handle it before rendering.
+            // A count answers BLANK, never 0 (DAX).
             if matches!(operation, AggregateOp::CountRows) {
-                return Ok("COUNT(*)".to_string());
+                return Ok(dax_semantics::blank_zero_count(
+                    operation,
+                    "COUNT(*)".to_string(),
+                ));
             }
             let col = operand.to_sql_string()?;
             let fact = fact_model_name.to_lowercase();
@@ -718,7 +887,7 @@ pub(super) fn resolve_compound_sql(
             } else {
                 format!("{fact}.\"{col}\"")
             };
-            Ok(operation.render_sql(&qualified))
+            Ok(dax_semantics::measure_aggregate_sql(operation, &qualified))
         }
 
         // Leaf expressions: generate plain SQL.
@@ -766,6 +935,10 @@ pub(super) fn contains_partitioned_clear(
         Expression::IsBlank(inner) | Expression::Not(inner) => {
             contains_partitioned_clear(inner, model, group_columns)
         }
+        Expression::Comparison { left, right, .. }
+        | Expression::And(left, right)
+        | Expression::Or(left, right)
+        | Expression::Xor(left, right) => any(&[left, right]),
         _ if expr.has_context_ops() => {
             let (_, ctx) = ContextResolver::new(model).resolve(expr)?;
             Ok(axis_clear_partition(&ctx, group_columns).is_some_and(|p| !p.is_empty()))
@@ -812,11 +985,22 @@ pub(super) fn hoist_measure_sql(
         };
     }
     match expr {
-        Expression::BinaryOp { left, op, right } => {
-            let l = recurse!(left);
-            let r = recurse!(right);
-            Ok(format!("({l} {} {r})", op.as_sql()))
-        }
+        Expression::BinaryOp { .. } => dax_semantics::render_binary(
+            expr,
+            DivideStyle::Ieee,
+            &mut |e| {
+                hoist_measure_sql(
+                    e,
+                    model,
+                    fact_table,
+                    fact_model_name,
+                    group_columns,
+                    context_join_tables,
+                    override_joins,
+                    hoist,
+                )
+            },
+        ),
         Expression::SafeDivide {
             numerator,
             denominator,
@@ -828,9 +1012,7 @@ pub(super) fn hoist_measure_sql(
                 Some(a) => recurse!(a),
                 None => "NULL".to_string(),
             };
-            Ok(format!(
-                "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE) / {d} END"
-            ))
+            Ok(dax_semantics::safe_divide_sql(&n, &d, &alt, "DOUBLE"))
         }
         Expression::ScalarFunc { function, args } => {
             let mut mapped = Vec::with_capacity(args.len());
@@ -854,6 +1036,7 @@ pub(super) fn hoist_measure_sql(
             let c = recurse!(condition);
             let t = recurse!(then_expr);
             let e = recurse!(else_expr);
+            let c = null_is_false_condition(&c, condition.is_boolean_predicate());
             Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
         }
         Expression::IsBlank(inner) => {
@@ -863,6 +1046,18 @@ pub(super) fn hoist_measure_sql(
         Expression::Not(inner) => {
             let i = recurse!(inner);
             Ok(format!("(NOT {i})"))
+        }
+        // Each operand of a measure-level comparison / AND / OR / XOR keeps
+        // its own context (mirrors `resolve_compound_sql`).
+        Expression::Comparison { left, op, right } => {
+            let l = dax_semantics::comparison_operand(recurse!(left), left, right);
+            let r = dax_semantics::comparison_operand(recurse!(right), right, left);
+            Ok(format!("({l} {} {r})", op.as_sql()))
+        }
+        Expression::And(left, right) | Expression::Or(left, right) | Expression::Xor(left, right) => {
+            let l = recurse!(left);
+            let r = recurse!(right);
+            Ok(logical_sql(expr, &l, &r))
         }
         // A context-op aggregate: render its inner aggregate (CASE WHEN for KEEP,
         // else the plain aggregate), wrap in the window if it clears the axis,
@@ -876,9 +1071,12 @@ pub(super) fn hoist_measure_sql(
                     context_join_tables.push(f.table.clone());
                 }
             }
+            for cond in &ctx.conditions {
+                collect_qualified_tables(cond, fact_model_name, context_join_tables);
+            }
             let alias_map =
                 build_override_alias_map(&ctx, model, fact_model_name, fact_table, override_joins);
-            let inner_sql = if effective.is_empty() {
+            let inner_sql = if effective.is_empty() && ctx.conditions.is_empty() {
                 resolve_compound_sql(
                     &stripped,
                     model,
@@ -889,8 +1087,9 @@ pub(super) fn hoist_measure_sql(
                     override_joins,
                 )?
             } else {
-                let condition = build_condition_sql_with_aliases(
+                let condition = build_condition_sql_with_conditions(
                     &effective,
+                    &ctx.conditions,
                     fact_table,
                     fact_model_name,
                     model,
@@ -935,6 +1134,41 @@ mod tests {
     };
 
     #[test]
+    fn hoist_clear_scalars_moves_each_distinct_total_into_one_cross_join() {
+        // BUG-0444: DIVIDE repeats its denominator; both copies read ONE
+        // cross-joined total, and a parenthesis inside a quoted literal or
+        // identifier never unbalances the scan.
+        let sub = "(SELECT SUM(sales.\"amount\") AS __clear_scalar FROM sales)";
+        let sql = format!(
+            "CASE WHEN {sub} = 0 THEN NULL ELSE CAST(SUM(CASE WHEN sales.\"n\" = 'a(b' \
+             THEN sales.\"x)\" END) AS DOUBLE) / {sub} END"
+        );
+        let mut joins = Vec::new();
+        let out = hoist_clear_scalars(&sql, &mut joins);
+        assert_eq!(
+            out,
+            "CASE WHEN MAX(__cs0.__clear_scalar) = 0 THEN NULL ELSE CAST(SUM(CASE WHEN \
+             sales.\"n\" = 'a(b' THEN sales.\"x)\" END) AS DOUBLE) / MAX(__cs0.__clear_scalar) END"
+        );
+        assert_eq!(joins, vec![format!("CROSS JOIN {sub} AS __cs0")]);
+
+        // A second measure's DIFFERENT total gets its own join; the same total
+        // reuses the first. A COUNT total is read like any other: over an
+        // EMPTY fact table it is BLANK, DAX's answer (rev-backend-7, pinned
+        // end to end by `a_reset_total_over_an_empty_fact_table_is_blank`).
+        let other = "(SELECT COUNT(*) AS __clear_scalar FROM sales)";
+        let out2 = hoist_clear_scalars(&format!("({sub} + {other})"), &mut joins);
+        assert_eq!(out2, "(MAX(__cs0.__clear_scalar) + MAX(__cs1.__clear_scalar))");
+        assert_eq!(joins.len(), 2);
+        assert_eq!(joins[1], format!("CROSS JOIN {other} AS __cs1"));
+
+        // No grand total: the fragment is returned unchanged.
+        let plain = "SUM(sales.\"amount\")";
+        assert_eq!(hoist_clear_scalars(plain, &mut joins), plain);
+        assert_eq!(joins.len(), 2);
+    }
+
+    #[test]
     fn qualify_condition_complex_pinned() {
         // Equivalence oracle for the unified renderer migration: AND + NOT +
         // ISBLANK + comparison over table-qualified columns with a quoted
@@ -948,9 +1182,11 @@ mod tests {
             ),
             not(is_blank(qualified_col("Dates", "year"))),
         );
+        // Re-pinned DELIBERATELY (open-ledger round D): a BLANK row compares
+        // as "" against a text literal (DAX), so the column is COALESCEd.
         assert_eq!(
             qualify_condition_sql(&cond).unwrap(),
-            "((products.\"category\" = 'O''Brien') AND (NOT (dates.\"year\" IS NULL)))"
+            "((COALESCE(products.\"category\", '') = 'O''Brien') AND (NOT (dates.\"year\" IS NULL)))"
         );
     }
 }

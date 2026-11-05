@@ -294,6 +294,7 @@ fn a_script_write_into_a_background_canvas_is_refused_before_anything_is_install
         2,
         "script",
         "canvas-test",
+        crate::commands::data::RegionGate::Enforce,
         &active,
     );
     assert_refused_as_canvas(result, "apply_script_modified_grids");
@@ -2310,7 +2311,9 @@ fn every_canvas_write_door_is_wired_and_ordered() {
         (SHEETS, "sheets.rs", "pub(crate) fn set_freeze_panes_impl(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (SHEETS, "sheets.rs", "pub fn set_split_window(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (SHEETS, "sheets.rs", "pub(crate) fn copy_sheet_impl(", "is_canvas_sheet", Some(EFFECT)),
-        (REPORT, "report.rs", "pub async fn create_report(", "ensure_not_canvas_in_state", Some(EFFECT)),
+        // The async door awaits its query first; the gate and the effect live
+        // in its sync half, which runs pinned to the document it started on.
+        (REPORT, "report.rs", "fn create_report_from_view(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (REPORT, "report.rs", "pub fn restore_report(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (PIVOT, "pivot/commands.rs", "pub(crate) fn create_pivot_core(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (PIVOT, "pivot/commands.rs", "pub async fn create_pivot_from_bi_model(", "ensure_not_canvas_in_state", Some(EFFECT)),
@@ -2341,7 +2344,8 @@ fn every_canvas_write_door_is_wired_and_ordered() {
         (CALP, "calp_commands.rs", "pub(crate) fn restore_pulled_pivots(", "state.sheet_kinds.read", Some("state.grids.write")),
         (CALP, "calp_commands.rs", "pub(crate) fn restore_pulled_pivots(", "is_canvas_sheet", Some("write_pivot_to_grid(")),
         (CALP, "calp_commands.rs", "pub(crate) fn apply_refreshed_pivots(", "is_canvas_sheet", Some("update_pivot_in_grid(")),
-        (TABLES, "tables.rs", "pub fn create_table(", "ensure_not_canvas_in_state", Some(EFFECT)),
+        // The command is a wrapper; its body is `create_table_core`.
+        (TABLES, "tables.rs", "pub(crate) fn create_table_core(", "ensure_not_canvas_in_state", Some(EFFECT)),
         // The tool's body; the shared formatting core it calls mints the effect.
         // CHANGED DELIBERATELY (review revFU#9): the tool refuses a canvas
         // itself only for an empty rectangle (it formats nothing); any other

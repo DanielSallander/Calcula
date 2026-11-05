@@ -28,7 +28,7 @@ vi.mock("@api", async () => {
 const dialogs = vi.hoisted(() => ({ alertAsync: vi.fn(async (..._a: unknown[]) => undefined) }));
 vi.mock("@api/dialogs", () => dialogs);
 
-const theme = vi.hoisted(() => ({ getThemeColorPalette: vi.fn() }));
+const theme = vi.hoisted(() => ({ getThemeColorPalette: vi.fn(), clearThemeCache: vi.fn() }));
 vi.mock("@api/theme", () => theme);
 
 import {
@@ -40,6 +40,7 @@ import {
 } from "@api/layout";
 import { RibbonIcon } from "@api/ribbonIcons";
 import { CommandRegistry, CoreCommands } from "@api/commands";
+import { AppEvents } from "@api/events";
 import type { HomeTabItem } from "../../homeTabConfig";
 import type { HomeTabState } from "../../components/homeItemProps";
 import { ColorSplitButton } from "../../components/font/ColorSplitButton";
@@ -233,6 +234,49 @@ describe("Fill Color", () => {
     click(byTestId("fmt-backgroundColor"));
     await settle();
     expect(applyFormat).toHaveBeenCalledWith(sent, "Fill Color");
+  });
+
+  it("after a document THEME change the bar shows the slot's NEW colour (BUG-0370)", async () => {
+    await render(FILL);
+    const palette = await openPalette("backgroundColor");
+    click(swatch(palette, "Blue, Accent 1"));
+    await settle();
+    expect(bar("backgroundColor")).toBe("rgb(68, 114, 196)");
+    // The document theme changes: Accent 1 is now orange.
+    theme.getThemeColorPalette.mockResolvedValue([
+      { slot: "light1", tint: 0, resolvedColor: "#ffffff", label: "White, Background 1" },
+      { slot: "accent1", tint: 0, resolvedColor: "#ed7d31", label: "Orange, Accent 1" },
+    ]);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(AppEvents.THEME_CHANGED, { detail: { theme: {} } }));
+    });
+    await settle();
+    expect(bar("backgroundColor"), "the bar follows the slot, not the hex it had when picked").toBe("rgb(237, 125, 49)");
+    // The face still applies the SLOT, now with the current colour as its fallback.
+    applyFormat.mockClear();
+    click(byTestId("fmt-backgroundColor"));
+    await settle();
+    expect(applyFormat).toHaveBeenCalledWith(
+      { backgroundColor: "#ed7d31", bgColorTheme: "accent1", bgColorTint: 0 },
+      "Fill Color",
+    );
+  });
+
+  // The per-document palette cache is dropped by @api/theme itself now, for
+  // every consumer (themeCachePerDocument.test.ts); the button only re-reads.
+  it("opening another document re-reads its theme", async () => {
+    await render(FONT);
+    const palette = await openPalette("textColor");
+    click(swatch(palette, "Blue, Accent 1"));
+    await settle();
+    theme.getThemeColorPalette.mockResolvedValue([
+      { slot: "accent1", tint: 0, resolvedColor: "#70ad47", label: "Green, Accent 1" },
+    ]);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(AppEvents.AFTER_OPEN, { detail: { path: "" } }));
+    });
+    await settle();
+    expect(bar("textColor")).toBe("rgb(112, 173, 71)");
   });
 
   it("'No Fill' sits after the Standard Colors (Excel's measured order) and removes the fill", async () => {

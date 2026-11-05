@@ -24,8 +24,9 @@ import {
   registerAutoFitContributor,
   getActiveGridTheme,
 } from "@api";
-import type { AutoFitColumnContribution, AutoFitRowContribution } from "@api";
+import type { AutoFitColumnContribution, AutoFitRowContribution, AutoFitRowSpan } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
+import { onBiFormatCultureApplied } from "@api/locale";
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import { pivotMergeGuard, PIVOT_MERGE_GUARDED_COMMANDS } from "./lib/pivotMergeGuard";
 import { registerPivotStructuralGuards } from "./lib/pivotStructuralGuard";
@@ -819,7 +820,8 @@ function buildColumnMeasureSource(
  */
 function measurePivotAutoFitColumn(
   col: number,
-  measureCtx: CanvasRenderingContext2D
+  measureCtx: CanvasRenderingContext2D,
+  rows?: readonly AutoFitRowSpan[]
 ): AutoFitColumnContribution | null {
   const claimedRowRanges: Array<{ startRow: number; endRow: number }> = [];
   let requiredWidth: number | undefined;
@@ -833,14 +835,31 @@ function measurePivotAutoFitColumn(
     // available answer — leave the cells unclaimed
     if (!pivotId || !view) continue;
 
-    claimedRowRanges.push({ startRow: region.startRow, endRow: region.endRow });
+    // ONLY THE FITTED ROWS (BUG-0351): AutoFit Column Width over A1 alone must
+    // not size column A for a PivotTable in A20:C40, and over A25:A30 only
+    // those rows of it count (Excel fits the selected cells). View row i is
+    // grid row region.startRow + i.
+    const spans = rows
+      ? rows
+          .map((r) => ({ startRow: Math.max(r.startRow, region.startRow), endRow: Math.min(r.endRow, region.endRow) }))
+          .filter((r) => r.startRow <= r.endRow)
+      : [{ startRow: region.startRow, endRow: region.endRow }];
+    if (spans.length === 0) continue;
+    claimedRowRanges.push(...spans);
     const colIndex = col - region.startCol;
-    const width = measurePivotColumnRequiredWidth(
-      measureCtx,
-      buildColumnMeasureSource(pivotId, view, colIndex),
-      colIndex,
-      getThemeForPivot(pivotId)
-    );
+    const whole = buildColumnMeasureSource(pivotId, view, colIndex);
+    const partial = spans.length !== 1 || spans[0].startRow !== region.startRow || spans[0].endRow !== region.endRow;
+    const inSpans = (i: number) => spans.some((s) => region.startRow + i >= s.startRow && region.startRow + i <= s.endRow);
+    const source = partial
+      ? {
+          ...whole,
+          availableRowIndices: () =>
+            [...(whole.availableRowIndices?.() ?? Array.from({ length: whole.rowCount }, (_, i) => i))].filter(inSpans),
+          // The sample is the widest string over ALL rows: not this part's.
+          maxContentSample: undefined,
+        }
+      : whole;
+    const width = measurePivotColumnRequiredWidth(measureCtx, source, colIndex, getThemeForPivot(pivotId));
     if (width !== null && (requiredWidth === undefined || width > requiredWidth)) {
       requiredWidth = width;
     }
@@ -1889,6 +1908,11 @@ function activate(context: ExtensionContext): void {
   // and repainted. Keys -- selections, filters -- are invariant and unchanged.
   // EVERY cached view is in the old locale, a door's fresh one too: the
   // pivots of the other sheets are re-read on the return to them (revD#1).
+  // A BI pivot's view is a MODEL query, and Rust gives the model engines the
+  // new DAX FORMAT culture in a walk that ends AFTER `locale:changed`: a view
+  // re-read at once can carry FORMAT text in the old culture, so every view
+  // is re-read again when the walk ends (@api/locale onBiFormatCultureApplied;
+  // the two events come in either order, so both re-read).
   const handleLocaleChangedForPivots = () => {
     markAllCachedPivotViewsStale({ includeFresh: true });
     void refreshPivotRegions(true);
@@ -1896,6 +1920,7 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     onAppEvent(AppEvents.LOCALE_CHANGED, handleLocaleChangedForPivots),
   );
+  cleanupFunctions.push(onBiFormatCultureApplied(handleLocaleChangedForPivots));
 
   // Also refresh regions when grid refreshes (sheet switch, etc.)
   // Do NOT trigger another repaint (triggerRepaint=false) to avoid infinite loop.

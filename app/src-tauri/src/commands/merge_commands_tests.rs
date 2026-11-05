@@ -7,8 +7,9 @@
 //! owns, rather than a copied one.
 //!
 //! What is pinned here, and why each one matters:
-//! - with NO options the command is exactly the old Range.Merge (api.mergeCells,
-//!   the fill engine and the TestRunner suites depend on it), overlap text and all;
+//! - with NO options the command is Excel's Range.Merge (api.mergeCells, the
+//!   fill engine and the TestRunner suites depend on it) -- over a merge it
+//!   partly overlaps or contains, it merges the UNION (2026-11-05, [LIVE]);
 //! - a PROBE changes nothing, records nothing and leaves the document CLEAN --
 //!   it runs before Excel's data-loss warning, so a probe that dirtied would make
 //!   every cancelled Merge & Center prompt to save;
@@ -42,7 +43,7 @@ fn merge(
 }
 
 fn gesture() -> MergeOptions {
-    MergeOptions { absorb: true, keep_first_value: true, ..Default::default() }
+    MergeOptions::default()
 }
 
 fn probe() -> MergeOptions {
@@ -126,19 +127,146 @@ fn without_options_a_merge_is_the_old_range_merge() {
     assert_eq!(result.created_regions, vec![region(0, 0, 0, 2)]);
     assert_eq!(result.lossy_regions, 1);
 
-    // A merge already inside the range is REFUSED without `absorb`, with the
-    // exact text scripts and the walker have always seen.
-    let err = merge(&wb, (0, 0, 1, 3), None).unwrap_err();
-    assert_eq!(err, "Cannot merge: selection overlaps with existing merged region");
+    // Changed deliberately (2026-11-05): a merge already inside the range used
+    // to be REFUSED without `absorb`; Excel's Range.Merge absorbs it [LIVE].
+    let bigger = merge(&wb, (0, 0, 1, 3), None).expect("a merge inside the range is absorbed");
+    assert_eq!(merges(&wb), vec![region(0, 0, 1, 3)]);
+    assert_eq!(bigger.removed_regions, vec![region(0, 0, 0, 2)]);
+}
+
+// ---------------------------------------------------------------------------
+// The UNION (NEW-merge-union): Excel's Range.Merge over a PARTIAL overlap
+// ---------------------------------------------------------------------------
+//
+// [LIVE, Excel 16 build 20326, 2026-11-05, miscb-probe1/2.ps1] E1:F1 merged,
+// Range("E1:E2").Merge -> E1:F2 (E1 keeps its value, E2's is discarded);
+// E1:F1 + E3:G3 merged, Range("E1:E3").Merge -> E1:G3; E1:F2 + G2:H2 merged,
+// Range("F1:G1").Merge -> E1:H2; E1:F1 merged, Range("E1:E2").Merge(True) ->
+// E1:F1 and E2:F2; F2 inside E1:G3 -> E1:G3 unchanged. Calcula refused every
+// partial overlap ("selection overlaps with existing merged region").
+
+// SABOTAGE: make `expand_over_merges` return `rect.clone()` -> the plain merge
+// is a partial overlap again and E1:F2 is never made.
+#[test]
+fn a_merge_over_a_partial_overlap_merges_the_union_as_excel_does() {
+    let wb = Workbook::new(1);
+    merge(&wb, (0, 4, 0, 5), None).expect("E1:F1"); // E1:F1
+    wb.set(0, 4, "a"); // E1
+    wb.set(1, 4, "b"); // E2
+    let result = merge(&wb, (0, 4, 1, 4), None).expect("E1:E2 over E1:F1 merges the union");
+    assert_eq!(merges(&wb), vec![region(0, 4, 1, 5)], "the union E1:F2 was not merged");
+    assert_eq!(result.created_regions, vec![region(0, 4, 1, 5)]);
+    assert_eq!(result.removed_regions, vec![region(0, 4, 0, 5)]);
+    assert_eq!(value(&wb, 0, 4), text("a"), "the top-left keeps its value");
+    assert_eq!(value(&wb, 1, 4), CellValue::Empty, "a slave's value is discarded");
+
+    // One Ctrl+Z restores both the old merge and the discarded value.
+    undo(&wb);
+    assert_eq!(merges(&wb), vec![region(0, 4, 0, 5)]);
+    assert_eq!(value(&wb, 1, 4), text("b"));
 }
 
 #[test]
-fn without_the_value_rule_an_empty_top_left_stays_empty() {
+fn the_union_takes_in_every_merge_it_reaches_and_merge_across_splits_it_by_row() {
+    // Two merges bridged.
+    let wb = Workbook::new(1);
+    merge(&wb, (0, 4, 0, 5), None).expect("E1:F1");
+    merge(&wb, (2, 4, 2, 6), None).expect("E3:G3");
+    merge(&wb, (0, 4, 2, 4), None).expect("E1:E3");
+    assert_eq!(merges(&wb), vec![region(0, 4, 2, 6)], "E1:G3");
+
+    // The chain: the growth reaches a merge the range itself did not touch.
+    let wb = Workbook::new(1);
+    merge(&wb, (0, 4, 1, 5), None).expect("E1:F2");
+    merge(&wb, (1, 6, 1, 7), None).expect("G2:H2");
+    merge(&wb, (0, 5, 0, 6), None).expect("F1:G1");
+    assert_eq!(merges(&wb), vec![region(0, 4, 1, 7)], "E1:H2");
+
+    // Merge Across over E1:E2 with E1:F1 merged: one region per row of E1:F2.
+    let wb = Workbook::new(1);
+    merge(&wb, (0, 4, 0, 5), None).expect("E1:F1");
+    merge(&wb, (0, 4, 1, 4), Some(MergeOptions { across: true, ..Default::default() })).expect("across");
+    assert_eq!(merges(&wb), vec![region(0, 4, 0, 5), region(1, 4, 1, 5)]);
+
+    // A range wholly inside a merge changes nothing, and leaves the document clean.
+    let wb = Workbook::new(1);
+    merge(&wb, (0, 4, 2, 6), None).expect("E1:G3");
+    saved(&wb);
+    let inside = merge(&wb, (1, 5, 1, 6), None).expect("F2:G2 inside");
+    assert!(!inside.success);
+    assert!(!dirty(&wb));
+    assert_eq!(merges(&wb), vec![region(0, 4, 2, 6)]);
+}
+
+/// The same union on a NON-active sheet (a script's Range.Merge there).
+#[test]
+fn an_off_sheet_merge_over_a_partial_overlap_merges_the_union() {
+    let wb = Workbook::new(2);
+    let off = |rect: (u32, u32, u32, u32)| {
+        merge_cells_core(
+            &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, rect.0, rect.1, rect.2,
+            rect.3, Some(1), None,
+        )
+    };
+    off((0, 1, 0, 2)).expect("B1:C1 on Sheet2");
+    off((0, 1, 2, 1)).expect("B1:B3 over B1:C1 merges the union");
+    let mut on_two: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(&wb.state, 1, |m| m.iter().cloned().collect());
+    on_two.sort_by_key(|r| (r.start_row, r.start_col));
+    assert_eq!(on_two, vec![region(0, 1, 2, 2)], "B1:C3");
+}
+
+/// NEW-merge-first-value. OVERRULES the old pin
+/// `without_the_value_rule_an_empty_top_left_stays_empty`, deliberately:
+/// [LIVE, Excel 16, 2026-11-05, miscb PLAINVAL + tablec/probe2.ps1] a PLAIN
+/// `Range("E1:G1").Merge` with F1="title" leaves E1="title" -- the value rule
+/// is not the ribbon's, it is every merge's -- and the value MOVES as a cut
+/// and paste moves it: `=F1` reads `=E1`, `=E1` (the overwritten empty
+/// top-left) reads `#REF!`. A script's api.mergeCells and the fill engine
+/// reach this door with no options; they used to destroy the value and
+/// re-point nothing. One Ctrl+Z takes the merge AND the re-pointing back.
+/// SABOTAGE (tablec-mergeval): the value rule back behind `opts.probe` (never
+/// on for a plain merge).
+#[test]
+fn a_plain_range_merge_moves_the_first_value_into_an_empty_top_left_as_excel_does() {
     let wb = Workbook::new(1);
     wb.set(0, 1, "title");
-    merge(&wb, (0, 0, 0, 2), None).expect("merge");
-    assert_eq!(value(&wb, 0, 0), CellValue::Empty);
+    wb.set(4, 0, "=B1");
+    wb.set(5, 0, "=A1");
+    let result = merge(&wb, (0, 0, 0, 2), None).expect("merge");
+    assert_eq!(result.moved_cells.len(), 1);
+    assert_eq!(value(&wb, 0, 0), text("title"), "the value moved into the empty top-left");
     assert_eq!(value(&wb, 0, 1), CellValue::Empty);
+    let formula = |row: u32| {
+        wb.state.grids.read().unwrap()[0].get_cell(row, 0).and_then(|c| c.formula_string()).unwrap_or_default()
+    };
+    assert_eq!(formula(4).to_ascii_uppercase(), "A1", "a reader of the moved value follows it");
+    assert_eq!(value(&wb, 4, 0), text("title"));
+    assert!(formula(5).contains("#REF!"), "a reader of the overwritten top-left is #REF!: {}", formula(5));
+
+    undo(&wb);
+    assert_eq!(value(&wb, 0, 1), text("title"), "one Ctrl+Z puts the value back");
+    assert_eq!(value(&wb, 0, 0), CellValue::Empty);
+    assert_eq!(formula(4).to_ascii_uppercase(), "B1", "and the reader's reference");
+    assert!(merges(&wb).is_empty());
+}
+
+/// The same rule on a NON-active sheet (a script's Range.Merge there): the
+/// value survives in the top-left instead of being destroyed.
+#[test]
+fn an_off_sheet_plain_merge_keeps_the_first_value_too() {
+    let wb = Workbook::new(2);
+    {
+        let effect = crate::document_effect::test_seed_effect();
+        wb.state.grids.write(&effect).unwrap()[1].set_cell(0, 2, Cell::new_text("far".to_string()));
+    }
+    merge_cells_core(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, 0, 1, 0, 3, Some(1), None,
+    )
+    .expect("off-sheet merge");
+    let grids = wb.state.grids.read().unwrap();
+    assert_eq!(grids[1].get_cell(0, 1).map(|c| c.value.clone()), Some(text("far")));
+    assert!(grids[1].get_cell(0, 2).is_none(), "the moved cell is emptied");
 }
 
 // ---------------------------------------------------------------------------
@@ -178,10 +306,13 @@ fn a_refused_or_empty_merge_leaves_the_document_clean() {
     // 1x1: nothing to merge.
     let one = merge(&wb, (5, 5, 5, 5), Some(gesture())).expect("1x1");
     assert!(!one.success);
-    // A PARTIAL overlap is refused even with absorb.
-    assert!(merge(&wb, (0, 1, 0, 3), Some(gesture())).is_err());
-    // An overlap without absorb is refused.
-    assert!(merge(&wb, (0, 0, 2, 2), None).is_err());
+    // A range inside the merge: its union IS the merge, so nothing changes.
+    // (A partial overlap used to be refused here; it merges the union now --
+    // see `a_merge_over_a_partial_overlap_merges_the_union_as_excel_does`.)
+    let inside = merge(&wb, (0, 1, 0, 1), None).expect("inside");
+    assert!(!inside.success);
+    // A Merge Across over too many rows is refused.
+    assert!(merge(&wb, (10, 0, 10 + MAX_MERGE_ACROSS_ROWS, 1), Some(MergeOptions { across: true, ..gesture() })).is_err());
 
     assert!(!dirty(&wb), "a merge that changed nothing set the dirty flag");
     assert_eq!(undo_depth(&wb), depth);
@@ -354,7 +485,7 @@ fn merge_options_are_refused_off_sheet() {
     let wb = Workbook::new(2);
     let err = merge_cells_core(
         &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, 0, 0, 0, 1, Some(1),
-        Some(gesture()),
+        Some(MergeOptions { across: true, ..Default::default() }),
     )
     .unwrap_err();
     assert!(err.contains("active sheet"), "{}", err);

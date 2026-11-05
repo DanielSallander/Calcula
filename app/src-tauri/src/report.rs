@@ -456,6 +456,16 @@ fn check_report_overlap(
     Ok(())
 }
 
+/// The number of grid rows a report writes for `view`: its VISIBLE rows,
+/// filter-area rows included. ONE definition for every reader -- the write,
+/// its region, the overwrite count, the size Create / Refresh Report answer
+/// with, and the report editor's dry run (`run_design_query` with
+/// `forReport`, BUG-0450), so the dry run describes the report Create Report
+/// writes and not the chart route's smaller one.
+pub(crate) fn report_visible_rows(view: &pivot_engine::PivotView) -> usize {
+    view.rows.iter().filter(|r| r.visible).count()
+}
+
 /// Count non-empty cells the write would clobber outside the report's old region.
 fn count_report_overwrites(
     state: &AppState,
@@ -464,7 +474,7 @@ fn count_report_overwrites(
     dest: (u32, u32),
     view: &pivot_engine::PivotView,
 ) -> u32 {
-    let visible_rows = view.rows.iter().filter(|r| r.visible).count() as u32;
+    let visible_rows = report_visible_rows(view) as u32;
     if visible_rows == 0 || view.col_count == 0 {
         return 0;
     }
@@ -545,7 +555,7 @@ fn write_report_to_grid(
             };
 
             let (dest_row, dest_col) = dest;
-            let visible_rows = view.rows.iter().filter(|r| r.visible).count() as u32;
+            let visible_rows = report_visible_rows(view) as u32;
             let new_end_row = dest_row + visible_rows.max(1) - 1;
             let new_end_col = dest_col + view.col_count.max(1) as u32 - 1;
 
@@ -573,7 +583,7 @@ fn write_report_to_grid(
 
     // Re-register the protected region (region_type "report").
     let (dest_row, dest_col) = dest;
-    let visible_rows = view.rows.iter().filter(|r| r.visible).count() as u32;
+    let visible_rows = report_visible_rows(view) as u32;
     let end_row = dest_row + visible_rows.max(1) - 1;
     let end_col = dest_col + view.col_count.max(1) as u32 - 1;
     let mut regions = state.protected_regions.lock().unwrap();
@@ -655,21 +665,133 @@ pub async fn create_report(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: CreateReportRequest,
 ) -> Result<ReportResult, String> {
+    // WHICH DOCUMENT and WHICH SHEET, decided before the query is awaited (rev-
+    // backend-2): the await can outlive a File > Open (the report then landed
+    // in the newly opened workbook) or a sheet delete / move (it then wrote the
+    // cells of whatever sheet now sat at `sheet_index`). The sheet is carried
+    // by its stable id and resolved again once the query is back.
+    let epoch = file_state.settled_document_epoch();
+    let sheet_id = report_sheet_id_at(&state, request.sheet_index)?;
     let (_def, _cache, view) = compute_design_query_view_for_report(&bi_state, &request.query).await?;
-    // A grid report materializes CELLS; a canvas sheet shows none, so the
-    // report would be invisible there. Refused before the effect so the
-    // refusal leaves the document clean.
-    crate::sheets::ensure_not_canvas_in_state(&state, request.sheet_index, "create a grid report")?;
-    // The query resolved; everything below writes grid cells and the report
-    // registry. Built after the await so a failed query leaves the doc clean.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let visible_rows = view.rows.iter().filter(|r| r.visible).count();
+    let data_source_id = connection_data_source_id(&bi_state, request.query.connection_id);
+    create_report_pinned(
+        &state,
+        &file_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        epoch,
+        sheet_id,
+        request,
+        data_source_id,
+        &view,
+    )
+}
+
+/// The stable id of the sheet at `index`, or the missing-sheet refusal.
+fn report_sheet_id_at(state: &AppState, index: usize) -> Result<identity::SheetId, String> {
+    state
+        .sheet_ids
+        .read()
+        .map_err(|e| e.to_string())?
+        .get(index)
+        .copied()
+        .ok_or_else(|| format!("Sheet {} does not exist.", index + 1))
+}
+
+/// `create_report`'s write, once its query is back: only on the document of
+/// `epoch` (pinned, so File > Open / New cannot replace it mid-write), and on
+/// the sheet whose stable id is `sheet_id`, wherever it sits now. A replaced
+/// document or a deleted sheet is a refusal that writes nothing and leaves the
+/// document clean.
+#[allow(clippy::too_many_arguments)]
+fn create_report_pinned(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    epoch: u64,
+    sheet_id: identity::SheetId,
+    request: CreateReportRequest,
+    data_source_id: Option<String>,
+    view: &pivot_engine::PivotView,
+) -> Result<ReportResult, String> {
+    file_state
+        .with_document_pinned(epoch, move || {
+            let index = state
+                .sheet_ids
+                .read()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .position(|id| *id == sheet_id)
+                .ok_or_else(|| {
+                    "The report's sheet was deleted while its query ran; nothing was written.".to_string()
+                })?;
+            let request = CreateReportRequest { sheet_index: index, ..request };
+            create_report_from_view(
+                state,
+                file_state,
+                pivot_state,
+                pane_control_state,
+                ribbon_filter_state,
+                request,
+                data_source_id,
+                view,
+            )
+        })
+        .unwrap_or_else(|| {
+            Err("Another workbook was opened while the report's query ran; nothing was written.".to_string())
+        })
+}
+
+/// Excel's refusal of a query-result write on a protected sheet. [LIVE,
+/// Excel 16, 2026-11-05, tablec/probe2.ps1] `QueryTable.Refresh` and
+/// `QueryTables.Add` on a protected sheet both fail with exactly this; a
+/// grid report is Calcula's query table (a design query materialised into
+/// cells), so it takes the same refusal.
+pub(crate) const REPORT_PROTECTED_MESSAGE: &str = "The cell or chart you're trying to change is on a protected sheet. \
+     To make a change, unprotect the sheet. You might be requested to enter a password.";
+
+/// Creating or refreshing a report writes cells, so it is refused while the
+/// report's sheet is protected (NEW-report-protection). Asked before any
+/// `DocumentEffect` is minted, so the refusal leaves the document clean.
+fn require_report_sheet_unprotected(state: &AppState, sheet_index: usize) -> Result<(), String> {
+    crate::protection::require_sheet_unprotected(state, sheet_index, "the report")
+        .map_err(|_| REPORT_PROTECTED_MESSAGE.to_string())
+}
+
+/// Size check shared by Create and Refresh Report: a view over the row cap is
+/// refused before anything is decided about the document.
+fn ensure_report_within_row_cap(visible_rows: usize) -> Result<(), String> {
     if visible_rows > MAX_REPORT_ROWS {
         return Err(format!(
             "This report has {} rows, over the {} row cap. Add filters to narrow it.",
             visible_rows, MAX_REPORT_ROWS
         ));
     }
+    Ok(())
+}
+
+/// The synchronous half of `create_report`, after its query resolved: every
+/// refusal (canvas sheet, row cap, missing sheet, overlap with another object)
+/// runs FIRST, and the `DocumentEffect` is minted only once none of them can
+/// still refuse -- so a refused create leaves the document clean (it used to
+/// mint the effect before the row-cap, sheet and overlap refusals, so each of
+/// them dirtied a document nothing had changed).
+#[allow(clippy::too_many_arguments)]
+fn create_report_from_view(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    request: CreateReportRequest,
+    data_source_id: Option<String>,
+    view: &pivot_engine::PivotView,
+) -> Result<ReportResult, String> {
+    let visible_rows = report_visible_rows(view);
+    ensure_report_within_row_cap(visible_rows)?;
 
     let report_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
     let dest = (request.anchor_row, request.anchor_col);
@@ -683,26 +805,34 @@ pub async fn create_report(
             return Err(format!("Sheet {} does not exist.", request.sheet_index + 1));
         }
     }
-    check_report_overlap(&state, report_id, request.sheet_index, bounds)?;
-    let overwritten = count_report_overwrites(&state, report_id, request.sheet_index, dest, &view);
+    // A grid report materializes CELLS; a canvas sheet shows none, so the
+    // report would be invisible there.
+    crate::sheets::ensure_not_canvas_in_state(state, request.sheet_index, "create a grid report")?;
+    // Nor onto a protected sheet (NEW-report-protection), before the effect.
+    require_report_sheet_unprotected(state, request.sheet_index)?;
+    check_report_overlap(state, report_id, request.sheet_index, bounds)?;
+
+    // Every gate passed; everything below writes grid cells and the report
+    // registry, so it changes what a save writes.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let overwritten = count_report_overwrites(state, report_id, request.sheet_index, dest, view);
 
     // Undo snapshot: the target cells as they are now + the current report list.
-    record_report_undo(&state, request.sheet_index, bounds, "Create report");
+    record_report_undo(state, request.sheet_index, bounds, "Create report");
 
     materialize(
         &effect,
-        &state,
-        &pivot_state,
-        &pane_control_state,
-        &ribbon_filter_state,
+        state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
         report_id,
         request.sheet_index,
         dest,
-        &view,
+        view,
     );
 
-    let data_source_id = connection_data_source_id(&bi_state, request.query.connection_id);
-    with_reports_mut(&state, &effect, |defs| {
+    with_reports_mut(state, &effect, |defs| {
         defs.push(SavedReport {
             id: report_id,
             name: request.name,
@@ -736,31 +866,55 @@ pub async fn refresh_report(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: RefreshReportRequest,
 ) -> Result<ReportResult, String> {
-    let (sheet_idx, dest, old_bounds) = {
-        let defs = read_reports(&state);
-        let def = defs
-            .iter()
-            .find(|d| d.id == request.report_id)
-            .ok_or_else(|| format!("Report {} not found", request.report_id))?;
-        (
-            def.sheet_index,
-            (def.anchor_row, def.anchor_col),
-            (def.anchor_row, def.anchor_col, def.end_row, def.end_col),
-        )
-    };
+    // Fail fast on an unknown report, before running its query.
+    report_placement(&state, request.report_id)?;
 
     let (_def, _cache, view) = compute_design_query_view_for_report(&bi_state, &request.query).await?;
-    // The query resolved and the report exists. Everything below rewrites the
-    // report's grid region and the definition registry (mirrored into
-    // `workbook.extension_data`), so it changes what a save writes.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let visible_rows = view.rows.iter().filter(|r| r.visible).count();
-    if visible_rows > MAX_REPORT_ROWS {
-        return Err(format!(
-            "This report has {} rows, over the {} row cap. Add filters to narrow it.",
-            visible_rows, MAX_REPORT_ROWS
-        ));
-    }
+    refresh_report_from_view(
+        &state,
+        &file_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &request,
+        &view,
+    )
+}
+
+/// Where a report sits: (sheet, anchor, previous box), or the not-found refusal.
+fn report_placement(
+    state: &AppState,
+    report_id: ReportId,
+) -> Result<(usize, (u32, u32), (u32, u32, u32, u32)), String> {
+    let defs = read_reports(state);
+    let def = defs
+        .iter()
+        .find(|d| d.id == report_id)
+        .ok_or_else(|| format!("Report {} not found", report_id))?;
+    Ok((
+        def.sheet_index,
+        (def.anchor_row, def.anchor_col),
+        (def.anchor_row, def.anchor_col, def.end_row, def.end_col),
+    ))
+}
+
+/// The synchronous half of `refresh_report`, after its query resolved. The
+/// report is looked up again (it may have been deleted while the query ran),
+/// and every refusal -- not found, row cap, sheet gone, overlap -- runs before
+/// the `DocumentEffect` is minted, so a refused refresh leaves the document
+/// clean.
+fn refresh_report_from_view(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    request: &RefreshReportRequest,
+    view: &pivot_engine::PivotView,
+) -> Result<ReportResult, String> {
+    let (sheet_idx, dest, old_bounds) = report_placement(state, request.report_id)?;
+    let visible_rows = report_visible_rows(view);
+    ensure_report_within_row_cap(visible_rows)?;
 
     {
         let grids = state.grids.read().unwrap();
@@ -772,10 +926,19 @@ pub async fn refresh_report(
         }
     }
 
+    // A refresh rewrites the report's cells: refused on a protected sheet
+    // (NEW-report-protection), before the effect.
+    require_report_sheet_unprotected(state, sheet_idx)?;
+
     let end_row = dest.0 + (visible_rows.max(1) as u32) - 1;
     let end_col = dest.1 + (view.col_count.max(1) as u32) - 1;
-    check_report_overlap(&state, request.report_id, sheet_idx, (dest.0, dest.1, end_row, end_col))?;
-    let overwritten = count_report_overwrites(&state, request.report_id, sheet_idx, dest, &view);
+    check_report_overlap(state, request.report_id, sheet_idx, (dest.0, dest.1, end_row, end_col))?;
+
+    // Every gate passed. Everything below rewrites the report's grid region and
+    // the definition registry (mirrored into `workbook.extension_data`), so it
+    // changes what a save writes.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let overwritten = count_report_overwrites(state, request.report_id, sheet_idx, dest, view);
 
     // Undo policy: manual refreshes always record (covering both the old and new
     // extents). Control-driven auto-refreshes only rewrite the report's own
@@ -785,22 +948,22 @@ pub async fn refresh_report(
     // region (then it must stay undoable: that data would otherwise be lost).
     if !request.auto || overwritten > 0 {
         let box_bounds = union_bounds(old_bounds, (dest.0, dest.1, end_row, end_col));
-        record_report_undo(&state, sheet_idx, box_bounds, "Refresh report");
+        record_report_undo(state, sheet_idx, box_bounds, "Refresh report");
     }
 
     materialize(
         &effect,
-        &state,
-        &pivot_state,
-        &pane_control_state,
-        &ribbon_filter_state,
+        state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
         request.report_id,
         sheet_idx,
         dest,
-        &view,
+        view,
     );
 
-    with_reports_mut(&state, &effect, |defs| {
+    with_reports_mut(state, &effect, |defs| {
         if let Some(d) = defs.iter_mut().find(|d| d.id == request.report_id) {
             d.end_row = end_row;
             d.end_col = end_col;
@@ -1366,6 +1529,339 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // A REFUSED create / refresh leaves the document clean
+    // ------------------------------------------------------------------
+    //
+    // `create_report` / `refresh_report` used to mint `DocumentEffect::mutates`
+    // before the row-cap, sheet and overlap refusals, so a refusal dirtied a
+    // document nothing had changed (the close prompt and AutoRecover then
+    // fired for no change). Driven through the synchronous halves the commands
+    // call once their query resolved.
+
+    struct ReportSides {
+        pivots: PivotState,
+        pane: crate::pane_control::PaneControlState,
+        ribbon: crate::ribbon_filter::RibbonFilterState,
+    }
+
+    fn sides() -> ReportSides {
+        ReportSides {
+            pivots: PivotState::new(),
+            pane: crate::pane_control::PaneControlState::new(),
+            ribbon: crate::ribbon_filter::RibbonFilterState::new(),
+        }
+    }
+
+    /// A view with `rows` visible rows and no cells (nothing to paint, so the
+    /// positive controls write no grid content but still take the write path).
+    fn view_with_visible_rows(rows: usize) -> pivot_engine::PivotView {
+        let mut view = pivot_engine::PivotView::new(identity::EntityId::from_bytes(identity::generate_uuid_v7()));
+        for i in 0..rows {
+            view.rows.push(pivot_engine::PivotRowDescriptor {
+                view_row: i,
+                row_type: pivot_engine::PivotRowType::Data,
+                depth: 0,
+                visible: true,
+                parent_index: None,
+                children_indices: Vec::new(),
+                group_values: Vec::new(),
+            });
+        }
+        view
+    }
+
+    fn create_request(sheet_index: usize, anchor_row: u32, anchor_col: u32) -> CreateReportRequest {
+        let connection = serde_json::to_value(identity::EntityId::from_bytes(identity::generate_uuid_v7())).unwrap();
+        serde_json::from_value(serde_json::json!({
+            "name": "Refused or not",
+            "dslText": "ROWS: Product",
+            "sheetIndex": sheet_index,
+            "anchorRow": anchor_row,
+            "anchorCol": anchor_col,
+            "query": { "connectionId": connection },
+        }))
+        .expect("a create request deserializes")
+    }
+
+    fn refresh_request(report_id: ReportId) -> RefreshReportRequest {
+        let connection = serde_json::to_value(identity::EntityId::from_bytes(identity::generate_uuid_v7())).unwrap();
+        serde_json::from_value(serde_json::json!({
+            "reportId": serde_json::to_value(report_id).unwrap(),
+            "query": { "connectionId": connection },
+        }))
+        .expect("a refresh request deserializes")
+    }
+
+    /// A pivot's protected region on sheet 0, rows 1-10 / cols 1-10 (0-based 0..9).
+    fn occupy_with_a_pivot(state: &AppState) {
+        state.protected_regions.lock().unwrap().push(ProtectedRegion {
+            id: "pivot-x".to_string(),
+            region_type: "pivot".to_string(),
+            owner_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            sheet_index: 0,
+            start_row: 0,
+            start_col: 0,
+            end_row: 9,
+            end_col: 9,
+            reserved_only: false,
+        });
+    }
+
+    #[test]
+    fn a_refused_create_report_leaves_the_document_clean() {
+        let s = sides();
+
+        // Row cap.
+        let (state, fs) = mutating();
+        let err = create_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            create_request(0, 20, 20), None, &view_with_visible_rows(MAX_REPORT_ROWS + 1),
+        )
+        .expect_err("over the row cap is refused");
+        assert!(err.contains("row cap"), "{}", err);
+        assert!(!fs.is_dirty(), "a create refused by the row cap dirtied the document");
+
+        // Missing sheet.
+        let (state, fs) = mutating();
+        let err = create_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            create_request(7, 0, 0), None, &view_with_visible_rows(0),
+        )
+        .expect_err("a missing sheet is refused");
+        assert!(err.contains("does not exist"), "{}", err);
+        assert!(!fs.is_dirty(), "a create refused for a missing sheet dirtied the document");
+
+        // Overlap with a pivot.
+        let (state, fs) = mutating();
+        occupy_with_a_pivot(&state);
+        let err = create_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            create_request(0, 2, 2), None, &view_with_visible_rows(0),
+        )
+        .expect_err("overlapping a pivot is refused");
+        assert!(err.contains("overlap"), "{}", err);
+        assert!(!fs.is_dirty(), "a create refused for an overlap dirtied the document");
+        assert!(read_reports(&state).is_empty(), "the refused create registered a report");
+
+        // POSITIVE CONTROL: the same create clear of the pivot is accepted and dirties.
+        let result = create_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            create_request(0, 20, 20), None, &view_with_visible_rows(0),
+        )
+        .expect("a create clear of every object is accepted");
+        assert!(fs.is_dirty(), "an accepted create must dirty the document");
+        assert_eq!(read_reports(&state).len(), 1);
+        assert!(read_reports(&state).iter().any(|r| r.id == result.report_id));
+    }
+
+    /// A two-sheet workbook, as a load would leave it (clean).
+    fn two_sheets() -> (AppState, FileState) {
+        let (state, fs) = mutating();
+        let load = DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk);
+        state.grids.write(&load).unwrap().push(engine::Grid::new());
+        state.sheet_names.write(&load).unwrap().push("Sheet2".to_string());
+        state
+            .sheet_ids
+            .write(&load)
+            .unwrap()
+            .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        {
+            let mut all = state.all_merged_regions.write(&load).unwrap();
+            while all.len() < 2 {
+                all.push(HashSet::new());
+            }
+        }
+        (state, fs)
+    }
+
+    /// rev-backend-2: the query is awaited between the request and the write.
+    /// A File > Open in that window used to put the report into the newly
+    /// opened workbook; a sheet move put it on whatever sheet then sat at the
+    /// requested index.
+    #[test]
+    fn a_create_report_whose_document_was_replaced_during_its_query_writes_nothing() {
+        let s = sides();
+        let (state, fs) = two_sheets();
+        let epoch = fs.settled_document_epoch();
+        let sheet_id = report_sheet_id_at(&state, 1).unwrap();
+        fs.note_document_replaced();
+        let err = create_report_pinned(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon, epoch, sheet_id,
+            create_request(1, 20, 20), None, &view_with_visible_rows(0),
+        )
+        .expect_err("a replaced document is refused");
+        assert!(err.contains("Another workbook"), "{}", err);
+        assert!(read_reports(&state).is_empty(), "the report landed in the replacing workbook");
+        assert!(!fs.is_dirty(), "the refusal dirtied the replacing workbook");
+
+        // POSITIVE CONTROL: the same create on the live epoch is written.
+        let live = fs.settled_document_epoch();
+        create_report_pinned(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon, live, sheet_id,
+            create_request(1, 20, 20), None, &view_with_visible_rows(0),
+        )
+        .expect("the live document takes the report");
+        assert_eq!(read_reports(&state).len(), 1);
+    }
+
+    #[test]
+    fn a_create_report_follows_its_sheet_by_id_and_refuses_a_deleted_one() {
+        let s = sides();
+        // Sheet 2 is asked for, then the two sheets swap places (a move)
+        // while the query runs: the report lands on Sheet2 at its NEW index.
+        let (state, fs) = two_sheets();
+        let epoch = fs.settled_document_epoch();
+        let sheet_id = report_sheet_id_at(&state, 1).unwrap();
+        state.sheet_ids.write(&DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk)).unwrap().swap(0, 1);
+        create_report_pinned(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon, epoch, sheet_id,
+            create_request(1, 20, 20), None, &view_with_visible_rows(0),
+        )
+        .expect("a moved sheet is followed");
+        let written = read_reports(&state);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].sheet_index, 0, "the report was written to the index, not to its sheet");
+
+        // The sheet is deleted while the query runs (its id is gone).
+        let (state, fs) = two_sheets();
+        let epoch = fs.settled_document_epoch();
+        let sheet_id = report_sheet_id_at(&state, 1).unwrap();
+        state.sheet_ids.write(&DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk)).unwrap()[1] =
+            identity::SheetId::from_bytes(identity::generate_uuid_v7());
+        let err = create_report_pinned(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon, epoch, sheet_id,
+            create_request(1, 20, 20), None, &view_with_visible_rows(0),
+        )
+        .expect_err("a deleted sheet is refused");
+        assert!(err.contains("deleted"), "{}", err);
+        assert!(read_reports(&state).is_empty());
+        assert!(!fs.is_dirty(), "the refusal dirtied the document");
+    }
+
+    #[test]
+    fn a_refused_refresh_report_leaves_the_document_clean() {
+        let s = sides();
+        // The stored report sits at (20, 20) on sheet 0 -- seeded as a load
+        // would, so the document starts clean.
+        let seeded = |sheet_index: usize, anchor: (u32, u32)| {
+            let (state, fs) = mutating();
+            let mut report = a_report(sheet_index);
+            report.anchor_row = anchor.0;
+            report.anchor_col = anchor.1;
+            report.end_row = anchor.0;
+            report.end_col = anchor.1;
+            let id = report.id;
+            let load = DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk);
+            with_reports_mut(&state, &load, |defs| defs.push(report));
+            assert!(!fs.is_dirty());
+            (state, fs, id)
+        };
+
+        // Row cap.
+        let (state, fs, id) = seeded(0, (20, 20));
+        let err = refresh_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            &refresh_request(id), &view_with_visible_rows(MAX_REPORT_ROWS + 1),
+        )
+        .expect_err("over the row cap is refused");
+        assert!(err.contains("row cap"), "{}", err);
+        assert!(!fs.is_dirty(), "a refresh refused by the row cap dirtied the document");
+
+        // The report's sheet is gone.
+        let (state, fs, id) = seeded(6, (20, 20));
+        let err = refresh_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            &refresh_request(id), &view_with_visible_rows(0),
+        )
+        .expect_err("a report whose sheet is gone is refused");
+        assert!(err.contains("no longer exists"), "{}", err);
+        assert!(!fs.is_dirty(), "a refresh refused for a missing sheet dirtied the document");
+
+        // The report was deleted while its query ran.
+        let (state, fs, _id) = seeded(0, (20, 20));
+        let err = refresh_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            &refresh_request(identity::EntityId::from_bytes(identity::generate_uuid_v7())),
+            &view_with_visible_rows(0),
+        )
+        .expect_err("an unknown report is refused");
+        assert!(err.contains("not found"), "{}", err);
+        assert!(!fs.is_dirty(), "a refresh refused for an unknown report dirtied the document");
+
+        // The refreshed result would grow over a pivot.
+        let (state, fs, id) = seeded(0, (5, 5));
+        occupy_with_a_pivot(&state);
+        let err = refresh_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            &refresh_request(id), &view_with_visible_rows(0),
+        )
+        .expect_err("overlapping a pivot is refused");
+        assert!(err.contains("overlap"), "{}", err);
+        assert!(!fs.is_dirty(), "a refresh refused for an overlap dirtied the document");
+
+        // POSITIVE CONTROL: a refresh clear of every object is accepted and dirties.
+        let (state, fs, id) = seeded(0, (20, 20));
+        refresh_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            &refresh_request(id), &view_with_visible_rows(0),
+        )
+        .expect("a refresh clear of every object is accepted");
+        assert!(fs.is_dirty(), "an accepted refresh must dirty the document");
+    }
+
+    /// NEW-report-protection. [LIVE, Excel 16, 2026-11-05, tablec/probe2.ps1]
+    /// a QueryTable's Refresh, and QueryTables.Add, on a protected sheet are
+    /// refused "The cell or chart you're trying to change is on a protected
+    /// sheet. ..."; a report is Calcula's query table. Create and Refresh are
+    /// refused with that message BEFORE the effect -- nothing written, nothing
+    /// registered, the document clean -- and both succeed once unprotected.
+    /// SABOTAGE (tablec-report): `require_report_sheet_unprotected` answers Ok.
+    #[test]
+    fn a_report_is_neither_created_nor_refreshed_on_a_protected_sheet() {
+        let s = sides();
+        let protect = |state: &AppState, on: bool| {
+            state
+                .sheet_protection
+                .write(&crate::document_effect::test_seed_effect())
+                .unwrap()
+                .insert(0, crate::protection::SheetProtection { protected: on, ..Default::default() });
+        };
+
+        let (state, fs) = mutating();
+        protect(&state, true);
+        let err = create_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            create_request(0, 20, 20), None, &view_with_visible_rows(0),
+        )
+        .expect_err("a create on a protected sheet is refused");
+        assert_eq!(err, REPORT_PROTECTED_MESSAGE);
+        assert!(!fs.is_dirty(), "the refused create dirtied the document");
+        assert!(read_reports(&state).is_empty(), "the refused create registered a report");
+        protect(&state, false);
+        let created = create_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            create_request(0, 20, 20), None, &view_with_visible_rows(0),
+        )
+        .expect("unprotected, the create is accepted");
+
+        protect(&state, true);
+        crate::document_effect::mark_saved(&fs);
+        let err = refresh_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            &refresh_request(created.report_id), &view_with_visible_rows(0),
+        )
+        .expect_err("a refresh on a protected sheet is refused");
+        assert_eq!(err, REPORT_PROTECTED_MESSAGE);
+        assert!(!fs.is_dirty(), "the refused refresh dirtied the document");
+        protect(&state, false);
+        refresh_report_from_view(
+            &state, &fs, &s.pivots, &s.pane, &s.ribbon,
+            &refresh_request(created.report_id), &view_with_visible_rows(0),
+        )
+        .expect("unprotected, the refresh is accepted");
     }
 }
 

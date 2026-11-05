@@ -837,11 +837,116 @@ pub(crate) fn load_pending_roles(
     }
 }
 
+/// The culture DAX `FORMAT` writes in for the APP locale `locale` (BUG-0522):
+/// the engine's built-in culture when it has one for the locale's tag
+/// (en-US, sv-SE, de-DE -- DAX's own output for those cultures), else one
+/// built from the app locale's own data (separators, currency, the short and
+/// long date and the long time patterns, the calendar names).
+pub(crate) fn format_culture_of(locale: &engine::LocaleSettings) -> bi_engine::FormatCulture {
+    if let Some(builtin) = bi_engine::FormatCulture::builtin(&locale.locale_id) {
+        return builtin;
+    }
+    let calendar = locale.calendar();
+    let symbol = locale.currency_symbol.trim().to_string();
+    bi_engine::FormatCulture {
+        name: locale.locale_id.clone(),
+        decimal_separator: locale.decimal_separator.to_string(),
+        group_separator: locale.thousands_separator.to_string(),
+        date_separator: locale
+            .date_format
+            .chars()
+            .find(|c| !c.is_ascii_alphanumeric())
+            .map(String::from)
+            .unwrap_or_else(|| "/".to_string()),
+        time_separator: ":".to_string(),
+        currency_symbol_before: matches!(locale.currency_position, engine::LocaleCurrencyPosition::Before),
+        // " kr" / "\u{20ac} ": the locale's symbol carries its own spacing.
+        currency_space: locale.currency_symbol != symbol,
+        currency_symbol: symbol,
+        short_date: locale.date_format.to_lowercase(),
+        long_date: locale.long_date_format.clone(),
+        long_time: locale.time_format.clone(),
+        am_designator: "AM".to_string(),
+        pm_designator: "PM".to_string(),
+        months: std::array::from_fn(|i| calendar.month_full(i as u32 + 1).to_string()),
+        months_short: std::array::from_fn(|i| calendar.month_short(i as u32 + 1).to_string()),
+        days: std::array::from_fn(|i| calendar.day_full(i as u32).to_string()),
+        days_short: std::array::from_fn(|i| calendar.day_short(i as u32).to_string()),
+    }
+}
+
+/// Give `engine` the APP locale's FORMAT culture (BUG-0522). Every engine
+/// the app builds for a connection takes it at birth; `set_locale` re-applies
+/// it to every live engine when the locale changes
+/// ([`apply_format_culture_to_all_engines`]).
+pub(crate) fn apply_app_format_culture(engine: &mut bi_engine::Engine) {
+    engine.set_format_culture(format_culture_of(&crate::app_locale::display_locale()));
+}
+
+/// The Tauri event [`apply_format_culture_to_all_engines`] emits once every
+/// live engine writes DAX `FORMAT` in the current app locale. Mirrored by
+/// `BI_FORMAT_CULTURE_APPLIED_EVENT` in `app/src/api/locale.ts`, which every
+/// window re-dispatches as `AppEvents.BI_FORMAT_CULTURE_APPLIED`
+/// (`onBiFormatCultureApplied`): the one seam every frontend listener that
+/// re-queries a model after a locale switch waits for -- the bound measures,
+/// the pivots, the pivot cross-filter views and the charts (pinned by
+/// `appLocale.test.ts`).
+pub(crate) const FORMAT_CULTURE_APPLIED_EVENT: &str = "bi:format-culture-applied";
+
+/// Re-apply the APP locale's FORMAT culture to every connection's engine
+/// (after `set_locale`), in the background: each engine is behind an async
+/// mutex a running query may hold, and a locale change must not wait on it.
+/// Clones the engine handles out of the connection map first, so no std
+/// guard is held across an await. When every engine has it, emits
+/// [`FORMAT_CULTURE_APPLIED_EVENT`] -- also with no engine at all, so a
+/// listener never waits for an event that does not come.
+///
+/// The culture is read INSIDE each engine's lock, from the app locale as it
+/// is NOW ([`apply_current_format_culture`]), never captured when the task
+/// was spawned (rev-backend-5): two quick `set_locale` calls spawn two
+/// walkers, and one held up behind a running query used to arrive LAST at an
+/// engine the newer walker had already set, writing the OLDER culture back.
+/// A walker reading at the lock always writes the newest locale, whichever
+/// arrives last. And `locale:changed` fires before this walk ends, so a
+/// listener that queries an engine at once (the bound measures did) could
+/// compute FORMAT text in the old culture with nothing re-querying after: it
+/// re-reads on this event instead.
+///
+/// Touches no document state (the locale is an application preference): no
+/// `DocumentEffect`, and only the engines' own async locks are taken.
+pub(crate) fn apply_format_culture_to_all_engines(bi_state: &BiState, app: tauri::AppHandle) {
+    let engines: Vec<std::sync::Arc<tokio::sync::Mutex<bi_engine::Engine>>> = match bi_state.connections.lock() {
+        Ok(connections) => connections.values().filter_map(|c| c.engine.clone()).collect(),
+        Err(_) => Vec::new(),
+    };
+    tauri::async_runtime::spawn(async move {
+        apply_current_format_culture(&engines, crate::app_locale::display_locale).await;
+        if let Err(e) = tauri::Emitter::emit(&app, FORMAT_CULTURE_APPLIED_EVENT, ()) {
+            crate::log_warn!("BI", "Could not announce {}: {}", FORMAT_CULTURE_APPLIED_EVENT, e);
+        }
+    });
+}
+
+/// Give each engine the FORMAT culture of `current_locale()` as read WHILE
+/// that engine's lock is held -- the body of
+/// [`apply_format_culture_to_all_engines`], with the locale source a
+/// parameter so a test can move it between two walks.
+pub(crate) async fn apply_current_format_culture(
+    engines: &[std::sync::Arc<tokio::sync::Mutex<bi_engine::Engine>>],
+    current_locale: impl Fn() -> engine::LocaleSettings,
+) {
+    for engine in engines {
+        let mut engine = engine.lock().await;
+        engine.set_format_culture(format_culture_of(&current_locale()));
+    }
+}
+
 /// Build an Engine from a model with Calcula's standard auto-tier + query-cache
 /// configuration. Shared by connection-create and workbook reconstruct so both
-/// behave identically.
+/// behave identically -- including the APP locale's FORMAT culture.
 pub(crate) fn build_configured_engine(model: bi_engine::DataModel) -> bi_engine::Engine {
     let mut engine = bi_engine::Engine::new(model);
+    apply_app_format_culture(&mut engine);
     engine.set_auto_tier_config(bi_engine::AutoTierConfig {
         enabled: true,
         max_rows: 100_000,
@@ -4624,5 +4729,101 @@ async fn save_cache_for_connection(bi_state: &BiState, connection_id: Connection
         let cache_dir = EngineRegistry::cache_dir_for(&key);
         let engine = arc.lock().await;
         EngineRegistry::save_cache_sync(&engine, &cache_dir);
+    }
+}
+
+#[cfg(test)]
+mod format_culture_tests {
+    //! BUG-0522: DAX FORMAT writes in the APP locale's culture.
+    use super::*;
+
+    #[test]
+    fn a_builtin_culture_is_used_for_its_tag_and_any_other_locale_is_built_from_its_data() {
+        let sv = format_culture_of(&engine::LocaleSettings::from_locale_id("sv-SE"));
+        assert_eq!(sv, bi_engine::FormatCulture::sv_se());
+        let gb = format_culture_of(&engine::LocaleSettings::from_locale_id("en-GB"));
+        assert_eq!(gb.name, "en-GB");
+        assert_eq!(gb.decimal_separator, ".");
+        assert_eq!(gb.date_separator, "/");
+        assert_eq!(gb.short_date, "dd/mm/yyyy");
+        assert_eq!(gb.months[0], "January");
+        assert_eq!(
+            bi_engine::format_value(&bi_engine::FormatValue::Number(1234.5), "#,0.00", &gb),
+            "1,234.50"
+        );
+    }
+
+    #[test]
+    fn every_configured_engine_takes_the_app_locales_culture() {
+        let engine = crate::app_locale::with_test_display_locale(engine::LocaleSettings::from_locale_id("sv-SE"), || {
+            build_configured_engine(bi_engine::DataModel::builder().build().unwrap())
+        });
+        assert_eq!(engine.format_culture().name, "sv-SE", "a new engine kept the en-US default");
+    }
+
+    /// rev-backend-5 (a): two quick locale switches spawn two walkers. The
+    /// walker spawned FIRST, held up behind a running query, used to reach an
+    /// engine AFTER the newer walker had set it -- and write the OLDER
+    /// culture back, because each walker carried the culture it was spawned
+    /// with. Each now reads the locale inside the engine's lock.
+    ///
+    /// SABOTAGE: capture the culture once, before the walk, again.
+    #[test]
+    fn a_walker_held_up_behind_a_query_never_writes_an_older_culture_back() {
+        use std::future::Future;
+        use std::sync::{Arc, Mutex};
+        use std::task::{Context, Waker};
+        let new_engine = || {
+            Arc::new(tokio::sync::Mutex::new(bi_engine::Engine::new(bi_engine::DataModel::builder().build().unwrap())))
+        };
+        let (first, second) = (new_engine(), new_engine());
+        let app_locale = Arc::new(Mutex::new(engine::LocaleSettings::from_locale_id("de-DE")));
+        let reader = |slot: &Arc<Mutex<engine::LocaleSettings>>| {
+            let slot = slot.clone();
+            move || slot.lock().unwrap().clone()
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+        let swedish = format_culture_of(&engine::LocaleSettings::from_locale_id("sv-SE"));
+
+        // A query holds the SECOND engine while the user picks de-DE: the
+        // first walker visits that engine first and waits behind the query.
+        let query = second.clone().try_lock_owned().unwrap();
+        let older_walk = [second.clone(), first.clone()];
+        let mut older = Box::pin(apply_current_format_culture(&older_walk, reader(&app_locale)));
+        assert!(older.as_mut().poll(&mut cx).is_pending(), "premise: the first walker waits behind the query");
+
+        // The user picks sv-SE at once. The second walker (another connection
+        // order) sets the FIRST engine, then queues behind the first walker.
+        *app_locale.lock().unwrap() = engine::LocaleSettings::from_locale_id("sv-SE");
+        let newer_walk = [first.clone(), second.clone()];
+        let mut newer = Box::pin(apply_current_format_culture(&newer_walk, reader(&app_locale)));
+        assert!(newer.as_mut().poll(&mut cx).is_pending(), "premise: the second walker waits too");
+        assert_eq!(first.try_lock().unwrap().format_culture(), &swedish, "premise: sv-SE reached the first engine");
+
+        // The query ends: the first walker finishes LAST on the first engine.
+        drop(query);
+        assert!(older.as_mut().poll(&mut cx).is_ready());
+        assert!(newer.as_mut().poll(&mut cx).is_ready());
+        for (which, engine) in [("first", &first), ("second", &second)] {
+            assert_eq!(
+                engine.try_lock().unwrap().format_culture().name,
+                swedish.name,
+                "the {which} engine writes FORMAT in an older locale than the app's"
+            );
+        }
+
+        // rev-backend-5 (b): the walk announces itself when done, and
+        // set_locale starts it (the bridge re-reads bound measures on it).
+        let src = include_str!("commands.rs");
+        let body = &src[src.find("pub(crate) fn apply_format_culture_to_all_engines(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let walked = body.find("apply_current_format_culture(&engines, crate::app_locale::display_locale).await").expect("the walk reads the CURRENT app locale");
+        let announced = body.find("FORMAT_CULTURE_APPLIED_EVENT, ()").expect("the walk announces its end");
+        assert!(walked < announced, "the end is announced before the walk");
+        let locale = include_str!("../locale_commands.rs");
+        assert!(
+            locale.contains("crate::bi::commands::apply_format_culture_to_all_engines(&bi_state, app.clone());"),
+            "set_locale no longer re-applies the FORMAT culture"
+        );
     }
 }

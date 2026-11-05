@@ -1182,15 +1182,16 @@ function CodeUnitRow({
         )}
         {/* OWNER DECISION B (follow-up F7): an application's macro written as an
             object script is restricted -- but a run YOU start may also change
-            the cells of any sheet. Said on the code itself, not only on the
-            approval screen. */}
+            the cells of any sheet, and how they look. Said on the code itself,
+            not only on the approval screen. */}
         {unit.module?.cellAccessWhenYouRunIt === true && (
           <span
             style={capCeilingBadge}
             data-cell-access-when-you-run-it
             title={
               "When you run it yourself -- Developer ▸ Macros ▸ Run, a button that runs it, or the " +
-              "command line -- it may also read and change the cells of any sheet, and nothing more. " +
+              "command line -- it may also read and change the cells of any sheet, and how they " +
+              "look, and nothing more. " +
               "If it stops part-way, every change it made is undone. Started by another script, it " +
               "has only what every restricted script has: the sheet on screen."
             }

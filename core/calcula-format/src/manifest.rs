@@ -67,7 +67,32 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 ///
 /// v12 adds the INCOMPLETE-CALCULATION mark -- `calc_state.json`
 /// (`CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION`), Excel's `calcCompleted="0"`.
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 12;
+///
+/// v13 adds LIVE DATA TABLES -- body cells holding the `TABLE(row, col)`
+/// marker (`DATA_TABLE_MIN_FORMAT_VERSION`), Excel's `{=TABLE()}`.
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 13;
+
+/// Minimum `.cala` format version a reader must be to handle a LIVE DATA
+/// TABLE: cells whose formula is the `TABLE(row_input, col_input)` marker the
+/// What-If Data Table command writes over its body (BUG-0652; Excel's
+/// `{=TABLE(,A1)}`, `<f t="dataTable">` in `.xlsx`). The body's values are the
+/// table formula's answers with the input substituted, which only a reader
+/// that knows the marker computes (`engine::data_table`).
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes --
+/// "a stale body shown as live". An older build parses `TABLE` as an unknown
+/// function, and its load seeds every root call of one with the SAVED value
+/// (the results cache), so each body cell keeps answering the number it was
+/// saved with -- while its formula bar shows `=TABLE(,A1)` and its input
+/// values and model are edited around it. Nothing turns `#NAME?`; the table
+/// simply never moves again, looking calculated. Stamped ONLY when some cell
+/// holds the marker, so a workbook without a data table keeps the lowest
+/// version that can express it.
+pub const DATA_TABLE_MIN_FORMAT_VERSION: u32 = 13;
+
+/// Manifest FEATURE ID declared beside [`DATA_TABLE_MIN_FORMAT_VERSION`]'s
+/// stamp, so a reader can say WHICH feature raised the version.
+pub const DATA_TABLE_FEATURE: &str = "data_tables";
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `calc_state.json` -- the workbook was saved with values that may be stale
@@ -361,6 +386,19 @@ pub const PAGE_NAVIGATOR_FEATURE: &str = "page_navigator";
 /// unconditional: `sparklines.json` carries the groups as opaque text.
 pub const SPARKLINE_GROUP_AREAS_FEATURE: &str = "sparkline_group_areas";
 
+/// Manifest FEATURE ID declared when some table column remembers a TOTALS ROW
+/// LABEL (`totalsRowLabel` on its column in `tables/table_{id}.json`): the
+/// constant a column with no totals function showed in its totals row when
+/// the row was hidden, put back when it is shown again, as Excel does
+/// (NEW-totals-label-persist; [LIVE] cfdv/probe2.ps1).
+///
+/// DELIBERATELY NO LINK IN THE FORMAT-VERSION CHAIN: an older reader drops the
+/// field, so showing the totals row again leaves that cell empty -- the
+/// user's constant is LOST, visibly, but nothing shows as something it is not
+/// (the totals function stays None, so no subtotal appears in its place). The
+/// READ is unconditional: the label rides the table's own record.
+pub const TABLE_TOTALS_ROW_LABEL_FEATURE: &str = "table_totals_row_label";
+
 /// Manifest FEATURE ID declared when some object carries a VISUAL CONTAINER
 /// (D-FORMAT: padding, title, subtitle, divider, background, border, shadow)
 /// -- a slicer / timeline / floating grid `container`, a canvas pivot's
@@ -382,6 +420,15 @@ pub const VISUAL_CONTAINER_FEATURE: &str = "visual_container";
 /// pivot in the default style -- a visible, cosmetic loss, never a lie. The
 /// READ is unconditional: the style rides the pivot's own definition JSON.
 pub const PIVOT_STYLE_FEATURE: &str = "pivot_style";
+
+/// Manifest FEATURE ID declared when some pivot definition sorts a row or
+/// column field by the VALUES of a data field (`value_sort`, Excel's AutoSort
+/// by a data field -- BUG-0459).
+///
+/// Feature id, DELIBERATELY NO format-version link: an older reader shows the
+/// items in label order -- a visible loss, never a lie. The READ is
+/// unconditional: the sort rides the field in the pivot's own definition JSON.
+pub const PIVOT_VALUE_SORT_FEATURE: &str = "pivot_value_sort";
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

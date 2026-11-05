@@ -9,15 +9,44 @@ use datafusion::prelude::SessionContext;
 use engine_core::compute::aggregate::AggregateOp;
 use engine_core::compute::context::ContextResolver;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
-use engine_core::compute::sql_util::quote_ident_double;
+use engine_core::compute::sql_util::{null_is_false_condition, quote_ident_double};
 use engine_core::model::DataModel;
 
 use crate::error::QueryResult;
 use crate::request::ColumnRef;
 
 use super::fetch::register_partitioned_table;
-use super::sql::build_condition_sql;
+use super::sql::{
+    build_condition_sql_with_conditions, collect_qualified_tables, reject_unconsumed_in_filters,
+};
 use super::QueryExecutor;
+
+/// A measure's KEEP filters AND its KEEP expression conditions (`IN {...}`,
+/// column-vs-column comparisons) as the WHEN of a Stage 1 `CASE` on
+/// DataFusion, spelled so a NULL condition (a BLANK attribute, an unmatched
+/// dimension row) is FALSE: DataFusion 44's `CASE WHEN c THEN col END` answers
+/// `col` when `c` is NULL
+/// (`engine_core::compute::sql_util::null_is_false_condition`). The
+/// expression conditions were counted as context but never rendered until the
+/// open-ledger round E, so they were dropped -- or, alone, left an empty
+/// condition (NEW-preagg-conditions).
+fn build_case_condition_sql(
+    filters: &[engine_core::compute::context::ResolvedFilter],
+    conditions: &[engine_core::compute::expression::Expression],
+    fact_table: &str,
+    fact_model_name: &str,
+    model: &DataModel,
+) -> QueryResult<String> {
+    let condition = build_condition_sql_with_conditions(
+        filters,
+        conditions,
+        fact_table,
+        fact_model_name,
+        model,
+        &std::collections::HashMap::new(),
+    )?;
+    Ok(null_is_false_condition(&condition, true))
+}
 
 impl QueryExecutor {
     /// Execute aggregation using a two-stage pre-aggregate approach for unsafe
@@ -97,16 +126,41 @@ impl QueryExecutor {
         // breaking the query).
         let mut pre_agg_aliases: Vec<(String, AggregateOp)> = Vec::new();
         let mut s2_measure_parts: Vec<String> = Vec::new();
+        // Dimension tables a measure's KEEP condition reads (joined in Stage 1).
+        let mut s1_context_tables: Vec<String> = Vec::new();
 
         for (i, measure) in measures.iter().enumerate() {
             let name = measure.name();
             let expr = measure.expression();
 
             let (stripped, eval_ctx) = resolver.resolve(expr)?;
+            // A KEEP(... IN set[col]) membership has no Stage 1 rendering:
+            // refuse rather than answer the unfiltered value.
+            reject_unconsumed_in_filters(name, &eval_ctx)?;
             let effective = eval_ctx.effective_filters(&[]);
 
             // Check for context filters — embed as CASE WHEN in Stage 1.
             let has_context = !effective.is_empty() || !eval_ctx.conditions.is_empty();
+            let measure_condition = if has_context {
+                // The dimension tables the condition reads join Stage 1.
+                for f in &effective {
+                    if !f.table.eq_ignore_ascii_case(fact_model_name) {
+                        s1_context_tables.push(f.table.clone());
+                    }
+                }
+                for cond in &eval_ctx.conditions {
+                    collect_qualified_tables(cond, fact_model_name, &mut s1_context_tables);
+                }
+                build_case_condition_sql(
+                    &effective,
+                    &eval_ctx.conditions,
+                    fact_table,
+                    fact_model_name,
+                    model,
+                )?
+            } else {
+                String::new()
+            };
 
             if let Some((op, col)) = stripped.as_simple_aggregate() {
                 let alias = format!("__pre_{i}");
@@ -116,12 +170,7 @@ impl QueryExecutor {
                 let (s1_agg, s2_agg) = match op {
                     AggregateOp::Sum => {
                         if has_context {
-                            let condition = build_condition_sql(
-                                &effective,
-                                fact_table,
-                                fact_model_name,
-                                model,
-                            )?;
+                            let condition = &measure_condition;
                             (
                                 format!(
                                     "SUM(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
@@ -144,42 +193,31 @@ impl QueryExecutor {
                     AggregateOp::Count | AggregateOp::CountRows => {
                         let s1 = if op == AggregateOp::CountRows {
                             if has_context {
-                                let condition = build_condition_sql(
-                                    &effective,
-                                    fact_table,
-                                    fact_model_name,
-                                    model,
-                                )?;
+                                let condition = &measure_condition;
                                 format!("COUNT(CASE WHEN {condition} THEN 1 END) AS \"{alias}\"")
                             } else {
                                 format!("COUNT(*) AS \"{alias}\"")
                             }
                         } else if has_context {
-                            let condition = build_condition_sql(
-                                &effective,
-                                fact_table,
-                                fact_model_name,
-                                model,
-                            )?;
+                            let condition = &measure_condition;
                             format!(
                                 "COUNT(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
                             )
                         } else {
                             format!("COUNT({col_ref}) AS \"{alias}\"")
                         };
+                        // A count answers BLANK, never 0 (DAX).
                         (
                             s1,
-                            format!("SUM(__pre_agg.\"{alias}\") AS {}", quote_ident_double(name)),
+                            format!(
+                                "NULLIF(SUM(__pre_agg.\"{alias}\"), 0) AS {}",
+                                quote_ident_double(name)
+                            ),
                         )
                     }
                     AggregateOp::Min => {
                         if has_context {
-                            let condition = build_condition_sql(
-                                &effective,
-                                fact_table,
-                                fact_model_name,
-                                model,
-                            )?;
+                            let condition = &measure_condition;
                             (
                                 format!(
                                     "MIN(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
@@ -201,12 +239,7 @@ impl QueryExecutor {
                     }
                     AggregateOp::Max => {
                         if has_context {
-                            let condition = build_condition_sql(
-                                &effective,
-                                fact_table,
-                                fact_model_name,
-                                model,
-                            )?;
+                            let condition = &measure_condition;
                             (
                                 format!(
                                     "MAX(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
@@ -231,12 +264,7 @@ impl QueryExecutor {
                         let sum_alias = format!("__pre_{i}_sum");
                         let cnt_alias = format!("__pre_{i}_cnt");
                         if has_context {
-                            let condition = build_condition_sql(
-                                &effective,
-                                fact_table,
-                                fact_model_name,
-                                model,
-                            )?;
+                            let condition = &measure_condition;
                             s1_select.push(format!(
                                 "SUM(CASE WHEN {condition} THEN {col_ref} END) AS \"{sum_alias}\""
                             ));
@@ -254,7 +282,9 @@ impl QueryExecutor {
                         pre_agg_aliases.push((name.to_string(), op));
                         continue;
                     }
-                    AggregateOp::DistinctCount => {
+                    AggregateOp::DistinctCount | AggregateOp::DistinctCountNoBlank => {
+                        // DISTINCTCOUNTNOBLANK skips BLANK: its flag is a constant 0.
+                        let counts_blank = matches!(op, AggregateOp::DistinctCount);
                         // DISTINCTCOUNT cannot be decomposed. Fall back: carry raw
                         // column through Stage 1 (no aggregation for this measure),
                         // then COUNT(DISTINCT) in Stage 2. This means Stage 1 must
@@ -267,24 +297,40 @@ impl QueryExecutor {
                         // Better approach: we skip pre-aggregation for DISTINCTCOUNT
                         // and evaluate it separately via an EXISTS-filtered subquery.
                         if has_context {
-                            let condition = build_condition_sql(
-                                &effective,
-                                fact_table,
-                                fact_model_name,
-                                model,
-                            )?;
+                            let condition = &measure_condition;
                             s1_select.push(format!(
                                 "COUNT(DISTINCT CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
                             ));
+                            s1_select.push(if counts_blank {
+                                format!(
+                                    "MAX(CASE WHEN {condition} THEN CASE WHEN ({col_ref}) IS NULL \
+                                     THEN 1 ELSE 0 END ELSE 0 END) AS \"{alias}__blank\""
+                                )
+                            } else {
+                                format!("0 AS \"{alias}__blank\"")
+                            });
                         } else {
                             s1_select.push(format!("COUNT(DISTINCT {col_ref}) AS \"{alias}\""));
+                            s1_select.push(if counts_blank {
+                                format!(
+                                    "MAX(CASE WHEN ({col_ref}) IS NULL THEN 1 ELSE 0 END) \
+                                     AS \"{alias}__blank\""
+                                )
+                            } else {
+                                format!("0 AS \"{alias}__blank\"")
+                            });
                         }
                         // DISTINCTCOUNT cannot be re-aggregated correctly; use MAX
                         // as a placeholder. This gives correct results when the
                         // join key is unique in the fact table (pre-aggregation
                         // preserves the exact distinct count per key group).
+                        // A count answers BLANK, never 0 (DAX), and DAX's
+                        // DISTINCTCOUNT counts BLANK as ONE value however many
+                        // key groups hold one ("The DISTINCTCOUNT function
+                        // counts the BLANK value" -- Microsoft): the per-group
+                        // BLANK flags re-aggregate with MAX, not SUM.
                         s2_measure_parts.push(format!(
-                            "SUM(__pre_agg.\"{alias}\") AS {}",
+                            "NULLIF(SUM(__pre_agg.\"{alias}\") + MAX(__pre_agg.\"{alias}__blank\"), 0) AS {}",
                             quote_ident_double(name)
                         ));
                         pre_agg_aliases.push((name.to_string(), op));
@@ -296,12 +342,7 @@ impl QueryExecutor {
                     _ => {
                         let fn_name = op.to_string();
                         if has_context {
-                            let condition = build_condition_sql(
-                                &effective,
-                                fact_table,
-                                fact_model_name,
-                                model,
-                            )?;
+                            let condition = &measure_condition;
                             (
                                 format!(
                                     "{fn_name}(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
@@ -328,6 +369,16 @@ impl QueryExecutor {
             } else {
                 // Complex expression: emit the full SQL in Stage 1.
                 // Stage 2 re-aggregates with SUM (best-effort for complex exprs).
+                // Its context has no rendering here (`to_sql_string` drops
+                // it): refuse rather than answer the unfiltered value.
+                if has_context {
+                    return Err(crate::error::QueryError::InvalidQuery(format!(
+                        "measure '{name}' combines a filter context (KEEP) with an expression \
+                         that is not a single aggregate; grouping it through a many-to-many or \
+                         non-equi relationship is not supported on the local path yet (its \
+                         filter would be ignored)"
+                    )));
+                }
                 let alias = format!("__pre_{i}");
                 let expr_sql = stripped.to_sql_string()?;
                 s1_select.push(format!("{expr_sql} AS \"{alias}\""));
@@ -356,6 +407,27 @@ impl QueryExecutor {
             let left_is_from = rel.from_table() == fact_model_name;
             let on_clause = rel.build_on_clause(fact_table, &dim_lower, left_is_from);
             s1_sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
+            s1_joined.insert(dim_lower);
+        }
+        // The dimensions a KEEP condition reads. Only a many-to-one hop can
+        // be joined without multiplying fact rows; any other one is refused
+        // rather than its rows double-counted or its column left unbound.
+        for dim_table in &s1_context_tables {
+            let dim_lower = dim_table.to_lowercase();
+            if s1_joined.contains(&dim_lower) {
+                continue;
+            }
+            let rel = model.find_relationship(fact_model_name, dim_table)?;
+            if !rel.is_safe_for_direct_join() || unsafe_dim_tables.contains(dim_table) {
+                return Err(crate::error::QueryError::InvalidQuery(format!(
+                    "a KEEP filter on '{dim_table}', reached through a many-to-many or non-equi \
+                     relationship, combined with a group-by through another such relationship \
+                     is not supported on the local path yet"
+                )));
+            }
+            let left_is_from = rel.from_table() == fact_model_name;
+            let on_clause = rel.build_on_clause(fact_table, &dim_lower, left_is_from);
+            s1_sql.push_str(&format!(" LEFT JOIN {dim_lower} ON {on_clause}"));
             s1_joined.insert(dim_lower);
         }
 

@@ -27,12 +27,17 @@ const h = vi.hoisted(() => ({
   mountAnswer: { recheckWhileRunning: false } as Record<string, unknown> | null,
   /**
    * How the Rust gate answers a `runAdmitted` question that carries a claim
-   * (owner decision B, F3): "grant" (cellAccess + a fresh grantId, as Rust
-   * does when everything it sees agrees), "refuse" (cellAccess false), "noId"
-   * (cellAccess without a usable grantId), "absent" (an old backend that says
-   * nothing about cell access).
+   * (owner decision B, F3): "grant" (cellAccess + formatAccess + a fresh
+   * grantId, as Rust does when everything it sees agrees), "cellsOnly"
+   * (cellAccess and a grantId but no formatAccess -- an older backend),
+   * "refuse" (cellAccess false), "noId" (cellAccess without a usable grantId),
+   * "absent" (an old backend that says nothing about cell access).
    */
-  rust: "grant" as "grant" | "refuse" | "noId" | "absent",
+  rust: "grant" as "grant" | "cellsOnly" | "refuse" | "noId" | "absent",
+  /** The lines hidden on the sheet (effective), as get_hidden_rows_info answers. */
+  hiddenRows: [] as number[],
+  /** Every line resize the grid library was asked for. */
+  resizes: [] as string[],
   grantSeq: 0,
   /**
    * The run's ONE undo step (owner decision B, follow-up F9), as the backend
@@ -63,6 +68,8 @@ const h = vi.hoisted(() => ({
   reads: [] as Array<[number, number]>,
   /** Every formatting the grid library was asked to apply or clear. */
   formats: [] as string[],
+  /** While set, a formatting call on other sheets fails AFTER it was applied (part-way). */
+  failFormatAfterApply: false,
   /** Every sheet the grid library was asked to activate. */
   activations: [] as number[],
   /** Every merge pattern a fill asked the fill engine to repeat. */
@@ -120,7 +127,8 @@ vi.mock("../../backend", () => ({
         if (h.rust === "refuse") return { ...h.mountAnswer, cellAccess: false, grantId: null };
         if (h.rust === "noId") return { ...h.mountAnswer, cellAccess: true, grantId: null };
         h.grantSeq += 1;
-        return { ...h.mountAnswer, cellAccess: true, grantId: h.grantSeq };
+        if (h.rust === "cellsOnly") return { ...h.mountAnswer, cellAccess: true, grantId: h.grantSeq };
+        return { ...h.mountAnswer, cellAccess: true, formatAccess: true, grantId: h.grantSeq };
       }
       return h.mountAnswer;
     },
@@ -195,14 +203,27 @@ vi.mock("../../lib", async (orig) => ({
   },
   applyFormattingToSheets: async (sheets: number[]) => {
     h.formats.push(`apply on sheets ${sheets.join(",")}`);
+    if (h.failFormatAfterApply) throw new Error("the second half of the format failed");
     return [];
   },
   clearRangeWithOptions: async (sr: number, sc: number, er: number, ec: number, what: string) => {
     h.formats.push(`clear ${what} ${sr},${sc}:${er},${ec}`);
     return { cells: [] };
   },
+  getHiddenRowsInfo: async () => ({ user: h.hiddenRows, effective: h.hiddenRows }),
+  getHiddenColsInfo: async () => ({ user: [], effective: [] }),
+  setRowHeights: async (runs: Array<[number, number]>, height: number) => {
+    h.resizes.push(`rows ${JSON.stringify(runs)} ${height}`);
+    return runs;
+  },
+  setColumnWidths: async (runs: Array<[number, number]>, width: number) => {
+    h.resizes.push(`cols ${JSON.stringify(runs)} ${width}`);
+    return runs;
+  },
   // The fill's band and its one undo step.
   getViewportCells: async () => [{ row: 0, col: 0, display: "seed", styleIndex: 2 }],
+  // No merged cells in the fill's way (the executor asks before it writes).
+  getMergedRegions: async () => [],
   getUndoState: async () => ({ transactionOpen: false }),
   beginUndoTransaction: async () => 1,
   commitUndoTransaction: async (ticket?: number | null) => {
@@ -241,7 +262,7 @@ import {
   runOnlyRefusalMessage,
 } from "../explicitRunGrant";
 import { listMountedHandles } from "../broker";
-import type { HostMountDefinition } from "../host";
+import { RUN_ONLY_CALL_AFTER_THE_RUN, type HostMountDefinition } from "../host";
 
 // ---------------------------------------------------------------------------
 // The fake realm
@@ -323,10 +344,10 @@ async function host(): Promise<typeof import("../host")> {
 /** Mount and report what the realm was told and what the host holds. */
 async function mount(definition: HostMountDefinition): Promise<{
   spec: Record<string, unknown>;
-  handleAtMount: { tier: string; explicitRun?: { cells: boolean } } | undefined;
+  handleAtMount: { tier: string; explicitRun?: { cells: boolean; formatting: boolean } } | undefined;
   worker: FakeWorker;
 }> {
-  let handleAtMount: { tier: string; explicitRun?: { cells: boolean } } | undefined;
+  let handleAtMount: { tier: string; explicitRun?: { cells: boolean; formatting: boolean } } | undefined;
   const previous = FakeWorker.onMount;
   FakeWorker.onMount = (w, spec) => {
     const handle = listMountedHandles().find((x) => x.scriptId === spec.scriptId);
@@ -350,10 +371,13 @@ beforeEach(() => {
   h.writes.length = 0;
   h.reads.length = 0;
   h.formats.length = 0;
+  h.failFormatAfterApply = false;
   h.activations.length = 0;
   h.merges.length = 0;
   h.mountAnswer = { recheckWhileRunning: false };
   h.rust = "grant";
+  h.hiddenRows = [];
+  h.resizes.length = 0;
   h.reports.length = 0;
   h.reportFails = false;
   h.undo.length = 0;
@@ -383,7 +407,8 @@ describe("admitMount grants cell access only to a person's run of an approved ap
     const { spec, handleAtMount } = await mount(appRun({ explicitRun: pass }));
     expect(spec.explicitRunCells).toBe(true);
     expect(spec.tier).toBe("restricted");
-    expect(handleAtMount).toEqual({ tier: "restricted", explicitRun: { cells: true } });
+    // ...and formatting (owner, 2026-11-04): Rust said formatAccess too.
+    expect(handleAtMount).toEqual({ tier: "restricted", explicitRun: { cells: true, formatting: true } });
     // Every gate ran, in order: the Rust gate before Script Security and again after it.
     expect(h.gate.map((x) => x.phase)).toEqual(["runCheck", "runAdmitted"]);
   });
@@ -625,8 +650,30 @@ describe("the grant belongs to the first realm and ends with the run", () => {
     const late = worker.callResult(2) as { ok: boolean; error?: { code: string; message: string } } | undefined;
     expect(late?.ok).toBe(false);
     expect(late?.error?.code).toBe("PermissionDenied");
-    expect(late?.error?.message).toBe(explicitRunRefusalMessage("api.setCellValue"));
+    // Refused as a call after the run (rev-sec-5), before the broker is asked.
+    expect(late?.error?.message).toBe(RUN_ONLY_CALL_AFTER_THE_RUN);
     expect(h.writes, "a write after the run reached the grid").toEqual([[0, 0, "during"]]);
+  });
+
+  // rev-sec-5. SABOTAGE: drop the `runOnlyRealmsPastTheirRun.add(mw)` line in
+  // wireWorker's "mounted" -> the grant is turned off only once call 1 has
+  // passed the standing gate, so call 2, posted right after "mounted", is
+  // admitted on the run's grant and writes.
+  it("(h3) a call posted just AFTER \"mounted\" while an earlier call waits at the standing gate is refused", async () => {
+    h.mountAnswer = { recheckWhileRunning: true };
+    FakeWorker.onMount = (w) => {
+      w.send({ t: "call", callId: 1, method: "api.getCellValue", args: [3, 4] });
+      w.send({ t: "mounted", ok: true });
+      w.send({ t: "call", callId: 2, method: "api.setCellValue", args: [0, 0, "late"] });
+    };
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    const { worker } = await mount(appRun({ explicitRun: pass }));
+    await settle();
+    expect(worker.callResult(1)?.ok, "the run's own call keeps its grant").toBe(true);
+    const late = worker.callResult(2) as { ok: boolean; error?: { code: string; message: string } } | undefined;
+    expect(late?.ok, JSON.stringify(late)).toBe(false);
+    expect(late?.error?.message).toBe(RUN_ONLY_CALL_AFTER_THE_RUN);
+    expect(h.writes, "a call after the run wrote").toEqual([]);
   });
 
   it("(h2) in a WORKING COPY, a call held at the standing gate before \"mounted\" is still admitted", async () => {
@@ -691,14 +738,17 @@ describe("a run-only realm leaves nothing behind", () => {
   });
 });
 
-describe("a granted run cannot point the restricted formatting rows at every sheet", () => {
+describe("a run without the FORMATTING grant cannot point the restricted formatting rows at every sheet", () => {
   // Every restricted sheet.* row is clamped to the LIVE active sheet, and the
   // grant includes api.setActiveSheet. A realm can post broker calls directly
   // (postMessage is not neutered), so the shim having no `context.sheet` for a
-  // workbook realm is not the barrier -- the broker is.
-  // SABOTAGE (8): empty EXPLICIT_RUN_REFUSED_FORMAT_METHODS (explicitRunGrant.ts)
-  // -> the granted realm formats and clears Sheet2 and this goes red.
-  it("(l) api.setActiveSheet(1), then sheet.setRangeFormat / clearRangeFormat: refused, nothing formatted", async () => {
+  // workbook realm is not the barrier -- the broker is. With the formatting
+  // grant (owner, 2026-11-04) that composition IS the grant; without it (an
+  // older backend's cells-only answer) it stays refused.
+  // SABOTAGE (8): empty EXPLICIT_RUN_RESTRICTED_FORMAT_METHODS (explicitRunGrant.ts)
+  // -> the cells-only realm formats and clears Sheet2 and this goes red.
+  it("(l) cells only: api.setActiveSheet(1), then sheet.setRangeFormat / clearRangeFormat: refused, nothing formatted", async () => {
+    h.rust = "cellsOnly";
     FakeWorker.onMount = (w) => {
       w.send({ t: "call", callId: 1, method: "api.setActiveSheet", args: [1] });
       w.send({ t: "call", callId: 2, method: "sheet.setRangeFormat", args: [0, 0, 0, 0, { bold: true }] });
@@ -737,6 +787,166 @@ describe("a granted run cannot point the restricted formatting rows at every she
     expect(worker.callResult(1)?.ok, JSON.stringify(worker.callResult(1))).toBe(true);
     expect(worker.callResult(2)?.ok, JSON.stringify(worker.callResult(2))).toBe(true);
     expect(h.formats).toEqual(["apply 0x0", "clear formats 0,0:0,0"]);
+  });
+});
+
+describe("a granted run FORMATS on any sheet, on the trail and undone whole (owner, 2026-11-04)", () => {
+  // SABOTAGE: make executeAccountingGrantedRun skip noteGrantedRunFormat ->
+  // the report carries no formats and (f1) goes red.
+  it("(f1) setRangeFormat on Sheet2, a Clear All and the restricted row: formatted, and ONE report names each sheet", async () => {
+    FakeWorker.onMount = (w) => {
+      w.send({ t: "call", callId: 1, method: "api.setRangeFormat", args: [0, 2, 1_048_575, 2, { bold: true }, "Sheet2"] });
+      w.send({ t: "call", callId: 2, method: "api.clearRange", args: [1, 1, 3, 4, { applyTo: "all" }] });
+      w.send({ t: "call", callId: 3, method: "sheet.setRangeFormat", args: [5, 0, 5, 0, { italic: true }] });
+      w.send({ t: "mounted", ok: true });
+    };
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    const { worker } = await mount(appRun({ explicitRun: pass }));
+    const grantId = h.grantSeq;
+    await settle();
+    for (const id of [1, 2, 3]) expect(worker.callResult(id)?.ok, JSON.stringify(worker.callResult(id))).toBe(true);
+    expect(h.formats).toEqual(["apply on sheets 1", "clear all 1,1:3,4", "apply 5x0"]);
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]).toMatchObject({
+      grantId,
+      completed: true,
+      formats: [
+        { sheet: 0, changes: 2, firstRow: 1, lastRow: 5, firstCol: 0, lastCol: 4 },
+        { sheet: 1, changes: 1, firstRow: 0, lastRow: 1_048_575, firstCol: 2, lastCol: 2 },
+      ],
+    });
+  });
+
+  // SABOTAGE: drop the formattedByRun clause in countOthersUndone -> the run's
+  // own formatted cell is counted as somebody else's.
+  it("(f2) a run that formats and then throws is taken back WHOLE -- its formatting with it", async () => {
+    // The rollback names the cell the run formatted: the run's own, not another's.
+    h.takenBack = [{ sheet: 0, row: 2, col: 2 }];
+    FakeWorker.onMount = (w) => {
+      w.send({ t: "call", callId: 1, method: "api.setRangeFormat", args: [2, 2, 2, 2, { fill: { type: "solid", color: "#ff0000" } }] });
+      w.send({ t: "mounted", ok: false, error: "boom" });
+    };
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    await expect((await host()).hostMountScript(appRun({ explicitRun: pass }))).rejects.toThrow(/boom/);
+    await settle();
+    expect(h.formats).toEqual(["apply 2x2"]);
+    // The savepoint before, the rollback after: every change since it, the format included.
+    expect(h.undo.filter((x) => x.startsWith("savepoint") || x.startsWith("rollback"))).toEqual([
+      expect.stringMatching(/^savepoint /),
+      expect.stringMatching(/^rollback \d+\/0$/),
+    ]);
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]).toMatchObject({
+      completed: false,
+      rolledBack: true,
+      formats: [{ sheet: 0, changes: 1, firstRow: 2, lastRow: 2, firstCol: 2, lastCol: 2 }],
+    });
+    expect(h.reports[0].othersUndone, "the run's own format was counted as somebody else's").toBeUndefined();
+  });
+
+  // rev-sec-4. SABOTAGE: move `noteGrantedRunFormat` out of the finally block
+  // in executeAccountingGrantedRun (after the awaited executeImpl) -> the
+  // part-applied format is not on the report, and the rollback counts its cell
+  // as somebody else's.
+  it("(f4) a formatting call that fails PART-WAY is on the report, and its cells are the run's own", async () => {
+    h.failFormatAfterApply = true;
+    h.takenBack = [{ sheet: 1, row: 0, col: 2 }];
+    FakeWorker.onMount = (w) => {
+      w.send({ t: "call", callId: 1, method: "api.setRangeFormat", args: [0, 2, 0, 2, { bold: true }, "Sheet2"] });
+      w.send({ t: "mounted", ok: false, error: "boom" });
+    };
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    await expect((await host()).hostMountScript(appRun({ explicitRun: pass }))).rejects.toThrow(/boom/);
+    await settle();
+    expect(h.formats, "precondition: the format was applied before it failed").toEqual(["apply on sheets 1"]);
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]).toMatchObject({
+      rolledBack: true,
+      formats: [{ sheet: 1, firstRow: 0, lastRow: 0, firstCol: 2, lastCol: 2 }],
+    });
+    expect(h.reports[0].othersUndone, "the run's own part-applied format counted as somebody else's").toBeUndefined();
+  });
+
+  // THE SANDBOX: a run a SCRIPT starts carries no pass, so it is a plain
+  // restricted realm -- no formatting beyond the sheet on screen, and nothing
+  // on this trail.
+  it("(f3) a SCRIPT-started run (no pass) is refused every formatting row of the grant", async () => {
+    FakeWorker.onMount = (w) => {
+      w.send({ t: "call", callId: 1, method: "api.setRangeFormat", args: [0, 0, 0, 0, { bold: true }, "Sheet2"] });
+      w.send({ t: "call", callId: 2, method: "api.clearRange", args: [0, 0, 0, 0, { applyTo: "formats" }] });
+      w.send({ t: "call", callId: 3, method: "api.setRowHeights", args: [[[0, 1]], 30] });
+      w.send({ t: "mounted", ok: true });
+    };
+    const { worker, handleAtMount } = await mount(appRun());
+    await settle();
+    expect(handleAtMount?.explicitRun).toBeUndefined();
+    for (const [id, method] of [
+      [1, "api.setRangeFormat"],
+      [2, "api.clearRange"],
+      [3, "api.setRowHeights"],
+    ] as Array<[number, string]>) {
+      const result = worker.callResult(id) as { ok: boolean; error?: { message: string } } | undefined;
+      expect(result?.ok, method).toBe(false);
+      expect(result?.error?.message, method).toBe(`${method} requires unlocked access; this script is restricted`);
+    }
+    expect(h.formats).toEqual([]);
+    expect(h.resizes).toEqual([]);
+    expect(h.reports).toEqual([]);
+  });
+
+  // SABOTAGE: make grantedRunResizeRefusal answer null -> row 4 (hidden) is
+  // resized and shown.
+  it("(f4) rows may be sized, but never a HIDDEN one (a resize shows it)", async () => {
+    h.hiddenRows = [3];
+    FakeWorker.onMount = (w) => {
+      w.send({ t: "call", callId: 1, method: "api.setRowHeights", args: [[[0, 5]], 30] });
+      w.send({ t: "call", callId: 2, method: "api.setRowHeights", args: [[[6, 8]], 30] });
+      w.send({ t: "mounted", ok: true });
+    };
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    const { worker } = await mount(appRun({ explicitRun: pass }));
+    await settle();
+    const refused = worker.callResult(1) as { ok: boolean; error?: { code: string; message: string } } | undefined;
+    expect(refused?.ok).toBe(false);
+    expect(refused?.error?.code).toBe("PermissionDenied");
+    expect(refused?.error?.message).toMatch(/row 4 is hidden/);
+    expect(worker.callResult(2)?.ok, JSON.stringify(worker.callResult(2))).toBe(true);
+    expect(h.resizes).toEqual(["rows [[6,8]] 30"]);
+    expect(h.reports[0]).toMatchObject({
+      failedCalls: 1,
+      formats: [{ sheet: 0, changes: 1, firstRow: 6, lastRow: 8, firstCol: 0, lastCol: 16_383 }],
+    });
+  });
+
+  it("(f5) the protection attributes stay out: a granted locked:false is refused, nothing applied", async () => {
+    FakeWorker.onMount = (w) => {
+      w.send({ t: "call", callId: 1, method: "api.setRangeFormat", args: [0, 0, 4, 4, { locked: false }] });
+      w.send({ t: "mounted", ok: true });
+    };
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    const { worker } = await mount(appRun({ explicitRun: pass }));
+    await settle();
+    const result = worker.callResult(1) as { ok: boolean; error?: { message: string } } | undefined;
+    expect(result?.ok).toBe(false);
+    expect(result?.error?.message).toMatch(/protection, which code from an application never sets/);
+    expect(h.formats).toEqual([]);
+  });
+
+  // An OLDER backend (cellAccess, no formatAccess): cells yes, formatting no.
+  it("(f6) Rust's cells-only answer grants no formatting: the page never formats on its own say-so", async () => {
+    h.rust = "cellsOnly";
+    FakeWorker.onMount = (w) => {
+      w.send({ t: "call", callId: 1, method: "api.setCellValue", args: [0, 0, "x"] });
+      w.send({ t: "call", callId: 2, method: "api.setRangeFormat", args: [0, 0, 0, 0, { bold: true }] });
+      w.send({ t: "mounted", ok: true });
+    };
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    const { worker, handleAtMount } = await mount(appRun({ explicitRun: pass }));
+    await settle();
+    expect(handleAtMount?.explicitRun).toEqual({ cells: true, formatting: false });
+    expect(worker.callResult(1)?.ok).toBe(true);
+    expect(worker.callResult(2)?.ok).toBe(false);
+    expect(h.formats).toEqual([]);
   });
 });
 
@@ -1025,8 +1235,8 @@ describe("(s) what a granted run wrote goes on the persistent trail (F15)", () =
   it("(s4) a run that throws is reported as not completed, with its failed calls", async () => {
     FakeWorker.onMount = (w) => {
       w.send({ t: "call", callId: 1, method: "api.setCellValue", args: [0, 0, "half"] });
-      // Outside cell access: refused by the broker.
-      w.send({ t: "call", callId: 2, method: "api.setRangeFormat", args: [0, 0, 0, 0, { bold: true }] });
+      // Outside the grant (structure): refused by the broker.
+      w.send({ t: "call", callId: 2, method: "api.mergeCells", args: [0, 0, 1, 1] });
       w.send({ t: "mounted", ok: false, error: "boom" });
     };
     const pass = mintExplicitMacroRun("macrosDialog", "macro-b");

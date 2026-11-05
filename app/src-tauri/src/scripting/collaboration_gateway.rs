@@ -1190,6 +1190,7 @@ fn dispatch(
             let response = calp_cmds::calp_publish_model(
                 state.clone(),
                 bi_state.clone(),
+                (*file_state).clone(),
                 params,
                 window.clone(),
             )?;

@@ -45,7 +45,7 @@
 //          never inventing one.
 
 import { analyzeScript, type AnalyzedScript } from "./analyze";
-import { capabilitiesFor, surfaceMember, surfaceScopeFor, wrongContextMember } from "./surface";
+import { capabilitiesForDoor, surfaceMemberForDoor, surfaceScopeFor, wrongContextMember } from "./surface";
 import { CAPABILITY_ID_SET } from "../capabilityIds";
 import { topLevelFunctions } from "../worker/debugInstrument";
 
@@ -260,10 +260,14 @@ export function validateScriptSource(source: string, objectType?: string): Valid
   }
 
   // ---- L2 -----------------------------------------------------------------
+  // Each call's policy is the one of the DOOR this script's own context
+  // reaches it through (`rowsForDoor`): a chain can have one row per door,
+  // and the first row is another context's (a form's `close` needs
+  // ui.dialog; a panel's does not).
   const observedSet = new Set<string>();
   const firstLineFor = new Map<string, number>();
   for (const call of analysis.calls) {
-    for (const cap of capabilitiesFor(call.chain)) {
+    for (const cap of capabilitiesForDoor(call.chain, scope)) {
       observedSet.add(cap);
       if (!firstLineFor.has(cap)) firstLineFor.set(cap, call.line);
     }
@@ -285,8 +289,8 @@ export function validateScriptSource(source: string, objectType?: string): Valid
   // Uses something it did not declare: a real defect the broker WILL refuse.
   for (const cap of observed) {
     if (declared.includes(cap)) continue;
-    const chain = analysis.calls.find((c) => capabilitiesFor(c.chain).has(cap as never))?.chain;
-    const broker = chain ? surfaceMember(chain)?.broker : undefined;
+    const chain = analysis.calls.find((c) => capabilitiesForDoor(c.chain, scope).has(cap as never))?.chain;
+    const broker = chain ? surfaceMemberForDoor(chain, scope)?.broker : undefined;
     findings.push({
       severity: "error",
       code: "undeclared-capability",

@@ -48,6 +48,14 @@ pub enum CalpError {
     #[error("Two sheets in this version would both be called '{name}'. {detail}")]
     DuplicateSheetName { name: String, detail: String },
 
+    /// A defined name or table name in the publish is one the subscriber's own
+    /// UI would refuse (see [`crate::publish::published_name_problem`]): it
+    /// reads as a reference (`R1C1`, `Q1`), or a table and a name share one
+    /// name. A subscriber's pull refuses such a version, so it must never be
+    /// signed in the first place.
+    #[error("Cannot publish: {0} Rename it before publishing.")]
+    InvalidPublishedName(String),
+
     /// The workspace moved between a refresh PREVIEW and its APPLY.
     ///
     /// The refresh dialog is non-modal by design, and the two halves each

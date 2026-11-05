@@ -218,6 +218,7 @@ fn enum_spelling_census() {
         AggregateOp::Min,
         AggregateOp::Max,
         AggregateOp::DistinctCount,
+        AggregateOp::DistinctCountNoBlank,
         AggregateOp::CountRows,
         AggregateOp::Median,
         AggregateOp::StdevSample,

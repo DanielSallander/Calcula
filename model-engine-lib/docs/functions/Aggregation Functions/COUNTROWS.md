@@ -18,7 +18,7 @@ COUNTROWS(table, context_op)
 
 ## Return value
 
-A whole number — the total number of rows in the table.
+A whole number — the total number of rows in the table — or BLANK when the table has no rows in the current context, never 0 ("When the table argument contains no rows, the function returns BLANK", Microsoft DAX reference). A BLANK count still compares as 0 against a number: `IF(COUNTROWS(t) = 0, ...)` is TRUE over an empty table.
 
 ## Remarks
 

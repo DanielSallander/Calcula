@@ -103,15 +103,27 @@ describe("Data Bars [LIVE 2026-10-04]", () => {
   });
 
   it("write an automatic min/max bar in the chosen colour and fill", () => {
+    // Solid fill: no border; Excel's red negative bars and black axis (BUG-0511).
     expect(dataBarRule("#638EC6", false)).toEqual({
       type: "dataBar",
       minValueType: "autoMin",
       maxValueType: "autoMax",
       fillColor: "#638EC6",
+      negativeFillColor: "#FF0000",
+      axisColor: "#000000",
       axisPosition: "automatic",
       direction: "context",
       showValue: true,
       gradientFill: false,
+    });
+  });
+
+  it("a GRADIENT bar has a border in its own colour, and its negative bars a red one", () => {
+    expect(dataBarRule("#638EC6", true)).toMatchObject({
+      borderColor: "#638EC6",
+      negativeBorderColor: "#FF0000",
+      negativeFillColor: "#FF0000",
+      gradientFill: true,
     });
   });
 });

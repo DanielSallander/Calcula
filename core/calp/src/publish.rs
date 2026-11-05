@@ -1108,6 +1108,66 @@ pub fn published_object_bindings(
     rows
 }
 
+/// What is wrong with a version's DEFINED NAMES and TABLE NAMES, if anything,
+/// as one sentence -- the question both the publish (here) and every pull,
+/// checkout and refresh (`refuse_invalid_pulled_names` in the app) ask, so a
+/// package can carry nothing the subscriber's own UI would refuse:
+///
+/// - a defined name or a table name that is not a valid name
+///   (`identity::is_valid_defined_name`, Excel's rule measured live: `R1C1`,
+///   `C`, `Q1`, `TRUE`, a space...). The app's Name Manager and table commands
+///   refuse those, and an `.xlsx` export carrying one is a file Excel refuses
+///   to open;
+/// - a table and a defined name with one name, or two tables with one name:
+///   names and tables share one formula namespace (`identity::defined_name_key`,
+///   any scope), and the app refuses both directions.
+///
+/// Two DEFINED names with one name are not judged here: a sheet-scoped name
+/// and a workbook-scoped one may legitimately share it, as in Excel.
+pub fn published_name_problem<'a>(
+    named_ranges: &[PublishedNamedRange],
+    table_names: impl Iterator<Item = &'a str>,
+) -> Option<String> {
+    for nr in named_ranges {
+        if !identity::is_valid_defined_name(&nr.name) {
+            return Some(format!(
+                "the defined name '{}' is not a valid name -- a name cannot read as a cell or \
+                 R1C1 reference or as TRUE/FALSE, must start with a letter or an underscore, \
+                 and holds only letters, digits, underscores and periods.",
+                nr.name
+            ));
+        }
+    }
+    let name_keys: std::collections::HashMap<String, &str> = named_ranges
+        .iter()
+        .map(|nr| (identity::defined_name_key(&nr.name), nr.name.as_str()))
+        .collect();
+    let mut table_keys: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for table in table_names {
+        if !identity::is_valid_defined_name(table) {
+            return Some(format!(
+                "the table name '{}' is not a valid name -- a table name follows the rule for \
+                 defined names: it cannot read as a cell or R1C1 reference or as TRUE/FALSE, \
+                 must start with a letter or an underscore, and holds only letters, digits, \
+                 underscores and periods.",
+                table
+            ));
+        }
+        let key = identity::defined_name_key(table);
+        if let Some(name) = name_keys.get(&key) {
+            return Some(format!(
+                "the table '{}' and the defined name '{}' have the same name -- names and tables \
+                 share one namespace, so a formula naming it could mean either.",
+                table, name
+            ));
+        }
+        if let Some(first) = table_keys.insert(key, table) {
+            return Some(format!("two tables are both called '{}' ('{}' and '{}').", first, first, table));
+        }
+    }
+    None
+}
+
 /// Publish selected sheets from a workbook to a local workspace.
 ///
 /// `profile_dir` is the per-user profile directory holding the publisher's
@@ -1212,6 +1272,15 @@ pub fn publish(
     let published_tables: Vec<&SavedTable> = request.workbook.tables.iter()
         .filter(|t| published_sheet_ids.contains(&t.sheet_id))
         .collect();
+    // THE NAMES A SUBSCRIBER'S PULL WOULD REFUSE are refused here first, on
+    // every publish route (the scripted gateway included): a version carrying
+    // one would be signed and then refused by every subscriber.
+    if let Some(problem) = published_name_problem(
+        &named_ranges,
+        published_tables.iter().map(|t| t.name.as_str()),
+    ) {
+        return Err(CalpError::InvalidPublishedName(problem));
+    }
     let table_ids: Vec<EntityId> = published_tables.iter().map(|t| t.id).collect();
 
     // Collect object scripts to publish

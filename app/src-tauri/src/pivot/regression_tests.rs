@@ -540,6 +540,46 @@ fn a_field_list_edit_never_expands_a_collapsed_field() {
     assert!(def.row_fields[0].collapsed, "a field-list edit expanded a collapsed field");
 }
 
+/// NEW-pivot-field-config-sort: the facade's `createFieldConfig`
+/// (extensions/Pivot/lib/pivot-api.ts, `pivot.createFieldConfig` in @api)
+/// FILLED IN `sortOrder: "asc"`, `showSubtotals: true`, `collapsed: false` and
+/// `hiddenItems: []`, so a layout edit built from it SENT them -- and this
+/// door applies what is sent: a field sorted Largest to Smallest by value came
+/// back ascending, its subtotals back on and its item filter cleared. Driven
+/// from the WIRE JSON each version of the helper produced for
+/// `createFieldConfig(0, "Region")`.
+#[test]
+fn a_layout_edit_from_create_field_config_keeps_the_fields_value_sort_and_filter() {
+    let tuned = || {
+        let mut def = tuned_definition();
+        def.row_fields[0].value_sort = Some(pivot_engine::ValueSort {
+            value_field: "Sum of Amount".to_string(),
+            scope: Vec::new(),
+        });
+        def
+    };
+    let wire = |json: serde_json::Value| -> PivotFieldConfig {
+        serde_json::from_value(json).expect("a field config deserializes")
+    };
+
+    // What createFieldConfig(0, "Region") sends now: only what it was given.
+    let mut def = tuned();
+    let now = wire(serde_json::json!({ "sourceIndex": 0, "name": "Region" }));
+    apply_zone_field_configs(&mut def, &request(Some(vec![now]), None, None));
+    assert_region_kept(&def.row_fields[0], "a layout edit built from createFieldConfig");
+    assert!(def.row_fields[0].value_sort.is_some(), "the value sort was dropped");
+
+    // What it used to send: the defaults, which this door applies (the defect).
+    let mut def = tuned();
+    let before = wire(serde_json::json!({
+        "sourceIndex": 0, "name": "Region", "sortOrder": "asc",
+        "showSubtotals": true, "collapsed": false, "hiddenItems": [],
+    }));
+    apply_zone_field_configs(&mut def, &request(Some(vec![before]), None, None));
+    assert_eq!(def.row_fields[0].sort_order, SortOrder::Ascending, "control: a SENT asc is applied");
+    assert!(def.row_fields[0].hidden_items.is_empty(), "control: a SENT [] clears the filter");
+}
+
 // ============================================================================
 // open-items 2.af: the pivot listing says which sheet each pivot is on
 // ============================================================================

@@ -2790,6 +2790,15 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       call(rt, "api.insertColumns", [startCol, count, sheet]),
     deleteColumns: (startCol: number, count: number, sheet?: SheetRef) =>
       call(rt, "api.deleteColumns", [startCol, count, sheet]),
+    // Excel's Insert / Delete Cells (BUG-0358), active sheet only.
+    insertCells: (
+      startRow: number, startCol: number, endRow: number, endCol: number,
+      shift: "right" | "down", options?: { unmergeCutMerges?: boolean },
+    ) => call(rt, "api.insertCells", [startRow, startCol, endRow, endCol, shift, options]),
+    deleteCells: (
+      startRow: number, startCol: number, endRow: number, endCol: number,
+      shift: "left" | "up", options?: { unmergeCutMerges?: boolean },
+    ) => call(rt, "api.deleteCells", [startRow, startCol, endRow, endCol, shift, options]),
     mergeCells: (
       startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef,
     ) => call(rt, "api.mergeCells", [startRow, startCol, endRow, endCol, sheet]),

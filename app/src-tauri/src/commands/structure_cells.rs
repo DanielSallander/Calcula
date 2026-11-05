@@ -1041,6 +1041,9 @@ pub(crate) fn shift_cells_impl(
     shift: CellShift,
     unmerge_cut_merges: bool,
 ) -> Result<CellShiftResult, String> {
+    // ONE REFRESH (NEW-double-refresh): the shared recalculations below leave
+    // the live data tables to this command's own tail, which refreshes once.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
     if start_row.max(end_row) > engine::EXCEL_MAX_ROW_INDEX || start_col.max(end_col) > engine::EXCEL_MAX_COL_INDEX {
         return Err("The range is outside the sheet.".to_string());
     }
@@ -1145,6 +1148,12 @@ pub(crate) fn shift_cells_impl(
             }
         }
     }
+
+    // A LIVE DATA TABLE (BUG-0652): cells shifted through its range -- body,
+    // formula row, input column -- move or delete part of it [LIVE: "Can't
+    // change part of a data table."; deleting the whole body is allowed].
+    // Before the merge question below, so a refused edit asks nothing first.
+    crate::data_tables::check_structural_edit(&grid, band.edit, band.band_start, band.band_end)?;
 
     // Tables (rule 7).
     let table_plans: Vec<(crate::tables::Table, CellRange)> = {
@@ -1255,7 +1264,7 @@ pub(crate) fn shift_cells_impl(
         state, &effect, &mut undo_stack, active_sheet, &edited_sheet_name, &band,
     );
     shift_controls_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
-    shift_rule_ranges_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
+    shift_rule_ranges_in_band(state, &effect, &mut undo_stack, active_sheet, &sheet_names_snapshot, &band);
     let cross_sheet_rewritten = shift_cross_sheet_formulas_in_band(
         &mut undo_stack, &mut grids, active_sheet, &edited_sheet_name, &sheet_names_snapshot, &band,
     );
@@ -1441,6 +1450,18 @@ pub(crate) fn shift_cells_impl(
         pane_control_state,
         ribbon_filter_state,
         &seeds,
+        &mut recalculated,
+    );
+    // A LIVE DATA TABLE whose model reads a shifted range follows the edit
+    // under automatic calculation, as after any edit (BUG-0652, rev-dt2-1).
+    // Every guard is dropped; the reply carries no cells (the grid re-reads).
+    // The whole-line arm above refreshes inside the line command it runs.
+    crate::data_tables::refresh_after_edit(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
         &mut recalculated,
     );
 
@@ -1915,9 +1936,10 @@ fn shift_rule_ranges_in_band(
     effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet: usize,
+    sheet_names: &[String],
     band: &BandEdit,
 ) {
-    shift_cf_and_validation_ranges(state, effect, undo_stack, sheet, band);
+    shift_cf_and_validation_ranges(state, effect, undo_stack, sheet, sheet_names, band);
 
     if let Ok(mut store) = state.sheet_protection.write(effect) {
         if let Some(protection) = store.get_mut(&sheet) {
@@ -1961,14 +1983,23 @@ fn shift_rule_ranges_in_band(
 /// the lines an insertion adds under a range ending just before them join it.
 ///
 /// Records one restore per store, and only when that store changed.
+///
+/// The rules' FORMULAS move in the same pass (NEW-cfdv-structural-shift): a
+/// rule's formula is its top-left cell's, re-stated from the top-left the edit
+/// leaves it (`conditional_formatting::rebase_rule_formula`), and the rules
+/// and validations on every OTHER sheet follow a reference qualified with this
+/// one (`shift_other_sheets_rule_formulas`) -- all inside the edit's own undo
+/// step. `sheet_names` is the caller's snapshot (taken before its other locks).
 pub(crate) fn shift_cf_and_validation_ranges(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
     undo_stack: &mut engine::UndoStack,
     sheet: usize,
+    sheet_names: &[String],
     band: &BandEdit,
 ) {
     use crate::conditional_formatting::ConditionalFormatRange;
+    let sheet_name = sheet_names.get(sheet).cloned().unwrap_or_default();
 
     if let Ok(mut store) = state.conditional_formats.write(effect) {
         if let Some(rules) = store.get_mut(&sheet) {
@@ -1985,6 +2016,22 @@ pub(crate) fn shift_cf_and_validation_ranges(
                     for p in pieces {
                         next.push(ConditionalFormatRange { start_row: p.start_row, start_col: p.start_col, end_row: p.end_row, end_col: p.end_col });
                     }
+                }
+                // The anchor is the top-left of the rectangle bounding EVERY
+                // range (`conditional_formatting::rule_anchor`, [LIVE] cfeval
+                // probe3 Q1-Q3), the cell the evaluator moves the formula from.
+                if let (Some(old), Some(new)) = (
+                    crate::conditional_formatting::rule_anchor(&rule.ranges),
+                    crate::conditional_formatting::rule_anchor(&next),
+                ) {
+                    changed |= crate::conditional_formatting::rebase_rule_formulas(
+                        &mut rule.rule,
+                        old,
+                        new,
+                        &sheet_name,
+                        &sheet_name,
+                        band,
+                    );
                 }
                 rule.ranges = next;
             }
@@ -2018,6 +2065,18 @@ pub(crate) fn shift_cf_and_validation_ranges(
                     piece.end_row = p.end_row;
                     piece.start_col = p.start_col;
                     piece.end_col = p.end_col;
+                    // Each piece is its own validated range, so its formula is
+                    // re-stated from ITS top-left.
+                    changed |= crate::data_validation::rebase_validation_formulas(
+                        &mut piece.validation,
+                        sheet,
+                        sheet,
+                        (v.start_row, v.start_col),
+                        (p.start_row, p.start_col),
+                        &sheet_name,
+                        &sheet_name,
+                        band,
+                    );
                     next.push(piece);
                 }
             }
@@ -2031,6 +2090,8 @@ pub(crate) fn shift_cf_and_validation_ranges(
             }
         }
     }
+
+    crate::conditional_formatting::shift_other_sheets_rule_formulas(state, effect, undo_stack, sheet, sheet_names, band);
 }
 
 /// Formulas on every OTHER sheet that name the edited sheet (rule 1). Only a

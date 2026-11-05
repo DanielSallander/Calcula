@@ -6,7 +6,7 @@
 // Clipboard API - Internal clipboard access for extensions
 // ============================================================================
 
-export { getInternalClipboard, settledInternalClipboard } from "../core/hooks/useClipboard";
+export { getInternalClipboard, settledInternalClipboard, clipboardSourceStandsAt } from "../core/hooks/useClipboard";
 export type { ClipboardData } from "../core/hooks/useClipboard";
 // Excel's Insert Copied Cells (round 12): with a COPY pending, Insert makes
 // room for the copied block and pastes it there as ONE undo step. The
@@ -323,6 +323,7 @@ export type {
   MergeResult,
   CellUpdateInput,
   MovedFrom,
+  PasteSource,
   CellStyleWrite,
   FormulaShiftInput,
   // Grouping types
@@ -390,6 +391,8 @@ export function requestMacroToNotebook(detail: MacroToNotebookDetail): void {
 export type { TypedCellData, CellValueType } from "../core/types";
 // One further block of a grouped multi-area clear (`clearRangeOnSheets`' `options.moreAreas`)
 export type { ClearArea } from "../core/types";
+// One further block of a multi-area formatting (`applyFormatting`'s `opts.moreAreas`, BUG-0394)
+export type { FormattingArea } from "../core/types";
 
 // Named range type exports
 export type {

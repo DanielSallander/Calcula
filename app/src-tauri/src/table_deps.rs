@@ -341,11 +341,20 @@ fn restamp_specifier(spec: &mut parser::ast::TableSpecifier, table: &Table) {
                 *b = s;
             }
         }
-        S::AllRows | S::DataRows | S::Headers | S::Totals => {}
+        S::AllRows | S::DataRows | S::Whole | S::Headers | S::Totals | S::HeadersAndData | S::DataAndTotals => {}
         S::SpecialColumn(inner, c) => {
             restamp_specifier(inner, table);
             if let Some(s) = column_spelling(table, c) {
                 *c = s;
+            }
+        }
+        S::SpecialColumnRange(inner, a, b) => {
+            restamp_specifier(inner, table);
+            if let Some(s) = column_spelling(table, a) {
+                *a = s;
+            }
+            if let Some(s) = column_spelling(table, b) {
+                *b = s;
             }
         }
     }
@@ -466,9 +475,14 @@ fn rename_spec_col(
             swap(a, changed);
             swap(b, changed);
         }
-        S::AllRows | S::DataRows | S::Headers | S::Totals => {}
+        S::AllRows | S::DataRows | S::Whole | S::Headers | S::Totals | S::HeadersAndData | S::DataAndTotals => {}
         S::SpecialColumn(inner, c) => {
             swap(c, changed);
+            rename_spec_col(inner, old_upper, new_name, changed);
+        }
+        S::SpecialColumnRange(inner, a, b) => {
+            swap(a, changed);
+            swap(b, changed);
             rename_spec_col(inner, old_upper, new_name, changed);
         }
     }

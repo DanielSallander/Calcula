@@ -55,11 +55,13 @@ export interface PolicyIdentity {
    * Present ONLY on a realm that an explicit, person-started run of an approved
    * application macro mounted (owner decision B; see explicitRunGrant.ts). The
    * tier stays "restricted"; while `cells` is true the grant's closed set of
-   * cell rows is admitted too. Its mere presence makes the realm run-only: no
-   * exposed methods, no event subscriptions, no calls into other scripts and no
-   * restricted formatting rows -- even after `cells` has expired.
+   * cell rows is admitted too, and while `formatting` is true its closed set
+   * of formatting rows (owner, 2026-11-04). Its mere presence makes the realm
+   * run-only: no exposed methods, no event subscriptions, no calls into other
+   * scripts -- even after the grant has expired -- and the restricted
+   * formatting rows only while `formatting` is live.
    */
-  explicitRun?: { readonly cells: boolean };
+  explicitRun?: { readonly cells: boolean; readonly formatting: boolean };
 }
 
 export type PolicyDecision =
@@ -117,11 +119,11 @@ export function decidePolicy(
 
   // A RUN-ONLY realm (an explicit run of an application's macro) may not open
   // a channel to other code while it holds cell access (expose, subscribe,
-  // callMethod), nor use the restricted formatting rows, which the granted
-  // api.setActiveSheet would otherwise point at every sheet in turn. After
-  // validation, like the tier check, for the same reason.
+  // callMethod), nor use the restricted formatting rows -- which the granted
+  // api.setActiveSheet points at every sheet in turn -- unless its formatting
+  // grant is live. After validation, like the tier check, for the same reason.
   if (identity.explicitRun !== undefined) {
-    const refusal = explicitRunRestrictedRefusal(method);
+    const refusal = explicitRunRestrictedRefusal(method, identity);
     if (refusal !== null) {
       return {
         admitted: false,
@@ -134,9 +136,10 @@ export function decidePolicy(
   }
 
   if (policy.tier === "unlocked" && identity.tier !== "unlocked") {
-    // The ONE exception to the tier (owner decision B): the closed set of cell
-    // rows, for a realm an explicit run of an approved application macro
-    // mounted, while that run lasts. Everything else unlocked stays refused --
+    // The ONE exception to the tier (owner decision B): the closed sets of cell
+    // and formatting rows, for a realm an explicit run of an approved
+    // application macro mounted, while that run lasts. Everything else unlocked
+    // stays refused --
     // with the old sentence, byte for byte, for every realm without the grant.
     if (!explicitRunAdmits(identity, method)) {
       return {
@@ -150,9 +153,10 @@ export function decidePolicy(
         policy,
       };
     }
-    // Admitted BY THE GRANT: its arguments must stay within cell access too
-    // (a clear of contents, never of formats -- BUG-0616 #2).
-    const argsRefusal = explicitRunArgsRefusal(method, args);
+    // Admitted BY THE GRANT: its arguments must stay within it too (no clear of
+    // formats without formatting, no protection attributes, the restricted
+    // bound for a non-line rectangle -- BUG-0616 #2, BUG-0659).
+    const argsRefusal = explicitRunArgsRefusal(method, args, identity);
     if (argsRefusal !== null) {
       return {
         admitted: false,

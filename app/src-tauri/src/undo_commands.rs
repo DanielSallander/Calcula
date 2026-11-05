@@ -3793,8 +3793,23 @@ pub fn undo(
         }
     };
 
-    let result = apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, &timeline_state, transaction, true);
+    // ONE REFRESH (NEW-double-refresh): the restore's shared recalculations
+    // leave the live data tables to the tail below, which refreshes once.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
+    let mut result = apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, &timeline_state, transaction, true);
     recalc_visibility_after_undo(&app, &state, &user_files_state, &pivot_state, &pane_control_state, &ribbon_filter_state, &result);
+    // Under automatic calculation the live data tables follow the restored
+    // cells (BUG-0652).
+    if result.success {
+        crate::data_tables::refresh_after_edit(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &mut result.updated_cells,
+        );
+    }
     result
 }
 
@@ -3848,8 +3863,21 @@ pub fn redo(
         }
     };
 
-    let result = apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, &timeline_state, transaction, false);
+    // ONE REFRESH (NEW-double-refresh): see `undo`.
+    let _deferred = crate::data_tables::defer_refresh_to_caller();
+    let mut result = apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, &timeline_state, transaction, false);
     recalc_visibility_after_undo(&app, &state, &user_files_state, &pivot_state, &pane_control_state, &ribbon_filter_state, &result);
+    // See `undo`: the live data tables follow the restored cells.
+    if result.success {
+        crate::data_tables::refresh_after_edit(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &mut result.updated_cells,
+        );
+    }
     result
 }
 

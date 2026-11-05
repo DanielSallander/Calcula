@@ -76,7 +76,10 @@ impl Parser {
                 match operand {
                     Expression::LiteralInt(v) => Ok(expr::lit_int(-v)),
                     Expression::LiteralFloat(v) => Ok(expr::lit(-v)),
-                    other => Ok(expr::lit_int(0).subtract(other)),
+                    // `-x` is `-1 * x`, not `0 - x`: DAX's unary minus keeps
+                    // BLANK (`-BLANK` is BLANK), while `0 - BLANK` is 0 under
+                    // DAX's BLANK arithmetic (see `compute::dax_semantics`).
+                    other => Ok(expr::lit_int(-1).multiply(other)),
                 }
             }
             Some(Token::Number(n)) => {
@@ -162,8 +165,10 @@ impl Parser {
         self.expect(&Token::LParen)?;
 
         match upper {
-            "SUM" | "COUNT" | "AVG" | "AVERAGE" | "MIN" | "MAX" | "DISTINCTCOUNT" | "MEDIAN"
-            | "STDEV" | "STDEVP" | "VARIANCE" | "VARIANCEP" => self.parse_aggregate_call(upper),
+            "SUM" | "COUNT" | "AVG" | "AVERAGE" | "MIN" | "MAX" | "DISTINCTCOUNT"
+            | "DISTINCTCOUNTNOBLANK" | "MEDIAN" | "STDEV" | "STDEVP" | "VARIANCE" | "VARIANCEP" => {
+                self.parse_aggregate_call(upper)
+            }
             "COUNTROWS" => self.parse_countrows_call(),
             "KEEP" => self.parse_keep_call(),
             "CLEAR" => self.parse_clear_call(),
@@ -404,7 +409,7 @@ mod tests {
         let expr = parse_measure_expression("SUM(Sales[amount]) / COUNT(Sales[id])").unwrap();
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "(SUM(\"amount\") / COUNT(\"id\"))"
+            "(CAST(SUM(\"amount\") AS DOUBLE) / CAST(COALESCE(NULLIF(COUNT(\"id\"), 0), 0) AS DOUBLE))"
         );
     }
 

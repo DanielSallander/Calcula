@@ -202,8 +202,66 @@ export const VALUE_FIELD_UNKNOWN_REASON = "The value field this cell shows canno
  */
 export const MODEL_PIVOT_REASON = "Not available on a data-model PivotTable yet.";
 
-/** Why Sort on a value cell is greyed (BUG-0459: values_hierarchy is read by no code). */
-export const SORT_BY_VALUE_REASON = "Sorting by values is not available yet.";
+/**
+ * Why Sort on a value cell is greyed on the Grand Total row: it names no item
+ * to move (Excel's Sort there changes nothing).
+ */
+export const SORT_GRAND_TOTAL_ROW_REASON = "The Grand Total row has no items to sort.";
+
+/** What a value cell's Sort sorts (BUG-0459): Excel's AutoSort on the cell's row field. */
+export interface ValueSortTarget {
+  pivotId: string;
+  /** The row field whose items move: the deepest item of the clicked row. */
+  fieldIndex: number;
+  /** The value field, by name (a `valueFieldNames` entry). */
+  valuesHierarchy: string;
+  /** The clicked column's items (`[fieldIndex, valueId]`); empty = Grand Total column. */
+  scopeGroupPath: Array<[number, number]>;
+}
+
+/**
+ * The sort a value cell's Sort Smallest to Largest / Largest to Smallest
+ * performs, or the reason it cannot: Excel sorts the items of the field the
+ * clicked ROW belongs to (a subtotal row sorts its own outer field), within
+ * each parent, by the clicked value field along the clicked COLUMN -- Excel's
+ * `PivotFields(f).AutoSort order, "Sum of Amount", <the column's PivotLine>`,
+ * whose orders were probed live in Excel 16 (`value_sort_tests` in
+ * core/pivot-engine/src/engine.rs). The row's items are its row-label cells'
+ * `groupPath` (the longest one); the cell's own path is that path followed
+ * by its column's items.
+ */
+export function valueSortTarget(ctx: GridMenuContext): ValueSortTarget | string {
+  const pivotId = getPivotIdFromContext(ctx);
+  const cached = getCachedCellData(ctx);
+  const index = valueFieldIndexFor(ctx);
+  if (pivotId === null || cached === null || index === null) return VALUE_FIELD_UNKNOWN_REASON;
+  const valuesHierarchy = cached.view.valueFieldNames?.[index];
+  if (!valuesHierarchy) return VALUE_FIELD_UNKNOWN_REASON;
+  const labelCols = Math.min(cached.view.rowLabelColCount ?? 0, cached.row.cells.length);
+  let rowPath: Array<[number, number]> = [];
+  for (let c = 0; c < labelCols; c++) {
+    const path = cached.row.cells[c]?.groupPath ?? [];
+    if (path.length > rowPath.length) rowPath = path;
+  }
+  if (rowPath.length === 0) return SORT_GRAND_TOTAL_ROW_REASON;
+  const cellPath = cached.cell.groupPath ?? [];
+  const startsWithRow = rowPath.every(([f, v], i) => cellPath[i]?.[0] === f && cellPath[i]?.[1] === v);
+  // A cell path that does not start with its row's items (never seen) keeps
+  // only the entries of fields the row does not name.
+  const rowFields = new Set(rowPath.map(([f]) => f));
+  const scopeGroupPath = startsWithRow
+    ? cellPath.slice(rowPath.length)
+    : cellPath.filter(([f]) => !rowFields.has(f));
+  return { pivotId, fieldIndex: rowPath[rowPath.length - 1][0], valuesHierarchy, scopeGroupPath };
+}
+
+/** Sort the clicked value cell's row field by its value field (BUG-0459). */
+async function sortByValue(ctx: GridMenuContext, sortBy: "ascending" | "descending"): Promise<void> {
+  const target = valueSortTarget(ctx);
+  if (typeof target === "string") throw new Error(target);
+  await sortPivotField({ ...target, sortBy });
+  window.dispatchEvent(new Event("pivot:refresh"));
+}
 
 /** Why Copy is greyed when the canvas cell copy is not installed. */
 export const COPY_UNAVAILABLE_REASON = "Copying PivotTable cells is not available yet.";
@@ -317,6 +375,10 @@ function valueCellMenuItems(): GridContextMenuItem[] {
   });
   const copyReason = (): string | null =>
     CommandRegistry.has(PIVOT_CANVAS_COPY_CELLS_COMMAND) ? null : COPY_UNAVAILABLE_REASON;
+  const sortByValueReason = (ctx: GridMenuContext): string | null => {
+    const target = valueSortTarget(ctx);
+    return typeof target === "string" ? target : null;
+  };
 
   return [
     {
@@ -349,27 +411,19 @@ function valueCellMenuItems(): GridContextMenuItem[] {
       group: "pivot",
       order: 6,
       visible: (ctx) => isValueCell(ctx),
-      disabled: true,
-      disabledReason: SORT_BY_VALUE_REASON,
+      ...disabledBy(sortByValueReason),
       children: [
         {
           id: "pivot:sortByValue:ascending",
           label: "Sort Smallest to Largest",
-          disabled: true,
-          disabledReason: SORT_BY_VALUE_REASON,
-          // A statement, not the toast's handle: an item's onClick returns nothing.
-          onClick: () => {
-            showToast(SORT_BY_VALUE_REASON, { variant: "info" });
-          },
+          ...disabledBy(sortByValueReason),
+          onClick: menuAction("Sort Smallest to Largest", (ctx) => sortByValue(ctx, "ascending")),
         },
         {
           id: "pivot:sortByValue:descending",
           label: "Sort Largest to Smallest",
-          disabled: true,
-          disabledReason: SORT_BY_VALUE_REASON,
-          onClick: () => {
-            showToast(SORT_BY_VALUE_REASON, { variant: "info" });
-          },
+          ...disabledBy(sortByValueReason),
+          onClick: menuAction("Sort Largest to Smallest", (ctx) => sortByValue(ctx, "descending")),
         },
       ],
       onClick: () => {}, // Parent item - no direct action

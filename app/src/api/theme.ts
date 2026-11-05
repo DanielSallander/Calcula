@@ -16,6 +16,52 @@ import { AppEvents, emitAppEvent } from "./events";
 
 let cachedTheme: ThemeDefinitionData | null = null;
 let cachedPalette: ThemeColorInfo[] | null = null;
+/**
+ * Bumped by every invalidation, so a read that was already in flight when the
+ * document changed does not put the OUTGOING document's theme back in the
+ * cache when it lands.
+ */
+let cacheGeneration = 0;
+
+/**
+ * THE CACHE IS PER DOCUMENT, and dropped HERE, once, for every consumer: when
+ * another document opens or a new one starts (each brings its own theme), and
+ * when the theme changes by any route (`setDocumentTheme` below, an undo, a
+ * script). It used to be dropped only by the Home tab's colour button, so
+ * every other consumer -- the colour pickers' palette (`@api/layout` Color),
+ * Format Cells' font list (`getCachedTheme`), the theme gallery -- kept the
+ * PREVIOUS file's palette after File > Open. Capture phase: on `window`, the
+ * target of every app event, capture listeners run before the ordinary ones,
+ * so a consumer that re-reads on the same event always reads after the drop.
+ */
+function installThemeCacheInvalidation(): void {
+  if (typeof window === "undefined") return;
+  // Read the event names first: a unit test that mocks `./events` without
+  // `AppEvents` makes that read THROW, and an import-time throw here would
+  // break every module that imports the theme API, not just the cache.
+  let names: { open: string; created: string; themeChanged: string };
+  try {
+    names = { open: AppEvents.AFTER_OPEN, created: AppEvents.AFTER_NEW, themeChanged: AppEvents.THEME_CHANGED };
+  } catch {
+    return;
+  }
+  if (!names.open || !names.created || !names.themeChanged) return;
+  const drop = (): void => clearThemeCache();
+  window.addEventListener(names.open, drop, { capture: true });
+  window.addEventListener(names.created, drop, { capture: true });
+  window.addEventListener(
+    names.themeChanged,
+    (e: Event) => {
+      const theme = (e as CustomEvent).detail?.theme as ThemeDefinitionData | undefined;
+      clearThemeCache();
+      // The event names the new theme: keep it, so a synchronous reader
+      // (`getCachedTheme`) still answers right after the change.
+      if (theme) cachedTheme = theme;
+    },
+    { capture: true },
+  );
+}
+installThemeCacheInvalidation();
 
 // ============================================================================
 // Theme API
@@ -26,8 +72,9 @@ let cachedPalette: ThemeColorInfo[] | null = null;
  */
 export async function getDocumentTheme(): Promise<ThemeDefinitionData> {
   if (cachedTheme) return cachedTheme;
+  const generation = cacheGeneration;
   const theme = await invoke<ThemeDefinitionData>("get_document_theme");
-  cachedTheme = theme;
+  if (generation === cacheGeneration) cachedTheme = theme;
   return theme;
 }
 
@@ -56,8 +103,9 @@ export async function listBuiltinThemes(): Promise<ThemeDefinitionData[]> {
  */
 export async function getThemeColorPalette(): Promise<ThemeColorInfo[]> {
   if (cachedPalette) return cachedPalette;
+  const generation = cacheGeneration;
   const palette = await invoke<ThemeColorInfo[]>("get_theme_color_palette");
-  cachedPalette = palette;
+  if (generation === cacheGeneration) cachedPalette = palette;
   return palette;
 }
 
@@ -86,9 +134,12 @@ export function getCachedTheme(): ThemeDefinitionData | null {
 }
 
 /**
- * Clear the theme cache (call after loading a new file).
+ * Clear the theme cache. Done for every consumer on AFTER_OPEN, AFTER_NEW and
+ * THEME_CHANGED (see `installThemeCacheInvalidation`); a caller needs it only
+ * for a document change that announces none of those.
  */
 export function clearThemeCache(): void {
+  cacheGeneration += 1;
   cachedTheme = null;
   cachedPalette = null;
 }

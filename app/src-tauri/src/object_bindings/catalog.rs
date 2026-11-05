@@ -115,12 +115,24 @@ use ObjectBindingKind as K;
 ///   `/spec/config/theme/titleColor|titleFontSize`; a slicer's and a timeline's
 ///   title text / visibility are `/headerText` / `/showHeader`; a floating
 ///   range's title text and visibility are its identity and its move handle,
-///   and its padding is never bound. Flags mirror each family's door: chart and
-///   floating range pass `editObjects` (protect), none is a position key.
+///   and its padding is never bound. Nor is a field the family never paints
+///   (BUG-0491): a slicer's, a timeline's and a floating grid's header is one
+///   line, so none has a row for the title's wrap, the subtitle, the divider or
+///   the spacing below them (and the floating grid none for spacing at all) --
+///   the `null` rows of each provider's `CONTAINER_BINDING_PATHS`. Flags mirror
+///   each family's door: chart and floating range pass `editObjects`
+///   (protect), none is a position key.
 /// - `O::Family` control rows `/properties/container*`: one EXACT row per
 ///   `visual_format::CONTROL_CONTAINER_PROPERTY_KEYS` key but
 ///   `containerLockAspect` -- a control's container facts ARE control
 ///   properties, written by the control arm through `set_control_property_core`.
+///   ONE `control` kind serves every control type, so the rows a Page Navigator
+///   needs (`containerBackgroundColor`, `containerBorderShow`, ...) exist for a
+///   shape too; a key the control's TYPE does not paint
+///   (`visual_format::CONTROL_PAINTED_CONTAINER_FIELDS`: a shape's second
+///   spelling of its fill, a button's title, ...) is refused per type at that
+///   door (`controls::dead_container_key`), at a binding's `set`, and a stored
+///   binding of one is not loaded.
 ///
 /// The Page Navigator's per-button rows (`/properties/pageOverrides/*/...`,
 /// WP-D S8d, D §3.18a) are keyed by PAGE, never by array index: the `*` is a
@@ -304,27 +316,8 @@ pub const BINDABLE_PATHS: &[BindablePathSpec] = &[
     row(K::Slicer, "/container/title/color", T::Color, O::Container, false, false),
     row(K::Slicer, "/container/title/background", T::Color, O::Container, false, false),
     row(K::Slicer, "/container/title/align", T::Enum(&["left", "center", "right"]), O::Container, false, false),
-    row(K::Slicer, "/container/title/wrap", T::Boolean, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/show", T::Boolean, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/text", T::Text, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/fontFamily", T::Text, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/fontSize", T::Number, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/bold", T::Boolean, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/italic", T::Boolean, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/underline", T::Boolean, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/color", T::Color, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/background", T::Color, O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/align", T::Enum(&["left", "center", "right"]), O::Container, false, false),
-    row(K::Slicer, "/container/subtitle/wrap", T::Boolean, O::Container, false, false),
-    row(K::Slicer, "/container/divider/show", T::Boolean, O::Container, false, false),
-    row(K::Slicer, "/container/divider/color", T::Color, O::Container, false, false),
-    row(K::Slicer, "/container/divider/style", T::Enum(&["solid", "dashed", "dotted"]), O::Container, false, false),
-    row(K::Slicer, "/container/divider/width", T::Number, O::Container, false, false),
-    row(K::Slicer, "/container/divider/ignorePadding", T::Boolean, O::Container, false, false),
     row(K::Slicer, "/container/spacing/custom", T::Boolean, O::Container, false, false),
     row(K::Slicer, "/container/spacing/belowTitle", T::Number, O::Container, false, false),
-    row(K::Slicer, "/container/spacing/belowSubtitle", T::Number, O::Container, false, false),
-    row(K::Slicer, "/container/spacing/belowDivider", T::Number, O::Container, false, false),
     row(K::Slicer, "/container/background/show", T::Boolean, O::Container, false, false),
     row(K::Slicer, "/container/background/color", T::Color, O::Container, false, false),
     row(K::Slicer, "/container/background/transparency", T::Number, O::Container, false, false),
@@ -354,27 +347,8 @@ pub const BINDABLE_PATHS: &[BindablePathSpec] = &[
     row(K::TimelineSlicer, "/container/title/color", T::Color, O::Container, false, false),
     row(K::TimelineSlicer, "/container/title/background", T::Color, O::Container, false, false),
     row(K::TimelineSlicer, "/container/title/align", T::Enum(&["left", "center", "right"]), O::Container, false, false),
-    row(K::TimelineSlicer, "/container/title/wrap", T::Boolean, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/show", T::Boolean, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/text", T::Text, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/fontFamily", T::Text, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/fontSize", T::Number, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/bold", T::Boolean, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/italic", T::Boolean, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/underline", T::Boolean, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/color", T::Color, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/background", T::Color, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/align", T::Enum(&["left", "center", "right"]), O::Container, false, false),
-    row(K::TimelineSlicer, "/container/subtitle/wrap", T::Boolean, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/divider/show", T::Boolean, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/divider/color", T::Color, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/divider/style", T::Enum(&["solid", "dashed", "dotted"]), O::Container, false, false),
-    row(K::TimelineSlicer, "/container/divider/width", T::Number, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/divider/ignorePadding", T::Boolean, O::Container, false, false),
     row(K::TimelineSlicer, "/container/spacing/custom", T::Boolean, O::Container, false, false),
     row(K::TimelineSlicer, "/container/spacing/belowTitle", T::Number, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/spacing/belowSubtitle", T::Number, O::Container, false, false),
-    row(K::TimelineSlicer, "/container/spacing/belowDivider", T::Number, O::Container, false, false),
     row(K::TimelineSlicer, "/container/background/show", T::Boolean, O::Container, false, false),
     row(K::TimelineSlicer, "/container/background/color", T::Color, O::Container, false, false),
     row(K::TimelineSlicer, "/container/background/transparency", T::Number, O::Container, false, false),
@@ -448,27 +422,6 @@ pub const BINDABLE_PATHS: &[BindablePathSpec] = &[
     row(K::FloatingRange, "/container/title/color", T::Color, O::Container, true, false),
     row(K::FloatingRange, "/container/title/background", T::Color, O::Container, true, false),
     row(K::FloatingRange, "/container/title/align", T::Enum(&["left", "center", "right"]), O::Container, true, false),
-    row(K::FloatingRange, "/container/title/wrap", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/show", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/text", T::Text, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/fontFamily", T::Text, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/fontSize", T::Number, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/bold", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/italic", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/underline", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/color", T::Color, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/background", T::Color, O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/align", T::Enum(&["left", "center", "right"]), O::Container, true, false),
-    row(K::FloatingRange, "/container/subtitle/wrap", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/divider/show", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/divider/color", T::Color, O::Container, true, false),
-    row(K::FloatingRange, "/container/divider/style", T::Enum(&["solid", "dashed", "dotted"]), O::Container, true, false),
-    row(K::FloatingRange, "/container/divider/width", T::Number, O::Container, true, false),
-    row(K::FloatingRange, "/container/divider/ignorePadding", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/spacing/custom", T::Boolean, O::Container, true, false),
-    row(K::FloatingRange, "/container/spacing/belowTitle", T::Number, O::Container, true, false),
-    row(K::FloatingRange, "/container/spacing/belowSubtitle", T::Number, O::Container, true, false),
-    row(K::FloatingRange, "/container/spacing/belowDivider", T::Number, O::Container, true, false),
     row(K::FloatingRange, "/container/background/show", T::Boolean, O::Container, true, false),
     row(K::FloatingRange, "/container/background/color", T::Color, O::Container, true, false),
     row(K::FloatingRange, "/container/background/transparency", T::Number, O::Container, true, false),

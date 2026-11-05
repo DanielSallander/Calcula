@@ -3,10 +3,13 @@
 //          number 5 is not the text "5") through @api/lib, and the used extent.
 // CONTEXT: get_range_cells_typed refuses more than 100,000 cells per call, so a
 //          tall read is split into row bands. The used extent is read once per
-//          AutoSum (it cannot change while the plan is being made).
+//          AutoSum (it cannot change while the plan is being made), and so is
+//          the sheet's filter mode (rev-ui-3: a Sum on a filtered sheet is
+//          written as SUBTOTAL(9,...)).
 
 import { getRangeCellsTyped, getUsedRange, type TypedCellData } from "@api/lib";
 import { getCellTargetCellsTyped, type CellTargetRef } from "@api/cellTarget";
+import { isActiveSheetFilterMode } from "@api/autoFilterService";
 import type { AutoSumCellReader, CellRange } from "./autoSumPlan";
 
 /** get_range_cells_typed's own cap. */
@@ -14,6 +17,7 @@ const TYPED_READ_CAP = 100_000;
 
 export function createLiveReader(): AutoSumCellReader {
   let used: Promise<{ endRow: number; endCol: number; empty: boolean }> | null = null;
+  let filtered: Promise<boolean> | null = null;
   return {
     async read(range: CellRange): Promise<TypedCellData[]> {
       const width = range.endCol - range.startCol + 1;
@@ -28,6 +32,10 @@ export function createLiveReader(): AutoSumCellReader {
     usedRange() {
       used ??= getUsedRange().then((u) => ({ endRow: u.endRow, endCol: u.endCol, empty: u.empty }));
       return used;
+    },
+    filterMode() {
+      filtered ??= isActiveSheetFilterMode();
+      return filtered;
     },
   };
 }

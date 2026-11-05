@@ -668,6 +668,29 @@ describe("ColorSwatch split — disabled while its palette is open", () => {
     expect(flyout()).not.toBeNull();
   });
 
+  it("disabled while FOCUS is in the palette: focus goes back to the half that opened it, not to <body> (BUG-0398)", async () => {
+    render(<FillColor color="#ff0000" />);
+    act(() => byTestId("fill").focus());
+    key(byTestId("fill"), "ArrowDown");
+    await settle();
+    expect(flyout()!.contains(document.activeElement)).toBe(true);
+    render(<FillColor color="#ff0000" disabled />);
+    await settle();
+    expect(flyout()).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(byTestId("fill"));
+
+    // Opened from the chevron: back to the chevron.
+    render(<FillColor color="#ff0000" />);
+    await settle();
+    await click(byTestId("fill-options"));
+    await settle();
+    expect(flyout()!.contains(document.activeElement)).toBe(true);
+    render(<FillColor color="#ff0000" disabled />);
+    await settle();
+    expect(document.activeElement).toBe(byTestId("fill-options"));
+  });
+
   it("controlled: disabling asks the caller to close through onOpenChange(false)", async () => {
     const onOpenChange = vi.fn();
     render(<FillColor open onOpenChange={onOpenChange} />);

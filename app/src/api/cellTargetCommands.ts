@@ -65,6 +65,11 @@ export const TARGET_COMMANDS: readonly string[] = [
   "set_cell_style",
   // BUG-0514: which icons a column SHOWS, for Custom Sort's Cell Icon list.
   "get_range_icons",
+  // BUG-0655: the lock and option QUESTIONS on a grid's own cells under its
+  // host's protection (a formatting-only paste tells "only Format Cells
+  // refuses" from a locked cell's refusal, as the sheet route does).
+  "can_edit_cell",
+  "can_perform_action",
 ];
 
 /**

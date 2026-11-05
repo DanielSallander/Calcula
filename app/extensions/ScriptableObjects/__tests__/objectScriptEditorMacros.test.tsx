@@ -732,7 +732,7 @@ describe("Object Script Editor — a distributed macro is visibly a publisher's"
     expect(title).toContain("Run and Debug in this window mount its stored code at the restricted tier");
     expect(title).toContain("context.api is null");
     expect(title).toContain(
-      "from Developer ▸ Macros ▸ Run, by clicking a button that runs it, or from the command line it may also read and change the cells of any sheet, and nothing more",
+      "from Developer ▸ Macros ▸ Run, by clicking a button that runs it, or from the command line it may also read and change the cells of any sheet, and how they look, and nothing more",
     );
     expect(title).toContain("if it stops part-way, every change it made is undone");
     expect(title).not.toMatch(/exactly (what|as) a button/i);

@@ -3170,11 +3170,49 @@ fn a_refresh_after_the_subscriber_deleted_a_pulled_sheet_never_reads_their_names
     let formula = formula_at(&grids[report], 0, 0);
     assert_eq!(
         formula.as_deref(),
-        Some("#REF!*3"),
+        Some("#REF!A1*3"),
         "the refreshed formula reads the subscriber's own 'Data' ({:?})",
         grids[report].get_cell(0, 0).map(|c| c.display_value())
     );
     assert_ne!(number_at(&grids[report], 0, 0), Some(3000.0));
+}
+
+/// NEW-calp-gone-walker-ref. The SAME deletion, written by its two writers: the
+/// host's sheet delete (`repair_formula_text_on_delete_at`, the cells' own
+/// rule) and the `.calp` gone-walker a refresh and an override's baseline go
+/// through (`SheetRenames::with_gone`). Both must write Excel's text -- the
+/// reference keeps its cell part and reads `#REF!` where the sheet was
+/// (`=#REF!A1`, `SUM(#REF!A1:A3)`) [LIVE, Excel 16, 2026-11-05,
+/// sheetspill/probe1.ps1]. The walker wrote the whole reference as `#REF!`, so
+/// a refresh's rewrite of an untouched upstream formula never matched the cell
+/// the subscriber's own delete had repaired.
+///
+/// SABOTAGE: make the gone arm of `walk_sheet_slots` write `ref_error()` again.
+#[test]
+fn the_refresh_gone_walker_and_the_sheet_delete_write_one_text() {
+    let gone = calp::sheet_renames::SheetRenames::default().with_gone(["Data"]);
+    // Sheet1, Data (deleted, index 1), Other.
+    let after = vec!["Sheet1".to_string(), "Other".to_string()];
+    for formula in [
+        "=Data!A1",
+        "=Data!$A$1*2",
+        "=SUM(Data!A1:A3)+1",
+        "=SUM(Data!A:A)",
+        "=SUM(Data!1:3)",
+        "=SUM(Data:Data!B1)",
+        "=@Data!A1:A9",
+        "=SUM(Data!A1#)",
+        "=-Data!A1",
+        "=Other!A1+Data!B2",
+        "=IF(Data!A1>0,Data!B1,Other!C1)",
+    ] {
+        let by_delete = crate::repair_formula_text_on_delete_at(formula, "Data", 1, &after)
+            .unwrap_or_else(|| panic!("the delete repairs {formula}"));
+        let by_refresh = gone.rename_formula(formula).unwrap_or_else(|| panic!("the walker rewrites {formula}"));
+        assert_eq!(by_refresh, by_delete, "one deletion, two texts for {formula}");
+        assert!(by_delete.contains("#REF!"), "{by_delete}");
+    }
+    assert_eq!(gone.rename_formula("=SUM(Data!A1:A3)").as_deref(), Some("=SUM(#REF!A1:A3)"));
 }
 
 /// A SECOND DEV SUBSCRIBE to the same source is refused before anything
@@ -5001,6 +5039,115 @@ fn a_new_application_from_a_subscribed_workbook_files_its_model_under_its_own_ke
     );
 }
 
+/// THE DATA-SOURCE IDENTITY CONTRACT, clause by clause (owner decision
+/// 2026-11-04, BUG-0616 note (c); docs/design/calp-workspace-collaboration.md
+/// "Data-source identity"). A data source's id is OWNED BY THE APPLICATION
+/// that publishes it:
+///   1. stable across that application's versions -- a subscriber's refresh
+///      re-uses its one connection (pinned end to end by
+///      `an_untouched_working_copy_push_keeps_every_subscribers_model_and_ribbon_filters`);
+///   2. a working copy pushing back to ITS OWN application keeps the id, in
+///      whichever spelling the workspace is reached (the marker file is the
+///      folder);
+///   3. anything published as a DIFFERENT application -- another name, or the
+///      same name in another workspace -- files it under a derived id of its
+///      own (a fork);
+///   4. ids are never shared across applications: the derived id is
+///      deterministic per (application, source id), distinct per application
+///      and per source, never the source's own; and a model ANOTHER
+///      subscription brought into a working copy is re-keyed even on a push to
+///      the working copy's own application;
+///   5. a package carrying an id another subscription claims is refused
+///      (`a_model_under_an_id_another_connection_serves_is_refused`,
+///      `after_an_open_that_connected_neither_shared_model_no_refresh_mints_one`).
+/// Clauses 2-4 are asked of `data_source_rekeys_for_target`, the one function
+/// every publish door (`assemble_publish_workbook`, `calp_publish_model`)
+/// consults; `push_working_copy` above bypasses it, so nothing else pins them.
+///
+/// SABOTAGES (separate builds): (1) make its filter keep every key (re-key
+/// even the working copy's own application) -- clause 2 fails. (2) drop
+/// `|| subscribed.contains(key)` -- clause 4's subscription case fails.
+#[test]
+fn the_data_source_identity_contract_holds_clause_by_clause() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let source_key = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &source_key);
+    let registry = dir.path().to_str().unwrap().to_string();
+
+    // A working copy of "literals".
+    let w = Harness::new();
+    w.empty_as_checkout_does();
+    w.materialize(checkout_pull(&dir, prof.path()), MaterializeMode::Checkout);
+    *w.state.working_copy_link.write(&test_effect()).unwrap() = Some(calp::WorkingCopyLink::new(
+        &registry,
+        "literals",
+        "report",
+        "1.0.0",
+        "2026-11-04T00:00:00Z",
+        Vec::new(),
+    ));
+    let (w_conn, _) = connection_for(&w, &source_key);
+    assert_ne!(w_conn.to_string(), source_key, "the premise: the checkout minted a session uuid");
+    let rekeys = |registry: &str, package: &str| {
+        crate::calp_commands::data_source_rekeys_for_target(&w.state, &w.bi, registry, package)
+            .expect("the rekey question answers")
+    };
+    let derived = crate::calp_commands::data_source_key_for_application;
+
+    // Clause 2: a push to its OWN application keeps the id...
+    assert!(
+        rekeys(&registry, "literals").is_empty(),
+        "a working copy pushing back to its own application must keep the data-source id"
+    );
+    // ...reached through the workspace's marker file too.
+    let marker = dir.path().join(calp::workspace_id::WORKSPACE_MARKER_FILE).to_str().unwrap().to_string();
+    assert!(rekeys(&marker, "literals").is_empty(), "the marker file names the same workspace");
+
+    // Clause 3: a different application -- a fork -- gets its own id.
+    let fork = rekeys(&registry, "literals-fork");
+    assert_eq!(
+        fork.get(&source_key),
+        Some(&derived("literals-fork", &source_key)),
+        "a working copy published as ANOTHER application files the model under that application's id"
+    );
+    let elsewhere = TempDir::new().unwrap();
+    let other_workspace = rekeys(elsewhere.path().to_str().unwrap(), "literals");
+    assert_eq!(
+        other_workspace.get(&source_key),
+        Some(&derived("literals", &source_key)),
+        "the same name in another workspace is another application"
+    );
+
+    // Clause 4: never shared across applications.
+    assert_eq!(derived("literals-fork", &source_key), derived("literals-fork", &source_key), "deterministic");
+    assert_ne!(derived("literals-fork", &source_key), source_key, "never the source's own id");
+    assert_ne!(derived("literals-fork", &source_key), derived("literals-fork2", &source_key), "distinct per application");
+    let other_source = new_entity().to_string();
+    assert_ne!(derived("literals-fork", &source_key), derived("literals-fork", &other_source), "distinct per source");
+    // The two inputs are NUL-separated: moving bytes between the application
+    // name and the source id does not land on another pair's id.
+    assert_ne!(derived("ab", "c"), derived("a", "bc"));
+
+    // ...and a model another SUBSCRIPTION brought into the working copy is
+    // that application's, never the working copy's: re-keyed even on a push
+    // to the working copy's own application.
+    let b_key = new_entity().to_string();
+    let mut model_wb = Workbook::default();
+    model_wb.sheets = vec![Sheet::new("Model".to_string())];
+    publish_with_model(&dir, prof.path(), &model_wb, vec![0], "model-b", (1, 0, 0), None, &b_key);
+    w.materialize(pull_latest(&dir, prof.path(), "model-b"), MaterializeMode::Subscribe);
+    let own = rekeys(&registry, "literals");
+    assert_eq!(
+        own.get(&b_key),
+        Some(&derived("literals", &b_key)),
+        "a subscribed model pushed in a working copy must be filed under the working copy's application's own id"
+    );
+    assert!(!own.contains_key(&source_key), "the application's own model still keeps its id: {own:?}");
+}
+
 /// THE SUBSCRIBER'S SIDE: a model arriving under an id another connection
 /// already serves is REFUSED, by name, before anything is written -- an
 /// application published before round 11 that re-used another's id, or a
@@ -5702,6 +5849,7 @@ fn a_checked_out_application_keeps_its_cube_and_custom_function_values_through_a
                 invariant: Some(true),
                 pasted: None,
                 moved: None,
+                source: None,
             }],
             None,
             None,
@@ -6227,4 +6375,258 @@ fn an_update_recalculates_the_subscribers_own_readers_of_a_refreshed_cell() {
         engine::CellValue::Number(14.0),
         "the subscriber's own Sheet1!A1 = Data!A1*2 kept v1's value after the update"
     );
+}
+
+// ===========================================================================
+// A package's NAMES are judged by the subscriber's own rule (round C)
+// ===========================================================================
+
+/// A one-column table on `sheet` (A1:A2, header "Amount").
+fn saved_table_named(sheet: identity::SheetId, name: &str) -> persistence::SavedTable {
+    persistence::SavedTable {
+        id: new_entity(),
+        name: name.to_string(),
+        sheet_id: sheet,
+        start_row: 0,
+        start_col: 0,
+        end_row: 1,
+        end_col: 0,
+        columns: vec![persistence::SavedTableColumn {
+            id: new_entity(),
+            name: "Amount".to_string(),
+            totals_row_function: "none".to_string(),
+            totals_row_formula: None,
+            calculated_formula: None,
+            totals_row_label: None,
+        }],
+        style_options: persistence::SavedTableStyleOptions {
+            banded_rows: true,
+            banded_columns: false,
+            header_row: true,
+            total_row: false,
+            first_column: false,
+            last_column: false,
+            show_filter_button: true,
+        },
+        style_name: "TableStyleMedium2".to_string(),
+    }
+}
+
+fn published_name(name: &str) -> calp::manifest::PublishedNamedRange {
+    calp::manifest::PublishedNamedRange {
+        name: name.to_string(),
+        refers_to: "=Data!$A$1".to_string(),
+        sheet_id: None,
+        extra: std::collections::HashMap::new(),
+    }
+}
+
+/// A SIGNED package carrying a name the subscriber's own UI refuses -- an
+/// R1C1-shaped or cell-shaped defined name (`R1C1`, `Q1`), a table named `C`,
+/// a table and a name sharing `Rate` -- used to land as it was: the Name
+/// Manager could not have made it, and an `.xlsx` export of the workbook is a
+/// file Excel refuses to open. Every door refuses the version whole, naming
+/// the item, before anything is written (renaming it would break the
+/// application's own formulas and hide that it shipped). The versions are
+/// tampered after the signature check, as a build without the publish gate
+/// would have signed them.
+///
+/// SABOTAGE: make `refuse_invalid_pulled_names` answer `Ok(())` at once --
+/// fails at "LANDED 'R1C1'".
+#[test]
+fn a_pulled_name_the_subscribers_ui_would_refuse_refuses_the_whole_pull() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    publish_sheets(&dir, prof.path(), &data_and_report(), vec![0, 1]);
+    let h = Harness::new();
+    let sheets_before = h.state.sheet_names.read().unwrap().clone();
+
+    type Tamper = fn(&mut calp::pull::PullResult);
+    let cases: [(&str, &str, Tamper); 4] = [
+        ("R1C1", "the defined name 'R1C1' is not a valid name", |p| p.named_ranges.push(published_name("R1C1"))),
+        ("Q1", "the defined name 'Q1' is not a valid name", |p| p.named_ranges.push(published_name("Q1"))),
+        ("C", "the table name 'C' is not a valid name", |p| {
+            let sheet = p.sheets[0].package_sheet_id;
+            p.tables.push(saved_table_named(sheet, "C"));
+        }),
+        ("rate", "the table 'rate' and the defined name 'Rate' have the same name", |p| {
+            let sheet = p.sheets[0].package_sheet_id;
+            p.tables.push(saved_table_named(sheet, "rate"));
+        }),
+    ];
+    for (item, sentence, tamper) in cases {
+        let mut pull = subscribe_pull(&dir, prof.path());
+        tamper(&mut pull);
+        let result = materialize_pull_result(
+            &h.state,
+            &test_effect(),
+            &h.pivot,
+            &h.bi,
+            &h.scripts,
+            &h.ribbon,
+            &h.pane,
+            &h.slicer,
+            &h.timeline,
+            pull,
+            MaterializeMode::Subscribe,
+            None,
+        );
+        let err = match result {
+            Ok(_) => panic!("LANDED '{item}': a package carrying it was materialized"),
+            Err(e) => e,
+        };
+        assert!(err.starts_with("CALP_INVALID_NAME: The application 'literals'"), "a structured refusal: {err}");
+        assert!(err.contains(sentence), "it names the item ({item}): {err}");
+        assert_eq!(*h.state.sheet_names.read().unwrap(), sheets_before, "{item}: nothing was installed");
+        assert!(h.state.named_ranges.read().unwrap().is_empty(), "{item}: no name landed");
+        assert!(h.state.subscriptions.read().unwrap().subscriptions.is_empty(), "{item}: no subscription");
+    }
+
+    // The control: the same version, untampered, lands -- with its name.
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    assert!(h.state.named_ranges.read().unwrap().contains_key("RATE"));
+
+    // A REFRESH carrying one is refused by its pre-effect pass, too.
+    let mut v2 = subscribe_pull(&dir, prof.path());
+    v2.named_ranges.push(published_name("RC1"));
+    let mut payloads = vec![calp::refresh::RefreshPayload { subscription_index: 0, pull_result: v2 }];
+    let err = crate::calp_commands::prepare_refresh_payloads(&h.state, &mut payloads)
+        .expect_err("a refresh bringing 'RC1' is refused");
+    assert!(err.contains("CALP_INVALID_NAME") && err.contains("'RC1'"), "{err}");
+
+    // Every door asks before its effect.
+    for door in ["pub fn calp_pull(", "pub fn calp_checkout(", "pub(crate) fn materialize_pull_result("] {
+        let code = crate_fn_code("src/calp_commands.rs", door);
+        let at = code
+            .find("refuse_invalid_pulled_names(")
+            .unwrap_or_else(|| panic!("{door} no longer refuses invalid names"));
+        if let Some(effect) = code.find("DocumentEffect::mutates(") {
+            assert!(at < effect, "{door} asks after its effect: a refusal would dirty the workbook");
+        }
+    }
+    let prepare = crate_fn_code("src/calp_commands.rs", "pub(crate) fn prepare_refresh_payloads(");
+    assert!(prepare.contains("refuse_invalid_pulled_names("), "the refresh's pre-effect pass asks");
+}
+
+/// THE PUBLISH DOOR refuses the same names, so such a version is never signed:
+/// a defined name Excel reads as a reference, and a table sharing a defined
+/// name.
+///
+/// SABOTAGE: delete the `published_name_problem` refusal from
+/// `calp::publish::publish` -- fails at "SIGNED".
+#[test]
+fn a_name_the_ui_would_refuse_is_never_published() {
+    let mut bad_name = data_and_report();
+    bad_name.named_ranges[0].name = "R1C1".to_string();
+    let mut shared = data_and_report();
+    let data = shared.sheets[0].id;
+    shared.tables = vec![saved_table_named(data, "RATE")];
+    for (what, wb, item) in [("an R1C1 name", bad_name, "'R1C1'"), ("a table named like a name", shared, "'RATE'")] {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+        let request = PublishRequest {
+            workbook: &wb,
+            package_name: "literals".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: "first".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-11-05T00:00:00Z".to_string(),
+            published_by: "author".to_string(),
+            writeback_regions: None,
+            model_writebacks: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            identity_policy: None,
+            min_app_version: String::new(),
+        };
+        let err = match publish::publish(&reg, &request, prof.path()) {
+            Ok(_) => panic!("SIGNED: {what} was published"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.starts_with("Cannot publish:") && err.contains(item), "{what}: {err}");
+    }
+}
+
+/// The subscriber's OWN names and tables keep their namespace: a pulled table
+/// named like a defined name the subscriber has is not added, nor a pulled
+/// name like a table the subscriber has -- the additive rule a same-kind
+/// collision already follows (the subscriber's own item wins). Before, both
+/// landed, making a pair no door of the workbook allows.
+///
+/// SABOTAGE: drop the `defined_name_keys` skip in `materialize_pulled_tables`
+/// -- fails at "TABLE SHADOWS"; drop the `table_names` skip of the subscribe's
+/// name materialization -- fails at "NAME SHADOWS".
+#[test]
+fn a_pulled_table_or_name_never_shares_a_name_with_the_subscribers_own() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut wb = data_and_report();
+    let data = wb.sheets[0].id;
+    wb.tables = vec![saved_table_named(data, "Sales")];
+    publish_sheets(&dir, prof.path(), &wb, vec![0, 1]);
+
+    let h = Harness::new();
+    let effect = test_effect();
+    h.state.named_ranges.write(&effect).unwrap().insert(
+        "SALES".to_string(),
+        crate::named_ranges::NamedRange {
+            name: "Sales".to_string(),
+            sheet_index: None,
+            refers_to: "=Sheet1!$B$1".to_string(),
+            comment: None,
+            folder: None,
+        },
+    );
+    let own_table = new_entity();
+    h.state.table_names.write(&effect).unwrap().insert("RATE".to_string(), (0, own_table));
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+
+    assert!(
+        !h.state.table_names.read().unwrap().contains_key("SALES"),
+        "TABLE SHADOWS: the pulled table 'Sales' landed beside the subscriber's defined name 'Sales'"
+    );
+    assert_eq!(h.state.named_ranges.read().unwrap()["SALES"].refers_to, "=Sheet1!$B$1", "the subscriber's name is kept");
+    assert!(
+        !h.state.named_ranges.read().unwrap().contains_key("RATE"),
+        "NAME SHADOWS: the pulled name 'Rate' landed beside the subscriber's table 'Rate'"
+    );
+    assert_eq!(h.state.table_names.read().unwrap()["RATE"].1, own_table, "the subscriber's table is kept");
+}
+
+/// A REFRESH upserts the publisher's latest names -- but never one a table of
+/// this workbook already holds: v2 of the application adds the name `Rate`
+/// while the subscriber has a table `Rate` of its own. Before, the upsert put
+/// a name and a table under one name.
+///
+/// SABOTAGE: drop the `table_names` skip of the refresh's name upsert in
+/// `apply_refresh_payloads` -- fails at "REFRESH SHADOWS".
+#[test]
+fn a_refreshed_name_never_shares_a_name_with_the_subscribers_table() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut v1 = data_and_report();
+    v1.named_ranges.clear();
+    publish_as(&dir, prof.path(), &v1, vec![0, 1], "literals", (1, 0, 0), None);
+
+    let h = Harness::new();
+    let own_table = new_entity();
+    h.state.table_names.write(&test_effect()).unwrap().insert("RATE".to_string(), (0, own_table));
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    assert!(h.state.named_ranges.read().unwrap().is_empty(), "precondition: v1 carries no name");
+
+    publish_as(&dir, prof.path(), &data_and_report(), vec![0, 1], "literals", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+    assert!(
+        !h.state.named_ranges.read().unwrap().contains_key("RATE"),
+        "REFRESH SHADOWS: the refreshed name 'Rate' landed beside the subscriber's table 'Rate'"
+    );
+    assert_eq!(h.state.table_names.read().unwrap()["RATE"].1, own_table, "the subscriber's table is kept");
 }

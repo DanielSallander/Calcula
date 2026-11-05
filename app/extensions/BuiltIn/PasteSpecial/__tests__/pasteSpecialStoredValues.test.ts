@@ -168,10 +168,13 @@ describe("on the sheet: Paste Values writes the stored value, never the display"
       { display: "5,50 kr", styleIndex: 6, stored: num(5.5) },
     ]);
     expect(await paste(copy, "values", "none", undefined, { startRow: 2, startCol: 5, endRow: 2, endCol: 5, type: "cells" } as never)).toBe(true);
+    // In the paste's ONE batch (BUG-0345).
     expect(h.log, "a value was re-typed from its display text").toEqual([
-      `batch ${JSON.stringify([{ row: 2, col: 5, value: "1.23456", invariant: true, pasted: true }])}`,
-      `batch ${JSON.stringify([{ row: 2, col: 6, value: String(1 / 3), invariant: true, pasted: true }])}`,
-      `batch ${JSON.stringify([{ row: 2, col: 7, value: "5.5", invariant: true, pasted: true }])}`,
+      `batch ${JSON.stringify([
+        { row: 2, col: 5, value: "1.23456", invariant: true, pasted: true },
+        { row: 2, col: 6, value: String(1 / 3), invariant: true, pasted: true },
+        { row: 2, col: 7, value: "5.5", invariant: true, pasted: true },
+      ])}`,
     ]);
   });
 
@@ -184,10 +187,12 @@ describe("on the sheet: Paste Values writes the stored value, never the display"
     ]);
     await paste(copy, "values");
     expect(h.log).toEqual([
-      `batch ${JSON.stringify([{ row: 2, col: 5, value: "'00123", invariant: true, pasted: true }])}`,
-      `batch ${JSON.stringify([{ row: 2, col: 6, value: "TRUE", invariant: true, pasted: true }])}`,
-      `batch ${JSON.stringify([{ row: 2, col: 7, value: "#N/A", invariant: true, pasted: true }])}`,
-      `batch ${JSON.stringify([{ row: 2, col: 8, value: "", invariant: true, pasted: true }])}`,
+      `batch ${JSON.stringify([
+        { row: 2, col: 5, value: "'00123", invariant: true, pasted: true },
+        { row: 2, col: 6, value: "TRUE", invariant: true, pasted: true },
+        { row: 2, col: 7, value: "#N/A", invariant: true, pasted: true },
+        { row: 2, col: 8, value: "", invariant: true, pasted: true },
+      ])}`,
     ]);
   });
 
@@ -214,12 +219,13 @@ describe("on the sheet: Paste Values writes the stored value, never the display"
     };
     copy.collectionTexts = new Map([["0,0", "[1,2]"]]);
     await paste(copy as never, "values");
-    expect(h.log).toEqual(["updateCell 2,5 [1,2]"]);
+    // An ENTRY in the paste's one batch (no `pasted` / `invariant`).
+    expect(h.log).toEqual([`batch ${JSON.stringify([{ row: 2, col: 5, value: "[1,2]" }])}`]);
   });
 
   it("positive control: a copy WITHOUT stored values keeps the display-text route", async () => {
     await paste(clip([{ display: "1.23", styleIndex: 4, stored: num(1.23456) }], false), "values");
-    expect(h.log).toEqual(["updateCell 2,5 1.23"]);
+    expect(h.log).toEqual([`batch ${JSON.stringify([{ row: 2, col: 5, value: "1.23" }])}`]);
   });
 });
 
@@ -235,11 +241,10 @@ describe("on the sheet: Paste Formulas and Paste All paste a constant's stored v
     expect(h.log).toEqual([`batch ${JSON.stringify([{ row: 2, col: 5, value: "=1/3", pasted: true }])}`]);
   });
 
-  it("Paste All of TRUE: the boolean, then the source's style", async () => {
+  it("Paste All of TRUE: the boolean, the source's style riding the same write", async () => {
     await paste(clip([{ display: "TRUE", styleIndex: 3, stored: { type: "boolean", value: true } }]), "all");
     expect(h.log).toEqual([
-      `batch ${JSON.stringify([{ row: 2, col: 5, value: "TRUE", invariant: true, pasted: true }])}`,
-      "setCellStyle 2,5 3",
+      `batch ${JSON.stringify([{ row: 2, col: 5, value: "TRUE", invariant: true, pasted: true, styleIndex: 3 }])}`,
     ]);
   });
 });

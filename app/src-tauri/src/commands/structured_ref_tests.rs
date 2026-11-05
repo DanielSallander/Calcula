@@ -656,12 +656,13 @@ fn deleting_a_table_leaves_its_readers_reporting_a_name_error() {
     // EXCEL, VERIFIED BY BEHAVIOUR RATHER THAN ASSUMED: there is no Excel
     // gesture that deletes a table object and leaves the cells, so the closest
     // parity question is what an UNRESOLVABLE structured reference does — and
-    // Excel answers `#NAME?`. The product's own `delete_table` command avoids
-    // the situation entirely by flattening every reference to the equivalent
-    // range first (`rewrite_table_refs_to_ranges`, which `convert_to_range`
-    // shares and which IS Excel's Convert to Range); this test covers the
-    // registry-level fact underneath it, so a future caller that forgets the
-    // flattening produces an ERROR rather than a stale number.
+    // Excel answers `#NAME?`. The product's own `delete_table` and
+    // `convert_to_range` commands avoid the situation entirely by rewriting
+    // every reference first (`retire_table_core`: `#REF!` for Delete, the
+    // sheet-qualified range for Convert to Range, as Excel's ListObject.Delete
+    // and Unlist do); this test covers the registry-level fact underneath it,
+    // so a future caller that forgets the rewrite produces an ERROR rather
+    // than a stale number.
     let wb = Workbook::new(1);
     wb.sales_fixture();
     wb.set(0, 2, "=SUM(Sales[Amount])");
@@ -1034,21 +1035,25 @@ fn renaming_a_sheet_restamps_the_formulas_that_qualify_it() {
 fn command_wiring() {
     let source = include_str!("../tables.rs");
     for command in [
-        "create_table",
-        "delete_table",
+        // The command is a wrapper; its body is `create_table_core`.
+        "create_table_core",
+        // Delete Table and Convert to Range are wrappers; their one body is
+        // `retire_table_core`.
+        "retire_table_core",
         // The command is a wrapper; the one rename route is its core, which
         // the JSON view's `table` arm also takes.
         "rename_table_core",
         "resize_table",
         "add_table_column",
         "remove_table_column",
-        "rename_table_column",
+        "rename_table_column_core",
         "enforce_table_header",
-        "convert_to_range",
-        "check_table_auto_expand",
-        "add_table_row",
-        "toggle_totals_row",
-        "set_totals_row_function",
+        // These four commands are wrappers over their `_core`s.
+        "check_table_auto_expand_core",
+        "add_table_row_core",
+        // The command is a wrapper; its body is `toggle_totals_row_core`.
+        "toggle_totals_row_core",
+        "set_totals_row_function_core",
     ] {
         let body = body_of(source, command);
         assert!(
@@ -1127,4 +1132,238 @@ fn a_dotless_i_function_typed_into_a_cell_calls_the_built_in() {
     let sep = wb.state.locale.lock().unwrap().list_separator;
     wb.set(0, 0, &format!("=\u{131}F(TRUE{sep}1{sep}2)"));
     assert_eq!(wb.number(0, 0, 0), 1.0);
+}
+
+/// BUG-0643. A SECOND special item is a special item, never a column, through
+/// the real entry path, the stored text and the table resolver. [LIVE, Excel
+/// 16, parser lane probe: Table1 over H1:H6 (header + 5 rows, no totals),
+/// Table4 over U1:V6 (header p/q, 4 rows, a totals row), Table5 over X2:X4 with
+/// its header row OFF.] `ROWS(Table1[[#Headers],[#Data]])` 6,
+/// `ROWS(Table1[[#Data],[#Totals]])` 5, `ROWS(Table4[[#Headers],[#Data]])` 5,
+/// `ROWS(Table4[[#Data],[#Totals]])` 5, `ROWS(Table4[[#Headers],[#Data],[p]:[q]])`
+/// 5, `COLUMNS(` the same `)` 2, `SUM(Table4[[#Data],[#Totals],[p]])` 10,
+/// `ROWS(Table4[[#Headers],[p]:[q]])` 1, `ROWS(Table5[[#Headers],[#Data]])` 3.
+/// Calcula read the second item as a column named `#Data` and answered #NAME?.
+#[test]
+fn a_second_special_item_reads_the_pairs_rows() {
+    let wb = Workbook::new(1);
+    let sep = wb.state.locale.lock().unwrap().list_separator;
+    // Table1: H1 header, H2:H6 = 2..6.
+    wb.set(0, 7, "Col");
+    for r in 1..=5u32 {
+        wb.set(r, 7, &(r + 1).to_string());
+    }
+    wb.add_table("Table1", 0, (0, 7, 5, 7), &["Col"]);
+    // Table4: U1:V1 headers, U2:V5 data, U6:V6 the totals row.
+    wb.set(0, 20, "p");
+    wb.set(0, 21, "q");
+    for r in 1..=4u32 {
+        wb.set(r, 20, &r.to_string());
+        wb.set(r, 21, &(10 * r).to_string());
+    }
+    wb.add_table("Table4", 0, (0, 20, 5, 21), &["p", "q"]);
+    // Table5: X2:X4 = 2..4, header row off.
+    for r in 1..=3u32 {
+        wb.set(r, 23, &(r + 1).to_string());
+    }
+    wb.add_table("Table5", 0, (1, 23, 3, 23), &["s"]);
+    {
+        let effect = crate::document_effect::test_seed_effect();
+        let mut tables = wb.state.tables.write(&effect).unwrap();
+        for t in tables.get_mut(&0).unwrap().values_mut() {
+            match t.name.as_str() {
+                "Table4" => t.style_options.total_row = true,
+                "Table5" => t.style_options.header_row = false,
+                _ => {}
+            }
+        }
+    }
+    let cases: [(&str, &str, f64); 9] = [
+        ("=ROWS(Table1[[#Headers]{s}[#Data]])", "ROWS(Table1[[#Headers],[#Data]])", 6.0),
+        ("=ROWS(Table1[[#Data]{s}[#Totals]])", "ROWS(Table1[[#Data],[#Totals]])", 5.0),
+        ("=ROWS(Table4[[#Headers]{s}[#Data]])", "ROWS(Table4[[#Headers],[#Data]])", 5.0),
+        ("=ROWS(Table4[[#Totals]{s}[#Data]])", "ROWS(Table4[[#Data],[#Totals]])", 5.0),
+        ("=ROWS(Table4[[#Headers]{s}[#Data]{s}[p]:[q]])", "ROWS(Table4[[#Headers],[#Data],[p]:[q]])", 5.0),
+        ("=COLUMNS(Table4[[#Headers]{s}[#Data]{s}[p]:[q]])", "COLUMNS(Table4[[#Headers],[#Data],[p]:[q]])", 2.0),
+        ("=SUM(Table4[[#Data]{s}[#Totals]{s}[p]])", "SUM(Table4[[#Data],[#Totals],[p]])", 10.0),
+        ("=ROWS(Table4[[#Headers]{s}[p]:[q]])", "ROWS(Table4[[#Headers],[p]:[q]])", 1.0),
+        ("=ROWS(Table5[[#Headers]{s}[#Data]])", "ROWS(Table5[[#Headers],[#Data]])", 3.0),
+    ];
+    for (i, (typed, stored, value)) in cases.iter().enumerate() {
+        let row = 10 + i as u32;
+        wb.set(row, 9, &typed.replace("{s}", &sep.to_string()));
+        assert_eq!(wb.formula_of(0, row, 9), *stored, "the formula bar shows Excel's spelling of {typed}");
+        assert_eq!(wb.number(0, row, 9), *value, "{stored}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BUG-0646 / BUG-0649 through the real entry path (parser lane, 2026-11-04).
+// The harness's entry is `update_cell_impl`, so each formula is spelled with
+// THIS machine's list separator.
+// ---------------------------------------------------------------------------
+
+/// BUG-0646: the range operator between two structured references, and
+/// between a name half and a cell half. [LIVE, Excel 16, parser lane probe:
+/// `SUM(Table1[Col]:Table1[Col])` 20, `SUM(Table4[p]:Table4[q])` 110,
+/// `ROWS(Table1[[#Headers],[#Data]]:Table1[Col])` 6, `LET(a,B2,SUM(a:C3))` 550.]
+/// Every one was a parse error, so the cell held the typed text.
+#[test]
+fn the_range_operator_spans_structured_references_and_name_halves() {
+    let wb = Workbook::new(1);
+    let sep = wb.state.locale.lock().unwrap().list_separator.to_string();
+    wb.set(0, 7, "Col");
+    for r in 1..=5u32 {
+        wb.set(r, 7, &(r + 1).to_string());
+    }
+    wb.add_table("Table1", 0, (0, 7, 5, 7), &["Col"]);
+    // Table6 over Z1:AB3: a, b, c -- the span must reach b, which neither half names.
+    for (c, name) in [(25u32, "a"), (26, "b"), (27, "c")] {
+        wb.set(0, c, name);
+        wb.set(1, c, "1");
+        wb.set(2, c, "1");
+    }
+    wb.add_table("Table6", 0, (0, 25, 2, 27), &["a", "b", "c"]);
+    for r in 0..5u32 {
+        let n = r + 1;
+        wb.set(r, 0, &n.to_string());
+        wb.set(r, 1, &(10 * n).to_string());
+        wb.set(r, 2, &(100 * n).to_string());
+    }
+    wb.set(10, 9, "=SUM(Table1[Col]:Table1[Col])");
+    assert_eq!(wb.formula_of(0, 10, 9), "SUM(Table1[Col]:Table1[Col])");
+    assert_eq!(wb.number(0, 10, 9), 20.0);
+    wb.set(11, 9, &format!("=ROWS(Table1[[#Headers]{sep}[#Data]]:Table1[Col])"));
+    assert_eq!(wb.number(0, 11, 9), 6.0);
+    wb.set(12, 9, "=SUM(Table6[a]:Table6[c])");
+    assert_eq!(wb.number(0, 12, 9), 6.0);
+    // The precedent is the RECTANGLE: an edit to column b, which neither half
+    // names, recalculates the sum.
+    wb.set(1, 26, "11");
+    assert_eq!(wb.number(0, 12, 9), 16.0, "column b is inside Table6[a]:Table6[c]");
+    wb.set(13, 9, &format!("=LET(a{sep}B2{sep}SUM(a:C3))"));
+    assert_eq!(wb.number(0, 13, 9), 550.0);
+    wb.set(14, 9, &format!("=LET(b{sep}A3{sep}SUM(A1:b))"));
+    assert_eq!(wb.number(0, 14, 9), 6.0);
+    wb.set(15, 9, "=SUM(sheet1!A1:SHEET1!A3)");
+    assert_eq!(wb.formula_of(0, 15, 9), "SUM(Sheet1!A1:Sheet1!A3)", "both qualifiers, spelled as the tab is");
+    assert_eq!(wb.number(0, 15, 9), 6.0);
+}
+
+/// BUG-0646: `a#` where a LET name or an invoked LAMBDA's parameter is bound to
+/// a spill anchor [LIVE, Excel 16, E5 = `=SEQUENCE(3)`: `LET(a,E5,SUM(a#))` 6,
+/// `LET(a,E5,ROWS(a#))` 3, `LAMBDA(a,ROWS(a#))(E5)` 3,
+/// `LET(a,SEQUENCE(3),SUM(a#))` #VALUE!]. The cell keeps `a#` as typed.
+#[test]
+fn a_spill_after_a_bound_name_reads_the_anchors_array() {
+    let wb = Workbook::new(1);
+    let sep = wb.state.locale.lock().unwrap().list_separator.to_string();
+    wb.set(4, 4, "=SEQUENCE(3)");
+    assert_eq!(wb.number(0, 6, 4), 3.0, "fixture: E5 spills to E7");
+    wb.set(1, 9, &format!("=LET(a{sep}E5{sep}SUM(a#))"));
+    assert_eq!(wb.number(0, 1, 9), 6.0);
+    assert!(wb.formula_of(0, 1, 9).ends_with("SUM(A#))") || wb.formula_of(0, 1, 9).ends_with("SUM(a#))"));
+    wb.set(2, 9, &format!("=LET(a{sep}E5{sep}ROWS(a#))"));
+    assert_eq!(wb.number(0, 2, 9), 3.0);
+    wb.set(3, 9, "=LAMBDA(a,ROWS(a#))(E5)".replace(',', &sep).as_str());
+    assert_eq!(wb.number(0, 3, 9), 3.0);
+    wb.set(5, 9, &format!("=LET(a{sep}SEQUENCE(3){sep}SUM(a#))"));
+    assert_eq!(wb.value(0, 5, 9), CellValue::Error(engine::CellError::Value));
+}
+
+/// BUG-0649: a bare `C` / `R` / `RC` / `R2C` / `R1C1` that no binder names is
+/// Excel's R1C1 reference to THIS cell's column / row / cell, rewritten to A1
+/// at entry. [LIVE, Excel 16, parser lane probe, column J: `=LET(a,1,a+C)` is
+/// stored `=LET(a,1,a+J:J)`, `=R*0` in J52 `=52:52*0`, `=RC*0` in J53
+/// `=J53*0`, `=R2C*0` `=J$2*0`, `=R1C1*0` `=$A$1*0`, `=LET(c,5,c+C)` 10.]
+/// Calcula read each as an undefined name and answered #NAME?.
+#[test]
+fn a_bare_r1c1_name_is_this_cells_reference_at_entry() {
+    let wb = Workbook::new(1);
+    let sep = wb.state.locale.lock().unwrap().list_separator.to_string();
+    wb.set(0, 0, "4"); // A1
+    wb.set(1, 9, "7"); // J2
+    // J10: R2C is J$2, R1C1 is $A$1 -- neither reads the formula's own cell.
+    wb.set(9, 9, "=R2C*1");
+    assert_eq!(wb.formula_of(0, 9, 9), "J$2*1");
+    assert_eq!(wb.number(0, 9, 9), 7.0);
+    wb.set(10, 9, &format!("=LET(a{sep}1{sep}a+R1C1)"));
+    assert!(wb.formula_of(0, 10, 9).ends_with("+$A$1)"), "{}", wb.formula_of(0, 10, 9));
+    assert_eq!(wb.number(0, 10, 9), 5.0);
+    // The own column / row / cell: the A1 form Excel stores.
+    wb.set(4, 9, &format!("=LET(a{sep}1{sep}a+C)"));
+    assert!(wb.formula_of(0, 4, 9).ends_with("+J:J)"), "{}", wb.formula_of(0, 4, 9));
+    wb.set(51, 9, "=R*0");
+    assert_eq!(wb.formula_of(0, 51, 9), "52:52*0");
+    wb.set(52, 9, "=RC*0");
+    assert_eq!(wb.formula_of(0, 52, 9), "J53*0");
+    for (row, col) in [(4u32, 9u32), (51, 9), (52, 9)] {
+        assert_ne!(
+            wb.value(0, row, col),
+            CellValue::Error(engine::CellError::Name),
+            "({row},{col}) still reads an undefined name"
+        );
+    }
+    // A binder of that spelling is the binding.
+    wb.set(20, 9, &format!("=LET(c{sep}5{sep}c+C)"));
+    assert_eq!(wb.number(0, 20, 9), 10.0);
+    wb.set(21, 9, &format!("=LET(C{sep}1{sep}C)"));
+    assert_eq!(wb.number(0, 21, 9), 1.0);
+}
+
+/// NEW-headerless-headers-ref: a region the table does not have is `#REF!`.
+/// [LIVE, Excel 16, 2026-11-05, tablefix-probe/probe1.ps1, a one-column
+/// table TK with its header row off and no totals row]
+/// `=ROWS(TK[#Headers])`, `=TK[[#Headers],[Col1]]`, `=ROWS(TK[#Totals])` and
+/// `=ROWS(TK[[#Totals],[Col1]])` are `#REF!`; `=ISREF(TK[#Headers])` is
+/// FALSE, `=ERROR.TYPE(TK[#Headers])` 4, and the pair
+/// `=ROWS(TK[[#Headers],[#Data]])` still 3. It was an unknown name here
+/// (`#NAME?`). The positive control: the same reference to a table WITH a
+/// header row is that row.
+/// SABOTAGE (tablefix-ref): `missing_table_region` back to the
+/// `_UNRESOLVED_HEADERS` name.
+#[test]
+fn a_region_the_table_does_not_have_is_a_ref_error() {
+    let wb = Workbook::new(1);
+    // The formulas below are typed with Excel's en-US separators.
+    *wb.state.locale.lock().unwrap() = engine::LocaleSettings::from_locale_id("en-US");
+    wb.set(0, 0, "1");
+    wb.set(1, 0, "2");
+    wb.set(2, 0, "3");
+    wb.add_table("TK", 0, (0, 0, 2, 0), &["Col1"]);
+    {
+        let effect = crate::document_effect::test_seed_effect();
+        let id = wb.table_id_of("TK");
+        let mut tables = wb.state.tables.write(&effect).unwrap();
+        tables.get_mut(&0).unwrap().get_mut(&id).unwrap().style_options.header_row = false;
+    }
+    wb.table_changed(&["TK"]);
+    let typed = [
+        "=ROWS(TK[#Headers])",
+        "=TK[[#Headers],[Col1]]",
+        "=ROWS(TK[#Totals])",
+        "=ROWS(TK[[#Totals],[Col1]])",
+    ];
+    for (i, formula) in typed.iter().enumerate() {
+        wb.set(i as u32, 3, formula);
+        assert_eq!(
+            wb.value(0, i as u32, 3),
+            CellValue::Error(engine::CellError::Ref),
+            "{} over a headerless table with no totals row",
+            formula
+        );
+    }
+    wb.set(5, 3, "=ISREF(TK[#Headers])");
+    assert_eq!(wb.value(0, 5, 3), CellValue::Boolean(false));
+    wb.set(6, 3, "=ERROR.TYPE(TK[#Headers])");
+    assert_eq!(wb.number(0, 6, 3), 4.0);
+    wb.set(7, 3, "=ROWS(TK[[#Headers],[#Data]])");
+    assert_eq!(wb.number(0, 7, 3), 3.0);
+
+    wb.set(0, 6, "H");
+    wb.set(1, 6, "5");
+    wb.add_table("TW", 0, (0, 6, 1, 6), &["H"]);
+    wb.table_changed(&["TW"]);
+    wb.set(10, 3, "=ROWS(TW[#Headers])");
+    assert_eq!(wb.number(0, 10, 3), 1.0, "positive control: a table with a header row");
 }

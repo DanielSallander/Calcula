@@ -26,8 +26,67 @@ import {
   layoutStackedText,
   stackedTextExtent,
   rotatedHorizontalSide,
+  rotatedWrapLength,
+  layoutRotatedLines,
   ORIENTATION_LINE_HEIGHT_FACTOR,
 } from "./textOrientation";
+
+describe("rotated text on several lines (BUG-0363)", () => {
+  // Excel [LIVE] 2026-11-04: Rotate Text Up with Wrap Text breaks at the ROW
+  // HEIGHT (column AutoFit 117.75pt in a 30pt row, 60.75pt in a 60pt row; one
+  // line 18pt), and at 45 degrees along the slant through the height.
+  const BOX = { left: 0, top: 0, right: 100, bottom: 80 };
+  const LH = 10;
+
+  it("wraps along the text: the box height at +-90, the slant at an angle", () => {
+    expect(rotatedWrapLength(90, BOX)).toBe(80);
+    expect(rotatedWrapLength(-90, BOX)).toBe(80);
+    expect(rotatedWrapLength(45, BOX)).toBeCloseTo(80 * Math.SQRT2, 9);
+  });
+
+  it("one line is placed exactly as a single rotated run", () => {
+    const one = layoutRotatedLines({ degrees: 90, lines: [{ text: "ab", width: 30 }], lineHeight: LH, box: BOX, hAlign: "general", vAlign: "bottom" });
+    const run = layoutRotatedText({ degrees: 90, textWidth: 30, lineHeight: LH, box: BOX, hAlign: "general", vAlign: "bottom" });
+    expect({ cx: one.cx, cy: one.cy, radians: one.radians }).toEqual({ cx: run.cx, cy: run.cy, radians: run.radians });
+    expect(one.lines).toEqual([{ text: "ab", x: -15, y: 0 }]);
+  });
+
+  it("Rotate Text Up: lines stack across the cell, the first one LEFTMOST, each starting at the bottom", () => {
+    const p = layoutRotatedLines({
+      degrees: 90,
+      lines: [{ text: "one two ", width: 48 }, { text: "three four", width: 60 }],
+      lineHeight: LH,
+      box: BOX,
+      hAlign: "general",
+      vAlign: "bottom",
+    });
+    // The block is 60 along the text by 2 lines across it, at the right edge
+    // (General +90) and its start at the bottom.
+    expect(p.cx).toBeCloseTo(100 - LH, 9);
+    expect(p.cy).toBeCloseTo(80 - 30, 9);
+    // In the rotated frame (-90deg on screen), +y is screen RIGHT: line 0 sits
+    // left of line 1.
+    expect(p.lines.map((l) => l.y)).toEqual([-LH / 2, LH / 2]);
+    // Bottom-aligned Rotate Text Up: every line STARTS at the block's start.
+    expect(p.lines.map((l) => l.x)).toEqual([-30, -30]);
+  });
+
+  it("Top alignment ends every line at the top; Rotate Text Down mirrors it", () => {
+    const up = layoutRotatedLines({
+      degrees: 90,
+      lines: [{ text: "a", width: 20 }, { text: "bb", width: 40 }],
+      lineHeight: LH, box: BOX, hAlign: "general", vAlign: "top",
+    });
+    expect(up.lines.map((l) => l.x + (l.text === "a" ? 20 : 40))).toEqual([20, 20]);
+    const down = layoutRotatedLines({
+      degrees: -90,
+      lines: [{ text: "a", width: 20 }, { text: "bb", width: 40 }],
+      lineHeight: LH, box: BOX, hAlign: "general", vAlign: "top",
+    });
+    // Rotate Text Down reads top-to-bottom: Top is where each line STARTS.
+    expect(down.lines.map((l) => l.x)).toEqual([-20, -20]);
+  });
+});
 
 /** 8px per character, the measure every case below uses. */
 const measure = (text: string): number => text.length * 8;

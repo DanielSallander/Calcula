@@ -95,6 +95,23 @@ export interface ApiChangelogEntry {
  * Round 9 changed the scripting reach (BUG-0616): whole-line formats and
  * clears, a contents clear in an approved macro's run, and a sandboxed
  * extension's scheduled job calling a method published for its own jobs.
+ * The open-ledger programme (2026-11-04/05) widened an approved macro's run
+ * to formatting (owner decision) and bounded the restricted tier's non-line
+ * format rectangles (BUG-0659); scripts gained Insert / Delete Cells and the
+ * recorder records them (RecordedGridEvent.insertCells / .deleteCells); a
+ * conditional format can hide a cell's value (IStyleOverride.hideValue), a
+ * pivot field sorts by one group's values (SortPivotFieldRequest
+ * .scopeGroupPath), Ctrl+click areas reach formatting (FormattingArea), the
+ * audit log can include this computer's trail (MachineAuditTrail), a
+ * control's container keys are one closed list per type
+ * (CONTROL_PAINTED_CONTAINER_FIELDS) and a module run's queued cell styles
+ * are applied in its own undo step (ScriptRunSuccess.formattingApplied).
+ * Its rounds C-E added the BI format-culture seam (@api/locale), a move's
+ * paste source (PasteSource.unshifted) and Paste Special's
+ * (clipboardSourceStandsAt), a model measure's non-finite value
+ * (PivotCellData.nonFinite, nonFiniteNumberText) and a table column's
+ * remembered totals constant (TableColumn.totalsRowLabel), and changed
+ * merges, table deletes and totals rows to Excel's rules.
  * Rounds 9-10 (BUG-0614) gave the stores whose cell coordinates the backend
  * never holds one way to follow every coordinate change (@api/structuralFollow):
  * an Undo / Redo hands them the changes it made as STRUCTURED DELTAS read from
@@ -127,6 +144,18 @@ export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
       // ---- A recorded grid event says which sheet it WROTE when that was not
       // the active sheet, so a recorded grouped or off-sheet gesture replays
       // there (each arm's own member; "kind:" never crossed by the pattern).
+      // ---- The macro recorder hears Excel's Insert / Delete Cells (BUG-0358,
+      // 2026-11-05): the block, the shift and the answer to unmerging.
+      {
+        name: "RecordedGridEvent.insertCells",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: 'kind: "insertCells";(?:(?!kind:)[\\s\\S])*?unmergeCutMerges: boolean;',
+      },
+      {
+        name: "RecordedGridEvent.deleteCells",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: 'kind: "deleteCells";(?:(?!kind:)[\\s\\S])*?unmergeCutMerges: boolean;',
+      },
       {
         name: "RecordedGridEvent.clearRange.sheetIndex",
         declaredIn: "src/core/lib/tauri-api.ts",
@@ -319,6 +348,115 @@ export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
       // something can be asked between them (unsaved changes made meanwhile).
       { name: "workbook.pickFileToOpen", declaredIn: "src/api/system.ts", pattern: "\\n  pickFileToOpen,\\n" },
       { name: "workbook.openAtPath", declaredIn: "src/api/system.ts", pattern: "\\n  openAtPath: openFileAtPath,\\n" },
+      // ---- The open-ledger programme, rounds A and B (2026-11-04/05), lane by
+      // lane (each lane's report "API:" lines).
+      // render: a conditional format's Show Bar Only / Show Icon Only, and a
+      // data bar's axis and negative direction.
+      {
+        name: "IStyleOverride.hideValue",
+        declaredIn: "src/api/styleInterceptors.ts",
+        pattern: "export interface IStyleOverride \\{(?:(?!\\n\\})[\\s\\S])*?hideValue\\?: boolean;",
+      },
+      {
+        name: "CellConditionalFormat.dataBarAxis",
+        declaredIn: "src/api/backend.ts",
+        pattern: "export interface CellConditionalFormat \\{(?:(?!\\n\\})[\\s\\S])*?dataBarAxis\\?: number;",
+      },
+      {
+        name: "CellConditionalFormat.dataBarNegative",
+        declaredIn: "src/api/backend.ts",
+        pattern: "export interface CellConditionalFormat \\{(?:(?!\\n\\})[\\s\\S])*?dataBarNegative\\?: boolean;",
+      },
+      {
+        name: "CellConditionalFormat.hideValue",
+        declaredIn: "src/api/backend.ts",
+        pattern: "export interface CellConditionalFormat \\{(?:(?!\\n\\})[\\s\\S])*?hideValue\\?: boolean;",
+      },
+      // bi: sort a pivot field by the values of ONE row / column group.
+      {
+        name: "SortPivotFieldRequest.scopeGroupPath",
+        declaredIn: "src/api/pivotTypes.ts",
+        pattern: "export interface SortPivotFieldRequest \\{(?:(?!\\n\\})[\\s\\S])*?scopeGroupPath\\?: Array<\\[number, number\\]>;",
+      },
+      // multiarea: Ctrl+click areas everywhere, and the shown text of a cell.
+      { name: "FormattingArea", declaredIn: "src/core/types/types.ts", pattern: "export interface FormattingArea \\{" },
+      { name: "shownGeneralTextAt", module: "@api/shownCellText" },
+      { name: "AutoFitRowSpan", declaredIn: "src/api/autoFitContributors.ts", pattern: "export interface AutoFitRowSpan \\{" },
+      {
+        name: "FormulaShiftInput.sourceRow",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface FormulaShiftInput \\{(?:(?!\\n\\})[\\s\\S])*?sourceRow\\?: number;",
+      },
+      {
+        name: "FormulaShiftInput.sourceCol",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface FormulaShiftInput \\{(?:(?!\\n\\})[\\s\\S])*?sourceCol\\?: number;",
+      },
+      // calpdec: this computer's audit trail of rows no open workbook holds.
+      { name: "MachineAuditTrail", declaredIn: "src/api/collaboration.ts", pattern: "export interface MachineAuditTrail \\{" },
+      { name: "MachineAuditEntry", declaredIn: "src/api/collaboration.ts", pattern: "export interface MachineAuditEntry extends AuditEntry \\{" },
+      {
+        name: "AuditLog.machine",
+        declaredIn: "src/api/collaboration.ts",
+        pattern: "machine\\?: MachineAuditTrail;",
+      },
+      // scriptb: the container keys each control type paints (BUG-0491), and a
+      // module run's queued cell styles applied in its own undo step.
+      // miscb: a paste write names its SOURCE cell; the backend writes what it
+      // holds at write time.
+      {
+        name: "CellUpdateInput.source",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface CellUpdateInput \\{(?:(?!\\n\\})[\\s\\S])*?source\\?: PasteSource;",
+      },
+      { name: "PasteSource", declaredIn: "src/core/lib/tauri-api.ts", pattern: "export interface PasteSource \\{" },
+      // uic: Excel's Worksheet.FilterMode for the active sheet (AutoSum, Ctrl+Enter).
+      { name: "isActiveSheetFilterMode", module: "@api/autoFilterService" },
+      { name: "CONTROL_PAINTED_CONTAINER_FIELDS", module: "@api/visualContainer" },
+      { name: "controlPaintsContainerField", module: "@api/visualContainer" },
+      { name: "controlPaintsContainerKey", module: "@api/visualContainer" },
+      {
+        name: "ScriptRunSuccess.formattingApplied",
+        declaredIn: "src/api/workbookScripts.ts",
+        pattern: "export interface ScriptRunSuccess \\{(?:(?!\\n\\})[\\s\\S])*?formattingApplied\\?: boolean;",
+      },
+      {
+        name: "ScriptSideEffects.formattingApplied",
+        declaredIn: "src/api/workbookScripts.ts",
+        pattern: "export interface ScriptSideEffects \\{(?:(?!\\n\\})[\\s\\S])*?formattingApplied\\?: boolean;",
+      },
+      // bic (round C): the ONE seam for "every BI model engine now writes DAX
+      // FORMAT in the app locale" -- a model re-query after a locale switch
+      // waits for it, since LOCALE_CHANGED fires before Rust's walk ends.
+      { name: "onBiFormatCultureApplied", module: "@api/locale" },
+      { name: "getBiFormatCultureGeneration", module: "@api/locale" },
+      { name: "BI_FORMAT_CULTURE_APPLIED_EVENT", module: "@api/locale" },
+      { name: "AppEvents.BI_FORMAT_CULTURE_APPLIED", module: "@api/events" },
+      // clipc (round C): a paste write that MOVES its source (Cut + Paste, a
+      // drag move) lands the source's formula unshifted.
+      {
+        name: "PasteSource.unshifted",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface PasteSource \\{(?:(?!\\n\\})[\\s\\S])*?unshifted\\?: boolean;",
+      },
+      // pastec (round D): whether a pending copy's recorded positions still
+      // name its source cells, so a Paste Special write may name them.
+      { name: "clipboardSourceStandsAt", module: "@api/lib" },
+      // dfcase (round D): a model measure's non-finite value (1/0, -1/0, 0/0)
+      // on the pivot wire, and Power BI's words for it on a canvas visual.
+      {
+        name: "PivotCellData.nonFinite",
+        declaredIn: "src/api/pivotTypes.ts",
+        pattern: "export interface PivotCellData \\{(?:(?!\\n\\})[\\s\\S])*?nonFinite\\?: NonFiniteNumber;",
+      },
+      { name: "NonFiniteNumber", declaredIn: "src/api/locale.ts", pattern: "export type NonFiniteNumber = " },
+      { name: "nonFiniteNumberText", module: "@api/locale" },
+      // cfdv (round D): a table column's remembered totals-row constant.
+      {
+        name: "TableColumn.totalsRowLabel",
+        declaredIn: "src/api/backend.ts",
+        pattern: "export interface TableColumn \\{(?:(?!\\n\\})[\\s\\S])*?totalsRowLabel\\?: string;",
+      },
     ],
     changed: [
       "STRUCTURAL_UNDO's payload is StructuralUndoPayload (rounds 9-10, BUG-0614): an Undo or Redo of a structural step carries source \"undo\" | \"redo\" and deltas, the coordinate changes it made in the order made, as the backend read them from the step (UndoResult.structuralDeltas: an undo reports the INVERSE of each change, newest first; a redo each change again, oldest first; a grouped step every edit; Insert / Delete Cells its band), and Insert / Delete Cells announces it with source \"edit\" and its band (CellShiftResult.delta) -- never parse the description; an Undo / Redo of a step that moved cells but restored no structure (a Cut + Paste) announces CELLS_MOVED instead",
@@ -342,8 +480,15 @@ export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
       "the Undo of a moved block (a Cut + Paste, a drag, a merge's moved value) overwrites nothing: a cell bookmark or a Watch Window entry on a cell the block returns to stays, as Excel's watch does [LIVE] (round 12); the Redo moves the block again and overwrites again",
       "a drag-move of cells is all or nothing (round 12): a refused destination write, source clear or relocation takes the whole move back to a savepoint, commits nothing and announces nothing; and a drag, a Cut + Paste or a Copy + Paste of sheet cells that would run past the sheet's last row or column is refused whole with Excel's words [LIVE] -- it used to write the part that fit, clear the whole source and announce the whole block as moved (a floating grid's own extent still clamps)",
       "a sandboxed (worker) extension's context.capabilities.schedule gains expose(name, fn) (round 9, BUG-0616 #3; not an @api export -- the worker realm's own context): it publishes fn under name for the extension's OWN scheduled jobs, so schedule.every / schedule.at have something to run (Excel's Application.OnTime calls a named procedure; before it every such job failed at every firing); nothing else can call it, it needs the schedule capability, a firing runs at most 30 s, and it resolves to a function that withdraws the name",
-      "a script's format and clear take WHOLE rows, WHOLE columns and the whole sheet in one call (round 9, BUG-0616 #1), as VBA's Columns(\"C\").ClearFormats / Rows(5).Font.Bold = True / Cells.ClearFormats do: api.setRangeFormat, api.clearRangeFormat, api.clearRange and their sheet.* twins accept a rectangle that is whole lines or almost-whole lines (A2:D1048576) at any size -- the backend writes them as row / column formats -- and any other rectangle up to 4,000,000 cells (was 100,000 for every rectangle); reads, value writes, api.applyNamedStyle and every other range call keep 100,000, and a recorded whole-column format or Clear Formats now replays as that one call",
-      "an approved application macro that you run (owner decision B) may call api.clearRange with { applyTo: \"contents\" } on any sheet -- Range.ClearContents, cell access like a write: Rust's grant, every cell it changed on the run's trail, the run undone whole if it fails (round 9, BUG-0616 #2); \"formats\" and \"all\" stay refused (formatting is not cell access), and the pre-flight names a clear that does not say \"contents\" before anything runs. clearRangeWithOptions on a sheet other than the active one now answers the cells it changed (updatedCells, each with its sheetIndex) where it answered none",
+      "a script's format and clear take WHOLE rows, WHOLE columns and the whole sheet in one call (round 9, BUG-0616 #1), as VBA's Columns(\"C\").ClearFormats / Rows(5).Font.Bold = True / Cells.ClearFormats do: api.setRangeFormat, api.clearRangeFormat, api.clearRange and their sheet.* twins accept a rectangle that is whole lines or almost-whole lines (A2:D1048576) at any size -- the backend writes them as row / column formats -- and any other rectangle up to 4,000,000 cells (was 100,000 for every rectangle) for the user's own code -- the RESTRICTED tier (the sheet.* format rows, and an application macro's granted run whatever row it reaches) keeps 100,000 for a rectangle that is not whole lines (BUG-0659, 2026-11-05: every such position is a stored cell and an undo entry); reads, value writes, api.applyNamedStyle and every other range call keep 100,000, and a recorded whole-column format or Clear Formats now replays as that one call",
+      "an approved application macro that you run (owner decision B) may call api.clearRange with { applyTo: \"contents\" } on any sheet -- Range.ClearContents, cell access like a write: Rust's grant, every cell it changed on the run's trail, the run undone whole if it fails (round 9, BUG-0616 #2); \"formats\" and \"all\" join with the formatting grant below (they were refused until 2026-11-04). clearRangeWithOptions on a sheet other than the active one now answers the cells it changed (updatedCells, each with its sheetIndex) where it answered none",
+      "an approved application macro that you run (owner decision B) may also change FORMATTING on any sheet (owner, 2026-11-04): api.setRangeFormat (font, colour, fill, alignment, number format, borders incl. the range edges -- never locked / formulaHidden, which are protection), api.clearRangeFormat, api.clearRange \"formats\" / \"all\", api.applyNamedStyle, the row-height / column-width rows and the AutoFit rows (never on a HIDDEN line: a resize would show it), the format reads, and the restricted sheet.setRangeFormat / sheet.clearRangeFormat while the grant lasts; Rust co-decides it (the mount gate's formatAccess), every formatting change is on the run's trail per sheet, and a run that fails part-way takes its formatting back with its cells. Hiding, conditional formats, validation, creating or deleting a named style, merges and every sheet-level setting stay outside it; a run a script starts never has it. The pre-flight names a setRangeFormat that sets locked or formulaHidden before anything runs",
+      "a script's api.mergeCells of a block with nothing to merge -- one cell, or a block that is already exactly that merge -- returns quietly, as Excel's Range(\"A1\").Merge does [LIVE] (BUG-0283); it used to throw \"the range overlaps an existing merge\". A real overlap is refused in the backend's own words",
+      "scripts gain Excel's Insert / Delete Cells (BUG-0358; VBA Range.Insert Shift / Range.Delete Shift): api.insertCells(startRow, startCol, endRow, endCol, \"right\" | \"down\", { unmergeCutMerges? }) and api.deleteCells(..., \"left\" | \"up\", ...) on the active sheet, over the same wrappers as Home > Insert Cells... (a block spanning every column / row is an entire-row / -column edit); a shift that would cut a merged block is refused with Excel's question, nothing changed, unless unmergeCutMerges says to go on. insertCellsRange / deleteCellsRange record an applied shift for the macro recorder (RecordedGridEvent.insertCells / .deleteCells), which replays it as that call",
+      "on the sheet on screen, insertRows / insertColumns / deleteRows / deleteColumns ask the grid to re-read its row heights and column widths (window \"dimensions:refresh\") themselves (BUG-0360), so every caller -- a script's table row insert, Insert Copied Cells' whole rows, an extension -- repaints the shifted sizes; insertCellsRange / deleteCellsRange's whole-line route no longer asks a second time",
+      "BINDABLE_PATHS (@api/objectBindings) drops the slicer / timeline slicer / floating grid container rows of fields those families never paint (title.wrap, subtitle.*, divider.*, spacing.belowSubtitle / belowDivider; spacing.custom / belowTitle on a floating grid) (BUG-0491)",
+      "resolveVisualContainer (@api/visualContainer): a BOUND valid solid background.color paints as a solid background -- over a stored gradient, and shown unless background.show is bound too (BUG-0510)",
+      "a control's background and border have ONE spelling (BUG-0491): set_control_property, set_control_appearance and an objectBindings set / setLiteral refuse a non-empty containerBackground{Show,Color} / containerBorder{Show,Color,Width} on a shape, text box, button or picture, naming the real key (fill, stroke / borderColor, strokeWidth); a page navigator's containerBackgroundColor, written or bound, also shows its background (containerBackgroundShow \"true\", BUG-0510)",
       "handleGlobalKeyDown: prevents the default of every F5 and BrowserRefresh (with or without Ctrl or Shift) and every Ctrl+R / Ctrl+Shift+R (by character or virtual key 82, so on any layout) -- never with Alt -- that no binding took -- during a cell edit, in a text field, with the keyboard on a ribbon button or a pane -- so WebView2 never reloads the page (BUG-0393); the key still propagates",
       "updateCellsBatch / updateCellOnSheets: a written CUBE formula shows its value instead of #N/A (BUG-0476): the write first asks the backend for exactly the cube data it evaluates (one cube_prefetch call more), which the backend serves to the cells it evaluates, and it latches the session's cube flag, so a later Calculate Now prefetches too; once the session has latched, EVERY updateCellsBatch on the sheet prefetches -- a paste, a fill or a setValue into a cube ARGUMENT cell re-evaluates the cube cell that reads it -- while a session that has written no CUBE formula keeps each batch ONE IPC call, and a batch on a floating grid's cells (target) never prefetches; updateCellOnSheets prefetches, one call per target sheet, only for a written CUBE formula -- any other value is one IPC call, latched or not",
       "insertRows / insertColumns / deleteRows / deleteColumns on a sheet other than the active one, or on a floating grid's cells, announce STRUCTURAL_EDIT_ELSEWHERE (once per burst: the first call at once, the calls of the following 50 ms in one trailing announcement), TABLE_DEFINITIONS_UPDATED and a cell refetch (\"grid:refresh\"), plus MUTATION_REFRESH { domains: ['slicer', 'pivot', 'ribbonFilter'] } after a delete on another sheet -- never STRUCTURAL_UNDO or the objects domain, so nothing on the sheet on screen is disturbed -- and the stores that cache what the backend moved there re-read it on STRUCTURAL_EDIT_ELSEWHERE: the chart and sparkline ranges (BUG-0357) and @api/cellBehaviors' workbook-wide index (rev4A#1); its payload lists every edit of the burst in the order made (StructuralEditElsewherePayload.edits: sheetIndex, null for a floating grid's own lines, kind, at, count -- never folded), an on-screen insert or delete delivers the edits still waiting in the window before its own ROWS_ event, and the stores whose coordinates the backend never holds replay them on the sheet named: forms embedded on that sheet move with their anchor cells, and Controls re-keys the side state of the shapes there (html frame, canvas renderer, declared properties, container, script badge) as the backend re-keyed the controls",
@@ -372,6 +517,40 @@ export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
       "canEditCells answers off the main thread and refuses a list longer than four whole columns (4 x 1,048,576 cells) with \"Too many cells to check at once...\" before it reads anything (round 18)",
       "Paste Special > Formats on a protected sheet goes silent only when the sheet's Format Cells option is what refused (Excel [LIVE]: nothing raised over unlocked cells and over locked cells inside an Allow Edit Range); any other failure of its whole-area check (a canvas sheet, an IPC error) is shown and nothing is pasted (round 18)",
       "File > Open asks about unsaved changes before the picker AND again after it when the workbook turned dirty while the picker was open (a push recording its version, a scheduled job, a script) -- workbook.open() is now workbook.pickFileToOpen() then workbook.openAtPath(path) (round 18)",
+      "conditionalResultsToOverride folds a rule's hideValue (Show Bar Only / Show Icon Only) into IStyleOverride.hideValue, which every cell painter honours (the grid, its frozen and split panes, a floating grid's styled cell box): the cell's fill, borders and glyph still paint, its value does not; a data bar runs from CellConditionalFormat.dataBarAxis (when set) and, for dataBarNegative, toward the start edge in the negative colours",
+      "SplitMenuButton / ColorSwatch: closing a split button's or a colour swatch's dropdown hands the keyboard focus back to the grid when the focus would otherwise be lost (on the page body), instead of leaving the keyboard nowhere",
+      "canEditCells / canPerformAction: honour opts.target (CellTargetOptions) -- the protection question is asked of the OBJECT's cells (a floating grid's backing cells, gated by its host), and the can_edit_cell / can_perform_action wire carries target for the commands that act on such cells",
+      "the built-in keybinding core.pasteSpecial stays Ctrl+Alt+V, and core.pasteValues (Ctrl+Shift+V, command core.clipboard.pasteValues) is new: Paste Values from the keyboard",
+      "SortPivotFieldRequest / the slicer wire: a TABLE slicer's item key is the item's INVARIANT value (never its display text in the app locale), so a selection survives a locale change; an AutoFilter reads the display text from it",
+      "clearRangeWithOptions takes opts.moreAreas (the other Ctrl+click blocks, cleared in the same step), and so do clearCommentsInRange / clearNotesInRange / clearHyperlinksInRange as a fifth argument; Delete over several areas is Clear Contents (formats stay)",
+      "applyFormatting takes opts.moreAreas (FormattingArea[]: each block's rows and columns, one step for every area) and adjustNumberFormatDecimals opts.shownText (the text the cell SHOWS, which Excel's Increase / Decrease Decimal reads its decimals from)",
+      "AutoFitContributor.measureColumn receives rows (AutoFitRowSpan[]): the rows being fitted -- AutoFit Column Width fits only the selected cells, as Excel does; absent, the whole column",
+      "getAuditLog({ includeMachine: true }) (@api/collaboration) also answers this computer's trail (AuditLog.machine) -- rows no open workbook holds, such as a push whose workbook was replaced before it finished; the calp_get_audit_log wire takes includeMachine",
+      "the run_design_query wire takes forReport: true for the query a REPORT runs (its FILTERS kept as the report's filter rows, never baked), so a report and its dry run read the same rows",
+      "a control's container keys are a CLOSED list per control type (BUG-0491): set_control_property, set_control_metadata (the create door: paste, duplicate, insert), set_control_appearance and an objectBindings set / setLiteral refuse a non-empty container* key the type does not paint -- CONTROL_PAINTED_CONTAINER_FIELDS (@api/visualContainer) is the list, decided from the painters (a button's title, subtitle, padding and spacing; a shape's corner radius; a picture's and a navigator's subtitle and divider; a navigator's containerPadding*, whose padding is `padding`; every container key on a type with no container) -- naming the real key where one exists; a \"\" write of such a key stores nothing, and load, every .calp pull and the control's next write drop one a document still carries (a binding of one is not loaded); the Controls painters read only the listed keys",
+      "applyNamedStyle / applyNamedStyleRange keep a cell's PROTECTION the way Excel's IncludeProtection does [LIVE] (rev-sec-1): every built-in style but Normal keeps each cell's Locked AND Hidden flags on any sheet; Normal and a style the user created write their own; on a protected sheet every style keeps both -- the Cell Styles gallery, a script's api.applyNamedStyle and a module macro's Calcula.applyNamedStyle alike",
+      "a MODULE run's queued Calcula.applyNamedStyle (run_script, a button's code) is applied by the backend WITH the run's cells, in the run's ONE undo step, on the sheet the run had switched to -- a style that cannot be applied (a protected sheet) ends the run with every change taken back -- and it is on the audit trail only once applied; the run's deferred actions no longer carry it, and ScriptRunSuccess.formattingApplied says it happened (dispatchScriptSideEffects then re-reads the styles and repaints)",
+      "validateScriptSource reads each call's policy row for the DOOR the script's own context reaches it through (rowsForDoor): a chain whose doors disagree carries one row per door (SurfaceMember.via, generated/scriptSurfacePolicy.ts), so a panel script's close() no longer needs ui.dialog (a form's does), and a sheet script's range.setValues is sheet.setRangeValues where a table script's is object.setState",
+      "an approved application macro's run (owner decision B): a call its realm posts after its setup has finished is refused at once (RUN_ONLY_CALL_AFTER_THE_RUN), never admitted on the expiring grant, and a formatting call that fails part-way is still on the run's report, so a rollback counts its cells as the run's own",
+      "pivot.createFieldConfig carries only the options it is given (lane miscb), so an update built from it keeps a field's own sort, subtotals, collapse state and item filter instead of resetting them to defaults",
+      "clearThemeCache (@api/theme) is no longer needed after opening a file: the theme cache is dropped for every consumer on AFTER_OPEN, AFTER_NEW and THEME_CHANGED (lane miscb)",
+      "mergeCells / MergeOptions.absorb: a range that partly overlaps or contains merges now merges their UNION, as Excel's Range.Merge does [LIVE] (lane miscb); the \"selection overlaps\" refusal is gone, and MergeOptions.absorb no longer changed anything (a script's api.mergeCells alike) -- round C removed it (below)",
+      "createNamedRange / updateNamedRange (and every name door): an R1C1-shaped name (R, C, RC, R1C1, ...), a Lotus-style A1.B1 name and a name over 255 characters are refused, as Excel refuses them; NULL is accepted (lane miscb)",
+      "the core.pasteSpecial keybinding is the ONLY source of Paste Special's key: the grid keyboard no longer hard-codes Ctrl+Alt+V, so rebinding core.pasteSpecial moves it (lane miscb)",
+      "RecordedGridEvent.clearRange: clearRange (the backend clear that removes every stored cell of the rectangle, its value AND its own format -- what a row move or copy uses) is recorded as applyTo \"all\" (was \"contents\"), so a replayed recording wipes the destination formats the gesture wiped (lane miscb)",
+      "a BI model's measure values follow DAX's BLANK rules (lane bic, round C): COUNT / DISTINCTCOUNT / COUNTROWS of nothing are BLANK (null), never 0; BLANK reads as 0 in + and - (SUM(x) + 1 over no rows is 1), stays BLANK in * and as a / numerator; / always answers a decimal and never fails (x / 0 is +/-Infinity, 0 / 0 NaN, where the whole query used to fail); a table transformation keeps SQL's null + 5 = null",
+      "mergeCells / MergeOptions: MergeOptions.absorb and MergeOptions.keepFirstValue are REMOVED (lane tablec, round C): every merge applies Excel's value rule [LIVE] -- an empty top-left takes the first value, moved, and the backend re-points the formulas that read it -- so no caller asks for it, and Core's merge gestures no longer move the value themselves; MergeOptions is across and probe",
+      "deleteTable is Excel's ListObject.Delete (lane tablec, round C [LIVE]): the table's cells go too, contents and formats, nothing around them moves, and every reference to the table -- in any cell, in another table's stored formulas, in a defined name -- becomes #REF!, as ONE undo step with its AutoFilter, object scripts and slicers; it used to keep the cells and turn the references into ranges. Table Design > Delete Table does the same, undoable, with no confirmation",
+      "convertToRange (Excel's Unlist, lane tablec, round C [LIVE]): every reference to the table -- in any cell, in another table's stored formulas, in a defined name, and only ITS references in a formula that also names another table -- becomes the sheet-qualified absolute rectangle it named; the cells, their formats and the other references stay",
+      "addTableRow is Excel's ListRows.Add (lane tablec, round C [LIVE]): on the active sheet the row is INSERTED -- the cells under the table, across its columns only, shift down one row, and a totals row moves down with its formulas, the new data row opening above it; it used to swallow the row under the table, or turn the old totals row into a data row still holding its SUBTOTALs. A table on another sheet is grown in place, and one with a totals row there is refused (\"Switch to the table's sheet...\")",
+      "toggleTotalsRow (lanes tablefix / tablec / cfdv, rounds B-D [LIVE]): turning the totals row on lands it on the first row below the table whose cells across its columns hold nothing -- no value, formula or format -- and the occupied rows before it become data rows (it used to write over the row below); a landing on another table is refused. While no column has a totals function, Excel's defaults go in: the label \"Total\" under the first column and Sum (109) or Count (103) under the last (a one-column table gets only the function); a column's remembered constant (TableColumn.totalsRowLabel) comes back when the row is shown again",
+      "setTotalsRowFunction records an undo step (lane tablec, round C); it recorded none",
+      "checkTableAutoExpand (lanes tablec / cfdv / cfeval, rounds C-D [LIVE]): a cell TYPED into a totals row sets that column's totals function as Excel's does -- a constant (or a cleared cell) sets None and becomes the column's totalsRowLabel, =SUBTOTAL(n,[Col]) of that column with a totals-menu code sets that function, any other formula Custom -- in the cell edit's own undo step, and it returns the table when that changed; a value typed below a table that has a totals row no longer grows the table over it",
+      "copySheet (lanes tablec / cfdv, rounds C-D [LIVE]): the copy gets a copy of every table on the source under a new name (Excel's name-plus-number rule), the copy's references to those tables re-pointed at the copies (the source's formulas untouched), and every conditional format, data validation, comment and note of the source, each with a fresh id; it copied none of them. Sheet-scoped defined names are not copied yet",
+      "addConditionalFormat / updateConditionalFormat / setDataValidation refuse a rule formula or a custom validation formula that names a structured reference (Table1[Col], [@Col], Table1[#All]) with Excel's sentence, as Excel refuses them [LIVE] (lane cfdv, round D); a table's bare name stays an ordinary name there, and a list source reaches the backend only as the range the dialog resolved",
+      "api.fillRange (a script's fill) refuses, before anything is written, a destination holding merged cells that are not the source band's own repeated pattern, as Excel does [LIVE] (lane pastec, round D): type \"series\" throws \"To do this, all the merged cells need to be the same size.\" (Excel's AutoFill), type \"copy\" answers { count: 0 } and changes nothing (Excel's FillDown); a drag of the fill handle refuses the same way (round C), and Ctrl+D / Ctrl+R and the module runtime's Calcula.fillDown / fillRight change nothing (round E)",
+      "Paste Special names its source too (lane pastec, round D; BUG-0657): with no operation, no Transpose and Skip Blanks off, each content write carries CellUpdateInput.source (valuesOnly for the values attributes) while the copy still stands where it was copied (clipboardSourceStandsAt), so the backend writes what the source holds AT THE WRITE -- plain Paste, Cut + Paste (PasteSource.unshifted), Insert Copied Cells and drag moves have named it since round C; anything else pastes the snapshot",
+      "PivotCellData.value (lanes dfcase / bie, rounds D-E [LIVE]): a value cell holding an error carries the error's canonical Excel literal (\"#DIV/0!\", \"#N/A\"; a source error showed its variant name, \"#Div0\"), and the pivot writes it into the grid as an error VALUE (ISERROR is TRUE), never text; a model measure's 1/0, -1/0 or 0/0 is \"#NUM!\", as Excel's data-model PivotTable shows it, with PivotCellData.nonFinite saying which",
     ],
   },
   {

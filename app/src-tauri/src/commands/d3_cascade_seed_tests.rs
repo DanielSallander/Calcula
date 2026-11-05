@@ -635,10 +635,11 @@ fn every_table_cell_write_seeds_the_shared_cascade() {
     // the whole contract.
     const TABLES_RS: &str = include_str!("../tables.rs");
     for name in [
-        "toggle_totals_row",
-        "set_totals_row_function",
+        // The command is a wrapper; its body is `toggle_totals_row_core`.
+        "toggle_totals_row_core",
+        "set_totals_row_function_core",
         "set_calculated_column",
-        "check_table_auto_expand",
+        "check_table_auto_expand_core",
     ] {
         let body = body_of(TABLES_RS, name);
         assert!(
@@ -667,7 +668,7 @@ fn table_formula_writes_record_their_own_dependency_edges() {
     // The totals writers go through `write_table_formula_cell`, which stores the
     // RESOLVED ast and then registers the edges. Both halves matter and the
     // helper is the only place that does them together.
-    for name in ["toggle_totals_row", "set_totals_row_function"] {
+    for name in ["toggle_totals_row_core", "set_totals_row_function_core"] {
         let body = body_of(TABLES_RS, name);
         assert!(
             body.contains("write_table_formula_cell("),

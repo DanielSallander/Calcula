@@ -2,16 +2,21 @@
 // PURPOSE: The style-only pastes onto a floating grid's cells (BUG-0513, owner
 //          finding G3): Paste Formatting and Paste (No Borders) work sheet ->
 //          floating grid exactly as they do sheet -> sheet, as ONE undo step.
-//            - Formatting: each destination cell is pointed at the source's
-//              style INDEX through `setCellStyle(.., { target })`; no content
-//              is written; Skip Blanks and Transpose apply as on a sheet.
-//            - No Borders: Paste All onto the grid (the content and the
-//              source's style index in ONE targeted batch), then the
-//              destination's OWN border sides put back through
-//              `applyFormatting(.., { target })` where the source's differ --
-//              Excel, measured live through COM 2026-10-04
-//              (xlPasteAllExceptBorders): the source's bold arrived, its bottom
-//              border did not, the destination's thick top border stayed.
+//            - Formatting: every destination cell is pointed at the source's
+//              style INDEX in ONE `setCellStyles(.., { target })` (BUG-0345);
+//              no content is written; Skip Blanks and Transpose apply as on a
+//              sheet.
+//            - No Borders: the content in ONE targeted batch, then the source's
+//              style index as a style-only write that keeps each cell's OWN
+//              border sides (`keepBorders`, the backend's: theme colour and
+//              weight included, BUG-0347) -- Excel, measured live through COM
+//              2026-10-04 and 2026-11-04 (xlPasteAllExceptBorders): the
+//              source's bold arrived, its bottom border did not, the
+//              destination's thick top border stayed, a theme-coloured medium
+//              dashed one in full detail.
+//            - Format Cells refused by the host, formatting only: silent over
+//              unlocked cells, refused over a locked one (BUG-0655, the
+//              sheet's rule; Excel [LIVE]).
 //          Nothing reaches the active sheet's cells at the grid's coordinates.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -20,6 +25,9 @@ const h = vi.hoisted(() => ({
   batch: vi.fn(),
   updateCell: vi.fn(),
   setCellStyle: vi.fn(),
+  setCellStyles: vi.fn(),
+  canEditCells: vi.fn(),
+  canPerformAction: vi.fn(),
   applyFormatting: vi.fn(),
   styledTarget: vi.fn(),
   begin: vi.fn(),
@@ -60,6 +68,9 @@ vi.mock("@api/lib", async (importOriginal) => ({
   getStyle: vi.fn(async (i: number) => styleData(i)),
   updateCell: (...a: unknown[]) => h.updateCell(...a),
   setCellStyle: (...a: unknown[]) => h.setCellStyle(...a),
+  setCellStyles: (...a: unknown[]) => h.setCellStyles(...a),
+  canEditCells: (...a: unknown[]) => h.canEditCells(...a),
+  canPerformAction: (...a: unknown[]) => h.canPerformAction(...a),
   applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
   updateCellsBatch: (...a: unknown[]) => h.batch(...a),
   getRangeCellsTyped: vi.fn(async () => []),
@@ -139,7 +150,7 @@ function refuseFormat(_cells: ReadonlyArray<readonly [number, number]>): void {
 }
 
 beforeEach(() => {
-  for (const fn of [h.batch, h.updateCell, h.setCellStyle, h.applyFormatting, h.styledTarget, h.begin, h.commit, h.cancel, h.alert]) {
+  for (const fn of [h.batch, h.updateCell, h.setCellStyle, h.setCellStyles, h.canEditCells, h.canPerformAction, h.applyFormatting, h.styledTarget, h.begin, h.commit, h.cancel, h.alert]) {
     fn.mockReset();
   }
   h.log.length = 0;
@@ -173,6 +184,20 @@ beforeEach(() => {
     h.log.push(`setCellStyle${opts?.target ? "@target" : ""} ${row},${col} ${index}`);
     return null;
   });
+  // The style-only BATCH: gated once, all or nothing.
+  h.setCellStyles.mockImplementation(async (writes: Array<{ row: number; col: number; styleIndex: number; keepBorders?: boolean }>, opts?: { target?: unknown }) => {
+    refuseFormat(writes.map((w) => [w.row, w.col] as const));
+    h.log.push(`setCellStyles${opts?.target ? "@target" : ""} ${writes.map((w) => `${w.row},${w.col} ${w.styleIndex}${w.keepBorders ? " keepBorders" : ""}`).join("; ")}`);
+  });
+  // The host's Format Cells option and the GRID's own lock flags, as the
+  // backend answers them with a target (BUG-0655).
+  h.canPerformAction.mockImplementation(async (action: string, opts?: { target?: unknown }) =>
+    action === "formatCells" && opts?.target && !host.formatCellsAllowed ? { canEdit: false, reason: "not allowed" } : { canEdit: true },
+  );
+  h.canEditCells.mockImplementation(async (cells: Array<{ row: number; col: number }>, opts?: { target?: unknown }) => {
+    h.log.push(`canEditCells${opts?.target ? "@target" : ""} ${cells.map((c) => `${c.row},${c.col}`).join("; ")}`);
+    return cells.some((c) => host.locked.has(`${c.row},${c.col}`)) ? { canEdit: false, reason: LOCKED_REFUSAL } : { canEdit: true };
+  });
   h.applyFormatting.mockImplementation(async (rows: number[], cols: number[], fmt: Record<string, unknown>, opts?: { target?: unknown }) => {
     refuseFormat(rows.flatMap((r) => cols.map((c) => [r, c] as const)));
     h.log.push(`applyFormatting${opts?.target ? "@target" : ""} ${rows},${cols} ${JSON.stringify(fmt)}`);
@@ -198,13 +223,13 @@ describe("Paste Formatting onto a floating grid's cells (BUG-0513)", () => {
     expect(await paste("formats")).toBe(true);
     expect(h.alert, "the paste was refused or failed").not.toHaveBeenCalled();
     // The empty source position carries the default style (index 0), as on a sheet.
-    expect(h.log).toEqual(["check@target 2,1:2,2", "begin", "setCellStyle@target 2,1 4", "setCellStyle@target 2,2 0", "commit"]);
+    expect(h.log).toEqual(["check@target 2,1:2,2", "begin", "setCellStyles@target 2,1 4; 2,2 0", "commit"]);
     expect(h.updateCell, "wrote the ACTIVE sheet").not.toHaveBeenCalled();
   });
 
   it("Skip Blanks skips the empty source position; Transpose lays the row down a column", async () => {
     await paste("formats", { skipBlanks: true });
-    expect(h.log).toEqual(["check@target 2,1:2,1", "begin", "setCellStyle@target 2,1 4", "commit"]);
+    expect(h.log).toEqual(["check@target 2,1:2,1", "begin", "setCellStyles@target 2,1 4", "commit"]);
     h.log.length = 0;
     await executePasteSpecial(
       CLIP,
@@ -215,7 +240,7 @@ describe("Paste Formatting onto a floating grid's cells (BUG-0513)", () => {
       "Paste Special",
       REF,
     );
-    expect(h.log).toEqual(["check@target 2,1:3,1", "begin", "setCellStyle@target 2,1 4", "setCellStyle@target 3,1 0", "commit"]);
+    expect(h.log).toEqual(["check@target 2,1:3,1", "begin", "setCellStyles@target 2,1 4; 3,1 0", "commit"]);
   });
 
   it("a refusal from the backend (the host's protection) changes no cell, opens no step, and says why", async () => {
@@ -227,22 +252,49 @@ describe("Paste Formatting onto a floating grid's cells (BUG-0513)", () => {
     expect(h.alert).toHaveBeenCalledWith("Cannot format cells on a protected sheet.");
   });
 
-  it("Format Cells not allowed on the host: the whole paste is refused before the first cell is restyled (rev10A)", async () => {
+  // BUG-0655 (Excel wins): this used to raise the host's refusal over UNLOCKED
+  // cells too. Excel [LIVE, fmtprot/probe1.ps1 and cutfmt/probe1.ps1]:
+  // PasteSpecial(xlPasteFormats) onto unlocked cells with Format Cells off
+  // raises nothing and changes nothing; only a LOCKED cell in the range raises.
+  it("Format Cells not allowed on the host, every grid cell unlocked: nothing changes and NOTHING is said, no step (BUG-0655)", async () => {
     host.formatCellsAllowed = false;
-    await expect(paste("formats")).rejects.toThrow("protected");
+    expect(await paste("formats"), "Excel is silent: no refusal").toBe(true);
+    expect(h.begin, "a paste that changes nothing opened an undo step").not.toHaveBeenCalled();
+    expect(h.setCellStyles, "a cell was restyled after the whole-area check refused").not.toHaveBeenCalled();
+    expect(h.alert, "Calcula spoke where Excel is silent").not.toHaveBeenCalled();
+    // The lock question was the GRID's (the target), asked of every cell.
+    expect(h.log.filter((l) => l.startsWith("canEditCells"))).toEqual(["canEditCells@target 2,1; 2,2"]);
+  });
+
+  it("Format Cells not allowed on the host, a LOCKED grid cell in the range: refused whole before the first cell is restyled (rev10A)", async () => {
+    host.formatCellsAllowed = false;
+    lockHostCell(2, 2);
+    await expect(paste("formats")).rejects.toThrow(LOCKED_REFUSAL);
     expect(h.begin, "a refused paste opened an undo step: it was not refused whole up front").not.toHaveBeenCalled();
-    expect(
-      h.log.filter((l) => !l.startsWith("check") && l !== "begin"),
-      "cells were restyled before the refusal",
-    ).toEqual([]);
+    expect(h.setCellStyles, "cells were restyled before the refusal").not.toHaveBeenCalled();
     expect(h.commit, "a partial paste was committed").not.toHaveBeenCalled();
+    expect(h.alert).toHaveBeenCalledWith(LOCKED_REFUSAL);
+  });
+
+  it("only the host's OPTION refusing is silent: a check that failed for another reason is shown", async () => {
+    // Format Cells allowed (so the option does not refuse), yet the check fails.
+    h.setCellStyle.mockRejectedValue(new Error("Floating grid moved while the command ran."));
+    await expect(paste("formats")).rejects.toThrow("moved");
+    expect(h.alert).toHaveBeenCalledWith("Floating grid moved while the command ran.");
+    expect(h.begin).not.toHaveBeenCalled();
+  });
+
+  it("an option refusing whose lock flags cannot be read: the refusal is shown (fail closed, never a silent success)", async () => {
+    host.formatCellsAllowed = false;
+    h.canEditCells.mockRejectedValue(new Error("ipc down"));
+    await expect(paste("formats")).rejects.toThrow("protected");
     expect(h.alert).toHaveBeenCalledWith(FORMAT_REFUSAL);
   });
 
   it("Format Cells allowed: a LOCKED host cell is restyled too, in the one step (Excel [LIVE]; the backend keeps its lock)", async () => {
     lockHostCell(2, 2);
     expect(await paste("formats")).toBe(true);
-    expect(h.log).toEqual(["check@target 2,1:2,2", "begin", "setCellStyle@target 2,1 4", "setCellStyle@target 2,2 0", "commit"]);
+    expect(h.log).toEqual(["check@target 2,1:2,2", "begin", "setCellStyles@target 2,1 4; 2,2 0", "commit"]);
     expect(h.alert).not.toHaveBeenCalled();
   });
 });
@@ -281,31 +333,23 @@ describe("Paste (No Borders) onto a floating grid's cells (BUG-0513)", () => {
     expect(h.alert, "Calcula spoke where Excel is silent").not.toHaveBeenCalled();
   });
 
-  it("pastes content + the source's style in one batch, then puts the destination's OWN borders back, one step", async () => {
+  it("pastes the content in one batch, then the source's style KEEPING each cell's own borders in one style batch, one step (BUG-0347)", async () => {
     expect(await paste("allExceptBorders")).toBe(true);
     expect(h.alert).not.toHaveBeenCalled();
-    expect(h.styledTarget, "the destination's borders must be read from the GRID before the paste").toHaveBeenCalledWith(REF, {
-      startRow: 2,
-      startCol: 1,
-      endRow: 2,
-      endCol: 2,
-    });
+    expect(h.styledTarget, "the destination's borders are the backend's to keep: no read of the grid").not.toHaveBeenCalled();
+    expect(h.applyFormatting, "a border was put back through the lossy {style, color} wire").not.toHaveBeenCalled();
     expect(h.log).toEqual([
-      // Every cell that takes formatting (the styled content, the border put
-      // back) is CHECKED before the content batch (never half done).
+      // Every cell that takes formatting is CHECKED before the content batch
+      // (never half done).
       "check@target 2,1:2,2",
       "begin",
       `batch@target ${JSON.stringify([
-        { row: 2, col: 1, value: "7", invariant: true, pasted: true, styleIndex: 4 },
-        { row: 2, col: 2, value: "", invariant: true, pasted: true, styleIndex: 0 },
+        { row: 2, col: 1, value: "7", invariant: true, pasted: true },
+        { row: 2, col: 2, value: "", invariant: true, pasted: true },
       ])}`,
-      // B3: the source's red bottom border does not arrive (the destination had
-      // none), and the destination's thick top border stays. C3 (an empty
-      // source onto a cell that stores nothing) has no border to put back.
-      `applyFormatting@target 2,1 ${JSON.stringify({
-        borderTop: { style: "solid", color: "#000000" },
-        borderBottom: { style: "none", color: "#000000" },
-      })}`,
+      // The source's whole style, each cell's OWN border sides kept by the
+      // backend (theme colour, weight, style -- every detail).
+      "setCellStyles@target 2,1 4 keepBorders; 2,2 0 keepBorders",
       "commit",
     ]);
     expect(h.updateCell, "wrote the ACTIVE sheet").not.toHaveBeenCalled();

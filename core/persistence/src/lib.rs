@@ -5,9 +5,11 @@
 
 mod error;
 mod xlsx_chart_reader;
+mod xlsx_data_tables;
 mod xlsx_formula_text;
 mod xlsx_reader;
 mod xlsx_style_reader;
+mod xlsx_tables;
 mod xlsx_writer;
 
 pub use error::PersistenceError;
@@ -71,7 +73,8 @@ pub const DEFAULT_SHEET_ZOOM_PERCENT: f64 = 100.0;
 pub struct Workbook {
     pub sheets: Vec<Sheet>,
     pub active_sheet: usize,
-    /// Table definitions across all sheets (serialized as JSON in metadata sheet)
+    /// Table definitions across all sheets (`.cala`: tables/table_{id}.json; `.xlsx`:
+    /// Excel's own table parts, `xlsx_tables`)
     pub tables: Vec<SavedTable>,
     /// Slicer definitions across all sheets
     pub slicers: Vec<SavedSlicer>,
@@ -2022,6 +2025,12 @@ pub struct SavedTableColumn {
     pub totals_row_function: String,
     pub totals_row_formula: Option<String>,
     pub calculated_formula: Option<String>,
+    /// Excel's `totalsRowLabel`: the constant a column with no totals function
+    /// shows in its totals row, remembered while the row is HIDDEN so showing
+    /// it again puts the constant back (NEW-totals-label-persist). `None` while
+    /// the row shows -- the cell is the truth then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals_row_label: Option<String>,
 }
 
 /// Serializable table style options
@@ -2414,10 +2423,16 @@ pub struct SavedPaneControl {
 }
 
 /// Calcula metadata structure stored as JSON in the hidden _calcula_meta sheet.
+///
+/// TABLES ARE NOT HERE. They are written as Excel's own table parts
+/// (`xlsx_tables`), the one source of truth Excel and Calcula both read: the
+/// carry gave Excel no table at all (every structured reference showed
+/// `#REF!`, BUG-0644), and named each table's sheet by a `SheetId` the reader
+/// re-mints, so it never came back to Calcula either. A `tables` key in an
+/// older file's carry is ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculaMeta {
     pub version: u32,
-    pub tables: Vec<SavedTable>,
     /// Full-fidelity chart carry (position-keyed): the complete ChartDefinition
     /// JSON per chart, so a Calcula -> xlsx -> Calcula round-trip restores
     /// charts losslessly even where the native OOXML chart emission is only an
@@ -2455,10 +2470,9 @@ pub struct MetaSparkline {
 }
 
 impl CalculaMeta {
-    pub fn new(tables: Vec<SavedTable>) -> Self {
+    pub fn new() -> Self {
         Self {
             version: 1,
-            tables,
             charts: Vec::new(),
             sparklines: Vec::new(),
         }

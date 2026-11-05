@@ -64,6 +64,8 @@ vi.mock("@api/lib", async (importOriginal) => {
       return [];
     },
     setCellStyle: write("setCellStyle"),
+    // The style-only batch (Paste Formatting, No Borders).
+    setCellStyles: write("setCellStyles"),
     applyFormatting: write("applyFormatting"),
     setColumnWidth: write("setColumnWidth"),
     getColumnWidth: vi.fn(async () => 64),

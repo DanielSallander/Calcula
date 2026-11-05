@@ -3,9 +3,10 @@
 //          G3): every probe, merge, unmerge and alignment names the target;
 //          the merges it reads are the object's (its styled read), never the
 //          active sheet's; the value rule is the sheet's own (ruling Q4: one
-//          behaviour, so keepFirstValue stays on); relocateCellReferences --
-//          an active-sheet command -- never runs; and the gesture is ONE undo
-//          step, as on a sheet.
+//          behaviour; every merge applies it now, so the gesture sends no
+//          option for it); relocateCellReferences never runs from the
+//          gesture (the backend re-points); and the gesture is ONE undo step,
+//          as on a sheet.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -100,8 +101,10 @@ describe("Merge & Center on a floating grid's cells", () => {
       expect(c.slice(0, 4)).toEqual([1, 1, 2, 2]);
       expect(c[4], "a target never names a sheet").toBeUndefined();
       expect(c[6], "a merge call dropped the target").toEqual({ target: REF });
-      // Ruling Q4: the SAME value rule as a sheet's merge.
-      expect((c[5] as { keepFirstValue?: boolean }).keepFirstValue).toBe(true);
+      // Ruling Q4: the SAME value rule as a sheet's merge -- every merge's,
+      // so no option asks for it (NEW-absorb-dead-field).
+      expect(c[5]).not.toHaveProperty("keepFirstValue");
+      expect(c[5]).not.toHaveProperty("absorb");
     }
     expect((calls[0][5] as { probe?: boolean }).probe).toBe(true);
     expect(dialogs.confirmAsync).toHaveBeenCalledWith(MERGE_DISCARDS_VALUES, expect.anything());
@@ -146,7 +149,7 @@ describe("Merge & Center on a floating grid's cells", () => {
     expect(api.applyFormatting).toHaveBeenCalledWith([1], [1, 2, 3], { textAlign: "general" }, { target: REF });
   });
 
-  it("positive control: the SHEET gesture is unchanged -- active merges, no target, relocation runs", async () => {
+  it("positive control: the SHEET gesture -- active merges, no target; the backend re-points the move", async () => {
     api.mergeCells.mockImplementation(async (_sr, _sc, _er, _ec, _s, o: { probe?: boolean }) =>
       o?.probe ? result() : result({ movedCells: [{ fromRow: 2, fromCol: 2, toRow: 1, toCol: 1 }] as never }),
     );
@@ -154,6 +157,6 @@ describe("Merge & Center on a floating grid's cells", () => {
     expect(api.getMergedRegions).toHaveBeenCalled();
     expect(target.getCellTargetCells).not.toHaveBeenCalled();
     for (const c of api.mergeCells.mock.calls) expect(c).toHaveLength(6);
-    expect(api.relocateCellReferences).toHaveBeenCalledWith(2, 2, 2, 2, 1, 1);
+    expect(api.relocateCellReferences).not.toHaveBeenCalled();
   });
 });

@@ -325,6 +325,49 @@ fn is_omitted(expr: &Expression) -> bool {
     matches!(expr, Expression::Literal(Value::Blank))
 }
 
+/// The top-left cell of a multi-cell range reference, for N and T, which read
+/// only that cell of one; `None` for anything else.
+fn first_cell_of_reference(expr: &Expression) -> Option<Expression> {
+    if !is_multi_cell_reference(expr) {
+        return None;
+    }
+    match expr {
+        Expression::Range { sheet, start, .. } => match start.as_ref() {
+            Expression::CellRef { sheet: corner_sheet, col, row, col_absolute, row_absolute, .. } => Some(Expression::CellRef {
+                sheet: corner_sheet.clone().or_else(|| sheet.clone()),
+                col: col.clone(),
+                row: *row,
+                col_absolute: *col_absolute,
+                row_absolute: *row_absolute,
+                ref_site_id: Default::default(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether an argument EXPRESSION is a reference to more than one cell: a
+/// range whose corners differ, a whole column or row, a 3-D span.
+///
+/// Excel's Analysis ToolPak functions take one cell, never a range: [LIVE]
+/// Excel 16 `ERF(B1:B2)` is #VALUE! while `ERF(B1:B1)` is erf(B1) and
+/// `SUM(ERF({0.5;1}))` lifts the array constant (1.36320067076276). Decided on
+/// the expression, because a range and an array constant are the same VALUE.
+fn is_multi_cell_reference(expr: &Expression) -> bool {
+    match expr {
+        Expression::Range { start, end, .. } => match (start.as_ref(), end.as_ref()) {
+            (
+                Expression::CellRef { col: c1, row: r1, sheet: s1, .. },
+                Expression::CellRef { col: c2, row: r2, sheet: s2, .. },
+            ) => !(c1.eq_ignore_ascii_case(c2) && r1 == r2 && (s2.is_none() || s1 == s2)),
+            _ => true,
+        },
+        Expression::ColumnRef { .. } | Expression::RowRef { .. } | Expression::Sheet3DRef { .. } => true,
+        _ => false,
+    }
+}
+
 /// Which end of the text LPAD / RPAD fill. The ONLY difference between the
 /// two functions — see `Evaluator::fn_pad`, which they share so that the cut,
 /// the cycling pad and every refusal cannot drift apart between them.
@@ -395,6 +438,18 @@ pub(crate) fn criteria_number(value: &EvalResult) -> Option<f64> {
         EvalResult::Boolean(_) => None,
         other => other.as_number(),
     }
+}
+
+/// The key a LET name or LAMBDA parameter is bound and looked up under:
+/// Excel's per-character case fold (`identity::sheet_name_key`), the rule the
+/// parser's `respell_bound_names` and the host's shadowing already follow
+/// (NEW-let-scope-fold). [LIVE, Excel 16, lane formd p1 J1794 / J1802, lane
+/// namese p2 J9 / J10] `=LET(Straße,1,STRASSE)` and
+/// `=LAMBDA(Straße,STRASSE)(1)` are #NAME?, `=LET(Straße,1,STRAẞE)` and
+/// `=LAMBDA(Straße,STRAẞE)(1)` are 1. `to_uppercase` turned `ß` into `SS`, so
+/// `STRASSE` found the binding and answered 1.
+fn scope_key(name: &str) -> String {
+    identity::sheet_name_key(name)
 }
 
 /// Reserved scope slots for ARRAY LIFTING (`call_with_values`).
@@ -1576,7 +1631,7 @@ impl<'a> Evaluator<'a> {
     /// chart `calculate`/`filter` over per-row fields) through the real engine
     /// instead of a hand-rolled evaluator. Keys are matched case-insensitively.
     pub fn bind_name(&self, name: &str, value: EvalResult) {
-        self.scope.borrow_mut().insert(name.to_uppercase(), value);
+        self.scope.borrow_mut().insert(scope_key(name), value);
     }
 
     /// Gets the grid for a given sheet name, or the current grid if None.
@@ -1612,6 +1667,12 @@ impl<'a> Evaluator<'a> {
     /// the like), where there is no sheet table to check the name against and
     /// the qualifier has always been ignored.
     fn resolve_grid_for_sheet(&self, sheet: &Option<String>) -> Result<&'a Grid, CellError> {
+        // A reference whose sheet was DELETED (`=#REF!A1`) is `#REF!` in every
+        // context -- including the single-sheet one below, which would
+        // otherwise read the formula's own sheet at the same coordinates.
+        if parser::ast::is_ref_error_sheet(sheet) {
+            return Err(CellError::Ref);
+        }
         match (sheet, &self.multi_sheet) {
             (Some(sheet_name), Some(ctx)) => {
                 ctx.get_grid(sheet_name).copied().ok_or(CellError::Ref)
@@ -1841,7 +1902,7 @@ impl<'a> Evaluator<'a> {
             }
             Expression::NamedRef { name, .. } => {
                 // Check scope first (LAMBDA/LET bindings)
-                let key = name.to_uppercase();
+                let key = scope_key(name);
                 let bound = self.scope.borrow().get(&key).cloned();
                 match bound {
                     Some(val) => val,
@@ -1854,6 +1915,24 @@ impl<'a> Evaluator<'a> {
                     // name collides with a built-in — and RATE, VALUE, INDEX and
                     // LOG are all both. It did, and it turned two #NAME? cells
                     // into #VALUE! ones.
+                    None => EvalResult::Error(CellError::Name),
+                }
+            }
+            // `a#` on a LET / LAMBDA name the host could not see a cell behind
+            // (`parser::bind_spill_anchor_names` turns `a#` into `E5#` when `a`
+            // is bound to E5): bound to a plain value it is #VALUE! [LIVE, Excel
+            // 16: `=LET(a,SEQUENCE(3),SUM(a#))`], to a reference that is no
+            // spill anchor #REF! [LIVE: `=LAMBDA(a,ROWS(a#))(A1)`], unbound
+            // #NAME?. An error value is its own answer.
+            Expression::SpillRef { cell, .. } if matches!(cell.as_ref(), Expression::NamedRef { .. }) => {
+                let Expression::NamedRef { name, .. } = cell.as_ref() else { unreachable!() };
+                let key = scope_key(name);
+                if self.bound_reference(&key).is_some() {
+                    return EvalResult::Error(CellError::Ref);
+                }
+                match self.scope.borrow().get(&key) {
+                    Some(EvalResult::Error(err)) => EvalResult::Error(err.clone()),
+                    Some(_) => EvalResult::Error(CellError::Value),
                     None => EvalResult::Error(CellError::Name),
                 }
             }
@@ -2066,9 +2145,28 @@ impl<'a> Evaluator<'a> {
     ) -> EvalResult {
         // `b:b` inside a LET / LAMBDA: the range operator between two names,
         // never column B (see `eval_bound_name_range`).
-        if sheet.is_none() {
-            if let (Expression::NamedRef { name: s, .. }, Expression::NamedRef { name: e, .. }) = (start, end) {
-                return self.eval_bound_name_range(s, e);
+        if let (Expression::NamedRef { name: s, .. }, Expression::NamedRef { name: e, .. }) = (start, end) {
+            // Behind a sheet the halves are that SHEET's names, never a LET /
+            // LAMBDA binding: [LIVE] Excel 16 `=LET(A1,2,Sheet2!A1)` and
+            // `=LET(A1,5,Sheet2!A1:A2)` are #NAME? (lane formc).
+            if sheet.is_some() {
+                return EvalResult::Error(CellError::Name);
+            }
+            return self.eval_bound_name_range(s, e);
+        }
+        // THE RANGE OPERATOR BETWEEN ANY TWO REFERENCES (BUG-0646): a name half
+        // beside a cell (`LET(a,B2,SUM(a:C3))` 550, `LET(b,A3,SUM(A1:b))` 6),
+        // two structured references (`SUM(Table1[Col]:Table1[Col])` 21, after
+        // the host resolved each to a range). [LIVE, Excel 16, parser lane probe.]
+        if !matches!((start, end), (Expression::CellRef { .. }, Expression::CellRef { .. })) {
+            return self.eval_reference_span(sheet, start, end);
+        }
+        // `Sheet1!A1:Sheet2!A3`: a second half qualified with ANOTHER sheet is
+        // no rectangle [LIVE, Excel 16: #VALUE!]; the same sheet is the range
+        // (`Sheet1!A1:Sheet1!A3` is 6).
+        if let (Some(own), Expression::CellRef { sheet: Some(theirs), .. }) = (sheet, end) {
+            if !identity::sheet_names_equal(own, theirs) {
+                return EvalResult::Error(CellError::Value);
             }
         }
         let grid = match self.resolve_grid_for_sheet(sheet) {
@@ -2473,6 +2571,18 @@ impl<'a> Evaluator<'a> {
         end_sheet: &str,
         reference: &Expression,
     ) -> EvalResult {
+        // The 3-D span of a NAME (`Sheet1:Sheet2!A1` in a formula read in R1C1,
+        // `parser::apply_r1c1_fallback`): [LIVE] Excel 16 #NAME? (lane formc).
+        let names_a_name = match reference {
+            Expression::NamedRef { .. } => true,
+            Expression::Range { start, end, .. } => {
+                matches!(start.as_ref(), Expression::NamedRef { .. }) || matches!(end.as_ref(), Expression::NamedRef { .. })
+            }
+            _ => false,
+        };
+        if names_a_name {
+            return EvalResult::Error(CellError::Name);
+        }
         let ctx = match &self.multi_sheet {
             Some(ctx) => ctx,
             None => return EvalResult::Error(CellError::Ref),
@@ -3163,6 +3273,17 @@ impl<'a> Evaluator<'a> {
                 return self.dispatch_function(&BuiltinFunction::Custom(name.to_string()), args);
             }
         }
+        if Self::takes_reference_whole(func) && args.iter().any(is_multi_cell_reference) {
+            return EvalResult::Error(CellError::Value);
+        }
+        // N and T read the FIRST cell of a multi-cell reference ([LIVE] Excel 16
+        // `=N(D1:D3)` 10, `=SUM(N(D1:D3))` 10, `=T(A5:A6)` "x") and lift an
+        // array (`=SUM(N({1,2,3}))` 6). Lane formc, NEW-lift-over-reference.
+        if matches!(func, BuiltinFunction::NFn | BuiltinFunction::TFn) && args.len() == 1 {
+            if let Some(corner) = first_cell_of_reference(&args[0]) {
+                return self.eval_lifted_function(func, std::slice::from_ref(&corner));
+            }
+        }
         if Self::lifts_over_arrays(func) && args.len() <= LIFT_SLOTS.len() {
             return self.eval_lifted_function(func, args);
         }
@@ -3203,11 +3324,21 @@ impl<'a> Evaluator<'a> {
                 | BuiltinFunction::Log10
                 | BuiltinFunction::Mod
                 | BuiltinFunction::Power
+                | BuiltinFunction::Pow
                 | BuiltinFunction::Ceiling
+                | BuiltinFunction::Ceil
                 | BuiltinFunction::Floor
+                // Lane formc (rev-parse-3): scalar too, and an error argument
+                // propagates ([LIVE] `CEILING.MATH(1/0)` #DIV/0!, Calcula #VALUE!).
+                | BuiltinFunction::CeilingMath
+                | BuiltinFunction::FloorMath
+                | BuiltinFunction::CeilingPrecise
+                | BuiltinFunction::FloorPrecise
+                | BuiltinFunction::IsoCeiling
                 | BuiltinFunction::Even
                 | BuiltinFunction::Odd
                 | BuiltinFunction::Fact
+                | BuiltinFunction::Factorial
                 | BuiltinFunction::Degrees
                 | BuiltinFunction::Radians
                 | BuiltinFunction::Sin
@@ -3258,8 +3389,9 @@ impl<'a> Evaluator<'a> {
                 | BuiltinFunction::NumberValue
                 | BuiltinFunction::Fixed
                 | BuiltinFunction::TFn
-                | BuiltinFunction::TextBefore
-                | BuiltinFunction::TextAfter
+                // TEXTBEFORE / TEXTAFTER are NOT here: their delimiter is a
+                // SET of alternatives, never lifted (`text_before_or_after`
+                // lifts the other five itself) -- lane formd.
                 // Calcula's padding pair. Every parameter is a scalar (text,
                 // length, pad). Off this list `=LPAD(A1:A3,4,"0")` is not an
                 // error but ONE text built from A1 alone — `as_text` reads an
@@ -3299,7 +3431,171 @@ impl<'a> Evaluator<'a> {
                 | BuiltinFunction::Time
                 | BuiltinFunction::EDate
                 | BuiltinFunction::EOMonth
+        ) || Self::is_distribution_family(func)
+    }
+
+    /// The probability distributions, their inverses and their scalar
+    /// companions (GAMMA, FISHER, PHI, ERF, ...): every parameter a number or a
+    /// `cumulative` flag, so each LIFTS over an array and an ERROR ARGUMENT
+    /// propagates through the gate in `eval_lifted_function`.
+    ///
+    /// Lane formc (2026-11-05): none of them was on the lifting list, and each
+    /// read its arguments through `as_number`, which answers `None` for an
+    /// error exactly as for the text "x" -- so `=NORMSDIST(1/0)` was #VALUE!
+    /// where [LIVE] Excel 16 says #DIV/0! (`NORM.S.DIST(NA(),TRUE)` #N/A,
+    /// `BINOM.DIST(3,NA(),0.5,FALSE)` #N/A, `ERF(0.5,1/0)` #DIV/0!, the
+    /// compatibility spellings the same), and `=SUM(NORM.S.DIST({1,2},TRUE))`
+    /// was #VALUE! where Excel lifts it (1.81859461412036).
+    /// Z.TEST / T.TEST / F.TEST / CHISQ.TEST take whole arrays and are not here.
+    fn is_distribution_family(func: &BuiltinFunction) -> bool {
+        Self::cumulative_slot(func).is_some()
+            || Self::rejects_logical_arguments(func)
+            || matches!(
+                func,
+                BuiltinFunction::NormInv
+                    | BuiltinFunction::NormSInv
+                    | BuiltinFunction::TDist2T
+                    | BuiltinFunction::TDistRT
+                    | BuiltinFunction::TInv
+                    | BuiltinFunction::TInv2T
+                    | BuiltinFunction::ChisqDistRT
+                    | BuiltinFunction::ChisqInv
+                    | BuiltinFunction::ChisqInvRT
+                    | BuiltinFunction::FDistRT
+                    | BuiltinFunction::FInv
+                    | BuiltinFunction::FInvRT
+                    | BuiltinFunction::BinomInv
+                    | BuiltinFunction::BinomDistRange
+                    | BuiltinFunction::BetaInv
+                    | BuiltinFunction::GammaInv
+                    | BuiltinFunction::GammaFn
+                    | BuiltinFunction::GammaLnFn
+                    | BuiltinFunction::GammaLnPrecise
+                    | BuiltinFunction::LognormInv
+                    | BuiltinFunction::ConfidenceNorm
+                    | BuiltinFunction::ConfidenceT
+                    | BuiltinFunction::NormSDistCompat
+                    | BuiltinFunction::TDistCompat
+                    | BuiltinFunction::FDistCompat
+                    | BuiltinFunction::BetaDistCompat
+                    | BuiltinFunction::LognormDistCompat
+                    | BuiltinFunction::HypgeomDistCompat
+                    | BuiltinFunction::NegbinomDistCompat
+                    | BuiltinFunction::NormInvCompat
+                    | BuiltinFunction::NormSInvCompat
+                    | BuiltinFunction::TInvCompat
+                    | BuiltinFunction::ChiDistCompat
+                    | BuiltinFunction::ChiInvCompat
+                    | BuiltinFunction::FInvCompat
+                    | BuiltinFunction::CritBinomCompat
+                    | BuiltinFunction::BetaInvCompat
+                    | BuiltinFunction::GammaInvCompat
+                    | BuiltinFunction::LogInvCompat
+                    | BuiltinFunction::ConfidenceCompat
+                    | BuiltinFunction::Standardize
+                    | BuiltinFunction::Fisher
+                    | BuiltinFunction::FisherInv
+                    | BuiltinFunction::Phi
+                    | BuiltinFunction::Gauss
+            )
+    }
+
+    /// The 0-based position of a distribution's `cumulative` flag, the one
+    /// LOGICAL parameter of the family.
+    fn cumulative_slot(func: &BuiltinFunction) -> Option<usize> {
+        match func {
+            BuiltinFunction::NormSDist => Some(1),
+            BuiltinFunction::TDist
+            | BuiltinFunction::ChisqDist
+            | BuiltinFunction::PoissonDist
+            | BuiltinFunction::ExponDist
+            | BuiltinFunction::PoissonCompat
+            | BuiltinFunction::ExponDistCompat => Some(2),
+            BuiltinFunction::NormDist
+            | BuiltinFunction::FDist
+            | BuiltinFunction::BinomDist
+            | BuiltinFunction::BetaDist
+            | BuiltinFunction::GammaDist
+            | BuiltinFunction::WeibullDist
+            | BuiltinFunction::LognormDist
+            | BuiltinFunction::NegbinomDist
+            | BuiltinFunction::NormDistCompat
+            | BuiltinFunction::BinomDistCompat
+            | BuiltinFunction::GammaDistCompat
+            | BuiltinFunction::WeibullCompat => Some(3),
+            BuiltinFunction::HypgeomDist => Some(4),
+            _ => None,
+        }
+    }
+
+    /// ERF and its siblings are Analysis ToolPak functions, whose numbers are
+    /// numbers only: [LIVE] Excel 16 `ERF(TRUE)`, `ERFC(A4)` over a TRUE cell
+    /// and `ERF(1,TRUE)` are #VALUE! while `NORM.S.DIST(TRUE,TRUE)`,
+    /// `GAMMA(A4)` and `FISHERINV(A4)` read TRUE as 1. Text numbers are read
+    /// (`ERF("2")` 0.995322265018953), as for the rest of the family.
+    fn rejects_logical_arguments(func: &BuiltinFunction) -> bool {
+        matches!(
+            func,
+            BuiltinFunction::Erf
+                | BuiltinFunction::ErfPrecise
+                | BuiltinFunction::Erfc
+                | BuiltinFunction::ErfcPrecise
         )
+    }
+
+    /// The Analysis ToolPak functions on the lifting list take a multi-cell
+    /// REFERENCE whole -- #VALUE! -- while an ARRAY argument lifts. [LIVE]
+    /// Excel 16 (lane formc, NEW-lift-over-reference, SCRATCH/formc/p4.json;
+    /// lane xlsxdyn's per-parameter table marks each R for a range, V for an
+    /// array constant): `=SUM(ISODD(D1:D3)*1)`, `=SUM(EDATE(D1:D3,1))`,
+    /// `=SUM(EDATE(10,D1:D2))`, `=SUM(QUOTIENT(100,D1:D2))`,
+    /// `=SUM(WEEKNUM(10,B3:B4))` and `ERF(B1:B2)` are #VALUE!, while
+    /// `=SUM(ISODD({1,2,3})*1)` is 2 and a one-cell range reads its cell.
+    fn takes_reference_whole(func: &BuiltinFunction) -> bool {
+        Self::rejects_logical_arguments(func)
+            || matches!(
+                func,
+                BuiltinFunction::IsOdd
+                    | BuiltinFunction::IsEven
+                    | BuiltinFunction::EDate
+                    | BuiltinFunction::EOMonth
+                    | BuiltinFunction::Quotient
+                    | BuiltinFunction::WeekNum
+            )
+    }
+
+    /// EXCEL COERCES BY SIGNATURE BEFORE THE FUNCTION RUNS, so a type error in
+    /// any argument outranks a domain error in an earlier one: [LIVE] Excel 16
+    /// `NORM.DIST(1,0,-1,"x")` is #VALUE!, not the #NUM! the negative standard
+    /// deviation would give, while `NORM.DIST(1,0,-1,1/0)` is #DIV/0!. For the
+    /// distribution family (`is_distribution_family`) every numeric argument
+    /// must read as a number (`as_number`: a number, a logical, a blank, a
+    /// numeric text -- typed or in a cell, [LIVE] `NORM.S.DIST(A10,TRUE)` over
+    /// the text "2" is 0.977249868051821) and the `cumulative` flag as a
+    /// logical (`as_boolean`: a logical, a number, a blank, the text "TRUE" or
+    /// "FALSE" in any case -- [LIVE] `NORM.S.DIST(1,"true")` reads TRUE,
+    /// `NORM.S.DIST(1,"1")` and `NORM.S.DIST(1,"")` are #VALUE!). The left-most
+    /// failing argument decides; an error value is that error.
+    fn signature_error(func: &BuiltinFunction, vals: &[EvalResult]) -> Option<CellError> {
+        if !Self::is_distribution_family(func) {
+            return None;
+        }
+        let flag = Self::cumulative_slot(func);
+        let no_logicals = Self::rejects_logical_arguments(func);
+        for (i, v) in vals.iter().enumerate() {
+            let readable = match v {
+                EvalResult::Error(e) => return Some(e.clone()),
+                // An array lifts: each element is read when its slice is called.
+                EvalResult::Array(_) => true,
+                _ if flag == Some(i) => v.as_boolean().is_some(),
+                EvalResult::Boolean(_) if no_logicals => false,
+                _ => v.as_number().is_some(),
+            };
+            if !readable {
+                return Some(CellError::Value);
+            }
+        }
+        None
     }
 
     /// Evaluates a liftable function, broadcasting over any array arguments.
@@ -3346,6 +3642,13 @@ impl<'a> Evaluator<'a> {
         // still answers `{1,#DIV/0!,3}` rather than a bare error. The left-most
         // error wins, which is Excel's rule and what falling out of this loop
         // on the first hit gives.
+        // The distribution family reads its arguments left to right, an error
+        // and an unreadable argument alike: [LIVE] Excel 16
+        // `NORM.DIST("x",NA(),1,TRUE)` is #VALUE!, `NORM.DIST(NA(),1/0,1,TRUE)`
+        // #N/A (see `signature_error`).
+        if let Some(e) = Self::signature_error(func, &vals) {
+            return EvalResult::Error(e);
+        }
         if !Self::inspects_errors(func) {
             for v in &vals {
                 if let EvalResult::Error(e) = v {
@@ -3502,6 +3805,9 @@ impl<'a> Evaluator<'a> {
         vals: &[EvalResult],
         omitted: &[bool],
     ) -> EvalResult {
+        if let Some(e) = Self::signature_error(func, vals) {
+            return EvalResult::Error(e);
+        }
         let mut saved: Vec<(&'static str, Option<EvalResult>)> = Vec::with_capacity(vals.len());
         {
             let mut scope = self.scope.borrow_mut();
@@ -3564,7 +3870,7 @@ impl<'a> Evaluator<'a> {
         match func {
             // Aggregate functions
             BuiltinFunction::Sum => self.fn_sum(args),
-            BuiltinFunction::Average => self.fn_average(args),
+            BuiltinFunction::Average | BuiltinFunction::Avg => self.fn_average(args),
             BuiltinFunction::Min => self.fn_min(args),
             BuiltinFunction::Max => self.fn_max(args),
             BuiltinFunction::Count => self.fn_count(args),
@@ -3598,9 +3904,9 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Abs => self.fn_abs(args),
             BuiltinFunction::Round => self.fn_round(args),
             BuiltinFunction::Floor => self.fn_floor(args),
-            BuiltinFunction::Ceiling => self.fn_ceiling(args),
+            BuiltinFunction::Ceiling | BuiltinFunction::Ceil => self.fn_ceiling(args),
             BuiltinFunction::Sqrt => self.fn_sqrt(args),
-            BuiltinFunction::Power => self.fn_power(args),
+            BuiltinFunction::Power | BuiltinFunction::Pow => self.fn_power(args),
             BuiltinFunction::Mod => self.fn_mod(args),
             BuiltinFunction::Int => self.fn_int(args),
             BuiltinFunction::Sign => self.fn_sign(args),
@@ -3631,7 +3937,7 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Gcd => self.fn_gcd(args),
             BuiltinFunction::Lcm => self.fn_lcm(args),
             BuiltinFunction::Combin => self.fn_combin(args),
-            BuiltinFunction::Fact => self.fn_fact(args),
+            BuiltinFunction::Fact | BuiltinFunction::Factorial => self.fn_fact(args),
             BuiltinFunction::Degrees => self.fn_degrees(args),
             BuiltinFunction::Radians => self.fn_radians(args),
 
@@ -3874,6 +4180,48 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::NegbinomDist => self.fn_negbinom_dist(args),
             BuiltinFunction::ConfidenceNorm => self.fn_confidence_norm(args),
             BuiltinFunction::ConfidenceT => self.fn_confidence_t(args),
+            BuiltinFunction::ZTest | BuiltinFunction::ZTestCompat => self.fn_z_test(args),
+
+            // Excel's compatibility functions (lane legacystats). Their own
+            // arguments and meaning where those differ from the modern
+            // function's, the modern implementation where they do not.
+            BuiltinFunction::NormSDistCompat => self.fn_normsdist_compat(args),
+            BuiltinFunction::TDistCompat => self.fn_tdist_compat(args),
+            BuiltinFunction::FDistCompat => self.fn_f_dist_rt(args),
+            BuiltinFunction::BetaDistCompat => self.fn_betadist_compat(args),
+            BuiltinFunction::LognormDistCompat => self.fn_with_flag_after(args, 3, true, Self::fn_lognorm_dist),
+            BuiltinFunction::HypgeomDistCompat => self.fn_with_flag_after(args, 4, false, Self::fn_hypgeom_dist),
+            BuiltinFunction::NegbinomDistCompat => self.fn_with_flag_after(args, 3, false, Self::fn_negbinom_dist),
+            BuiltinFunction::NormDistCompat => self.fn_norm_dist(args),
+            BuiltinFunction::NormInvCompat => self.fn_norm_inv(args),
+            BuiltinFunction::NormSInvCompat => self.fn_norm_s_inv(args),
+            BuiltinFunction::TInvCompat => self.fn_t_inv_2t(args),
+            BuiltinFunction::TTestCompat => self.fn_t_test(args),
+            BuiltinFunction::ChiDistCompat => self.fn_chisq_dist_rt(args),
+            BuiltinFunction::ChiInvCompat => self.fn_chisq_inv_rt(args),
+            BuiltinFunction::ChiTestCompat => self.fn_chisq_test(args),
+            BuiltinFunction::FInvCompat => self.fn_f_inv_rt(args),
+            BuiltinFunction::FTestCompat => self.fn_f_test(args),
+            BuiltinFunction::BinomDistCompat => self.fn_binom_dist(args),
+            BuiltinFunction::CritBinomCompat => self.fn_binom_inv(args),
+            BuiltinFunction::PoissonCompat => self.fn_poisson_dist(args),
+            BuiltinFunction::BetaInvCompat => self.fn_beta_inv(args),
+            BuiltinFunction::GammaDistCompat => self.fn_gamma_dist(args),
+            BuiltinFunction::GammaInvCompat => self.fn_gamma_inv(args),
+            BuiltinFunction::WeibullCompat => self.fn_weibull_dist(args),
+            BuiltinFunction::ExponDistCompat => self.fn_expon_dist(args),
+            BuiltinFunction::LogInvCompat => self.fn_lognorm_inv(args),
+            BuiltinFunction::CovarCompat => self.fn_covariance_p(args),
+            BuiltinFunction::ConfidenceCompat => self.fn_confidence_norm(args),
+            BuiltinFunction::ForecastCompat => self.fn_forecast_linear(args),
+            BuiltinFunction::StdevPop => self.fn_stdevp(args),
+            BuiltinFunction::VarPop => self.fn_varp(args),
+            BuiltinFunction::RankEq => self.fn_rank(args),
+            BuiltinFunction::PercentileInc => self.fn_percentile(args),
+            BuiltinFunction::QuartileInc => self.fn_quartile(args),
+            BuiltinFunction::ModeSngl => self.fn_mode(args),
+            BuiltinFunction::PercentRankInc => self.fn_percentrank(args),
+            BuiltinFunction::GammaLnPrecise => self.fn_gammaln(args),
 
             // Descriptive/Analytical statistical functions
             BuiltinFunction::Correl => self.fn_correl(args),
@@ -4175,8 +4523,25 @@ impl<'a> Evaluator<'a> {
                     }
                 }
 
+                // A LIVE DATA TABLE's body cell (`{=TABLE(row, col)}`): its
+                // value is the table formula's answer with the input cell
+                // substituted, which only the app's what-if refresh can compute
+                // (a write of the input and a recalculation per line). Here it
+                // answers the value that refresh last stored, so a pass or a
+                // cascade that reaches the cell leaves it as it is and its
+                // readers read it (`crate::data_table`).
+                if name.eq_ignore_ascii_case(crate::data_table::TABLE_FUNCTION) {
+                    return match (self.context.current_row, self.context.current_col) {
+                        (Some(r), Some(c)) => match self.grid.get_cell(r, c) {
+                            Some(cell) => self.cell_value_to_result(&cell.value),
+                            None => EvalResult::Number(0.0),
+                        },
+                        _ => EvalResult::Error(CellError::Value),
+                    };
+                }
+
                 // Check scope for a LAMBDA bound by LET
-                let key = name.to_uppercase();
+                let key = scope_key(name);
                 let maybe_lambda = {
                     let scope = self.scope.borrow();
                     scope.get(&key).cloned()
@@ -5243,6 +5608,8 @@ impl<'a> Evaluator<'a> {
 
         let significance = if args.len() == 2 {
             match self.evaluate(&args[1]).as_number() {
+                // [LIVE] Excel 16: `FLOOR(2.3,0)` is #DIV/0!, `FLOOR(0,0)` 0.
+                Some(s) if s == 0.0 && num == 0.0 => return EvalResult::Number(0.0),
                 Some(s) if s == 0.0 => return EvalResult::Error(CellError::Div0),
                 Some(s) => s,
                 None => return EvalResult::Error(CellError::Value),
@@ -5259,8 +5626,7 @@ impl<'a> Evaluator<'a> {
         if num > 0.0 && significance < 0.0 {
             return EvalResult::Error(CellError::Num);
         }
-        let result = (num / significance).floor() * significance;
-        EvalResult::Number(result)
+        EvalResult::Number(multiple_of(num, significance, false))
     }
 
     fn fn_ceiling(&self, args: &[Expression]) -> EvalResult {
@@ -5275,7 +5641,9 @@ impl<'a> Evaluator<'a> {
 
         let significance = if args.len() == 2 {
             match self.evaluate(&args[1]).as_number() {
-                Some(s) if s == 0.0 => return EvalResult::Error(CellError::Div0),
+                // [LIVE] Excel 16: `CEILING(x,0)` is 0 for every x (FLOOR's is
+                // #DIV/0!); Calcula said #DIV/0!.
+                Some(s) if s == 0.0 => return EvalResult::Number(0.0),
                 Some(s) => s,
                 None => return EvalResult::Error(CellError::Value),
             }
@@ -5289,8 +5657,7 @@ impl<'a> Evaluator<'a> {
         if num > 0.0 && significance < 0.0 {
             return EvalResult::Error(CellError::Num);
         }
-        let result = (num / significance).ceil() * significance;
-        EvalResult::Number(result)
+        EvalResult::Number(multiple_of(num, significance, true))
     }
 
     fn fn_sqrt(&self, args: &[Expression]) -> EvalResult {
@@ -7692,7 +8059,8 @@ impl<'a> Evaluator<'a> {
             Some(n) => n,
             None => return EvalResult::Error(CellError::Value),
         };
-        let significance = if args.len() >= 2 {
+        // An omitted significance is 1 ([LIVE] `CEILING.MATH(2.3,,1)` is 3).
+        let significance = if args.len() >= 2 && !is_omitted(&args[1]) {
             match self.evaluate(&args[1]).as_number() {
                 Some(s) => s.abs(),
                 None => return EvalResult::Error(CellError::Value),
@@ -7705,22 +8073,19 @@ impl<'a> Evaluator<'a> {
         }
         let mode = if args.len() == 3 {
             match self.evaluate(&args[2]).as_number() {
-                Some(m) => m as i32,
+                Some(m) => m,
                 None => return EvalResult::Error(CellError::Value),
             }
         } else {
-            0
+            0.0
         };
-        let result = if num >= 0.0 {
-            (num / significance).ceil() * significance
-        } else if mode != 0 {
-            // Round toward zero for negatives
-            (num / significance).ceil() * significance
-        } else {
-            // Round away from zero for negatives (up in magnitude)
-            -(-num / significance).ceil() * significance
-        };
-        EvalResult::Number(result)
+        // A NEGATIVE number rounds up -- toward zero -- unless `mode` is
+        // non-zero, which rounds it away from zero. The two arms were swapped
+        // (rev-parse-3, lane formc): [LIVE] Excel 16 `CEILING.MATH(-2.3)` is
+        // -2, `CEILING.MATH(-2.3,1,1)` -3, `CEILING.MATH(-5.5,2,-1)` -6, and any
+        // non-zero mode counts (`CEILING.MATH(-2.3,1,0.5)` -3).
+        let away_from_zero = num < 0.0 && mode != 0.0;
+        EvalResult::Number(multiple_of(num, significance, !away_from_zero))
     }
 
     fn fn_ceiling_precise(&self, args: &[Expression]) -> EvalResult {
@@ -7743,8 +8108,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Number(0.0);
         }
         // Always rounds up (toward positive infinity)
-        let result = (num / significance).ceil() * significance;
-        EvalResult::Number(result)
+        EvalResult::Number(multiple_of(num, significance, true))
     }
 
     fn fn_floor_math(&self, args: &[Expression]) -> EvalResult {
@@ -7755,7 +8119,8 @@ impl<'a> Evaluator<'a> {
             Some(n) => n,
             None => return EvalResult::Error(CellError::Value),
         };
-        let significance = if args.len() >= 2 {
+        // An omitted significance is 1 ([LIVE] `CEILING.MATH(2.3,,1)` is 3).
+        let significance = if args.len() >= 2 && !is_omitted(&args[1]) {
             match self.evaluate(&args[1]).as_number() {
                 Some(s) => s.abs(),
                 None => return EvalResult::Error(CellError::Value),
@@ -7768,22 +8133,18 @@ impl<'a> Evaluator<'a> {
         }
         let mode = if args.len() == 3 {
             match self.evaluate(&args[2]).as_number() {
-                Some(m) => m as i32,
+                Some(m) => m,
                 None => return EvalResult::Error(CellError::Value),
             }
         } else {
-            0
+            0.0
         };
-        let result = if num >= 0.0 {
-            (num / significance).floor() * significance
-        } else if mode != 0 {
-            // Round toward zero for negatives
-            (num / significance).floor() * significance
-        } else {
-            // Round away from zero for negatives (down in magnitude)
-            -(-num / significance).floor() * significance
-        };
-        EvalResult::Number(result)
+        // A NEGATIVE number rounds down -- away from zero -- unless `mode` is
+        // non-zero, which rounds it toward zero. Swapped before (rev-parse-3):
+        // [LIVE] Excel 16 `FLOOR.MATH(-2.3)` is -3, `FLOOR.MATH(-2.3,1,1)` -2,
+        // `FLOOR.MATH(-5.5,2,-1)` -4, `FLOOR.MATH(-2.3,1,0.5)` -2.
+        let toward_zero = num < 0.0 && mode != 0.0;
+        EvalResult::Number(multiple_of(num, significance, toward_zero))
     }
 
     fn fn_floor_precise(&self, args: &[Expression]) -> EvalResult {
@@ -7806,8 +8167,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Number(0.0);
         }
         // Always rounds down (toward negative infinity)
-        let result = (num / significance).floor() * significance;
-        EvalResult::Number(result)
+        EvalResult::Number(multiple_of(num, significance, false))
     }
 
     // ==================== Additional Math (Group 3) ====================
@@ -9260,14 +9620,51 @@ impl<'a> Evaluator<'a> {
 
     fn fn_rows(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let (rows, _) = self.get_range_dimensions(&args[0]);
-        EvalResult::Number(rows as f64)
+        match self.dimensions_of_argument(&args[0]) {
+            Ok((rows, _)) => EvalResult::Number(rows as f64),
+            Err(error) => error,
+        }
     }
 
     fn fn_columns(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let (_, cols) = self.get_range_dimensions(&args[0]);
-        EvalResult::Number(cols as f64)
+        match self.dimensions_of_argument(&args[0]) {
+            Ok((_, cols)) => EvalResult::Number(cols as f64),
+            Err(error) => error,
+        }
+    }
+
+    /// ROWS / COLUMNS of ONE argument: the shape of a REFERENCE, which is never
+    /// read, or of a VALUE, whose error is the answer (BUG-0650).
+    ///
+    /// [LIVE, Excel 16, parser lane probe] `=ROWS(1/0)` is #DIV/0!, `=ROWS(#N/A)`
+    /// and `=ROWS(NA())` #N/A, `=COLUMNS(1/0)` #DIV/0!, `=ROWS(SQRT(-1))` #NUM!,
+    /// `=LET(a,1/0,ROWS(a))` #DIV/0! and `=LET(a,A1,ROWS(A:R))` #NAME? -- while
+    /// a reference to a cell HOLDING an error is still a shape: `=ROWS(E1)`
+    /// with E1 = #N/A is 1, as is `=LET(a,E1,ROWS(a))`. This answered
+    /// `get_range_dimensions` for everything, which never looks at an error,
+    /// so every one of the first group counted 1.
+    fn dimensions_of_argument(&self, expr: &Expression) -> Result<(usize, usize), EvalResult> {
+        let is_reference = match expr {
+            // `b:b` / `a:C3` / `A1:b` inside a LET: a reference only when every
+            // name half is bound to one; otherwise its value (#NAME?, #VALUE!)
+            // is the answer.
+            Expression::Range { start, end, .. } => [start.as_ref(), end.as_ref()].iter().all(|half| match half {
+                Expression::NamedRef { name, .. } => self.bound_reference(&scope_key(name)).is_some(),
+                _ => true,
+            }),
+            // A LET / LAMBDA name: a shape when it is bound to a reference.
+            Expression::NamedRef { name, .. } => self.bound_reference(&scope_key(name)).is_some(),
+            other => Self::is_reference_argument(other),
+        };
+        if is_reference {
+            return Ok(self.get_range_dimensions(expr));
+        }
+        let value = self.evaluate(expr);
+        if let EvalResult::Error(_) = value {
+            return Err(value);
+        }
+        Ok(if array_lift::lifts(&value) { array_lift::shape(&value) } else { (1, 1) })
     }
 
     fn fn_transpose(&self, args: &[Expression]) -> EvalResult {
@@ -9671,20 +10068,14 @@ impl<'a> Evaluator<'a> {
                 self.scope_refs.borrow_mut().truncate(refs_depth);
                 return EvalResult::Error(CellError::Value);
             }
+            // AN ERROR IS A VALUE LIKE ANY OTHER, BOUND AND NOT RETURNED.
+            // [LIVE, Excel 16, parser lane probe] `=LET(a,1/0,5)` is 5,
+            // `=LET(a,1/0,ISERROR(a))` TRUE, `=LET(a,NA(),IFERROR(a,7))` 7 and
+            // `=LET(a,E1,ROWS(a))` 1 with E1 = #N/A. This returned the first
+            // error a value produced, so each of those answered the error, and
+            // the last one could never reach ROWS' shape of a reference.
             let value = self.evaluate(&args[i * 2 + 1]);
-            if let EvalResult::Error(e) = &value {
-                // Restore saved scope entries before returning error
-                let mut scope = self.scope.borrow_mut();
-                for (k, old) in saved.into_iter().rev() {
-                    match old {
-                        Some(v) => { scope.insert(k, v); }
-                        None => { scope.remove(&k); }
-                    }
-                }
-                self.scope_refs.borrow_mut().truncate(refs_depth);
-                return EvalResult::Error(e.clone());
-            }
-            let key = name.to_uppercase();
+            let key = scope_key(&name);
             // The reference the name stands for, when its value is one: what
             // `b:b` (a bare `B:B` the parser bound to this name) reads.
             let reference = self.reference_of_binding(&args[i * 2 + 1]);
@@ -9720,7 +10111,7 @@ impl<'a> Evaluator<'a> {
     /// Returns the uppercased name, or empty string if not a NamedRef.
     fn extract_param_name(&self, expr: &Expression) -> String {
         if let Expression::NamedRef { name, .. } = expr {
-            name.to_uppercase()
+            scope_key(name)
         } else {
             String::new()
         }
@@ -9766,7 +10157,7 @@ impl<'a> Evaluator<'a> {
                 refs.push((key.clone(), None));
             }
             for name in params {
-                refs.push((name.to_uppercase(), None));
+                refs.push((scope_key(name), None));
             }
         }
         {
@@ -9780,7 +10171,7 @@ impl<'a> Evaluator<'a> {
 
             // Apply parameter bindings (override captured if same name)
             for (i, name) in params.iter().enumerate() {
-                let key = name.to_uppercase();
+                let key = scope_key(name);
                 // Only save if not already saved by captured
                 if !captured.contains_key(&key) {
                     saved.push((key.clone(), scope.get(&key).cloned()));
@@ -9830,7 +10221,7 @@ impl<'a> Evaluator<'a> {
             {
                 Some(expr.clone())
             }
-            Expression::NamedRef { name, .. } => self.bound_reference(&name.to_uppercase()),
+            Expression::NamedRef { name, .. } => self.bound_reference(&scope_key(name)),
             _ => None,
         }
     }
@@ -9864,7 +10255,7 @@ impl<'a> Evaluator<'a> {
     /// because Excel then reads the formula's A1-style references as names --
     /// it stores `LET(a,'A1',...)`].
     fn eval_bound_name_range(&self, start: &str, end: &str) -> EvalResult {
-        let (a, b) = (start.to_uppercase(), end.to_uppercase());
+        let (a, b) = (scope_key(start), scope_key(end));
         let (va, vb) = {
             let scope = self.scope.borrow();
             (scope.get(&a).cloned(), scope.get(&b).cloned())
@@ -9904,6 +10295,47 @@ impl<'a> Evaluator<'a> {
                 None => EvalResult::Error(CellError::Value),
             },
             _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// `x:y` where a half is not a plain cell: the smallest rectangle holding
+    /// both references (BUG-0646). A NAME half stands for the reference its
+    /// LET / LAMBDA binding is: unbound it is `#NAME?` (`=SUM(A:C3)` and
+    /// `=SUM(A1:B)` outside any LET), bound to a plain value `#VALUE!`
+    /// (`=LET(a,1,SUM(a:C3))`) [LIVE, Excel 16, parser lane probe]. Any other
+    /// half (a resolved structured reference is a range) is its own reference.
+    fn eval_reference_span(&self, sheet: &Option<String>, start: &Expression, end: &Expression) -> EvalResult {
+        let half = |e: &Expression| -> Result<Expression, CellError> {
+            match e {
+                Expression::NamedRef { name, .. } => {
+                    let key = scope_key(name);
+                    if let Some(reference) = self.bound_reference(&key) {
+                        return Ok(reference);
+                    }
+                    match self.scope.borrow().get(&key) {
+                        Some(EvalResult::Error(err)) => Err(err.clone()),
+                        Some(_) => Err(CellError::Value),
+                        None => Err(CellError::Name),
+                    }
+                }
+                Expression::CellRef { .. } | Expression::Range { .. } => Ok(e.clone()),
+                _ => Err(CellError::Value),
+            }
+        };
+        let (x, y) = match (half(start), half(end)) {
+            (Ok(x), Ok(y)) => (x, y),
+            (Err(err), _) | (_, Err(err)) => return EvalResult::Error(err),
+        };
+        // The range's own qualifier applies to a corner that carries none.
+        let qualify = |e: Expression| match (sheet, e) {
+            (Some(s), Expression::CellRef { sheet: None, col, row, col_absolute, row_absolute, ref_site_id }) => {
+                Expression::CellRef { sheet: Some(s.clone()), col, row, col_absolute, row_absolute, ref_site_id }
+            }
+            (_, other) => other,
+        };
+        match Self::reference_span(&qualify(x), &qualify(y)) {
+            Some(span) => self.evaluate(&span),
+            None => EvalResult::Error(CellError::Value),
         }
     }
 
@@ -9993,7 +10425,7 @@ impl<'a> Evaluator<'a> {
     /// still shadows it — the same precedence the evaluator gives every name.
     fn callable_arg(&self, expr: &Expression) -> Option<Callable> {
         if let Expression::NamedRef { name, .. } = expr {
-            let key = name.to_uppercase();
+            let key = scope_key(name);
             if self.scope.borrow().get(&key).is_none() {
                 // A DEFINED NAME never reaches here: `resolve_names_in_ast`
                 // splices one into the tree before evaluation (D2), so a
@@ -10007,6 +10439,66 @@ impl<'a> Evaluator<'a> {
             }
         }
         Self::as_callable(&self.evaluate(expr))
+    }
+
+    /// `callable_arg`, or the error a LAMBDA helper answers when its function
+    /// argument is no callable: #VALUE! WHATEVER the argument holds, an error
+    /// value included. [LIVE] Excel 16: `=ERROR.TYPE(MAP({1,2},xyz))`,
+    /// `=ERROR.TYPE(MAP({1,2},1/0))` and `=ERROR.TYPE(MAKEARRAY(2,2,xyz))` are
+    /// all 3 -- unlike an ARRAY argument, whose error is passed on
+    /// (`helper_array_arg`).
+    fn callable_or_error(&self, expr: &Expression) -> Result<Callable, CellError> {
+        self.callable_arg(expr).ok_or(CellError::Value)
+    }
+
+    /// Whether an array ARGUMENT of a LAMBDA helper denotes a REFERENCE, so a
+    /// cell holding an error is a one-cell array of it rather than the error.
+    ///
+    /// [LIVE] Excel 16 (lane formc, SCRATCH/formc/p1.json, p2.json):
+    /// `=TYPE(MAP(xyz,LAMBDA(x,x)))`, `=TYPE(MAP(1/0,LAMBDA(x,x)))`,
+    /// `=TYPE(LET(x,1/0,MAP(x,..)))`, `=TYPE(BYROW(1/0,..))`,
+    /// `=TYPE(SCAN(0,xyz,..))` and `=TYPE(REDUCE(0,1/0,..))` are 16 (an error),
+    /// while `=TYPE(MAP(A6,..))` over a #DIV/0! cell, `MAP(A6:A7,..)`,
+    /// `LET(x,A6,MAP(x,..))`, `MAP(INDEX(A6:A7,1),..)` and `MAP(IF(1,A6),..)`
+    /// are 64 (an array). Calcula answered `{#NAME?}` -- a one-element array --
+    /// for an unknown name. A function's result is a reference only for the
+    /// reference-returning ones; IF / CHOOSE / IFS / SWITCH when a branch is one.
+    fn denotes_reference(&self, expr: &Expression) -> bool {
+        match expr {
+            Expression::CellRef { .. }
+            | Expression::Range { .. }
+            | Expression::ColumnRef { .. }
+            | Expression::RowRef { .. }
+            | Expression::Sheet3DRef { .. }
+            | Expression::TableRef { .. }
+            | Expression::SpillRef { .. } => true,
+            Expression::NamedRef { name, .. } => self.bound_reference(&scope_key(name)).is_some(),
+            Expression::FunctionCall { func, args, .. } => match func {
+                BuiltinFunction::Index
+                | BuiltinFunction::Offset
+                | BuiltinFunction::Indirect
+                | BuiltinFunction::XLookup => true,
+                BuiltinFunction::If
+                | BuiltinFunction::Choose
+                | BuiltinFunction::Ifs
+                | BuiltinFunction::Switch => args.iter().skip(1).any(|a| self.denotes_reference(a)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// An array argument of MAP / BYROW / BYCOL / SCAN / REDUCE, as rows,
+    /// columns and values -- or the ERROR it is when it is an error VALUE
+    /// rather than a reference to an error (`denotes_reference`).
+    fn helper_array_arg(&self, expr: &Expression) -> Result<(usize, usize, Vec<EvalResult>), CellError> {
+        let (rows, cols, data) = self.eval_range_2d(expr);
+        if let [EvalResult::Error(e)] = data.as_slice() {
+            if !self.denotes_reference(expr) {
+                return Err(e.clone());
+            }
+        }
+        Ok((rows, cols, data))
     }
 
     /// Invoke a callable with already-evaluated arguments.
@@ -10056,20 +10548,31 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// MAP(array, lambda)
-    /// Applies lambda to each element of the array. Returns an array of results.
+    /// MAP(array1, [array2, ...], lambda)
+    /// Applies lambda to each element of the array (or, given several arrays,
+    /// to one element of each: `map_over_arrays`). Returns an array of results.
     /// Works with COLLECT: if the lambda returns a List/Dict, each output cell is 3D.
     fn fn_map(&self, args: &[Expression]) -> EvalResult {
-        if args.len() != 2 {
+        // MAP(array1, [array2, ...], lambda): ONE OR MORE arrays, the lambda
+        // taking one parameter per array. [LIVE] Excel 16 (lane formd,
+        // SCRATCH/formd/p1.json, p2.json): `=MAP(A1:A3,B1:B3,LAMBDA(a,b,a+b))`
+        // is {11;22;33}, `=MAP({1,2},{3,4},{5,6},LAMBDA(a,b,c,a+b+c))` {9,12}.
+        // Calcula took exactly one array (#VALUE! for every other count).
+        if args.len() < 2 {
             return EvalResult::Error(CellError::Value);
         }
+        let last = args.len() - 1;
+        if last > 1 {
+            return self.map_over_arrays(&args[..last], &args[last]);
+        }
 
-        let (rows, cols, data) = self.eval_range_2d(&args[0]);
-        let callable = self.callable_arg(&args[1]);
-
-        let callable = match callable {
-            Some(c) => c,
-            None => return EvalResult::Error(CellError::Value),
+        let (rows, cols, data) = match self.helper_array_arg(&args[0]) {
+            Ok(array) => array,
+            Err(e) => return EvalResult::Error(e),
+        };
+        let callable = match self.callable_or_error(&args[1]) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
         };
 
         if !callable.accepts_arity(1) {
@@ -10097,6 +10600,99 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// MAP over TWO OR MORE arrays: the lambda is called with one element of
+    /// each, position by position.
+    ///
+    /// [LIVE] Excel 16 (lane formd, SCRATCH/formd/p1.json, p2.json):
+    /// - The result is as tall as the TALLEST array and as wide as the WIDEST,
+    ///   and a position some array does not reach is #N/A -- nothing
+    ///   broadcasts, a one-element array included: `=MAP({1,2,3},{10,20},..)`
+    ///   {11,22,#N/A}, `=MAP(10,{1,2,3},..)` {11,#N/A,#N/A},
+    ///   `=MAP({1},{3,4},..)` {4,#N/A}, `=MAP({1;2},{1,2},..)` 2 then three
+    ///   #N/A, `=MAP(A1:A3,B1:B2,..)` {11;22;#N/A}.
+    /// - The FIRST array may be anything the one-array MAP takes
+    ///   (`helper_array_arg`: `=MAP(1/0,{1,2},..)` #DIV/0!, `=MAP(xyz,..)`
+    ///   #NAME?). Every LATER one must be an array or a reference:
+    ///   `=MAP({1,2},10,..)`, `MAP({1,2},"x",..)`, `MAP({1,2},TRUE,..)`,
+    ///   `MAP({1,2},LET(x,5,x),..)`, `MAP({1,2},1/0,..)` and
+    ///   `MAP({1,2},xyz,..)` are #VALUE!, while `MAP({1,2},A1,..)`,
+    ///   `MAP({1,2},{5},..)` and `MAP({1,2},A6,..)` over a blank cell map.
+    /// - A function argument that is no callable, or one whose parameter
+    ///   count is not the array count, is #VALUE! (`LAMBDA(a,a)`,
+    ///   `LAMBDA(a,b,c,a)` over two arrays); an error the lambda returns is
+    ///   that element's value (`IF(a=1,1/0,b)` gives {#DIV/0!,4}).
+    fn map_over_arrays(&self, arrays: &[Expression], function: &Expression) -> EvalResult {
+        let mut grids: Vec<(usize, usize, Vec<EvalResult>)> = Vec::with_capacity(arrays.len());
+        for (i, expr) in arrays.iter().enumerate() {
+            if i == 0 {
+                match self.helper_array_arg(expr) {
+                    Ok(array) => grids.push(array),
+                    Err(e) => return EvalResult::Error(e),
+                }
+            } else if self.denotes_reference(expr) {
+                grids.push(self.eval_range_2d(expr));
+            } else {
+                let value = self.evaluate(expr);
+                // A one-element array CONSTANT (`{5}`) evaluates to its element
+                // but is an array to Excel's MAP.
+                if !array_lift::lifts(&value) && !matches!(expr, Expression::ArrayLiteral { .. }) {
+                    return EvalResult::Error(CellError::Value);
+                }
+                let (rows, cols) = array_lift::shape(&value);
+                if rows == 0 || cols == 0 {
+                    return EvalResult::Error(CellError::Value);
+                }
+                let mut data = Vec::with_capacity(rows * cols);
+                for r in 0..rows {
+                    for c in 0..cols {
+                        data.push(array_lift::at(&value, r, c));
+                    }
+                }
+                grids.push((rows, cols, data));
+            }
+        }
+        let callable = match self.callable_or_error(function) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
+        };
+        if !callable.accepts_arity(arrays.len()) {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let rows = grids.iter().map(|g| g.0).max().unwrap_or(0);
+        let cols = grids.iter().map(|g| g.1).max().unwrap_or(0);
+        if rows == 0 || cols == 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let cells = (rows as u64).saturating_mul(cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
+
+        let mut out = Vec::with_capacity(cells as usize);
+        let mut call: Vec<EvalResult> = Vec::with_capacity(grids.len());
+        for r in 0..rows {
+            for c in 0..cols {
+                call.clear();
+                let mut reached = true;
+                for (g_rows, g_cols, data) in &grids {
+                    if r >= *g_rows || c >= *g_cols {
+                        reached = false;
+                        break;
+                    }
+                    call.push(data.get(r * g_cols + c).cloned().unwrap_or(EvalResult::Error(CellError::NA)));
+                }
+                out.push(if reached {
+                    self.invoke_callable(&callable, &call)
+                } else {
+                    EvalResult::Error(CellError::NA)
+                });
+            }
+        }
+        array_lift::pack(rows, cols, out)
+    }
+
     /// REDUCE(initial_value, array, lambda)
     /// Reduces an array to a single value by applying lambda(accumulator, element) iteratively.
     fn fn_reduce(&self, args: &[Expression]) -> EvalResult {
@@ -10104,17 +10700,20 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
+        // AN ERROR ACCUMULATOR IS DATA, not a stop: [LIVE] Excel 16
+        // `=REDUCE(1/0,{1,2},LAMBDA(a,b,5))` is 5, `=REDUCE(xyz,{1,2},
+        // LAMBDA(a,b,5))` 5, `=REDUCE(1/0,{1,2},LAMBDA(a,b,ISERROR(a)))` FALSE
+        // and `=REDUCE(0,{1,2},LAMBDA(a,b,IF(b=1,1/0,5)))` 5. Calcula returned
+        // the first error it met -- the initial value's, or a step's.
         let initial = self.evaluate(&args[0]);
-        if let EvalResult::Error(e) = &initial {
-            return EvalResult::Error(e.clone());
-        }
 
-        let flat = self.eval_flat(&args[1]);
-        let callable = self.callable_arg(&args[2]);
-
-        let callable = match callable {
-            Some(c) => c,
-            None => return EvalResult::Error(CellError::Value),
+        let flat = match self.helper_array_arg(&args[1]) {
+            Ok((_, _, data)) => data,
+            Err(e) => return EvalResult::Error(e),
+        };
+        let callable = match self.callable_or_error(&args[2]) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
         };
 
         if !callable.accepts_arity(2) {
@@ -10124,9 +10723,6 @@ impl<'a> Evaluator<'a> {
         let mut accumulator = initial;
         for item in &flat {
             accumulator = self.invoke_callable(&callable, &[accumulator, item.clone()]);
-            if let EvalResult::Error(_) = &accumulator {
-                return accumulator;
-            }
         }
 
         accumulator
@@ -10139,17 +10735,22 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
+        // As REDUCE: an error accumulator is passed on, and the result is the
+        // ARRAY of every step in the input's own shape. [LIVE] Excel 16
+        // `=TYPE(SCAN(1/0,{1,2},LAMBDA(a,b,a+b)))` and
+        // `=TYPE(SCAN(0,{1,"x",2},LAMBDA(a,b,a+b)))` are 64 (an array;
+        // `INDEX(..,1,1)` of the second is 1, `INDEX(..,1,3)` #VALUE!),
+        // `=INDEX(SCAN(1/0,{1,2},LAMBDA(a,b,5)),1,1)` 5. Calcula returned the
+        // first error bare, and a ROW input came back as a column.
         let initial = self.evaluate(&args[0]);
-        if let EvalResult::Error(e) = &initial {
-            return EvalResult::Error(e.clone());
-        }
 
-        let flat = self.eval_flat(&args[1]);
-        let callable = self.callable_arg(&args[2]);
-
-        let callable = match callable {
-            Some(c) => c,
-            None => return EvalResult::Error(CellError::Value),
+        let (rows, cols, flat) = match self.helper_array_arg(&args[1]) {
+            Ok(array) => array,
+            Err(e) => return EvalResult::Error(e),
+        };
+        let callable = match self.callable_or_error(&args[2]) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
         };
 
         if !callable.accepts_arity(2) {
@@ -10160,13 +10761,14 @@ impl<'a> Evaluator<'a> {
         let mut results: Vec<EvalResult> = Vec::with_capacity(flat.len());
         for item in &flat {
             accumulator = self.invoke_callable(&callable, &[accumulator, item.clone()]);
-            if let EvalResult::Error(_) = &accumulator {
-                return accumulator;
-            }
             results.push(accumulator.clone());
         }
 
-        EvalResult::Array(results)
+        if cols <= 1 || results.len() != rows * cols {
+            EvalResult::Array(results)
+        } else {
+            EvalResult::Array(results.chunks(cols).map(|row| EvalResult::Array(row.to_vec())).collect())
+        }
     }
 
     /// MAKEARRAY(rows, cols, lambda)
@@ -10177,19 +10779,27 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let rows = match self.evaluate(&args[0]).as_number() {
-            Some(n) if n >= 1.0 && n <= 1048576.0 => n as usize,
-            _ => return EvalResult::Error(CellError::Value),
+        // An error count is that error ([LIVE] Excel 16 `MAKEARRAY(1/0,2,..)`,
+        // `MAKEARRAY(2,NA(),..)` and `MAKEARRAY(xyz,2,..)` are errors, TYPE 16);
+        // Calcula said #VALUE! for each.
+        let rows = match self.evaluate(&args[0]) {
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            v => match v.as_number() {
+                Some(n) if n >= 1.0 && n <= 1048576.0 => n as usize,
+                _ => return EvalResult::Error(CellError::Value),
+            },
         };
-        let cols = match self.evaluate(&args[1]).as_number() {
-            Some(n) if n >= 1.0 && n <= 16384.0 => n as usize,
-            _ => return EvalResult::Error(CellError::Value),
+        let cols = match self.evaluate(&args[1]) {
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            v => match v.as_number() {
+                Some(n) if n >= 1.0 && n <= 16384.0 => n as usize,
+                _ => return EvalResult::Error(CellError::Value),
+            },
         };
 
-        let callable = self.callable_arg(&args[2]);
-        let callable = match callable {
-            Some(c) => c,
-            None => return EvalResult::Error(CellError::Value),
+        let callable = match self.callable_or_error(&args[2]) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
         };
 
         if !callable.accepts_arity(2) {
@@ -10244,12 +10854,13 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let (rows, cols, data) = self.eval_range_2d(&args[0]);
-        let callable = self.callable_arg(&args[1]);
-
-        let callable = match callable {
-            Some(c) => c,
-            None => return EvalResult::Error(CellError::Value),
+        let (rows, cols, data) = match self.helper_array_arg(&args[0]) {
+            Ok(array) => array,
+            Err(e) => return EvalResult::Error(e),
+        };
+        let callable = match self.callable_or_error(&args[1]) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
         };
 
         if !callable.accepts_arity(1) {
@@ -10279,12 +10890,13 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let (rows, cols, data) = self.eval_range_2d(&args[0]);
-        let callable = self.callable_arg(&args[1]);
-
-        let callable = match callable {
-            Some(c) => c,
-            None => return EvalResult::Error(CellError::Value),
+        let (rows, cols, data) = match self.helper_array_arg(&args[0]) {
+            Ok(array) => array,
+            Err(e) => return EvalResult::Error(e),
+        };
+        let callable = match self.callable_or_error(&args[1]) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
         };
 
         if !callable.accepts_arity(1) {
@@ -11343,8 +11955,12 @@ impl<'a> Evaluator<'a> {
             .collect();
 
         // Call the pivot data lookup
+        // A non-finite value (a model measure's 1/0, -1/0, 0/0 in a BI
+        // pivot) is #NUM!, as the pivot cell itself shows it -- Excel's
+        // data-model PivotTable shows #NUM! there and GETPIVOTDATA reads the
+        // cell [LIVE, open-ledger round D]. It answered the raw infinity.
         match pivot_fn(&data_field, pivot_sheet.as_deref(), pivot_row, pivot_col, &pair_refs) {
-            Some(value) => EvalResult::Number(value),
+            Some(value) => finite_or_num(value),
             None => EvalResult::Error(CellError::Ref),
         }
     }
@@ -12513,91 +13129,363 @@ impl<'a> Evaluator<'a> {
 
     // ==================== Text Parsing/Conversion Functions ====================
 
+    /// TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty],
+    /// [match_mode], [pad_with]).
+    ///
+    /// [LIVE] Excel 16, lane formd (SCRATCH/formd/p1.json, p2.json). Calcula
+    /// split on ONE delimiter string and ignored `ignore_empty`, `match_mode`
+    /// and `pad_with`, so `=TEXTSPLIT("a-b+c",{"-","+"})` split on nothing it
+    /// could see and `=TEXTSPLIT("a,b;c",",",";")` left its short row ragged.
+    /// Excel's rules, each probed:
+    /// - Each delimiter argument is a SET: every element of an array or range
+    ///   is an alternative (`{"-","+"}` gives a|b|c), and at one position the
+    ///   LONGEST alternative matches (`TEXTSPLIT("a--b",{"-","--"})` a|b). A
+    ///   position both a column and a row delimiter match is a column break
+    ///   (`TEXTSPLIT("a;b",";",";")` a|b).
+    /// - An EMPTY delimiter anywhere is #VALUE! (`TEXTSPLIT("abc","")`,
+    ///   `{"","b"}`, `TEXTSPLIT("abc",,"")`); an omitted column delimiter is
+    ///   fine beside a row delimiter (`TEXTSPLIT("a;b",,";")` a;b) and #VALUE!
+    ///   alone (`TEXTSPLIT("a,b",)`). Empty text is #VALUE!.
+    /// - `ignore_empty` drops empty items and empty rows (`"a,,b"` a|b,
+    ///   `"a,b;;c"` with TRUE a,b;c,#N/A); a result left with nothing is
+    ///   Excel's #CALC!, which Calcula has no value for -- #VALUE! here, as
+    ///   FILTER's empty result.
+    /// - `match_mode` 1 matches case-insensitively, by Excel's case table
+    ///   (`identity::fold_sheet_name_char`); anything but 0 or 1 is #VALUE!.
+    /// - A short row is padded with `pad_with`, #N/A when it is not given
+    ///   (`TEXTSPLIT("a,b;c",",",";")` a,b;c,#N/A); an argument written but
+    ///   empty pads with 0 (`..,";",,,)` and a blank cell alike), an error
+    ///   pads with that error only where padding is needed, and an array pad
+    ///   is #VALUE!.
+    /// - A text ARRAY lifts, each element keeping only the first item of its
+    ///   split (`TEXTSPLIT({"a,b";"c,d"},",")` a;c, `TEXTSPLIT(A1:A3,",")`).
     fn fn_textsplit(&self, args: &[Expression]) -> EvalResult {
-        // TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])
-        if args.is_empty() || args.len() > 6 { return EvalResult::Error(CellError::Value); }
-        let text = text_arg!(self.evaluate(&args[0]));
-        let col_delim = if args.len() >= 2 { text_arg!(self.evaluate(&args[1])) } else { return EvalResult::Error(CellError::Value); };
-        let row_delim = if args.len() >= 3 {
-            // The row delimiter is a TEXT argument like the others, so an error
-            // in it propagates rather than being split on: `=TEXTSPLIT(a,",",1/0)`
-            // would otherwise have split on the literal "#DIV/0!".
-            let v = arg_or_err!(self.evaluate(&args[2]));
-            let rd = v.text_or_error().unwrap_or_default();
-            if matches!(v, EvalResult::Boolean(false)) || matches!(v, EvalResult::Number(n) if n == 0.0) || rd.is_empty() {
-                None
-            } else { Some(rd) }
-        } else { None };
-        let _ignore_empty = if args.len() >= 4 { { let _v = arg_or_err!(self.evaluate(&args[3])); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
-        // Split by rows first, then cols
-        if let Some(ref rd) = row_delim {
-            let rows: Vec<&str> = text.split(rd.as_str()).collect();
-            let mut result: Vec<EvalResult> = Vec::new();
-            for row in &rows {
-                let cols: Vec<&str> = row.split(col_delim.as_str()).collect();
-                result.push(EvalResult::Array(cols.iter().map(|s| EvalResult::Text(s.to_string())).collect()));
-            }
-            EvalResult::Array(result)
+        if args.len() < 2 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = text { return EvalResult::Error(e); }
+        let given = |i: usize| args.len() > i && !is_omitted(&args[i]);
+        let col_delims = if given(1) {
+            match self.delimiter_set(&args[1]) { Ok(d) => d, Err(e) => return EvalResult::Error(e) }
         } else {
-            let parts: Vec<&str> = text.split(col_delim.as_str()).collect();
-            EvalResult::Array(parts.iter().map(|s| EvalResult::Text(s.to_string())).collect())
+            Vec::new()
+        };
+        let row_delims = if given(2) {
+            match self.delimiter_set(&args[2]) { Ok(d) => d, Err(e) => return EvalResult::Error(e) }
+        } else {
+            Vec::new()
+        };
+        let ignore_empty = if given(3) {
+            match self.evaluate(&args[3]) {
+                EvalResult::Error(e) => return EvalResult::Error(e),
+                EvalResult::Array(_) => return EvalResult::Error(CellError::Value),
+                v => match v.as_boolean() { Some(b) => b, None => return EvalResult::Error(CellError::Value) },
+            }
+        } else {
+            false
+        };
+        let case_insensitive = if given(4) {
+            match Self::text_match_flag(&self.evaluate(&args[4])) { Ok(b) => b, Err(e) => return EvalResult::Error(e) }
+        } else {
+            false
+        };
+        let pad = if args.len() > 5 {
+            match self.evaluate(&args[5]) {
+                EvalResult::Array(_) => return EvalResult::Error(CellError::Value),
+                EvalResult::Blank => EvalResult::Number(0.0),
+                v => v,
+            }
+        } else {
+            EvalResult::Error(CellError::NA)
+        };
+        if col_delims.is_empty() && row_delims.is_empty() {
+            return EvalResult::Error(CellError::Value);
+        }
+        if col_delims.iter().chain(row_delims.iter()).any(|d| d.is_empty()) {
+            return EvalResult::Error(CellError::Value);
+        }
+        let split = |t: &EvalResult| -> EvalResult {
+            match t.text_or_error() {
+                Ok(s) => Self::split_text(&s, &col_delims, &row_delims, ignore_empty, case_insensitive, &pad),
+                Err(e) => EvalResult::Error(e),
+            }
+        };
+        if array_lift::lifts(&text) {
+            let (rows, cols) = array_lift::shape(&text);
+            if rows == 0 || cols == 0 { return EvalResult::Error(CellError::Value); }
+            let mut out = Vec::with_capacity(rows * cols);
+            for r in 0..rows {
+                for c in 0..cols {
+                    // A lifted element keeps the first item of its split.
+                    out.push(array_lift::at(&split(&array_lift::at(&text, r, c)), 0, 0));
+                }
+            }
+            return array_lift::pack(rows, cols, out);
+        }
+        split(&text)
+    }
+
+    /// One TEXTSPLIT of one text (see [`Self::fn_textsplit`]).
+    fn split_text(
+        text: &str,
+        col_delims: &[Vec<char>],
+        row_delims: &[Vec<char>],
+        ignore_empty: bool,
+        case_insensitive: bool,
+        pad: &EvalResult,
+    ) -> EvalResult {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut row: Vec<String> = Vec::new();
+        let mut item = String::new();
+        let mut p = 0;
+        while p < chars.len() {
+            let col = longest_delimiter_at(&chars, p, col_delims, case_insensitive);
+            let brk = longest_delimiter_at(&chars, p, row_delims, case_insensitive);
+            match (col, brk) {
+                (Some(c), r) if r.map_or(true, |r| c >= r) => {
+                    row.push(std::mem::take(&mut item));
+                    p += c;
+                }
+                (_, Some(r)) => {
+                    row.push(std::mem::take(&mut item));
+                    rows.push(std::mem::take(&mut row));
+                    p += r;
+                }
+                _ => {
+                    item.push(chars[p]);
+                    p += 1;
+                }
+            }
+        }
+        row.push(item);
+        rows.push(row);
+        if ignore_empty {
+            for r in rows.iter_mut() {
+                r.retain(|s| !s.is_empty());
+            }
+            rows.retain(|r| !r.is_empty());
+            if rows.is_empty() {
+                // Excel's #CALC! (see `fn_textsplit`).
+                return EvalResult::Error(CellError::Value);
+            }
+        }
+        let width = rows.iter().map(Vec::len).max().unwrap_or(1);
+        let height = rows.len();
+        let mut cells = Vec::with_capacity(width * height);
+        for r in rows {
+            let n = r.len();
+            cells.extend(r.into_iter().map(EvalResult::Text));
+            cells.extend(std::iter::repeat(pad.clone()).take(width - n));
+        }
+        array_lift::pack(height, width, cells)
+    }
+
+    /// The DELIMITER SET of TEXTBEFORE / TEXTAFTER / TEXTSPLIT: every element
+    /// of the argument, each an alternative, read as text (a number as its
+    /// text, a blank as the empty string). An error anywhere in it is that
+    /// error -- [LIVE] `TEXTBEFORE("a-b",IF({1,0},"-",1/0))` is #DIV/0!
+    /// although "-" would match.
+    fn delimiter_set(&self, expr: &Expression) -> Result<Vec<Vec<char>>, CellError> {
+        let mut out = Vec::new();
+        for v in self.eval_flat(expr) {
+            out.push(v.text_or_error()?.chars().collect());
+        }
+        Ok(out)
+    }
+
+    /// A text function's `match_mode` / `match_end`: 0 or 1 after truncation
+    /// (a logical, a numeric text), anything else #VALUE!. [LIVE]
+    /// `TEXTBEFORE("abc","b",1,2)`, `(..,1,-1)`, `(..,1,"x")`, `(..,1,"TRUE")`
+    /// and `(..,1,0,2)` are #VALUE!; `(..,1,TRUE)`, `(..,1,0.5)` and
+    /// `(..,1,"1")` are accepted.
+    fn text_match_flag(v: &EvalResult) -> Result<bool, CellError> {
+        match v {
+            EvalResult::Error(e) => Err(e.clone()),
+            EvalResult::Array(_) => Err(CellError::Value),
+            other => match other.as_number().map(f64::trunc) {
+                Some(n) if n == 0.0 => Ok(false),
+                Some(n) if n == 1.0 => Ok(true),
+                _ => Err(CellError::Value),
+            },
         }
     }
 
     fn fn_textbefore(&self, args: &[Expression]) -> EvalResult {
-        // TEXTBEFORE(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])
+        self.text_before_or_after(args, true)
+    }
+
+    fn fn_textafter(&self, args: &[Expression]) -> EvalResult {
+        self.text_before_or_after(args, false)
+    }
+
+    /// TEXTBEFORE / TEXTAFTER(text, delimiter, [instance_num], [match_mode],
+    /// [match_end], [if_not_found]).
+    ///
+    /// [LIVE] Excel 16, lane formd (SCRATCH/formd/p1.json, p2.json). Calcula
+    /// LIFTED over a delimiter array (`=TEXTBEFORE("a-b+c",{"-","+"})` spilled
+    /// a|a-b) and ignored `match_mode` and `match_end`. Excel's rules:
+    /// - The delimiter is a SET of alternatives (an array or a range, every
+    ///   element): `TEXTBEFORE("a-b+c",{"-","+"})` is "a", instance 2 "a-b",
+    ///   -1 "a-b". The other five arguments LIFT (`{"a-b","c-d"}` a|c,
+    ///   instance `{1,2}` a|a-b, `if_not_found` `{"p","q"}` p|q).
+    /// - Counting from the START, the longest alternative matches at a
+    ///   position and the next is looked for after it (`TEXTBEFORE("aaaa",
+    ///   "aa",2)` "aa", `TEXTBEFORE("a---b",{"-","--"},2)` "a--",
+    ///   `TEXTAFTER("a--b",{"-","--"},2)` #N/A).
+    /// - Counting from the END (a negative instance), a position counts when
+    ///   some alternative there ENDS no later than the previous match began,
+    ///   and the text after it is cut after the LONGEST alternative there:
+    ///   `TEXTBEFORE("aaa","aa",-1)` "a", `TEXTBEFORE("aaaaa","aa",-2)` "a",
+    ///   `TEXTBEFORE("a--b",{"-","--"},-1)` "a-", `TEXTAFTER("a--b",
+    ///   {"-","--"},-2)` "b", `TEXTBEFORE("a---b",{"-","--"},-2)` "a-".
+    /// - `match_end` 1 makes the end of the text one more delimiter (the
+    ///   START when counting from the end): `TEXTBEFORE("abc","-",1,0,1)`
+    ///   "abc", `TEXTBEFORE("a-b","-",-2,0,1)` "", `TEXTAFTER("a-b","-",
+    ///   -2,0,1)` "a-b", one past that #N/A. On EMPTY text it is #VALUE!
+    ///   (`TEXTBEFORE("","-",1,0,1)`), without it #N/A.
+    /// - An EMPTY delimiter (alone, in the set, or a blank cell) matches
+    ///   before the first character counting from the start and after the
+    ///   last counting from the end, every instance alike and ahead of any
+    ///   other alternative: `TEXTBEFORE("abc","",4)` "", `(..,"",-1)` "abc",
+    ///   `TEXTAFTER("abc",{"","a"})` "abc".
+    /// - The instance is floored (`1.9` is 1, `-1.9` is -2); 0, or one whose
+    ///   size exceeds the text's length, is #VALUE! (`TEXTBEFORE("abc","b",4)`
+    ///   #VALUE!, `(..,3)` #N/A).
+    /// - `if_not_found` replaces the #N/A and is evaluated only then:
+    ///   `TEXTBEFORE("a-b","-",1,0,0,1/0)` is "a"; an argument written but
+    ///   left empty is no replacement (#N/A).
+    fn text_before_or_after(&self, args: &[Expression], before: bool) -> EvalResult {
         if args.len() < 2 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
-        let text = text_arg!(self.evaluate(&args[0]));
-        let delimiter = text_arg!(self.evaluate(&args[1]));
-        let instance = if args.len() >= 3 { match arg_or_err!(self.evaluate(&args[2])).as_number() { Some(n) => n as i32, None => 1 } } else { 1 };
-        let if_not_found = if args.len() >= 6 { Some(self.evaluate(&args[5])) } else { None };
-        if instance == 0 { return EvalResult::Error(CellError::Value); }
-        if delimiter.is_empty() { return EvalResult::Text(String::new()); }
-        let positions: Vec<usize> = text.match_indices(&delimiter).map(|(i, _)| i).collect();
-        if instance > 0 {
-            let idx = (instance - 1) as usize;
-            if idx < positions.len() {
-                EvalResult::Text(text[..positions[idx]].to_string())
-            } else {
-                if_not_found.unwrap_or(EvalResult::Error(CellError::NA))
-            }
-        } else {
-            // Negative instance: count from end
-            let idx = (-instance - 1) as usize;
-            if idx < positions.len() {
-                let pos = positions[positions.len() - 1 - idx];
-                EvalResult::Text(text[..pos].to_string())
-            } else {
-                if_not_found.unwrap_or(EvalResult::Error(CellError::NA))
+        let text = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = text { return EvalResult::Error(e); }
+        let delims = match self.delimiter_set(&args[1]) { Ok(d) => d, Err(e) => return EvalResult::Error(e) };
+        let given = |i: usize| args.len() > i && !is_omitted(&args[i]);
+        let mut slots = vec![
+            text,
+            if given(2) { self.evaluate(&args[2]) } else { EvalResult::Number(1.0) },
+            if given(3) { self.evaluate(&args[3]) } else { EvalResult::Number(0.0) },
+            if given(4) { self.evaluate(&args[4]) } else { EvalResult::Number(0.0) },
+        ];
+        for v in &slots[1..] {
+            if let EvalResult::Error(e) = v { return EvalResult::Error(e.clone()); }
+        }
+        let has_fallback = given(5);
+        if has_fallback {
+            slots.push(self.evaluate(&args[5]));
+        }
+        let one = |vals: &[EvalResult]| -> EvalResult {
+            Self::text_before_or_after_one(&vals[0], &delims, &vals[1], &vals[2], &vals[3], vals.get(4), before)
+        };
+        let refs: Vec<&EvalResult> = slots.iter().collect();
+        match array_lift::broadcast_shape(&refs) {
+            None => one(&slots),
+            Some((0, _)) | Some((_, 0)) => EvalResult::Error(CellError::Value),
+            Some((rows, cols)) => {
+                let cells = (rows as u64).saturating_mul(cols as u64);
+                if cells > MAX_ARRAY_ELEMENTS as u64 {
+                    return EvalResult::Error(CellError::Limit);
+                }
+                charge!(self, cells);
+                let mut out = Vec::with_capacity(cells as usize);
+                let mut slice = Vec::with_capacity(slots.len());
+                for r in 0..rows {
+                    for c in 0..cols {
+                        slice.clear();
+                        slice.extend(slots.iter().map(|v| array_lift::at(v, r, c)));
+                        out.push(one(&slice));
+                    }
+                }
+                array_lift::pack(rows, cols, out)
             }
         }
     }
 
-    fn fn_textafter(&self, args: &[Expression]) -> EvalResult {
-        // TEXTAFTER(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])
-        if args.len() < 2 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
-        let text = text_arg!(self.evaluate(&args[0]));
-        let delimiter = text_arg!(self.evaluate(&args[1]));
-        let instance = if args.len() >= 3 { match arg_or_err!(self.evaluate(&args[2])).as_number() { Some(n) => n as i32, None => 1 } } else { 1 };
-        let if_not_found = if args.len() >= 6 { Some(self.evaluate(&args[5])) } else { None };
-        if instance == 0 { return EvalResult::Error(CellError::Value); }
-        if delimiter.is_empty() { return EvalResult::Text(text.clone()); }
-        let positions: Vec<usize> = text.match_indices(&delimiter).map(|(i, _)| i).collect();
-        if instance > 0 {
-            let idx = (instance - 1) as usize;
-            if idx < positions.len() {
-                EvalResult::Text(text[positions[idx] + delimiter.len()..].to_string())
+    /// One TEXTBEFORE / TEXTAFTER over scalar arguments (see
+    /// [`Self::text_before_or_after`]).
+    fn text_before_or_after_one(
+        text: &EvalResult,
+        delims: &[Vec<char>],
+        instance: &EvalResult,
+        match_mode: &EvalResult,
+        match_end: &EvalResult,
+        if_not_found: Option<&EvalResult>,
+        before: bool,
+    ) -> EvalResult {
+        let chars: Vec<char> = match text.text_or_error() {
+            Ok(s) => s.chars().collect(),
+            Err(e) => return EvalResult::Error(e),
+        };
+        let instance = match instance {
+            EvalResult::Error(e) => return EvalResult::Error(e.clone()),
+            v => match v.as_number() {
+                Some(n) => n.floor(),
+                None => return EvalResult::Error(CellError::Value),
+            },
+        };
+        let case_insensitive = match Self::text_match_flag(match_mode) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
+        let end_counts = match Self::text_match_flag(match_end) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
+        if instance == 0.0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let len = chars.len();
+        let cut = |at: usize, width: usize| -> EvalResult {
+            if before {
+                EvalResult::Text(chars[..at].iter().collect())
             } else {
-                if_not_found.unwrap_or(EvalResult::Error(CellError::NA))
+                EvalResult::Text(chars[(at + width).min(len)..].iter().collect())
+            }
+        };
+        if delims.iter().any(|d| d.is_empty()) {
+            return if instance > 0.0 { cut(0, 0) } else { cut(len, 0) };
+        }
+        if len == 0 && end_counts {
+            return EvalResult::Error(CellError::Value);
+        }
+        if len > 0 && instance.abs() > len as f64 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let wanted = instance.abs() as usize;
+        let mut count = 0usize;
+        if instance > 0.0 {
+            let mut p = 0;
+            while p < len {
+                match longest_delimiter_at(&chars, p, delims, case_insensitive) {
+                    Some(width) => {
+                        count += 1;
+                        if count == wanted {
+                            return cut(p, width);
+                        }
+                        p += width;
+                    }
+                    None => p += 1,
+                }
+            }
+            if end_counts && count + 1 == wanted {
+                return cut(len, 0);
             }
         } else {
-            let idx = (-instance - 1) as usize;
-            if idx < positions.len() {
-                let pos = positions[positions.len() - 1 - idx];
-                EvalResult::Text(text[pos + delimiter.len()..].to_string())
-            } else {
-                if_not_found.unwrap_or(EvalResult::Error(CellError::NA))
+            let mut limit = len;
+            for p in (0..len).rev() {
+                let fits = delims
+                    .iter()
+                    .any(|d| p + d.len() <= limit && delimiter_matches_at(&chars, p, d, case_insensitive));
+                if fits {
+                    count += 1;
+                    if count == wanted {
+                        let width = longest_delimiter_at(&chars, p, delims, case_insensitive).unwrap_or(0);
+                        return cut(p, width);
+                    }
+                    limit = p;
+                }
             }
+            if end_counts && count + 1 == wanted {
+                return cut(0, 0);
+            }
+        }
+        match if_not_found {
+            Some(v) => v.clone(),
+            None => EvalResult::Error(CellError::NA),
         }
     }
 
@@ -12934,13 +13822,28 @@ impl<'a> Evaluator<'a> {
 
     // ==================== Probability Distribution Functions ====================
 
+    /// A distribution's `cumulative` argument as Excel reads a logical: TRUE /
+    /// FALSE, a number (non-zero is TRUE), a blank (FALSE), the text "TRUE" or
+    /// "FALSE" in any case; any other text is #VALUE! and an error is itself.
+    /// [LIVE] Excel 16: `NORM.S.DIST(1,"TRUE")` and `POISSON.DIST(2,2,A8)` over
+    /// the text "TRUE" are the CDF, `NORM.S.DIST(1,A3)` over a blank the PDF,
+    /// `NORM.S.DIST(1,"x")`, `NORM.S.DIST(1,"1")` and `BINOM.DIST(3,10,0.5,"x")`
+    /// #VALUE!. The flag used to be TRUE only for TRUE or a non-zero number, so
+    /// "x", "TRUE" and an error all silently meant FALSE.
+    fn cumulative_flag(&self, expr: &Expression) -> Result<bool, CellError> {
+        match self.evaluate(expr) {
+            EvalResult::Error(e) => Err(e),
+            v => v.as_boolean().ok_or(CellError::Value),
+        }
+    }
+
     fn fn_norm_dist(&self, args: &[Expression]) -> EvalResult {
         // NORM.DIST(x, mean, standard_dev, cumulative)
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[3]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         let z = (x - mean) / std_dev;
         if cumulative {
             EvalResult::Number(norm_cdf(z))
@@ -12956,7 +13859,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[2]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if cumulative {
             // Use approximation via normal distribution for large df
             EvalResult::Number(t_cdf(x, df))
@@ -12973,7 +13876,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[2]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         let k = df / 2.0;
         if cumulative {
             EvalResult::Number(lower_gamma_regularized(k, x / 2.0))
@@ -12991,7 +13894,7 @@ impl<'a> Evaluator<'a> {
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[3]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if cumulative {
             // CDF using regularized incomplete beta function
             let z = d1 * x / (d1 * x + d2);
@@ -13012,7 +13915,7 @@ impl<'a> Evaluator<'a> {
         let s = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let n = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let p = match self.evaluate(&args[2]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[3]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if s > n { return EvalResult::Error(CellError::Num); }
         if cumulative {
             let mut sum = 0.0;
@@ -13030,7 +13933,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let mean = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[2]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if cumulative {
             let mut sum = 0.0;
             for k in 0..=x {
@@ -13059,8 +13962,8 @@ impl<'a> Evaluator<'a> {
         let std_dev = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let size = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 2.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = size - 1.0;
-        let t = t_inv(1.0 - alpha / 2.0, df);
-        EvalResult::Number(t * std_dev / size.sqrt())
+        let t = t_upper_quantile(alpha / 2.0, df);
+        number_or_num(t * std_dev / size.sqrt())
     }
 
     // ==================== New Distribution Functions ====================
@@ -13078,7 +13981,7 @@ impl<'a> Evaluator<'a> {
         // NORM.S.DIST(z, cumulative)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let z = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[1]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[1]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if cumulative {
             EvalResult::Number(norm_cdf(z))
         } else {
@@ -13099,7 +14002,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        EvalResult::Number(2.0 * (1.0 - t_cdf(x, df)))
+        EvalResult::Number(2.0 * t_upper_tail(x, df))
     }
 
     fn fn_t_dist_rt(&self, args: &[Expression]) -> EvalResult {
@@ -13107,7 +14010,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        EvalResult::Number(1.0 - t_cdf(x, df))
+        EvalResult::Number(t_upper_tail(x, df))
     }
 
     fn fn_t_inv(&self, args: &[Expression]) -> EvalResult {
@@ -13115,7 +14018,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        EvalResult::Number(t_inv(p, df))
+        number_or_num(t_inv(p, df))
     }
 
     fn fn_t_inv_2t(&self, args: &[Expression]) -> EvalResult {
@@ -13123,7 +14026,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        EvalResult::Number(t_inv(1.0 - p / 2.0, df))
+        number_or_num(t_upper_quantile(p / 2.0, df))
     }
 
     fn fn_t_test(&self, args: &[Expression]) -> EvalResult {
@@ -13131,8 +14034,11 @@ impl<'a> Evaluator<'a> {
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
         let arr1 = self.eval_flat(&args[0]);
         let arr2 = self.eval_flat(&args[1]);
-        let tails = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let test_type = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 && n <= 3.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        // `tails` and `type` are TRUNCATED, as Excel's integer arguments are:
+        // [LIVE] Excel 16 (lane formd) `T.TEST(G1:G10,H1:H10,2.7,3.9)` is the
+        // type-3 two-tailed 1.6330229407111961E-14; Calcula answered #NUM!.
+        let tails = match self.evaluate(&args[2]).as_number().map(f64::trunc) { Some(n) if n == 1.0 || n == 2.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let test_type = match self.evaluate(&args[3]).as_number().map(f64::trunc) { Some(n) if n >= 1.0 && n <= 3.0 => n as i32, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         // TWO INDEPENDENT SAMPLES, NOT PAIRS. They may legitimately be
         // different lengths, and a non-numeric cell in one must not remove an
         // observation from the other. (T.TEST type 1 IS paired, and enforces
@@ -13153,27 +14059,36 @@ impl<'a> Evaluator<'a> {
                 let diffs: Vec<f64> = nums1.iter().zip(nums2.iter()).map(|(a, b)| a - b).collect();
                 let d_mean = diffs.iter().sum::<f64>() / n1;
                 let d_var = diffs.iter().map(|d| (d - d_mean).powi(2)).sum::<f64>() / (n1 - 1.0);
-                if d_var == 0.0 { return EvalResult::Number(if d_mean == 0.0 { 1.0 } else { 0.0 }); }
+                // A zero standard error is a division by zero: [LIVE] Excel 16
+                // `T.TEST(G1:G10,G1:G10+0.5,2,1)` (every difference 0.5) is
+                // #DIV/0!. Calcula answered 0 (or 1 for no difference).
+                if d_var == 0.0 { return EvalResult::Error(CellError::Div0); }
                 (d_mean / (d_var / n1).sqrt(), n1 - 1.0)
             }
             2 => {
                 // Two-sample equal variance
                 let sp = ((n1 - 1.0) * var1 + (n2 - 1.0) * var2) / (n1 + n2 - 2.0);
-                if sp == 0.0 { return EvalResult::Number(if mean1 == mean2 { 1.0 } else { 0.0 }); }
+                if sp == 0.0 { return EvalResult::Error(CellError::Div0); }
                 ((mean1 - mean2) / (sp * (1.0 / n1 + 1.0 / n2)).sqrt(), n1 + n2 - 2.0)
             }
             3 => {
                 // Two-sample unequal variance (Welch's)
                 let se = var1 / n1 + var2 / n2;
-                if se == 0.0 { return EvalResult::Number(if mean1 == mean2 { 1.0 } else { 0.0 }); }
+                if se == 0.0 { return EvalResult::Error(CellError::Div0); }
                 let t = (mean1 - mean2) / se.sqrt();
                 let df = se * se / ((var1 / n1).powi(2) / (n1 - 1.0) + (var2 / n2).powi(2) / (n2 - 1.0));
                 (t, df)
             }
             _ => return EvalResult::Error(CellError::Value),
         };
-        let p = 1.0 - t_cdf(t_stat.abs(), df);
-        EvalResult::Number(if tails == 2 { 2.0 * p } else { p })
+        // The upper tail ITSELF, never 1 - CDF: [LIVE] Excel 16 (lane formd)
+        // `T.TEST(G1:G10,H1:H10,2,1)` is 4.7974960608904026E-15 and
+        // `T.TEST(G1:G10,H1:H10,1,3)` 8.16511470355598E-15, where 1 - t_cdf
+        // kept one digit. The Welch degrees of freedom stay fractional
+        // (`T.TEST(K1:K10,L1:L10,2,3)` 0.99592987495441032 vs type 2's
+        // 0.99592987489565765).
+        let p = t_upper_tail(t_stat.abs(), df);
+        EvalResult::Number(if tails == 2 { (2.0 * p).min(1.0) } else { p })
     }
 
     fn fn_chisq_dist_rt(&self, args: &[Expression]) -> EvalResult {
@@ -13181,7 +14096,8 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        EvalResult::Number(1.0 - lower_gamma_regularized(df / 2.0, x / 2.0))
+        // The upper tail itself, never 1 - P: a tail of 1e-12 kept four digits.
+        EvalResult::Number(upper_gamma_regularized(df / 2.0, x / 2.0))
     }
 
     fn fn_chisq_inv(&self, args: &[Expression]) -> EvalResult {
@@ -13190,7 +14106,7 @@ impl<'a> Evaluator<'a> {
         let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 0.0 { return EvalResult::Number(0.0); }
-        EvalResult::Number(chisq_inv_impl(p, df))
+        number_or_num(chisq_inv_impl(p, 1.0 - p, df))
     }
 
     fn fn_chisq_inv_rt(&self, args: &[Expression]) -> EvalResult {
@@ -13199,7 +14115,7 @@ impl<'a> Evaluator<'a> {
         let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n <= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 1.0 { return EvalResult::Number(0.0); }
-        EvalResult::Number(chisq_inv_impl(1.0 - p, df))
+        number_or_num(chisq_inv_impl(1.0 - p, p, df))
     }
 
     fn fn_chisq_test(&self, args: &[Expression]) -> EvalResult {
@@ -13225,8 +14141,8 @@ impl<'a> Evaluator<'a> {
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let z = d1 * x / (d1 * x + d2);
-        EvalResult::Number(1.0 - regularized_beta(d1 / 2.0, d2 / 2.0, z))
+        // The upper tail itself (I over 1 - z, formed directly), never 1 - CDF.
+        EvalResult::Number(regularized_beta(d2 / 2.0, d1 / 2.0, 1.0 / (1.0 + d1 * x / d2)))
     }
 
     fn fn_f_inv(&self, args: &[Expression]) -> EvalResult {
@@ -13236,7 +14152,7 @@ impl<'a> Evaluator<'a> {
         let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 0.0 { return EvalResult::Number(0.0); }
-        EvalResult::Number(f_inv_impl(p, d1, d2))
+        number_or_num(f_inv_impl(p, 1.0 - p, d1, d2))
     }
 
     fn fn_f_inv_rt(&self, args: &[Expression]) -> EvalResult {
@@ -13246,7 +14162,7 @@ impl<'a> Evaluator<'a> {
         let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 1.0 { return EvalResult::Number(0.0); }
-        EvalResult::Number(f_inv_impl(1.0 - p, d1, d2))
+        number_or_num(f_inv_impl(1.0 - p, p, d1, d2))
     }
 
     fn fn_f_test(&self, args: &[Expression]) -> EvalResult {
@@ -13311,7 +14227,7 @@ impl<'a> Evaluator<'a> {
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[3]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         let a_bound = if args.len() >= 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) } else { 0.0 };
         let b_bound = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(1.0) } else { 1.0 };
         if a_bound >= b_bound { return EvalResult::Error(CellError::Value); }
@@ -13328,19 +14244,17 @@ impl<'a> Evaluator<'a> {
     fn fn_beta_inv(&self, args: &[Expression]) -> EvalResult {
         // BETA.INV(probability, alpha, beta, [A], [B])
         if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
-        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n <= 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        // [LIVE] Excel 16 (lane formd): the probability is OPEN at both ends
+        // (`BETA.INV(0,2,3)`, `BETA.INV(1,2,3)`, `BETAINV(0,2,3)` #NUM!) and
+        // A must lie below B (`BETA.INV(0.5,2,3,5,1)`, `(0.5,2,3,1,1)` and
+        // `(0.5,2,3,1)` -- A = 1 against the default B = 1 -- #NUM!).
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let a_bound = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
         let b_bound = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(1.0) } else { 1.0 };
-        // Bisection on regularized_beta
-        let mut lo = 0.0_f64;
-        let mut hi = 1.0_f64;
-        for _ in 0..100 {
-            let mid = (lo + hi) / 2.0;
-            if regularized_beta(alpha, beta, mid) < p { lo = mid; } else { hi = mid; }
-        }
-        EvalResult::Number(a_bound + (lo + hi) / 2.0 * (b_bound - a_bound))
+        if a_bound >= b_bound { return EvalResult::Error(CellError::Num); }
+        number_or_num(a_bound + beta_inv_unit(p, 1.0 - p, alpha, beta) * (b_bound - a_bound))
     }
 
     fn fn_gamma_dist(&self, args: &[Expression]) -> EvalResult {
@@ -13349,7 +14263,7 @@ impl<'a> Evaluator<'a> {
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[3]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if cumulative {
             EvalResult::Number(lower_gamma_regularized(alpha, x / beta))
         } else {
@@ -13367,14 +14281,7 @@ impl<'a> Evaluator<'a> {
         let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         if p == 0.0 { return EvalResult::Number(0.0); }
-        // Bisection on gamma CDF
-        let mut lo = 0.0_f64;
-        let mut hi = alpha * beta * 100.0;
-        for _ in 0..200 {
-            let mid = (lo + hi) / 2.0;
-            if lower_gamma_regularized(alpha, mid / beta) < p { lo = mid; } else { hi = mid; }
-        }
-        EvalResult::Number((lo + hi) / 2.0)
+        number_or_num(gamma_inv(p, 1.0 - p, alpha, beta))
     }
 
     fn fn_gamma(&self, args: &[Expression]) -> EvalResult {
@@ -13398,7 +14305,7 @@ impl<'a> Evaluator<'a> {
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[3]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if cumulative {
             EvalResult::Number(1.0 - (-(x / beta).powf(alpha)).exp())
         } else {
@@ -13414,7 +14321,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let lambda = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[2]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if cumulative {
             EvalResult::Number(1.0 - (-lambda * x).exp())
         } else {
@@ -13428,7 +14335,7 @@ impl<'a> Evaluator<'a> {
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
         let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[3]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         let z = (x.ln() - mean) / std_dev;
         if cumulative {
             EvalResult::Number(norm_cdf(z))
@@ -13454,7 +14361,7 @@ impl<'a> Evaluator<'a> {
         let n_samp = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let pop_s = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let pop = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[4]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[4]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if n_samp > pop || pop_s > pop { return EvalResult::Error(CellError::Num); }
         if cumulative {
             let mut sum = 0.0;
@@ -13474,7 +14381,7 @@ impl<'a> Evaluator<'a> {
         let f = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let s = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor() as u64, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
         let p = match self.evaluate(&args[2]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
-        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let cumulative = match self.cumulative_flag(&args[3]) { Ok(b) => b, Err(e) => return EvalResult::Error(e) };
         if cumulative {
             let mut sum = 0.0;
             for k in 0..=f { sum += negbinom_pmf(k, s, p); }
@@ -13482,6 +14389,103 @@ impl<'a> Evaluator<'a> {
         } else {
             EvalResult::Number(negbinom_pmf(f, s, p))
         }
+    }
+
+    // ==================== Excel's compatibility functions ====================
+    //
+    // [LIVE] Excel 16 (lane legacystats, 2026-11-05, SCRATCH/legacystats/p1.json):
+    // each of these is its own function with its own arity. Where the modern
+    // function takes one more argument -- a `cumulative` flag the legacy one
+    // fixes -- the legacy call is the modern call with that flag supplied.
+
+    /// `modern(args[..len], flag, args[len..])`: a legacy function that is
+    /// the modern one with its `cumulative` flag fixed at position `len`
+    /// (`LOGNORMDIST(x,m,s)` is `LOGNORM.DIST(x,m,s,TRUE)`, `HYPGEOMDIST(..4)`
+    /// `HYPGEOM.DIST(..4,FALSE)`). Every argument is still evaluated once,
+    /// by the modern implementation. The wrong number of arguments is the
+    /// legacy function's #VALUE!, never a modern call at another arity.
+    fn fn_with_flag_after(
+        &self,
+        args: &[Expression],
+        len: usize,
+        flag: bool,
+        modern: fn(&Self, &[Expression]) -> EvalResult,
+    ) -> EvalResult {
+        if args.len() != len {
+            return EvalResult::Error(CellError::Value);
+        }
+        let mut full = args.to_vec();
+        full.push(Expression::Literal(Value::Boolean(flag)));
+        modern(self, &full)
+    }
+
+    fn fn_normsdist_compat(&self, args: &[Expression]) -> EvalResult {
+        // NORMSDIST(z) = NORM.S.DIST(z, TRUE). [LIVE] NORMSDIST(1.5) = 0.933192798731142.
+        self.fn_with_flag_after(args, 1, true, Self::fn_norm_s_dist)
+    }
+
+    fn fn_betadist_compat(&self, args: &[Expression]) -> EvalResult {
+        // BETADIST(x, alpha, beta, [A], [B]) = BETA.DIST(x, alpha, beta, TRUE, [A], [B]).
+        // [LIVE] BETADIST(0.4,2,3) = 0.5248, BETADIST(2,2,3,1,4) = 0.407407407407407.
+        if args.len() < 3 || args.len() > 5 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let mut full = args[..3].to_vec();
+        full.push(Expression::Literal(Value::Boolean(true)));
+        full.extend_from_slice(&args[3..]);
+        self.fn_beta_dist(&full)
+    }
+
+    fn fn_tdist_compat(&self, args: &[Expression]) -> EvalResult {
+        // TDIST(x, deg_freedom, tails): the RIGHT tail (tails 1) or both tails
+        // (tails 2) -- T.DIST.RT / T.DIST.2T, never T.DIST's left-tailed CDF.
+        // [LIVE] TDIST(1.5,10,1) = 0.0822536632227201, TDIST(1.5,10,2) =
+        // 0.16450732644544, TDIST(0,10,2) = 1; x < 0, tails other than 1 or 2
+        // and deg_freedom < 1 are #NUM!; deg_freedom and tails are truncated
+        // (TDIST(1.5,10.7,1.9) = TDIST(1.5,10,1)).
+        if args.len() != 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        let tails = match self.evaluate(&args[2]).as_number() { Some(n) if n.floor() == 1.0 || n.floor() == 2.0 => n.floor(), Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(tails * t_upper_tail(x, df))
+    }
+
+    fn fn_z_test(&self, args: &[Expression]) -> EvalResult {
+        // Z.TEST(array, x, [sigma]) and ZTEST: the one-tailed P-value,
+        // 1 - NORM.S.DIST((AVERAGE(array) - x) / (sigma / SQRT(n)), TRUE), with
+        // sigma the sample standard deviation when omitted.
+        // [LIVE] ZTEST({2,4,4,5,7,9},4) = 0.124908720917974, with sigma 2
+        // 0.07652094207941; Z.TEST gives the same.
+        if args.len() < 2 || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let values = self.eval_flat(&args[0]);
+        if let Some(error) = values.iter().find_map(|v| match v { EvalResult::Error(e) => Some(e.clone()), _ => None }) {
+            return EvalResult::Error(error);
+        }
+        let nums: Vec<f64> = values.iter().filter_map(|v| v.as_sample_number()).collect();
+        let x = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        // [LIVE] an empty array is #N/A, one value #DIV/0! even with sigma
+        // given, and a sigma <= 0 #NUM!.
+        if nums.is_empty() {
+            return EvalResult::Error(CellError::NA);
+        }
+        if nums.len() < 2 {
+            return EvalResult::Error(CellError::Div0);
+        }
+        let n = nums.len() as f64;
+        let mean = nums.iter().sum::<f64>() / n;
+        let sigma = if args.len() == 3 {
+            match self.evaluate(&args[2]).as_number() { Some(s) if s > 0.0 => s, Some(_) => return EvalResult::Error(CellError::Num), None => return EvalResult::Error(CellError::Value) }
+        } else {
+            (nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+        };
+        if sigma == 0.0 {
+            return EvalResult::Error(CellError::Div0);
+        }
+        EvalResult::Number(1.0 - norm_cdf((mean - x) / (sigma / n.sqrt())))
     }
 
     // ==================== Descriptive/Analytical Statistical Functions ====================
@@ -15174,6 +16178,11 @@ impl<'a> Evaluator<'a> {
 
     fn fn_erf(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        // [LIVE] Excel 16: `ERF(,1)` -- the lower limit left out of a
+        // two-argument call -- is #N/A, not erf(1).
+        if args.len() == 2 && is_omitted(&args[0]) {
+            return EvalResult::Error(CellError::NA);
+        }
         let lower = if args.len() == 2 {
             match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) }
         } else { 0.0 };
@@ -15182,13 +16191,15 @@ impl<'a> Evaluator<'a> {
         } else {
             match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) }
         };
-        EvalResult::Number(erf_impl(upper) - if args.len() == 2 { erf_impl(lower) } else { 0.0 })
+        EvalResult::Number(erf_precise(upper) - if args.len() == 2 { erf_precise(lower) } else { 0.0 })
     }
 
     fn fn_erfc(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        EvalResult::Number(1.0 - erf_impl(x))
+        // erfc directly, never 1 - erf: [LIVE] Excel 16 `ERFC(5)` is
+        // 1.53745979442803E-12, where 1 - erf(5) keeps three digits of it.
+        EvalResult::Number(erfc_precise(x))
     }
 
     fn fn_gestep(&self, args: &[Expression]) -> EvalResult {
@@ -15795,6 +16806,21 @@ fn calc_pmt(rate: f64, nper: f64, pv: f64, fv: f64, pmt_type: i32) -> f64 {
     }
 }
 
+/// `num` rounded UP (`up`, toward +inf) or DOWN to a multiple of `significance`
+/// (non-zero), for CEILING / FLOOR and their .MATH / .PRECISE / ISO forms.
+///
+/// A QUOTIENT WITHIN ROUNDING NOISE OF A WHOLE NUMBER IS THAT NUMBER: 0.3 / 0.1
+/// is 2.9999999999999996 in doubles, so a plain floor made `FLOOR(0.3,0.1)`
+/// 0.2 where [LIVE] Excel 16 gives 0.30000000000000004 (3 x 0.1), and
+/// `CEILING.MATH(-0.3,0.1)` -0.2 where Excel gives -0.30000000000000004 (lane
+/// formc, rev-parse-3).
+fn multiple_of(num: f64, significance: f64, up: bool) -> f64 {
+    let q = num / significance;
+    let whole = q.round();
+    let q = if (q - whole).abs() <= 1e-13 * whole.abs().max(1.0) { whole } else { q };
+    (if up { q.ceil() } else { q.floor() }) * significance
+}
+
 /// Format a number cleanly (no trailing zeros for integers)
 fn format_number_clean(n: f64) -> String {
     if n == n.floor() && n.abs() < 1e15 {
@@ -15804,28 +16830,81 @@ fn format_number_clean(n: f64) -> String {
     }
 }
 
-/// Standard normal CDF using the Abramowitz and Stegun approximation
+/// Standard normal CDF, to double precision.
+///
+/// Lane legacystats (2026-11-05): this was Abramowitz and Stegun 7.1.26,
+/// whose error is 1.5e-7 -- `NORMSDIST(1.5)` / `NORM.S.DIST(1.5,TRUE)` read
+/// 0.933192769 where [LIVE] Excel 16 gives 0.933192798731142, so every value
+/// shown to more than six digits (and every NORMDIST, LOGNORMDIST, ZTEST,
+/// NORMINV built on it) disagreed with Excel. Now `erfc_precise`.
 fn norm_cdf(z: f64) -> f64 {
-    if z < -8.0 { return 0.0; }
-    if z > 8.0 { return 1.0; }
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-    let sign = if z < 0.0 { -1.0 } else { 1.0 };
-    let x = z.abs() / std::f64::consts::SQRT_2;
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-    0.5 * (1.0 + sign * y)
+    if z.is_nan() { return f64::NAN; }
+    0.5 * erfc_precise(-z / std::f64::consts::SQRT_2)
 }
 
-/// Inverse normal CDF (quantile function) using rational approximation
+/// The complementary error function, to about 1e-15 relative, from two
+/// expansions that need no table of constants: for 0 <= x < 1, 1 minus the
+/// all-positive series of `erf_series` (no cancellation, erfc > 0.157 there),
+/// and from 1 the continued fraction
+/// erfc(x) = e^-x^2 / sqrt(pi) / (x + 1/2 / (x + 1 / (x + 3/2 / (x + ...)))),
+/// evaluated by the modified Lentz method. `erfc(-x) = 2 - erfc(x)`.
+fn erfc_precise(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return 2.0 - erfc_precise(-x);
+    }
+    // Below 1 erfc is above 0.157 and 1 - erf loses nothing; from 1 the
+    // continued fraction (at most ~190 terms there) keeps the digits that the
+    // subtraction would cancel ([LIVE] `ERFC(1.9)` 0.00720957076474253).
+    if x < 1.0 {
+        return 1.0 - erf_series(x);
+    }
+    // [LIVE] Excel 16 `ERFC(26)` is 5.66319240885614E-296 and `ERFC(27)` 0:
+    // a result below the smallest NORMAL double (erfc(27) ~ 5e-319 is
+    // subnormal) is no number Excel holds.
+    if x >= 27.0 {
+        return 0.0;
+    }
+    // Lentz on x + K(a_k / x), a_k = k/2.
+    const TINY: f64 = 1e-300;
+    let mut f = x;
+    let mut c = x;
+    let mut d = 0.0_f64;
+    for k in 1..500 {
+        let a = k as f64 / 2.0;
+        d = x + a * d;
+        if d.abs() < TINY { d = TINY; }
+        c = x + a / c;
+        if c.abs() < TINY { c = TINY; }
+        d = 1.0 / d;
+        let delta = c * d;
+        f *= delta;
+        if (delta - 1.0).abs() < 1e-16 {
+            break;
+        }
+    }
+    let tail = (-x * x).exp() / std::f64::consts::PI.sqrt() / f;
+    if tail < f64::MIN_POSITIVE { 0.0 } else { tail }
+}
+
+/// Inverse normal CDF (quantile function): Acklam's rational approximation
+/// (relative error 1.15e-9), then one Halley step against the exact
+/// `norm_cdf`, which takes it to double precision ([LIVE] Excel 16
+/// `NORMSINV(0.9)` = 1.2815515655446006; Acklam alone gave 1.28155156414).
 fn norm_inv(p: f64) -> f64 {
     if p <= 0.0 { return f64::NEG_INFINITY; }
     if p >= 1.0 { return f64::INFINITY; }
     if (p - 0.5).abs() < 1e-15 { return 0.0; }
+    let x = norm_inv_acklam(p);
+    let e = norm_cdf(x) - p;
+    let u = e * (2.0 * std::f64::consts::PI).sqrt() * (x * x / 2.0).exp();
+    x - u / (1.0 + x * u / 2.0)
+}
+
+/// Peter Acklam's rational approximation to the normal quantile.
+fn norm_inv_acklam(p: f64) -> f64 {
     // Rational approximation (Peter Acklam's algorithm)
     let a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.383577518672690e2, -3.066479806614716e1, 2.506628277459239e0];
     let b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
@@ -15860,6 +16939,16 @@ fn gamma_ln(x: f64) -> f64 {
     0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + sum.ln()
 }
 
+/// P(T > x), as the tail itself for x > 0 (never 1 - CDF, which keeps no
+/// digits of a tail below 1e-16).
+fn t_upper_tail(x: f64, df: f64) -> f64 {
+    if x > 0.0 {
+        0.5 * regularized_beta(df / 2.0, 0.5, df / (df + x * x))
+    } else {
+        1.0 - t_cdf(x, df)
+    }
+}
+
 /// Student's t-distribution CDF
 fn t_cdf(x: f64, df: f64) -> f64 {
     let z = df / (df + x * x);
@@ -15867,24 +16956,110 @@ fn t_cdf(x: f64, df: f64) -> f64 {
     if x >= 0.0 { 1.0 - p } else { p }
 }
 
-/// Inverse t-distribution (using bisection on t_cdf)
+/// Inverse t-distribution: the x with `t_cdf(x, df) == p`.
+///
+/// Lane formc (2026-11-05): this bisected over [-1000, 1000], so every
+/// quantile beyond 1000 came back as about 1000 -- [LIVE] Excel 16
+/// `T.INV.2T(0.0001,1)` is 6366.19767131594, `T.INV(1E-10,2)`
+/// -70710.6781080481, `T.INV.2T(1E-300,1)` 6.36619772367581E+299. Now the
+/// SMALLER tail is solved for (`1 - p` is exact for p >= 0.5, where `p` itself
+/// would lose the digits of a tiny upper tail) over every positive double, by
+/// `solve_decreasing`.
 fn t_inv(p: f64, df: f64) -> f64 {
+    if p.is_nan() || df.is_nan() { return f64::NAN; }
     if p <= 0.0 { return f64::NEG_INFINITY; }
     if p >= 1.0 { return f64::INFINITY; }
-    // Start with normal approximation, then refine with bisection
-    let mut lo = -1000.0;
-    let mut hi = 1000.0;
-    for _ in 0..100 {
-        let mid = (lo + hi) / 2.0;
-        if t_cdf(mid, df) < p { lo = mid; } else { hi = mid; }
-    }
-    (lo + hi) / 2.0
+    if p == 0.5 { return 0.0; }
+    let x = t_upper_quantile(if p < 0.5 { p } else { 1.0 - p }, df);
+    if p < 0.5 { -x } else { x }
 }
 
-/// Regularized incomplete beta function Ix(a,b) using continued fraction
+/// The x >= 0 whose UPPER tail P(T > x) is `q` (0 < q <= 0.5), for the callers
+/// that hold that tail directly: T.INV.2T's p / 2 and CONFIDENCE.T's
+/// alpha / 2, which `1 - p/2` would round to 1 for a p below 1e-16 ([LIVE]
+/// `T.INV.2T(1E-300,1)` is 6.36619772367581E+299).
+fn t_upper_quantile(q: f64, df: f64) -> f64 {
+    if q >= 0.5 { return 0.0; }
+    // One and two degrees of freedom have closed forms, and need them: their
+    // quantiles reach 1e299, where x * x below overflows. [LIVE] `T.INV(0.75,1)`
+    // is 1.0000000000000002 = 1 / tan(pi / 4), `T.INV(1E-10,2)`
+    // -70710.6781080481 = -(1 - 2q) / sqrt(2q(1 - q)).
+    if df == 1.0 {
+        return 1.0 / (std::f64::consts::PI * q).tan();
+    }
+    if df == 2.0 {
+        return (1.0 - 2.0 * q) / (2.0 * q * (1.0 - q)).sqrt();
+    }
+    // P(T > x) for x > 0, falling from 0.5 to 0.
+    solve_decreasing(q, |x| 0.5 * regularized_beta(df / 2.0, 0.5, df / (df + x * x)))
+}
+
+/// The positive x with `f(x) == target` for a function that FALLS (never
+/// rises) over (0, inf), or NaN when no double reaches `target`.
+///
+/// Brackets geometrically from the smallest normal double to the largest --
+/// a quantile can be 1e-20 (`CHISQ.INV(1E-10,1)`) or 6e299
+/// (`T.INV.2T(1E-300,1)`) -- until the bracket is within a factor of two, then
+/// halves it arithmetically until it is two adjacent doubles. No fixed range
+/// clamps the answer, and the result is as exact as `f` is.
+fn solve_decreasing(target: f64, f: impl Fn(f64) -> f64) -> f64 {
+    let mut lo = f64::MIN_POSITIVE;
+    let mut hi = f64::MAX;
+    if f(hi) > target {
+        return f64::NAN;
+    }
+    if f(lo) <= target {
+        return lo;
+    }
+    // Invariant: f(lo) > target >= f(hi).
+    for _ in 0..2200 {
+        // sqrt(lo) * sqrt(hi), never lo * sqrt(hi / lo): the quotient of the
+        // first bracket overflows to infinity.
+        let mid = if hi > 2.0 * lo {
+            lo.sqrt() * hi.sqrt()
+        } else {
+            lo + (hi - lo) / 2.0
+        };
+        if mid <= lo || mid >= hi {
+            break;
+        }
+        if f(mid) > target { lo = mid; } else { hi = mid; }
+    }
+    // The double nearer the crossing.
+    if (f(lo) - target).abs() < (f(hi) - target).abs() { lo } else { hi }
+}
+
+/// The positive x with `lower(x) == p` (equivalently `upper(x) == q`, q =
+/// 1 - p) for a distribution on (0, inf), solved on whichever tail is SMALLER:
+/// near p = 1 the lower CDF is 1 - (tiny) and cannot tell the quantiles of
+/// `F.INV(0.99999,1,1)` apart, where the upper tail still has every digit.
+/// The caller passes both targets, each computed exactly from the argument it
+/// was given (F.INV has p, F.INV.RT has q).
+fn invert_two_tailed(p: f64, q: f64, lower: impl Fn(f64) -> f64, upper: impl Fn(f64) -> f64) -> f64 {
+    if p <= q {
+        solve_decreasing(-p, |x| -lower(x))
+    } else {
+        solve_decreasing(q, upper)
+    }
+}
+
+/// A finite answer, or #NUM! for an inverse no double reaches.
+fn number_or_num(x: f64) -> EvalResult {
+    if x.is_finite() { EvalResult::Number(x) } else { EvalResult::Error(CellError::Num) }
+}
+
+/// Regularized incomplete beta function Ix(a,b) using continued fraction.
+///
+/// The continued fraction converges only for x < (a+1)/(a+b+2); beyond it
+/// the symmetry I_x(a,b) = 1 - I_(1-x)(b,a) is used (lane legacystats: without
+/// it the F quantile bisection never left its upper bound -- [LIVE] Excel 16
+/// `FINV(0.05,5,10)` / `F.INV.RT` = 3.32583453041301, Calcula 10000).
 fn regularized_beta(a: f64, b: f64, x: f64) -> f64 {
     if x <= 0.0 { return 0.0; }
     if x >= 1.0 { return 1.0; }
+    if x > (a + 1.0) / (a + b + 2.0) {
+        return 1.0 - regularized_beta(b, a, 1.0 - x);
+    }
     let ln_beta = beta_ln(a, b);
     let front = (a * x.ln() + b * (1.0 - x).ln() - ln_beta).exp() / a;
     // Use continued fraction (Lentz's method)
@@ -15898,8 +17073,9 @@ fn beta_ln(a: f64, b: f64) -> f64 {
 
 /// Continued fraction for regularized beta
 fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
-    let max_iter = 200;
-    let epsilon = 1e-10;
+    // 1e-15, not 1e-10: the distributions are shown to 15 digits, as Excel's are.
+    let max_iter = 300;
+    let epsilon = 1e-15;
     let mut c = 1.0;
     let mut d = 1.0 - (a + b) * x / (a + 1.0);
     if d.abs() < 1e-30 { d = 1e-30; }
@@ -15937,10 +17113,10 @@ fn lower_gamma_regularized(a: f64, x: f64) -> f64 {
         // Series expansion
         let mut sum = 1.0 / a;
         let mut term = 1.0 / a;
-        for n in 1..200 {
+        for n in 1..2000 {
             term *= x / (a + n as f64);
             sum += term;
-            if term.abs() < 1e-10 * sum.abs() { break; }
+            if term.abs() < 1e-16 * sum.abs() { break; }
         }
         sum * (-x + a * x.ln() - gamma_ln(a)).exp()
     } else {
@@ -15949,9 +17125,14 @@ fn lower_gamma_regularized(a: f64, x: f64) -> f64 {
     }
 }
 
-/// Upper incomplete gamma via continued fraction
+/// Upper incomplete gamma via continued fraction (Numerical Recipes `gcf`,
+/// modified Lentz). Lane legacystats: `c` started at 1e-30 where Lentz
+/// starts it at 1/1e-30, so every x >= a + 1 came out wrong -- the chi-square
+/// and gamma quantile bisections never left their upper bound ([LIVE] Excel
+/// 16 `CHIINV(0.2,4)` / `CHISQ.INV.RT` = 5.98861669400425, Calcula 140;
+/// `GAMMAINV(0.5,3,1.5)` = 4.01109047058534, Calcula 111.15).
 fn upper_gamma_cf(a: f64, x: f64) -> f64 {
-    let mut c = 1e-30_f64;
+    let mut c = 1e30_f64;
     let mut d = x + 1.0 - a;
     if d.abs() < 1e-30 { d = 1e-30; }
     d = 1.0 / d;
@@ -15966,7 +17147,7 @@ fn upper_gamma_cf(a: f64, x: f64) -> f64 {
         d = 1.0 / d;
         let delta = d * c;
         h *= delta;
-        if (delta - 1.0).abs() < 1e-10 { break; }
+        if (delta - 1.0).abs() < 1e-16 { break; }
     }
     (-x + a * x.ln() - gamma_ln(a)).exp() * h
 }
@@ -16000,27 +17181,96 @@ fn negbinom_pmf(f: u64, s: u64, p: f64) -> f64 {
     (ln_coeff + s as f64 * p.ln() + f as f64 * (1.0 - p).ln()).exp()
 }
 
-/// Chi-square inverse via bisection
-fn chisq_inv_impl(p: f64, df: f64) -> f64 {
-    let mut lo = 0.0_f64;
-    let mut hi = df * 10.0 + 100.0;
-    for _ in 0..200 {
-        let mid = (lo + hi) / 2.0;
-        if lower_gamma_regularized(df / 2.0, mid / 2.0) < p { lo = mid; } else { hi = mid; }
+/// Upper regularized gamma Q(a, x) = 1 - P(a, x), computed as the TAIL where
+/// it is small (the continued fraction for x >= a + 1) rather than as a
+/// difference from 1.
+fn upper_gamma_regularized(a: f64, x: f64) -> f64 {
+    if x <= 0.0 { return 1.0; }
+    if x < a + 1.0 {
+        1.0 - lower_gamma_regularized(a, x)
+    } else {
+        upper_gamma_cf(a, x)
     }
-    (lo + hi) / 2.0
 }
 
-/// F-distribution inverse via bisection
-fn f_inv_impl(p: f64, d1: f64, d2: f64) -> f64 {
-    let mut lo = 0.0_f64;
-    let mut hi = 10000.0_f64;
-    for _ in 0..200 {
-        let mid = (lo + hi) / 2.0;
-        let z = d1 * mid / (d1 * mid + d2);
-        if regularized_beta(d1 / 2.0, d2 / 2.0, z) < p { lo = mid; } else { hi = mid; }
+/// The gamma quantile: x with P(alpha, x / beta) == p, given p and q = 1 - p.
+///
+/// Lane formc (2026-11-05): GAMMA.INV bisected below alpha * beta * 100 and
+/// CHISQ.INV below df * 10 + 100, on the LOWER CDF only -- so a quantile above
+/// the bound was the bound, and `CHISQ.INV.RT(1E-12,1)` compared against
+/// 1 - 1e-12 ([LIVE] Excel 16: 50.8441713324492; `CHISQ.INV.RT(1E-10,100)`
+/// 217.714203138309, `GAMMA.INV(0.9999999999,0.1,1)` 18.119637703108).
+fn gamma_inv(p: f64, q: f64, alpha: f64, beta: f64) -> f64 {
+    beta * invert_two_tailed(
+        p,
+        q,
+        |x| lower_gamma_regularized(alpha, x),
+        |x| upper_gamma_regularized(alpha, x),
+    )
+}
+
+/// Chi-square inverse: x with P(df/2, x/2) == p, given p and q = 1 - p.
+fn chisq_inv_impl(p: f64, q: f64, df: f64) -> f64 {
+    gamma_inv(p, q, df / 2.0, 2.0)
+}
+
+/// F inverse: x with I_z(d1/2, d2/2) == p for z = d1 x / (d1 x + d2), given
+/// p and q = 1 - p.
+///
+/// Lane formc (2026-11-05): this bisected below 10000, so [LIVE] Excel 16
+/// `F.INV(0.9999,1,1)` = 40528472.7902774 and `F.INV.RT(1E-10,2,2)` =
+/// 9999999999 came back as 10000. Both tails are now solved on their own
+/// side: z and 1 - z are formed separately (`1 / (1 + d2/(d1 x))`), so a z
+/// near 1 keeps the digits of 1 - z.
+fn f_inv_impl(p: f64, q: f64, d1: f64, d2: f64) -> f64 {
+    invert_two_tailed(
+        p,
+        q,
+        |x| regularized_beta(d1 / 2.0, d2 / 2.0, 1.0 / (1.0 + d2 / (d1 * x))),
+        |x| regularized_beta(d2 / 2.0, d1 / 2.0, 1.0 / (1.0 + d1 * x / d2)),
+    )
+}
+
+/// The standard beta quantile: the x in (0, 1) with I_x(alpha, beta) == p,
+/// given p and q = 1 - p, solved on whichever tail is SMALLER.
+///
+/// Lane formd (2026-11-05): BETA.INV bisected 100 times on the LOWER CDF, so a
+/// p near 1 compared `I_x` against 1 - (tiny) and kept a handful of digits.
+/// Near p = 1 this solves for y = 1 - x on the upper tail
+/// `P(X > 1 - y) = I_y(beta, alpha)`, which keeps every digit of q. [LIVE]
+/// Excel 16: `BETA.INV(0.999999999999,2,3)` 0.99993700341987779,
+/// `BETA.INV(0.99999999999999,2,3)` 0.99998643148281086,
+/// `BETA.INV(1E-12,2,3)` 4.082484015750325E-07, `BETA.INV(0.25,0.5,0.5)`
+/// 0.14644660940672621. `regularized_beta` is 1 for x >= 1, so the solver's
+/// bracket above 1 is harmless.
+fn beta_inv_unit(p: f64, q: f64, alpha: f64, beta: f64) -> f64 {
+    if p <= q {
+        solve_decreasing(-p, |x| -regularized_beta(alpha, beta, x))
+    } else {
+        1.0 - solve_decreasing(-q, |y| -regularized_beta(beta, alpha, y))
     }
-    (lo + hi) / 2.0
+}
+
+/// Whether delimiter `d` occurs in `text` at character position `p`, exactly
+/// or (for a `match_mode` of 1) under Excel's case table, one character for
+/// one -- so `ß` never matches `SS` ([LIVE] `TEXTBEFORE("straße","SS",1,1)`
+/// is #N/A) while `É` matches `é` (`TEXTBEFORE("xÉy","é",1,1)` "x").
+fn delimiter_matches_at(text: &[char], p: usize, d: &[char], case_insensitive: bool) -> bool {
+    if d.is_empty() || p + d.len() > text.len() {
+        return false;
+    }
+    text[p..p + d.len()].iter().zip(d).all(|(a, b)| {
+        a == b || (case_insensitive && identity::fold_sheet_name_char(*a) == identity::fold_sheet_name_char(*b))
+    })
+}
+
+/// The length of the LONGEST delimiter of the set occurring at `p`, if any.
+fn longest_delimiter_at(text: &[char], p: usize, delims: &[Vec<char>], case_insensitive: bool) -> Option<usize> {
+    delims
+        .iter()
+        .filter(|d| delimiter_matches_at(text, p, d, case_insensitive))
+        .map(Vec::len)
+        .max()
 }
 
 /// Year basis days for financial functions
@@ -16099,13 +17349,45 @@ fn format_complex(real: f64, imag: f64, suffix: &str) -> String {
     format!("{}{}", format_number_clean(real), imag_str)
 }
 
-/// Error function (erf) using Abramowitz and Stegun approximation
-fn erf_impl(x: f64) -> f64 {
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * x);
-    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
-    sign * y
+/// The error function, to double precision: the series of `erf_series` below
+/// |x| = 2 (no cancellation there), `1 - erfc_precise` beyond it, where erfc is
+/// already below 0.005 and the subtraction loses nothing.
+///
+/// Lane formc (2026-11-05): this was `erf_impl`, Abramowitz and Stegun 7.1.26
+/// (error 1.5e-7), behind ERF, ERFC, ERF.PRECISE and ERFC.PRECISE -- [LIVE]
+/// Excel 16 `ERF(0.5)` is 0.520499877813047, `ERFC(2)` 0.00467773498104726,
+/// `ERFC(5)` 1.53745979442803E-12, and the approximation agreed with none of
+/// them past the seventh digit (ERFC(5) was 1 - erf, about 1.5e-12 +- 1e-7).
+fn erf_precise(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return -erf_precise(-x);
+    }
+    if x < 2.0 {
+        erf_series(x)
+    } else {
+        1.0 - erfc_precise(x)
+    }
+}
+
+/// erf(x) = 2/sqrt(pi) e^-x^2 sum x^(2n+1) 2^n / (2n+1)!!, for 0 <= x < 2:
+/// every term positive, so no cancellation.
+fn erf_series(x: f64) -> f64 {
+    let mut term = x;
+    let mut sum = x;
+    let x2 = x * x;
+    let mut n = 0.0_f64;
+    loop {
+        n += 1.0;
+        term *= 2.0 * x2 / (2.0 * n + 1.0);
+        sum += term;
+        if term < 1e-17 * sum || n > 200.0 {
+            break;
+        }
+    }
+    2.0 / std::f64::consts::PI.sqrt() * (-x2).exp() * sum
 }
 
 /// Bessel function of the first kind Jn(x) using series expansion
@@ -17713,10 +18995,19 @@ impl<'a> Evaluator<'a> {
     fn fn_isref(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         // Check if the argument is a cell reference or range reference
-        let is_ref = matches!(&args[0],
-            Expression::CellRef { .. } | Expression::Range { .. } |
-            Expression::ColumnRef { .. } | Expression::RowRef { .. }
-        );
+        // A reference whose sheet was deleted (`#REF!A1`) is no reference:
+        // Excel [LIVE] answers `=ISREF(#REF!A1)` FALSE.
+        let is_ref = match &args[0] {
+            // A sheet's NAME spelled like a cell (`Sheet2!A1` in a formula read
+            // in R1C1) is no reference: [LIVE] `=LET(A1,2,ISREF(Sheet2!A1))`
+            // is FALSE (lane formc).
+            Expression::Range { sheet: Some(_), start, .. } if matches!(start.as_ref(), Expression::NamedRef { .. }) => false,
+            Expression::CellRef { sheet, .. }
+            | Expression::Range { sheet, .. }
+            | Expression::ColumnRef { sheet, .. }
+            | Expression::RowRef { sheet, .. } => !parser::ast::is_ref_error_sheet(sheet),
+            _ => false,
+        };
         EvalResult::Boolean(is_ref)
     }
 
@@ -21541,12 +22832,21 @@ mod tests {
         let eval = Evaluator::new(&grid);
         let expr = make_fn_expr(BuiltinFunction::TextSplit, vec![text("a,b,c"), text(",")]);
         let result = eval.evaluate(&expr);
+        // A COLUMN delimiter splits across a ROW ([LIVE] Excel 16, lane formd:
+        // `=TEXTSPLIT("a-b+c",{"-","+"})` spills J786:L786). This pinned a flat
+        // array -- the engine's spelling of a COLUMN -- which was the defect.
         match &result {
-            EvalResult::Array(items) => {
-                assert_eq!(items.len(), 3);
-                assert_eq!(items[0], EvalResult::Text("a".to_string()));
-                assert_eq!(items[1], EvalResult::Text("b".to_string()));
-                assert_eq!(items[2], EvalResult::Text("c".to_string()));
+            EvalResult::Array(rows) => {
+                assert_eq!(rows.len(), 1, "one row");
+                match &rows[0] {
+                    EvalResult::Array(items) => {
+                        assert_eq!(items.len(), 3);
+                        assert_eq!(items[0], EvalResult::Text("a".to_string()));
+                        assert_eq!(items[1], EvalResult::Text("b".to_string()));
+                        assert_eq!(items[2], EvalResult::Text("c".to_string()));
+                    }
+                    other => panic!("Expected a row, got {:?}", other),
+                }
             }
             _ => panic!("Expected Array, got {:?}", result),
         }
