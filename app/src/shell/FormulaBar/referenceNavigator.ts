@@ -22,6 +22,10 @@ export function installReferenceNavigator(): void {
   const navigator = createReferenceNavigator({
     dispatch: dispatchGridAction,
     activeSheetIndex: () => getGridStateSnapshot()?.sheetContext.activeSheetIndex ?? 0,
+    activeCell: () => {
+      const sel = getGridStateSnapshot()?.selection;
+      return sel ? { row: sel.activeRow ?? sel.endRow, col: sel.activeCol ?? sel.endCol } : null;
+    },
   });
   registerReferenceNavigator((text) => navigator.navigate(text.trim()));
 }

@@ -63,7 +63,8 @@ impl Workbook {
             .write(&crate::document_effect::test_seed_effect())
             .unwrap();
         names.insert(
-            identity::defined_name_key(name),
+            // The (scope, name) key the registry holds every name under (BUG-0744).
+            crate::named_ranges::registry_key(scope, name),
             NamedRange {
                 name: name.to_string(),
                 sheet_index: scope,
@@ -525,8 +526,10 @@ fn every_name_mutation_command_recalculates() {
     const NAMED_RANGES_RS: &str = include_str!("../named_ranges.rs");
     for (command, delegate) in [
         ("update_named_range", "update_named_range_core"),
-        ("delete_named_range", "delete_named_range_core"),
-        ("rename_named_range", "rename_named_range_core"),
+        // The (scope, name) registry (BUG-0744): the delete and the rename take
+        // the scope, through their `_scoped` bodies.
+        ("delete_named_range", "delete_named_range_scoped"),
+        ("rename_named_range", "rename_named_range_scoped_core"),
     ] {
         assert!(
             body_of(NAMED_RANGES_RS, command).contains(&format!("{}(", delegate)),
@@ -538,8 +541,8 @@ fn every_name_mutation_command_recalculates() {
     for name in [
         "create_named_range",
         "update_named_range_core",
-        "delete_named_range_core",
-        "rename_named_range_core",
+        "delete_named_range_scoped",
+        "rename_named_range_scoped_core",
     ] {
         let body = body_of(NAMED_RANGES_RS, name);
         assert!(

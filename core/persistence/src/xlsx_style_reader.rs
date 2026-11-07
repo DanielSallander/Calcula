@@ -34,6 +34,11 @@ pub struct XlsxStyleData {
     pub number_formats: HashMap<u32, String>,
     /// Cell XF records: (font_idx, fill_idx, border_idx, numfmt_id, alignment)
     pub cell_xfs: Vec<ParsedXf>,
+    /// The cell STYLES' records (`<cellStyleXfs>`), by `xfId`.
+    pub cell_style_xfs: Vec<ParsedXf>,
+    /// The named cell styles (`<cellStyles><cellStyle name xfId builtinId>`):
+    /// (name, `cellStyleXfs` index, whether it is one of Excel's built-ins).
+    pub cell_styles: Vec<(String, usize, bool)>,
     /// Per-sheet metadata, keyed by 1-based sheet index
     pub sheet_meta: HashMap<usize, SheetMeta>,
     /// Sheet visibility from workbook.xml `state` ("hidden"/"veryHidden"),
@@ -165,6 +170,12 @@ pub struct ParsedXf {
     /// `<protection hidden="..">` — hide the formula when the sheet is protected.
     pub formula_hidden: bool,
     pub apply_protection: bool,
+    /// The cell style (`cellStyleXfs` index) a `cellXfs` record is based on.
+    pub xf_id: usize,
+    /// Whether the record has a `<protection>` child of its own.
+    pub has_protection: bool,
+    /// A `cellStyleXfs` record's `applyProtection` as written (`None` absent).
+    pub apply_protection_attr: Option<bool>,
 }
 
 impl Default for ParsedXf {
@@ -184,6 +195,9 @@ impl Default for ParsedXf {
             locked: true,
             formula_hidden: false,
             apply_protection: false,
+            xf_id: 0,
+            has_protection: false,
+            apply_protection_attr: None,
         }
     }
 }
@@ -219,6 +233,12 @@ pub struct SheetMeta {
     /// `<c t="str"><v>0123</v></c>` whose value LOOKS like a number: a formula's
     /// TEXT result, which calamine turns into a number. The text as written.
     pub numeric_text_results: HashMap<(u32, u32), String>,
+    /// Every cell whose formula is a LEGACY one: an `<f>` (plain or shared)
+    /// in a `<c>` with no `cm` attribute. Excel reads such a formula with its
+    /// implicit intersection (`=A1:A5` is `=@A1:A5`); a dynamic one is
+    /// `<c cm="1"><f t="array" ..>`. A `t="array"` (CSE) or `t="dataTable"`
+    /// formula is neither, and is not recorded.
+    pub legacy_formula_cells: std::collections::HashSet<(u32, u32)>,
     /// `<c t="s"><v>7</v></c>` whose shared string is RICH
     /// (`XlsxStyleData::rich_strings`): the cell and the string's index. Only
     /// the rich ones are recorded, not every text cell.
@@ -783,7 +803,7 @@ fn extract_sheet_number(path: &str) -> Option<usize> {
 // xl/styles.xml parser
 // ============================================================================
 
-fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
+pub(crate) fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
     let mut reader = Reader::from_str(xml);
     reader.trim_text(true);
 
@@ -797,6 +817,9 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
     let mut current_border_edge = String::new();
     let mut current_xf = ParsedXf::default();
     let mut in_cell_xfs = false;
+    // Inside `<cellStyleXfs>`: its `<xf>` records are read as cellXfs' are
+    // (`in_cell_xfs` is set too) and pushed to `cell_style_xfs`.
+    let mut in_style_xfs = false;
     let mut xf_depth = 0u32;
 
     loop {
@@ -951,6 +974,27 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                         context = StyleParseContext::CellXfs;
                         in_cell_xfs = true;
                     }
+                    "cellStyleXfs" if !is_empty => {
+                        context = StyleParseContext::CellXfs;
+                        in_cell_xfs = true;
+                        in_style_xfs = true;
+                    }
+                    "cellStyle" => {
+                        let mut name = String::new();
+                        let mut xf_id = 0usize;
+                        let mut builtin = false;
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let raw = String::from_utf8_lossy(&attr.value).into_owned();
+                            match key {
+                                "name" => name = quick_xml::escape::unescape(&raw).map(|v| v.into_owned()).unwrap_or(raw),
+                                "xfId" => xf_id = raw.parse().unwrap_or(0),
+                                "builtinId" => builtin = true,
+                                _ => {}
+                            }
+                        }
+                        data.cell_styles.push((name, xf_id, builtin));
+                    }
                     "xf" if in_cell_xfs => {
                         current_xf = ParsedXf::default();
                         for attr in e.attributes().flatten() {
@@ -983,8 +1027,10 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                                         val == "1" || val == "true"
                                 }
                                 "applyProtection" => {
-                                    current_xf.apply_protection = val == "1" || val == "true"
+                                    current_xf.apply_protection = val == "1" || val == "true";
+                                    current_xf.apply_protection_attr = Some(val == "1" || val == "true");
                                 }
+                                "xfId" => current_xf.xf_id = val.parse().unwrap_or(0),
                                 "applyAlignment" => {
                                     current_xf.apply_alignment =
                                         val == "1" || val == "true"
@@ -994,7 +1040,11 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                         }
                         // Self-closing <xf .../> — push immediately (no alignment child)
                         if is_empty {
-                            data.cell_xfs.push(current_xf.clone());
+                            if in_style_xfs {
+                                data.cell_style_xfs.push(current_xf.clone());
+                            } else {
+                                data.cell_xfs.push(current_xf.clone());
+                            }
                             current_xf = ParsedXf::default();
                             xf_depth = 0;
                         } else {
@@ -1005,6 +1055,7 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                     // cell lock state, which Calcula also stores as a style
                     // attribute. Absent child = Excel's default (locked).
                     "protection" if in_cell_xfs && xf_depth > 0 => {
+                        current_xf.has_protection = true;
                         for attr in e.attributes().flatten() {
                             let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
                             let val = std::str::from_utf8(&attr.value).unwrap_or("");
@@ -1078,12 +1129,21 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                         current_border_edge.clear();
                     }
                     "xf" if in_cell_xfs => {
-                        data.cell_xfs.push(current_xf.clone());
+                        if in_style_xfs {
+                            data.cell_style_xfs.push(current_xf.clone());
+                        } else {
+                            data.cell_xfs.push(current_xf.clone());
+                        }
                         current_xf = ParsedXf::default();
                         xf_depth = 0;
                     }
                     "cellXfs" => {
                         in_cell_xfs = false;
+                        context = StyleParseContext::None;
+                    }
+                    "cellStyleXfs" => {
+                        in_cell_xfs = false;
+                        in_style_xfs = false;
                         context = StyleParseContext::None;
                     }
                     _ => {}
@@ -1093,6 +1153,38 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
             _ => {}
         }
         buf.clear();
+    }
+    inherit_style_protection(data);
+}
+
+/// A cell's protection where its `cellXfs` record does not say
+/// `applyProtection="1"`: its own `<protection>` child where it has one, else
+/// Excel's default (locked, not hidden) -- NEVER its cell style's record.
+/// [LIVE, Excel 16, 2026-11-06, lane xlsx probe3] A8 with a style
+/// "WithProt" (Locked off, Formula Hidden on, IncludeProtection on) applied
+/// is saved `<xf numFmtId="0" fontId="1" .. xfId="3"><protection locked="0"
+/// hidden="1"/></xf>`, NO `applyProtection` -- and the style's own record
+/// `<xf ..><protection locked="0" hidden="1"/></xf>`. Read as locked, as it
+/// was, the cell Excel leaves editable on a protected sheet came in locked.
+/// [LIVE, Excel 16, 2026-11-06, lane tabxlsx probe2] The same record with its
+/// `<protection>` child REMOVED (no applyProtection, the style still unlocked
+/// and hidden) opens in Excel as Locked=True, FormulaHidden=False: the cell
+/// record alone decides, so a style's protection is not inherited here.
+fn inherit_style_protection(data: &mut XlsxStyleData) {
+    for i in 0..data.cell_xfs.len() {
+        let xf = &data.cell_xfs[i];
+        if xf.apply_protection {
+            continue;
+        }
+        let (locked, hidden) = if xf.has_protection {
+            (xf.locked, xf.formula_hidden)
+        } else {
+            continue;
+        };
+        let xf = &mut data.cell_xfs[i];
+        xf.locked = locked;
+        xf.formula_hidden = hidden;
+        xf.apply_protection = true;
     }
 }
 
@@ -1134,6 +1226,9 @@ fn parse_sheet_xml_with(xml: &str, rich_strings: &std::collections::HashSet<u32>
     let mut current_cell: Option<(u32, u32, bool)> = None;
     // The `<c t="s">` being read, when the workbook has rich strings.
     let mut current_sst_cell: Option<(u32, u32)> = None;
+    // The `<c>` being read and whether it carries `cm` (cell metadata, the
+    // dynamic-array flag), for its `<f>` (`SheetMeta::legacy_formula_cells`).
+    let mut formula_cell: Option<((u32, u32), bool)> = None;
     // Where a `<c>` with no `r` attribute (ECMA-376 allows one) is: the
     // column after the previous cell of the row, in the row after the
     // previous row -- calamine's own positioning (its `cells_reader`), so the
@@ -1409,6 +1504,7 @@ fn parse_sheet_xml_with(xml: &str, rich_strings: &std::collections::HashSet<u32>
                                 next_col = col + 1;
                             }
                         }
+                        formula_cell = position.filter(|_| !self_closing).map(|at| (at, get_attr(e, "cm").is_some()));
                         if let Some((row, col)) = position {
                             {
                                 if let Some(s_str) = get_attr(e, "s") {
@@ -1436,6 +1532,14 @@ fn parse_sheet_xml_with(xml: &str, rich_strings: &std::collections::HashSet<u32>
                         }
                     }
                     "v" if in_sheet_data => in_cell_value = true,
+                    "f" if in_sheet_data => {
+                        if let Some((at, dynamic)) = formula_cell {
+                            let kind = get_attr(e, "t");
+                            if !dynamic && !matches!(kind.as_deref(), Some("array") | Some("dataTable")) {
+                                meta.legacy_formula_cells.insert(at);
+                            }
+                        }
+                    }
                     "col" => {
                         // <col min="2" max="5" width="15.5" customWidth="1" hidden="1"/>
                         let min: u32 = get_attr(e, "min")
@@ -1551,6 +1655,7 @@ fn parse_sheet_xml_with(xml: &str, rich_strings: &std::collections::HashSet<u32>
                     "c" => {
                         current_cell = None;
                         current_sst_cell = None;
+                        formula_cell = None;
                     }
                     "row" if in_sheet_data => {
                         // calamine's `row_index += 1; col_index = 0` (see

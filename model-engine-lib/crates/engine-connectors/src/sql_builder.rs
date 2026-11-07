@@ -990,6 +990,44 @@ mod tests {
         assert_eq!(params, vec!["active".to_string(), "north".to_string()]);
     }
 
+    /// A pushed scalar filter -- the form a row-level-security role filter
+    /// reaches a source in -- is a plain comparison with no COALESCE and no
+    /// `IS NULL` arm, so a BLANK (NULL) value never satisfies `= 0`, `<> 5`,
+    /// `< 1` or `= ''`. Owner decision BUG-0759 (2026-11-06): RLS stays
+    /// strict on BLANK, a deliberate difference from Power BI.
+    #[test]
+    fn a_pushed_scalar_filter_never_admits_a_blank_value() {
+        let filters = vec![
+            FilterCondition::new("tenant", FilterOperator::Equal, "0")
+                .with_kind(InValueKind::Integer),
+            FilterCondition::new("tenant", FilterOperator::NotEqual, "5")
+                .with_kind(InValueKind::Integer),
+            FilterCondition::new("tenant", FilterOperator::LessThan, "1")
+                .with_kind(InValueKind::Integer),
+            FilterCondition::new("code", FilterOperator::Equal, ""),
+        ];
+        let mut params = Vec::new();
+        let pg = build_filter_conditions(&PostgresDialect, &filters, &mut params);
+        assert_eq!(
+            pg,
+            vec![
+                "\"tenant\" = 0".to_string(),
+                "\"tenant\" <> 5".to_string(),
+                "\"tenant\" < 1".to_string(),
+                "\"code\"::text = $1".to_string(),
+            ]
+        );
+        let mut params = Vec::new();
+        let ss = build_filter_conditions(&SqlServerDialect, &filters, &mut params);
+        for sql in pg.iter().chain(ss.iter()) {
+            let upper = sql.to_uppercase();
+            assert!(
+                !upper.contains("COALESCE") && !upper.contains("NULL") && !upper.contains("ISNULL"),
+                "{sql}"
+            );
+        }
+    }
+
     #[test]
     fn build_filter_conditions_integer_kind_is_sargable_uncast_literal() {
         // An integer-kind scalar filter renders as `col op <literal>` against

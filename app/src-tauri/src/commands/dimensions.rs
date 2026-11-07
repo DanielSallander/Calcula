@@ -606,8 +606,15 @@ thread_local! {
 ///    rows as above, and an AutoFilter's filtered-out rows leave its hidden
 ///    set (its criteria stay; the filter is held through the write and its
 ///    previous state is an `obj_autofilter` restore in the same undo step).
-///    A row an ADVANCED filter hides is still left to that filter (it gets the
-///    size): that set has no undo record to restore it with.
+///    A row an ADVANCED filter in place hides is shown the same way ([LIVE]
+///    Excel 16, 2026-11-06, misc6/probe.ps1: A1:A14 advanced-filtered to hide
+///    row 4, Rows(4:4).RowHeight = 30 shows it, FilterMode stays True, and
+///    Rows(3:5).RowHeight = 30 leaves it hidden); it leaves the filter's set,
+///    whose previous state is an `obj_advanced_filter_hidden` restore in the
+///    same step. A whole-row move writes its vacated hidden rows this way
+///    (`lineMoveVacated.ts` `lineSizeWrites`), so Excel's move shows an
+///    advanced-filtered row at its old place too ([LIVE] `Range("3:5").Cut
+///    Range("A20")`: row 4 shown, row 21 hidden).
 ///    AutoFilter dropdowns with no criterion are not filter mode ([LIVE]).
 ///    Columns have no filter mode ([LIVE] Columns(A:H).ColumnWidth under a
 ///    filter still shows a hidden column).
@@ -660,6 +667,10 @@ pub(crate) fn set_line_sizes_core(
     // AutoFilter is HELD through the write (after `outlines`): a resize of
     // nothing but hidden rows shows the rows it filtered out, as Excel does.
     let auto_filters = if rows { Some(state.auto_filters.lock_pending().unwrap()) } else { None };
+    // The ADVANCED filter's hidden set, held through the write the same way
+    // (after the AutoFilter): a resize of nothing but hidden rows shows the
+    // rows it filtered out too ([LIVE] below).
+    let advanced_filters = if rows { Some(state.advanced_filter_hidden_rows.lock_pending().unwrap()) } else { None };
     let (filter_mode, filter_hidden): (bool, HashSet<u32>) = if rows {
         let mut hidden: HashSet<u32> = HashSet::new();
         let mut mode = false;
@@ -667,7 +678,7 @@ pub(crate) fn set_line_sizes_core(
             mode |= af.enabled && af.is_data_filtered();
             hidden.extend(af.hidden_rows.iter().copied());
         }
-        if let Some(adv) = state.advanced_filter_hidden_rows.read().unwrap().get(&active_sheet) {
+        if let Some(adv) = advanced_filters.as_ref().and_then(|adv| adv.get(&active_sheet)) {
             mode = true;
             hidden.extend(adv.iter().copied());
         }
@@ -695,7 +706,18 @@ pub(crate) fn set_line_sizes_core(
         }
         _ => Vec::new(),
     };
-    let unhides = plan.user_unhide.len() as u64 + plan.outline_shown + filter_unhide.len() as u64;
+    // ...and the ADVANCED filter's, a row both filters hide counted once.
+    let advanced_unhide: Vec<u32> = match advanced_filters.as_ref().and_then(|adv| adv.get(&active_sheet)) {
+        Some(adv) if plan.show_filtered => {
+            let mut lines: Vec<u32> = adv.iter().copied().filter(|&l| in_runs(&runs, l)).collect();
+            lines.sort_unstable();
+            lines.dedup();
+            lines
+        }
+        _ => Vec::new(),
+    };
+    let advanced_only = advanced_unhide.iter().filter(|l| filter_unhide.binary_search(l).is_err()).count() as u64;
+    let unhides = plan.user_unhide.len() as u64 + plan.outline_shown + filter_unhide.len() as u64 + advanced_only;
 
     let previous = line_size_segments(&sizes, &runs);
     let previous_standard = axis_standard(&grid, rows);
@@ -807,7 +829,24 @@ pub(crate) fn set_line_sizes_core(
             None
         }
     };
-    let filter_changed = filter_before.is_some();
+    // The same for the rows an ADVANCED filter hid: they leave its set (the
+    // filter stays -- an empty set keeps the sheet in filter mode, as Excel's
+    // FilterMode stays True). The set as it was is the undo record.
+    let advanced_before: Option<Option<Vec<u32>>> = match advanced_filters {
+        Some(adv) if !advanced_unhide.is_empty() => {
+            let mut adv = adv.authorize(&effect);
+            let before = adv.get(&active_sheet).cloned();
+            if let Some(set) = adv.get_mut(&active_sheet) {
+                set.retain(|l| advanced_unhide.binary_search(l).is_err());
+            }
+            Some(before)
+        }
+        other => {
+            drop(other);
+            None
+        }
+    };
+    let filter_changed = filter_before.is_some() || advanced_before.is_some();
 
     let label = if rows { "Row Height" } else { "Column Width" };
     let snapshot = LineSizesSnapshot { sheet_index: active_sheet, rows, segments: previous };
@@ -837,6 +876,13 @@ pub(crate) fn set_line_sizes_core(
         undo_stack.record_custom_restore(
             "obj_autofilter".to_string(),
             crate::undo_commands::autofilter_snapshot_bytes(active_sheet, Some(before)),
+            label,
+        );
+    }
+    if let Some(before) = advanced_before {
+        undo_stack.record_custom_restore(
+            crate::undo_commands::ADVANCED_FILTER_HIDDEN_RESTORE_KIND.to_string(),
+            crate::undo_commands::advanced_filter_hidden_snapshot_bytes(active_sheet, before),
             label,
         );
     }

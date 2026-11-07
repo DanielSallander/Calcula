@@ -344,18 +344,19 @@ fn chart_data_sheets(
     if wanted.is_empty() {
         return HashMap::new();
     }
-    let specs: Vec<(String, String)> = match state.charts.read() {
+    let specs: Vec<(String, String, usize)> = match state.charts.read() {
         Ok(charts) => charts
             .iter()
             .filter(|c| wanted.contains(c.id.to_string().as_str()))
-            .map(|c| (c.id.to_string(), c.spec_json.clone()))
+            .map(|c| (c.id.to_string(), c.spec_json.clone(), c.sheet_index))
             .collect(),
         Err(_) => Vec::new(),
     };
     specs
         .into_iter()
-        .filter_map(|(id, spec)| {
-            formula::chart_data_sheet(&spec, &world.sheet_names, &world.sheet_ids, &world.named_ranges).map(|i| (id, i))
+        .filter_map(|(id, spec, sheet)| {
+            formula::chart_data_sheet(&spec, sheet, &world.sheet_names, &world.sheet_ids, &world.named_ranges)
+                .map(|i| (id, i))
         })
         .collect()
 }

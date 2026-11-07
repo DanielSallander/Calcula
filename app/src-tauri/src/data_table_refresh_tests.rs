@@ -684,6 +684,8 @@ const RECALCULATES: &[&str] = &[
 /// run's end).
 const REFRESHES: &[&str] = &[
     "refresh_after_edit",
+    // An edit that names the cells it wrote: only the tables they reach (BUG-0755).
+    "refresh_after_cell_writes",
     "refresh_after_calculation_pass",
     "refresh_at_run_end",
     "refresh_live_tables",
@@ -730,10 +732,11 @@ const DATA_TABLE: &str = "the Data Table command: it computes the table it creat
 /// never a document edit, so it refreshes nothing persisted.
 const TRANSIENT: &str = "an animation frame or its restore: a transient write (CLAUDE.md rule 6) that refreshes \
      nothing persisted; Stop puts the model back, and the tables were never moved";
-/// Scenario Show / Summary: they take the what-if single-flight and write the
-/// changing cells as a what-if run (Summary puts them back).
-const SCENARIO: &str = "a scenario run: it holds the what-if single-flight and writes its changing cells as trials \
-     (Summary puts them back), so the tables are left to the next recalculation";
+/// Scenario Summary: it takes the what-if single-flight, writes each
+/// scenario's changing cells as a what-if run and puts them back. (Scenario
+/// Show refreshes the tables itself, under its run, BUG-0755.)
+const SCENARIO: &str = "a scenario summary: it holds the what-if single-flight, writes each scenario's changing \
+     cells as trials and puts them back, so the tables it leaves are the ones it found";
 
 /// Every `#[tauri::command]` that reaches a shared recalculation but no
 /// data-table refresh, with why. Kept EXACT both ways: a new command that
@@ -746,7 +749,6 @@ const NO_REFRESH: &[(&str, &str)] = &[
     ("anim_restore", TRANSIENT),
     ("data_table_one_var", DATA_TABLE),
     ("data_table_two_var", DATA_TABLE),
-    ("scenario_show", SCENARIO),
     ("scenario_summary", SCENARIO),
 ];
 
@@ -1156,8 +1158,15 @@ fn every_edit_refreshes_the_live_data_tables_once() {
     assert_eq!(n, 1, "MERGE refreshed {n} times");
     let (body, expected) = wb.body_follows_b1();
     assert_eq!(body, expected, "the body follows every edit");
-    let n = refreshes_during(|| wb.edit(11, 2, "9").expect("C12 = 9"));
+    // B1 reads C10:C11 now (the deleted C10 shrank the sum): an edit of C10 is
+    // refreshed once, and one of C12, which nothing in the table reads, not at
+    // all -- Excel recomputes a table only when a precedent changes (BUG-0755,
+    // `refresh_after_cell_writes`, ledger programme 2 wave 3; this edit was
+    // C12 and expected one refresh).
+    let n = refreshes_during(|| wb.edit(9, 2, "9").expect("C10 = 9"));
     assert_eq!(n, 1, "an EDIT refreshed {n} times");
+    let n = refreshes_during(|| wb.edit(11, 2, "9").expect("C12 = 9"));
+    assert_eq!(n, 0, "an edit nothing in the table reads refreshed it {n} times");
 }
 
 /// NEW-double-refresh: the cost, measured. A 50x50 two-variable table (2,500

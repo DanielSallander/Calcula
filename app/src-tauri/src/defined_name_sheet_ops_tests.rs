@@ -32,7 +32,8 @@ fn state_with_names(names: &[(&str, Option<usize>, &str)]) -> AppState {
         let mut table = state.named_ranges.write(&effect).unwrap();
         for (name, sheet_index, refers_to) in names {
             table.insert(
-                identity::defined_name_key(name),
+                // The (scope, name) key (BUG-0744).
+                crate::named_ranges::registry_key(*sheet_index, name),
                 NamedRange {
                     name: name.to_string(),
                     sheet_index: *sheet_index,
@@ -46,19 +47,23 @@ fn state_with_names(names: &[(&str, Option<usize>, &str)]) -> AppState {
     state
 }
 
+/// The one name of that spelling, in whatever scope it now holds (the
+/// registry is keyed by scope and name, BUG-0744, and these tests follow a
+/// name as its scope moves).
+fn the_name(state: &AppState, name: &str) -> Option<NamedRange> {
+    let key = identity::defined_name_key(name);
+    let names = state.named_ranges.read().unwrap();
+    let found: Vec<&NamedRange> = names.values().filter(|nr| identity::defined_name_key(&nr.name) == key).collect();
+    assert!(found.len() <= 1, "two scopes hold {}", name);
+    found.first().map(|nr| (*nr).clone())
+}
+
 fn refers_to(state: &AppState, name: &str) -> String {
-    state.named_ranges.read().unwrap()[&identity::defined_name_key(name)]
-        .refers_to
-        .clone()
+    the_name(state, name).expect("the name").refers_to
 }
 
 fn scope_of(state: &AppState, name: &str) -> Option<Option<usize>> {
-    state
-        .named_ranges
-        .read()
-        .unwrap()
-        .get(&identity::defined_name_key(name))
-        .map(|nr| nr.sheet_index)
+    the_name(state, name).map(|nr| nr.sheet_index)
 }
 
 // ---------------------------------------------------------------------------

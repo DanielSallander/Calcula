@@ -28,11 +28,63 @@ describe("parseListSourceText", () => {
     });
   });
 
-  it("accepts a reference with no anchors and in either case", () => {
+  // BUG-0745: this pin said the anchors "carry no meaning". Excel says they
+  // do [LIVE, cfdvb/probe1.ps1 C1/C2]: a part typed without `$` is RELATIVE,
+  // read moved by each validated cell's offset, so it is kept.
+  it("accepts a reference with no anchors and in either case, as RELATIVE", () => {
     expect(parseListSourceText("=a1:b2", SHEETS, CURRENT)).toEqual({
       kind: "range",
-      range: { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 1, endCol: 1 },
+      range: {
+        sheetIndex: 0,
+        startRow: 0,
+        startCol: 0,
+        endRow: 1,
+        endCol: 1,
+        relative: { startRow: true, startCol: true, endRow: true, endCol: true },
+      },
     });
+  });
+
+  it("keeps each part's own $ (=$F1:F$2), through the corner swap", () => {
+    expect(parseListSourceText("=$F1:F$2", SHEETS, CURRENT)).toEqual({
+      kind: "range",
+      range: {
+        sheetIndex: 0,
+        startRow: 0,
+        startCol: 5,
+        endRow: 1,
+        endCol: 5,
+        relative: { startRow: true, startCol: false, endRow: false, endCol: true },
+      },
+    });
+    // Written bottom-up, the rows swap and take their `$` with them.
+    expect(parseListSourceText("=F$9:F4", SHEETS, CURRENT)).toMatchObject({
+      range: { startRow: 3, endRow: 8, relative: { startRow: true, endRow: false } },
+    });
+    // Every part anchored: the absolute shape, no `relative` field at all.
+    expect(parseListSourceText("=$F$1:$F$2", SHEETS, CURRENT)).toEqual({
+      kind: "range",
+      range: { sheetIndex: 0, startRow: 0, startCol: 5, endRow: 1, endCol: 5 },
+    });
+  });
+
+  it("round-trips a relative source (open-then-OK)", () => {
+    const parsed = parseListSourceText("=Data!$F1:F$2", SHEETS, CURRENT);
+    if (parsed.kind !== "range") throw new Error("not a range");
+    const text = formatListSourceText({ range: parsed.range }, SHEETS, CURRENT);
+    expect(text).toBe("=Data!$F1:F$2");
+    expect(parseListSourceText(text, SHEETS, CURRENT)).toEqual(parsed);
+  });
+
+  it("shows a source on a deleted sheet as Excel does (=#REF!$A$1:$A$3) and refuses it back", () => {
+    // BUG-0750 [LIVE, cfdvb/probe1.ps1 F1].
+    const text = formatListSourceText(
+      { range: { startRow: 0, startCol: 0, endRow: 2, endCol: 0, sheetGone: true } },
+      SHEETS,
+      CURRENT
+    );
+    expect(text).toBe("=#REF!$A$1:$A$3");
+    expect(parseListSourceText(text, SHEETS, CURRENT).kind).toBe("error");
   });
 
   it("normalises a reference written bottom-right first", () => {
@@ -265,11 +317,11 @@ describe("parseListSourceText: a sheet name with spaces is its own sheet", () =>
     range: { sheetIndex, startRow: 0, startCol: 0, endRow: 2, endCol: 0 },
   });
   it("binds =' Data '!A1:A3 to ' Data ', not to 'Data'", () => {
-    expect(parseListSourceText("=' Data '!A1:A3", names, 0)).toEqual(range(2));
-    expect(parseListSourceText("=Data!A1:A3", names, 0)).toEqual(range(1));
+    expect(parseListSourceText("=' Data '!$A$1:$A$3", names, 0)).toEqual(range(2));
+    expect(parseListSourceText("=Data!$A$1:$A$3", names, 0)).toEqual(range(1));
   });
   it("finds ' Data ' when it is the only one", () => {
-    expect(parseListSourceText("=' Data '!A1:A3", ["Sheet1", " Data "], 0)).toEqual(range(1));
+    expect(parseListSourceText("=' Data '!$A$1:$A$3", ["Sheet1", " Data "], 0)).toEqual(range(1));
   });
   it("round-trips the spaced name (open-then-OK)", () => {
     const text = formatListSourceText({ range: range(2).range }, names, 0);
@@ -285,10 +337,10 @@ describe("parseListSourceText: a sheet name with spaces is its own sheet", () =>
 describe("parseListSourceText: the sheet prefix follows Excel's case rule", () => {
   const names = ["Sheet1", "Q\u00E5", "Q\u03A3"];
   it("keeps apart a pair toLowerCase merges", () => {
-    expect(parseListSourceText("='Q\u212B'!A1:A3", names, 0)).toMatchObject({ kind: "error" });
+    expect(parseListSourceText("='Q\u212B'!$A$1:$A$3", names, 0)).toMatchObject({ kind: "error" });
   });
   it("merges a pair toLowerCase splits", () => {
-    expect(parseListSourceText("='Q\u03C3'!A1:A3", names, 0)).toEqual({
+    expect(parseListSourceText("='Q\u03C3'!$A$1:$A$3", names, 0)).toEqual({
       kind: "range",
       range: { sheetIndex: 2, startRow: 0, startCol: 0, endRow: 2, endCol: 0 },
     });
@@ -309,18 +361,18 @@ describe("parseListSourceText: an unquoted sheet name holds no space, as in Exce
   });
   it("refuses =Data !A1:A3 even when a sheet 'Data ' exists, and takes it quoted", () => {
     const names = ["Sheet1", "Data "];
-    const refused = parseListSourceText("=Data !A1:A3", names, 0);
+    const refused = parseListSourceText("=Data !$A$1:$A$3", names, 0);
     expect(refused, "an unquoted name with a space was bound to a sheet").toMatchObject({ kind: "error" });
     expect((refused as { message: string }).message).toContain("='Data '!");
-    expect(parseListSourceText("='Data '!A1:A3", names, 0)).toEqual(range(1));
+    expect(parseListSourceText("='Data '!$A$1:$A$3", names, 0)).toEqual(range(1));
   });
   it("refuses =Data !A1:A3 beside a sheet 'Data'", () => {
-    expect(parseListSourceText("=Data !A1:A3", ["Sheet1", "Data"], 0)).toMatchObject({ kind: "error" });
+    expect(parseListSourceText("=Data !$A$1:$A$3", ["Sheet1", "Data"], 0)).toMatchObject({ kind: "error" });
   });
   it("takes the spellings Excel takes for 'Data'", () => {
     const names = ["Sheet1", "Data"];
-    expect(parseListSourceText("=Data! A1:A3", names, 0)).toEqual(range(1));
-    expect(parseListSourceText("= Data!A1:A3", names, 0)).toEqual(range(1));
-    expect(parseListSourceText("=data!A1:A3", names, 0)).toEqual(range(1));
+    expect(parseListSourceText("=Data! $A$1:$A$3", names, 0)).toEqual(range(1));
+    expect(parseListSourceText("= Data!$A$1:$A$3", names, 0)).toEqual(range(1));
+    expect(parseListSourceText("=data!$A$1:$A$3", names, 0)).toEqual(range(1));
   });
 });

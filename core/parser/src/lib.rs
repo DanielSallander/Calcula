@@ -16,6 +16,7 @@
 //! - Unary negation: -5
 
 pub mod ast;
+pub mod excel_arity;
 pub mod lexer;
 pub mod parser;
 pub mod token;
@@ -26,9 +27,10 @@ mod tests;
 
 // Re-export commonly used types for convenience
 pub use ast::{BinaryOperator, BuiltinFunction, Expression, FunctionMeta, UnaryOperator, Value};
+pub use excel_arity::{excel_refuses_arity, is_calcula_only_function, CALCULA_ONLY_FUNCTIONS};
 pub use lexer::Lexer;
 pub use parser::{
-    anchor_name_references, any_unbound_name, bind_spill_anchor_names, builtin_arity, check_entered_formula, parse,
-    replace_unbound_names, resolve_r1c1_names, ParseError, ParseResult, Parser,
+    anchor_name_references, any_unbound_name, bind_range_name_halves, bind_spill_anchor_names, builtin_arity,
+    check_entered_formula, parse, replace_unbound_names, resolve_r1c1_names, ParseError, ParseResult, Parser,
 };
 pub use token::Token;

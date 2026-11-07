@@ -674,6 +674,42 @@ fn script_and_ai_binding_edits_are_audited_accepted_or_refused() {
     assert_eq!(wb.audit_rows().len(), before);
 }
 
+/// A script's `Set` awaits the page's models first (`handle_request_async`); a
+/// File > Open / New during that await replaced the workbook, and the binding
+/// and its always-recorded audit row used to land in the one now on screen
+/// (wave-3 verifier, backmisc). `set_pinned_to` runs the write with the
+/// entry's workbook PINNED: refused, with nothing bound or recorded, once it
+/// is gone. The positive control binds and records.
+///
+/// SABOTAGE (obj4-obp): `set_pinned_to` calls `set_core` unpinned -- fails at
+/// "NOTHING BOUND IN THE NEW WORKBOOK".
+#[test]
+fn a_script_binding_set_after_an_await_never_lands_in_a_replaced_workbook() {
+    let wb = Wb::new();
+    let chart = wb.chart(DATA, json!({}));
+    let request = || SetRequest {
+        object: chart.clone(),
+        path: "/spec/title".to_string(),
+        formula: "=Data!A1".to_string(),
+        model: None,
+        invariant: true,
+        source: BindingEditSource::Script { script_id: "s-7".to_string(), unlocked: false },
+    };
+    let epoch = wb.file.settled_document_epoch();
+    wb.file.note_document_replaced();
+    let rows_before = wb.audit_rows().len();
+    let err = set_pinned_to(&wb.cx(), epoch, &[], request()).unwrap_err();
+    assert!(err.contains("Nothing was written"), "{err}");
+    let listed = wb.send(json!({ "op": "list" })).unwrap();
+    assert!(!format!("{listed:?}").contains("/spec/title"), "NOTHING BOUND IN THE NEW WORKBOOK: {listed:?}");
+    assert_eq!(wb.audit_rows().len(), rows_before, "no row credited to the new workbook");
+
+    // Positive control: the live workbook takes the binding and its row.
+    let live = wb.file.settled_document_epoch();
+    set_pinned_to(&wb.cx(), live, &[], request()).expect("bound");
+    assert_eq!(rows_with_surface(&wb, audit::SCRIPT_BINDING_SURFACE).len(), 1);
+}
+
 // ===========================================================================
 // SetLiteral through each family's own core
 // ===========================================================================
@@ -1378,4 +1414,36 @@ fn interactions_are_refused_as_a_binding_by_name() {
     let err = super::catalog::match_path(ObjectBindingKind::CanvasPage, "/interactions/pairs/0/mode").unwrap_err();
     assert_eq!(err, super::catalog::INTERACTIONS_NOT_BINDABLE, "a deeper pointer is refused the same way");
     assert!(wb.rows().is_empty() && !wb.dirty(), "nothing was bound");
+}
+
+/// Ledger programme 2 wave 5 (misc5, obj4-verify-7): a script's `SetLiteral`
+/// of a page's `/interactions` records its audit row AFTER the write's pivot
+/// re-fold is awaited, and a File > Open / New during that await replaced the
+/// workbook -- the row then landed in the workbook now on screen, crediting it
+/// with an edit it never had. The entry's workbook is pinned now (the `Set`
+/// arm's rule): replaced, no row; the positive control records one.
+///
+/// SABOTAGE (misc5-obi): record the row unpinned in
+/// `set_interactions_literal_in` -- fails at "ROW IN THE NEW WORKBOOK".
+#[tokio::test]
+async fn a_script_interactions_edit_after_a_replace_records_nothing_in_the_new_workbook() {
+    let wb = Wb::new();
+    let page = wb.page();
+    let slicer = wb.slicer(REPORT);
+    let chart = wb.chart(REPORT, json!({}));
+    let script = BindingEditSource::Script { script_id: "s-8".to_string(), unlocked: false };
+    let bi = crate::bi::types::BiState::new();
+    let cx = wb.cx();
+    let rows = || rows_with_surface(&wb, audit::SCRIPT_BINDING_SURFACE).len();
+
+    let entry = wb.file.settled_document_epoch();
+    wb.file.note_document_replaced();
+    let before = rows();
+    let _ = set_interactions_literal_in(&cx, &bi, entry, &page, interactions_value(&slicer, &chart, "none"), &script).await;
+    assert_eq!(rows(), before, "ROW IN THE NEW WORKBOOK: a replaced workbook's edit was credited to this one");
+
+    // Positive control: the live workbook's edit is recorded.
+    let live = wb.file.settled_document_epoch();
+    let _ = set_interactions_literal_in(&cx, &bi, live, &page, interactions_value(&slicer, &chart, "none"), &script).await;
+    assert_eq!(rows(), before + 1, "the script's edit is audited");
 }

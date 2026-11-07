@@ -279,7 +279,8 @@ pub fn default_ref_sheet(
 /// A DEFINED NAME as the data (`"SalesData"`) is on the sheet
 /// `resolveDataSource` (Charts/lib/dataSourceResolver.ts) reads it from: the
 /// sheet its definition names (`=Inputs!$A$1:$C$5`), else -- an unqualified
-/// definition -- the sheet the name is scoped to. It used to fall through as
+/// definition -- the sheet the name is scoped to. The name is the one the
+/// chart's own sheet (the envelope's `sheetIndex`) reads. It used to fall through as
 /// an unqualified source, so a canvas chart over a name read its bound title's
 /// `=B1` on the first visible worksheet while its own param cells
 /// (`locateParamCell`) read the name's sheet. The rule is the one the
@@ -290,6 +291,7 @@ pub fn default_ref_sheet(
 /// active), has no data sheet here either.
 pub fn chart_data_sheet(
     spec_json: &str,
+    chart_sheet: usize,
     names: &[String],
     ids: &[identity::SheetId],
     named_ranges: &HashMap<String, NamedRange>,
@@ -309,7 +311,21 @@ pub fn chart_data_sheet(
             calp::chart_refs::ChartSourceSheet::Name(n) => names.iter().position(|s| identity::sheet_names_equal(&s, &n)),
         };
     }
-    let name = named_ranges.get(&defined_name_key(data)?)?;
+    // THE NAME ASKED FROM THE CHART'S SHEET (BUG-0744 follow-up, lane namescalp),
+    // as `resolveDataSource` asks it: that sheet's own name of the spelling,
+    // else the workbook's (Excel's `Range("Sales")`), else the no-scope answer
+    // (`named_ranges::addressed_key`: the first sheet's own). A sheet's own
+    // name is held under `"{sheet}!{key}"`, so the plain-key lookup this was
+    // found only the workbook's, and a chart over a sheet-scoped name lost its
+    // data sheet. `chart_sheet` is the chart's PLACEMENT (`ChartEntry.sheet_index`,
+    // which a sheet move, delete or copy keeps current); the `sheetIndex` copy
+    // inside the spec JSON is never rewritten by the backend, so after a move it
+    // asked from the sheet the chart USED to be on (wave-3 verifier, namescalp).
+    let key = defined_name_key(data)?;
+    let name = crate::named_ranges::resolve_in_scope(named_ranges, &key, Some(chart_sheet))
+        .or_else(|| {
+            crate::named_ranges::addressed_key(named_ranges, &key, None).and_then(|k| named_ranges.get(&k))
+        })?;
     match name_definition_sheet(&name.refers_to, name.sheet_index)? {
         NameSheet::Named(sheet) => names.iter().position(|s| identity::sheet_names_equal(&s, &sheet)),
         NameSheet::Scope(index) => (index < names.len()).then_some(index),
@@ -820,7 +836,7 @@ fn analyze(ast: &Expression, cx: &FormulaContext<'_>) -> BindingFormulaAnalysis 
     // call in function position that the workbook does not define is not one.
     let uses_names = names
         .iter()
-        .any(|n| cx.named_ranges.contains_key(n) || !fn_names.contains(n));
+        .any(|n| crate::named_ranges::defined_in_any_scope(cx.named_ranges, n) || !fn_names.contains(n));
     let mut sheets: Vec<usize> = flags.sheets.into_iter().collect();
     sheets.sort_unstable();
     BindingFormulaAnalysis {

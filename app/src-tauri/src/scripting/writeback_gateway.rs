@@ -430,6 +430,9 @@ pub fn script_writeback(
 ) -> Result<Value, String> {
     // (1) Broker-routed calls run in the main window.
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&state.audit_log, &file_state);
 
     // (2) Server-side action allowlist.
     let act = Action::parse(&action)?;
@@ -454,7 +457,7 @@ pub fn script_writeback(
         );
         let err = "PermissionDenied: distribution.writeback not granted for this script";
         crate::net_commands::record_capability_call(
-            &state.audit_log,
+            &audit,
             WRITEBACK_CAPABILITY,
             &script_id,
             false,
@@ -484,7 +487,7 @@ pub fn script_writeback(
                 act.as_str()
             );
             crate::net_commands::record_capability_call(
-                &state.audit_log,
+                &audit,
                 WRITEBACK_CAPABILITY,
                 &script_id,
                 false,
@@ -499,7 +502,7 @@ pub fn script_writeback(
     // (6) Rate limit.
     if let Err(e) = check_rate(&script_id, act.bucket()) {
         crate::net_commands::record_capability_call(
-            &state.audit_log,
+            &audit,
             WRITEBACK_CAPABILITY,
             &script_id,
             false,
@@ -516,7 +519,7 @@ pub fn script_writeback(
     // (8) Always-on audit (success + failure), mirroring bi.query/bi.sql/bi.model.
     match &result {
         Ok(_) => crate::net_commands::record_capability_call(
-            &state.audit_log,
+            &audit,
             WRITEBACK_CAPABILITY,
             &script_id,
             true,
@@ -524,7 +527,7 @@ pub fn script_writeback(
             None,
         ),
         Err(e) => crate::net_commands::record_capability_call(
-            &state.audit_log,
+            &audit,
             WRITEBACK_CAPABILITY,
             &script_id,
             false,
@@ -1013,10 +1016,12 @@ mod tests {
     #[test]
     fn denials_and_successes_both_write_an_audit_row() {
         let log = crate::document_effect::Persisted::new(calp::audit::AuditLog::default());
+        let file = crate::persistence::FileState::default();
+        let audit = crate::machine_audit::WorkbookAudit::at_entry(&log, &file);
 
         // The exact call the gateway's grant-denial branch makes.
         crate::net_commands::record_capability_call(
-            &log,
+            &audit,
             WRITEBACK_CAPABILITY,
             "script-1",
             false,
@@ -1025,7 +1030,7 @@ mod tests {
         );
         // ...and its success branch.
         crate::net_commands::record_capability_call(
-            &log,
+            &audit,
             WRITEBACK_CAPABILITY,
             "script-1",
             true,

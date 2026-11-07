@@ -345,8 +345,9 @@ pub async fn feed_engine_writeback(
 /// the pre-distribution history, and registry submissions pass the same
 /// read-side integrity gates as GATHER (schema validation, masterData editor
 /// allowlist, drafts dropped) so hand-written registry files can't pollute
-/// the model. First subscription declaring a column wins, matching the grid
-/// writeback paths.
+/// the model. A column id that more than one subscription claims (its ledger
+/// rows or its verified manifest) is read from NONE of them, matching the grid
+/// writeback paths (BUG-0734).
 pub(crate) fn collect_distributed_writeback_entries(
     state: &AppState,
 ) -> HashMap<String, Vec<ModelWritebackEntry>> {
@@ -354,8 +355,14 @@ pub(crate) fn collect_distributed_writeback_entries(
     let Ok(subs) = state.subscriptions.read() else {
         return result;
     };
+    // Column id -> every subscription (by INDEX) that claims it: its ledger's
+    // `modelWriteback` rows (an unreachable claimant still counts), plus each
+    // verified manifest read below. A column two subscriptions claim feeds
+    // NEITHER model (BUG-0734): the first subscription used to win, so the
+    // copy's model totalled the original's entries.
+    let mut claimants = crate::calp_commands::recorded_model_writeback_claimants(&subs.subscriptions);
 
-    for sub in &subs.subscriptions {
+    for (sub_index, sub) in subs.subscriptions.iter().enumerate() {
         if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
@@ -395,6 +402,9 @@ pub(crate) fn collect_distributed_writeback_entries(
         else {
             continue;
         };
+        for decl in declarations {
+            claimants.entry(decl.id.clone()).or_default().insert(sub_index);
+        }
 
         // Registry submissions for this version (current/folded view — review
         // state is derived from review events), bucketed by writeback id. The
@@ -464,7 +474,7 @@ pub(crate) fn collect_distributed_writeback_entries(
 
         for decl in declarations {
             if result.contains_key(&decl.id) {
-                continue; // first subscription wins
+                continue; // a second claimant: the column is shared, dropped below
             }
             // MASTER DATA COUNTS ONLY SIGNED ENTRIES (identity phase 1): an
             // entry sent before sign-in names nobody anybody vouched for, so it
@@ -524,6 +534,21 @@ pub(crate) fn collect_distributed_writeback_entries(
             if !entries.is_empty() {
                 result.insert(decl.id.clone(), entries);
             }
+        }
+    }
+
+    // ONE COLUMN, ONE APPLICATION: a column id two subscriptions claim is read
+    // from neither, so no model shows another application's entries.
+    for (id, indices) in &claimants {
+        if indices.len() > 1 && result.remove(id).is_some() {
+            crate::log_warn!(
+                "CALP",
+                "model writeback: {}",
+                crate::calp_commands::model_writeback_shared_refusal(
+                    id,
+                    &crate::calp_commands::claimant_labels(&subs.subscriptions, indices),
+                )
+            );
         }
     }
 
@@ -629,6 +654,9 @@ pub async fn bi_writeback_set_value(
         &window,
         crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
     )?;
+    // The workbook this entry is made in (BUG-0735): fixed before the engine
+    // lock is awaited.
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&state.audit_log, &file_state);
 
     let (engine_arc, is_subscribed) = {
         let conns = bi_state.connections.lock().map_err(|e| e.to_string())?;
@@ -667,7 +695,13 @@ pub async fn bi_writeback_set_value(
         // re-validates against the SIGNED manifest's declaration, exactly
         // like the grid-region submit path: a tampered local model cannot
         // widen what the publisher declared.
-        crate::calp_commands::submit_model_writeback(&state, &wb, key, parsed, &identity)?;
+        // A File > Open / New while the engine lock was awaited replaced the
+        // workbook: its subscriptions are not the ones this entry was typed
+        // against, so nothing is sent.
+        if audit.workbook_replaced() {
+            return Err("The workbook was replaced (File > Open / New) before this value could be submitted. Nothing was sent.".to_string());
+        }
+        crate::calp_commands::submit_model_writeback(&state, &wb, key, parsed, &identity, &audit)?;
     } else {
         // LOCAL model: append to the workbook store, auto-approved (no
         // submit/approve ceremony inside one's own workbook).
@@ -679,16 +713,7 @@ pub async fn bi_writeback_set_value(
             submitted_at: chrono::Utc::now().to_rfc3339(),
             state: "approved".to_string(),
         };
-        // The append IS the document change; every gate above (writeback
-        // column resolved, key arity, value parse, editor allow-list) has
-        // already had its chance to refuse.
-        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut store = state.model_writeback.write(&effect).map_err(|e| e.to_string())?;
-        store
-            .entries
-            .entry(wb.id().to_string())
-            .or_default()
-            .push(entry);
+        append_local_writeback_entry(&state, &file_state, &audit, wb.id(), entry)?;
     }
 
     // Re-feed this engine from the merged (local + distributed) history.
@@ -718,9 +743,41 @@ pub async fn bi_writeback_set_value(
     // to `state.model_writeback`, and it has no store write to hang an effect
     // on -- so it keeps one here. The local branch already minted its own at
     // the append; a second `mutates` on an already-dirty document announces
-    // nothing and sets nothing new.
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+    // nothing and sets nothing new. Pinned to the entry's workbook: a File >
+    // Open that landed during the re-feed's await is not dirtied by it.
+    let _ = audit.while_workbook_live(|| crate::document_effect::DocumentEffect::mutates(&file_state));
     Ok(())
+}
+
+/// The LOCAL model's append (`bi_writeback_set_value`), into the workbook the
+/// command BEGAN in (`audit`, fixed at its entry before the engine lock was
+/// awaited). A File > Open / New that landed during that await replaced the
+/// workbook: this entry was typed against the old one's model, so nothing is
+/// written -- not into the new workbook's store, and its dirty flag is not
+/// touched. The replacement question and the write are ONE critical section
+/// (`WorkbookAudit::while_workbook_live`), never check-then-act (wave-3
+/// verifier, backmisc: the local branch asked nothing at all).
+///
+/// The append IS the document change; every gate before it (writeback column
+/// resolved, key arity, value parse, editor allow-list) has already had its
+/// chance to refuse.
+pub(crate) fn append_local_writeback_entry(
+    state: &AppState,
+    file_state: &FileState,
+    audit: &crate::machine_audit::WorkbookAudit<'_>,
+    writeback_id: &str,
+    entry: ModelWritebackEntry,
+) -> Result<(), String> {
+    audit
+        .while_workbook_live(|| -> Result<(), String> {
+            let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+            let mut store = state.model_writeback.write(&effect).map_err(|e| e.to_string())?;
+            store.entries.entry(writeback_id.to_string()).or_default().push(entry);
+            Ok(())
+        })
+        .unwrap_or_else(|| {
+            Err("The workbook was replaced (File > Open / New) before this value could be written. Nothing was written.".to_string())
+        })
 }
 
 /// One writeback column definition, projected for pivot editing: everything
@@ -807,6 +864,44 @@ mod tests {
     //! history-batch encoder (against the engine-declared slot schema).
     use super::*;
     use arrow::array::Array;
+
+    /// A LOCAL writeback entry typed in one workbook never lands in the one
+    /// a File > Open replaced it with during the engine-lock await (wave-3
+    /// verifier, backmisc): nothing is written, and the new workbook is not
+    /// dirtied. The positive control writes and dirties.
+    ///
+    /// SABOTAGE (obj4-wbl): `append_local_writeback_entry` writes without the
+    /// pin (`Some(work())`) -- fails at "NOTHING WRITTEN INTO THE NEW WORKBOOK".
+    #[test]
+    fn a_local_writeback_entry_never_lands_in_a_replaced_workbook() {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        let entry = || ModelWritebackEntry {
+            key: vec!["1".to_string()],
+            value: SubmissionValue::Number { value: 7.0 },
+            submitter_id: "me".to_string(),
+            submitter_name: "Me".to_string(),
+            submitted_at: "2026-11-06T00:00:00Z".to_string(),
+            state: "approved".to_string(),
+        };
+
+        let audit = crate::machine_audit::WorkbookAudit::at_entry(&state.audit_log, &file);
+        // File > Open lands while the engine lock is awaited.
+        file.note_document_replaced();
+        let err = append_local_writeback_entry(&state, &file, &audit, "wb-1", entry()).unwrap_err();
+        assert!(err.contains("Nothing was written"), "{err}");
+        assert!(
+            state.model_writeback.read().unwrap().entries.is_empty(),
+            "NOTHING WRITTEN INTO THE NEW WORKBOOK"
+        );
+        assert!(!file.is_dirty(), "the new workbook is not dirtied");
+
+        // Positive control: the live workbook takes the entry and is dirtied.
+        let live = crate::machine_audit::WorkbookAudit::at_entry(&state.audit_log, &file);
+        append_local_writeback_entry(&state, &file, &live, "wb-1", entry()).expect("written");
+        assert_eq!(state.model_writeback.read().unwrap().entries["wb-1"].len(), 1);
+        assert!(file.is_dirty());
+    }
 
     fn wb(data_type: bi_engine::DataType) -> bi_engine::WritebackColumn {
         bi_engine::WritebackColumn::new(

@@ -11,9 +11,12 @@
 //! the pivot engine splices over the rolled-up accumulator slots.
 //!
 //! v1 scope:
-//! - Totals are only installed when no local filters are active; the pivot
-//!   engine additionally gates application on an all-visible filter mask, so
-//!   filtering later falls back to rolled-up totals until the next refresh.
+//! - These totals describe the UNFILTERED set: they are only installed when no
+//!   local filters are active, and the pivot engine additionally gates them on
+//!   an all-visible filter mask. A FILTERED state's totals (and, for a share of
+//!   the visible total, its leaves) are the mask overlay's (`mask_overlay.rs`,
+//!   BUG-0108): the same grain queries with the mask expressed as level-1
+//!   IN-lists of the visible members, keyed by that exact mask.
 //! - Calculation groups are skipped (their totals are force-hidden anyway).
 //! - `TotalsMode::Rollup` (single-query rollup) is a future optimization: it
 //!   fails closed on multi-fact models, lookups and calculation groups, so
@@ -97,8 +100,9 @@ pub(crate) struct BiTotalsPlan {
 }
 
 /// Grains beyond this count keep rolled-up totals (avoids surprise refresh
-/// latency on connector-backed models with many nested dimensions).
-const MAX_TOTAL_GRAINS: usize = 24;
+/// latency on connector-backed models with many nested dimensions). The mask
+/// overlay (`mask_overlay.rs`) keeps to it too.
+pub(crate) const MAX_TOTAL_GRAINS: usize = 24;
 
 /// Enumerates the (row_depth, col_depth) total grains of an n×m axis layout.
 /// The full-depth leaf grain is the main query itself and is only included
@@ -132,6 +136,23 @@ pub(crate) fn enumerate_grains(
 /// with the subtotal padding and writing it clobbered a subtotal slot). A
 /// NULL row is still skipped when the pivot's cache has no blank member in
 /// that column: there is no (blank) row for it to describe.
+/// The value fields (definition order, `plan.vf_keys`) a grain answer
+/// carries a measure column for.
+pub(crate) fn answered_value_fields(result_columns: &[bi_engine::ResultColumn], plan: &BiTotalsPlan) -> Vec<usize> {
+    plan.vf_keys
+        .iter()
+        .enumerate()
+        .filter(|(_, (measure, item))| {
+            result_columns.iter().any(|rc| {
+                matches!(rc.kind, bi_engine::ResultColumnKind::Measure)
+                    && rc.measure.as_deref() == Some(measure.as_str())
+                    && rc.calculation_item == *item
+            })
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 pub(crate) fn overrides_from_grain_result(
     batches: &[RecordBatch],
     result_columns: &[bi_engine::ResultColumn],

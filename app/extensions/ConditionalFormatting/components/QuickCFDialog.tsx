@@ -19,7 +19,8 @@ import type {
   ConditionalFormat,
   ConditionalFormatRange,
 } from "@api";
-import { tryAddRule } from "../lib/ruleWrites";
+import { tryAddRule, reasonOf } from "../lib/ruleWrites";
+import { ruleForAnchor, UNMOVABLE_FORMULA_REFUSAL, type CellPos } from "../lib/ruleFormulaAnchor";
 import { DIALOG_THEME as DT } from "../../_shared/lib/dialogTheme";
 import type { CellTargetRef } from "@api/cellTarget";
 import { PRESET_STYLES, DATE_OCCURRING_PERIODS } from "../types";
@@ -170,6 +171,9 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
   const selection = data?.selection as ConditionalFormatRange | null;
   // A floating grid's cells (P3): the rule is written with the object's target.
   const target = data?.target as CellTargetRef | undefined;
+  // The selection's ACTIVE cell: a formula operand typed here ("=$C5") is
+  // relative to it, as in Excel (BUG-0748).
+  const activeCell = (data?.activeCell as CellPos | null | undefined) ?? null;
   const def = RULE_DEFS[ruleType] || RULE_DEFS.greaterThan;
 
   const [value1, setValue1] = useState(ruleType.includes("10") ? "10" : "");
@@ -260,9 +264,24 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
     if (busy) return;
     setBusy(true);
     setRefusal(null);
+    // A formula typed here is relative to the ACTIVE cell; the rule stores it
+    // for its first cell (lib/ruleFormulaAnchor.ts).
+    let stated: ConditionalFormatRule | null;
+    try {
+      stated = await ruleForAnchor(rule, [selection], activeCell);
+    } catch (err) {
+      setBusy(false);
+      setRefusal(reasonOf(err));
+      return;
+    }
+    if (stated === null) {
+      setBusy(false);
+      setRefusal(UNMOVABLE_FORMULA_REFUSAL);
+      return;
+    }
     const refused = await tryAddRule(
       {
-        rule,
+        rule: stated,
         format,
         ranges: [selection],
         stopIfTrue: false,
@@ -277,7 +296,7 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
     }
     onClose();
     restoreFocusToGrid();
-  }, [ruleType, value1, value2, formatIndex, dropdownValue, period, selection, target, onClose, busy]);
+  }, [ruleType, value1, value2, formatIndex, dropdownValue, period, selection, target, activeCell, onClose, busy]);
 
   const handleCancel = useCallback(() => {
     onClose();

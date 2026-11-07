@@ -297,7 +297,7 @@ fn cell_value_and_threshold_formulas_follow_the_edit() {
 fn validation_formulas_and_list_sources_follow_the_edit() {
     let list = || {
         DataValidationRule::List(ListRule {
-            source: ListSource::Range { sheet_index: None, start_row: 0, start_col: 5, end_row: 4, end_col: 5 },
+            source: ListSource::Range { sheet_index: None, start_row: 0, start_col: 5, end_row: 4, end_col: 5, relative: Default::default(), sheet_gone: false },
             in_cell_dropdown: true,
         })
     };
@@ -371,7 +371,7 @@ fn rules_reading_another_sheet_follow_an_edit_there() {
         9,
         7,
         DataValidationRule::List(ListRule {
-            source: ListSource::Range { sheet_index: Some(1), start_row: 0, start_col: 0, end_row: 2, end_col: 0 },
+            source: ListSource::Range { sheet_index: Some(1), start_row: 0, start_col: 0, end_row: 2, end_col: 0, relative: Default::default(), sheet_gone: false },
             in_cell_dropdown: true,
         }),
     );
@@ -465,7 +465,7 @@ fn copying_a_sheet_copies_its_rules_validations_comments_and_notes() {
     }
     let list = |sheet_index: Option<usize>, col: u32| {
         DataValidationRule::List(ListRule {
-            source: ListSource::Range { sheet_index, start_row: 0, start_col: col, end_row: 2, end_col: col },
+            source: ListSource::Range { sheet_index, start_row: 0, start_col: col, end_row: 2, end_col: col, relative: Default::default(), sheet_gone: false },
             in_cell_dropdown: true,
         })
     };

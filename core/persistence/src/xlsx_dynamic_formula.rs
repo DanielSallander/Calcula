@@ -74,6 +74,10 @@ use std::collections::HashMap;
 #[path = "xlsx_dynamic_formula_live.rs"]
 pub(crate) mod live;
 
+#[cfg(test)]
+#[path = "xlsx_dynamic_formula_legacy_tests.rs"]
+mod legacy_tests;
+
 /// Excel's class of each function's parameters [LIVE, see the module
 /// header]: (function, flags, class per position for a REFERENCE argument,
 /// class per position for an ARRAY argument). Flags: `A` the call's result
@@ -750,6 +754,13 @@ impl Walk<'_> {
     }
 
     fn kind(&self, expr: &E) -> Kind {
+        // A sheet-qualified NAME (`Sheet1!Dup`, or `[0]!Dup` read as one) is
+        // that name, whatever a LET binds (lane form4; [LIVE, Excel 16,
+        // SCRATCH/form4/p2.xlsx] Excel files `=Sheet1!Dup` over `=2` as a
+        // plain `<f>` and reads it back without an `@`).
+        if let Some((_, name)) = parser::parser::qualified_name_parts(expr) {
+            return self.names.get(name).1;
+        }
         match expr {
             E::CellRef { .. }
             | E::Range { .. }
@@ -788,6 +799,10 @@ impl Walk<'_> {
 
     /// Whether `expr`'s value may be multi-cell, to Excel's static view.
     fn array(&mut self, expr: &E) -> bool {
+        // A sheet-qualified name has the shape of its definitions (`kind`).
+        if let Some((_, name)) = parser::parser::qualified_name_parts(expr) {
+            return self.names.get(name).0;
+        }
         match expr {
             E::Literal(_) | E::CellRef { .. } => false,
             E::Range { .. } | E::ColumnRef { .. } | E::RowRef { .. } | E::Sheet3DRef { .. } | E::SpillRef { .. } => true,
@@ -915,6 +930,224 @@ impl Walk<'_> {
                     })
                 }
             },
+        }
+    }
+}
+
+// ============================================================================
+// READING A LEGACY FORMULA (BUG-0645 item 4)
+// ============================================================================
+
+/// A LEGACY formula's text (an `<f>` in a `<c>` with no `cm`, Calcula's
+/// stored text, no `=`) as Excel reads it: with every implicit intersection
+/// written out as `@`, or `None` when it has none -- a formula Excel saves
+/// plain ([`excel_saves_dynamic`]) reads the same either way, so it is never
+/// touched, and a Calcula export's own plain formulas come back as written.
+///
+/// EXCEL'S READING, MEASURED [LIVE, Excel 16, 2026-11-06, lane xlsx
+/// probe1/probe2: 172 formulas set with `Range.Formula` -- a legacy formula --
+/// in a fresh workbook beside A1:A5, B1:B5, C1:C3 and `MyR` = `$A$1:$A$3`, and
+/// read back with `Formula2`; the table is
+/// `xlsx_formula_text_names_tests::a_legacy_formula_reads_as_excel_shows_it`]:
+///
+/// - A multi-cell REFERENCE where one value is taken -- the top, an operand,
+///   a lifted parameter (`V` in [`PARAMETERS`]) -- is intersected:
+///   `@A1:A5`, `@A1:A3+1`, `SUM(@A1:A3*2)`, `SUM(LEN(@C1:C3))`, `@MyR`,
+///   `COUNTIF(A1:A5,@A1:A3)`; one a parameter takes whole is not
+///   (`SUM(A1:A3)`, `SUM(MyR)`, `N(A1:A3)`). An intersection is multi-cell
+///   only when both sides are (`ABS(A1:A3 A2)` stays).
+/// - A call whose result may be multi-cell is intersected where one value is
+///   taken at the top level (`@INDEX(A1:A5,D1)`, `ABS(@INDEX(..))`,
+///   `@IF(A1>0,A1:A3,B1:B3)`, `@TRANSPOSE(..)`, `@MMULT(..)`,
+///   `@SEQUENCE(3)`, `@FILTER(..)`, `LEN(@OFFSET(A1,0,0,3))`); inside a
+///   parameter taken whole only a REFERENCE call is (`SUM(ABS(@INDEX(..)))`,
+///   `SUM(LEN(@OFFSET(..)))`, but `SUM(ABS(SEQUENCE(3)))`,
+///   `SUM(LEN(TRANSPOSE(@A1:A3)))`). An array constant likewise at the top
+///   level only (`ABS(@{1,-2})`, `@{1,2,3}`, but `SUM(ABS({1,-2}))`).
+/// - `ROW` / `COLUMN` of a multi-cell reference is intersected anywhere but in
+///   an array parameter (`@ROW(A1:A3)`, `SUM(@ROW(A1:A3))`,
+///   `SUMPRODUCT(ROW(A1:A3))`).
+/// - An ARRAY parameter (every parameter of a function whose result is an
+///   array, `SUMPRODUCT`'s, `INDEX`'s first, `LOOKUP`'s vectors, the paired
+///   statistics') evaluates its argument as an array: nothing in it is
+///   intersected (`SUMPRODUCT(LEN(A1:A3))`, `@INDEX(A1:A3*2,1)`,
+///   `SUMPRODUCT(SUM(A1:A3*2))`, `@FILTER(A1:A5,A1:A5>1)`) -- but for
+///   `IF`'s condition and `TRANSPOSE`'s argument, whose references are always
+///   intersected (`SUMPRODUCT(IF(@A1:A3>1,1,0))`, `@TRANSPOSE(@A1:A3*2)`,
+///   `@MMULT(TRANSPOSE(@A1:A3),A1:A3)`).
+/// - `XLOOKUP`'s result is one value when its lookup value is
+///   (`XLOOKUP(1,A1:A5,B1:B5)+1` stays).
+///
+/// Known differences, each a formula still read as a dynamic one: an array
+/// constant in a lifted parameter inside a parameter taken whole
+/// (`SUM(VLOOKUP(A1,A1:B5,{1,2},FALSE))` is Excel's
+/// `SUM(VLOOKUP(A1,A1:B5,@{1,2},FALSE))`), and the functions this table has
+/// no row for.
+pub(crate) fn legacy_formula_text(formula: &str, names: &NameShapes) -> Option<String> {
+    if !excel_saves_dynamic(formula, names) {
+        return None;
+    }
+    let ast = parser::parse(formula).ok()?;
+    let mut walk = Walk { names, scope: Vec::new() };
+    let read = walk.legacy(&ast, true, Legacy::Top);
+    (read != ast).then(|| engine::ast_render::render_formula_raw(&read))
+}
+
+/// Where in a legacy formula a sub-expression sits (see
+/// [`legacy_formula_text`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Legacy {
+    /// Outside every parameter taken whole: the top level.
+    Top,
+    /// Inside a parameter that takes its argument whole (`SUM`'s).
+    Whole,
+    /// Inside an ARRAY parameter: nothing is intersected.
+    Array,
+    /// `IF`'s condition, `TRANSPOSE`'s argument: references are intersected,
+    /// calls and constants are not.
+    References,
+}
+
+/// The legacy ARRAY parameters of the functions whose result is no array
+/// (those, flag `A`, take every parameter as an array): 0-based positions,
+/// `None` for all.
+fn legacy_array_parameters(name: &str) -> Option<Option<&'static [usize]>> {
+    const PAIRS: &[usize] = &[0, 1];
+    Some(match name {
+        "SUMPRODUCT" | "MDETERM" => None,
+        "INDEX" => Some(&[0]),
+        "LOOKUP" | "FORECAST" | "FORECAST.LINEAR" => Some(&[1, 2]),
+        "CORREL" | "PEARSON" | "RSQ" | "SLOPE" | "INTERCEPT" | "STEYX" | "COVAR" | "COVARIANCE.P" | "COVARIANCE.S"
+        | "SUMX2MY2" | "SUMX2PY2" | "SUMXMY2" | "TTEST" | "T.TEST" | "FTEST" | "F.TEST" | "CHITEST" | "CHISQ.TEST"
+        | "PROB" => Some(PAIRS),
+        _ => return None,
+    })
+}
+
+impl Walk<'_> {
+    /// `expr` read as a legacy formula: `value` when one value is taken where
+    /// it sits (the top, an operand, a lifted parameter).
+    fn legacy(&mut self, expr: &E, value: bool, at: Legacy) -> E {
+        let intersect = |e: E| E::ImplicitIntersection { operand: Box::new(e) };
+        match expr {
+            E::BinaryOp { left, op: BinaryOperator::Intersect, right } => {
+                let multi = self.array(left) && self.array(right);
+                if value && multi && at != Legacy::Array {
+                    intersect(expr.clone())
+                } else {
+                    expr.clone()
+                }
+            }
+            E::BinaryOp { left, op, right } => E::BinaryOp {
+                left: Box::new(self.legacy(left, true, at)),
+                op: op.clone(),
+                right: Box::new(self.legacy(right, true, at)),
+            },
+            E::UnaryOp { op, operand } => E::UnaryOp { op: op.clone(), operand: Box::new(self.legacy(operand, true, at)) },
+            E::Range { .. }
+            | E::ColumnRef { .. }
+            | E::RowRef { .. }
+            | E::Sheet3DRef { .. }
+            | E::TableRef { .. }
+            | E::NamedRef { .. } => {
+                if value && at != Legacy::Array && self.array(expr) {
+                    intersect(expr.clone())
+                } else {
+                    expr.clone()
+                }
+            }
+            E::ArrayLiteral { .. } => {
+                if value && at == Legacy::Top {
+                    intersect(expr.clone())
+                } else {
+                    expr.clone()
+                }
+            }
+            E::FunctionCall { func, args, ref_site_id } => self.legacy_call(func, args, *ref_site_id, value, at),
+            _ => expr.clone(),
+        }
+    }
+
+    fn legacy_call(&mut self, func: &BuiltinFunction, args: &[E], ref_site_id: identity::RefSiteId, value: bool, at: Legacy) -> E {
+        let name = function_name(func);
+        // LET and LAMBDA have no legacy reading: kept as they are.
+        if matches!(name.as_str(), "LET" | "LAMBDA") {
+            return E::FunctionCall { func: func.clone(), args: args.to_vec(), ref_site_id };
+        }
+        let row = parameters(&name);
+        let array_result = row.is_some_and(|r| r.0.contains('A'));
+        let line = matches!(name.as_str(), "ROW" | "COLUMN");
+        let mut read: Vec<E> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            // TRANSPOSE's argument and IF's condition: references always
+            // intersected.
+            if (name == "TRANSPOSE" || name == "IF") && i == 0 {
+                let inner = if at == Legacy::Array || name == "TRANSPOSE" { Legacy::References } else { at };
+                let lifted = row.map_or(true, |r| self.class(r, i, arg) == Class::Lifted);
+                read.push(self.legacy(arg, lifted, inner));
+                continue;
+            }
+            let array_parameter = (array_result && name != "TRANSPOSE")
+                || legacy_array_parameters(&name).is_some_and(|positions| positions.map_or(true, |p| p.contains(&i)));
+            if array_parameter {
+                read.push(self.legacy(arg, false, Legacy::Array));
+                continue;
+            }
+            let lifted = !line && row.is_some_and(|r| self.class(r, i, arg) == Class::Lifted);
+            if lifted {
+                read.push(self.legacy(arg, true, at));
+            } else {
+                let inner = match at {
+                    Legacy::Top | Legacy::References => Legacy::Whole,
+                    other => other,
+                };
+                read.push(self.legacy(arg, false, inner));
+            }
+        }
+        // What the classifier sees as multi-cell where the legacy reading has
+        // one value -- an `XLOOKUP` of one lookup value, an intersection with
+        // a single cell -- is one value to the call's own shape too.
+        let probe: Vec<E> = read
+            .iter()
+            .map(|a| if self.legacy_single(a) { E::ImplicitIntersection { operand: Box::new(a.clone()) } } else { a.clone() })
+            .collect();
+        let call = E::FunctionCall { func: func.clone(), args: read, ref_site_id };
+        if at == Legacy::Array {
+            return call;
+        }
+        let multi = match name.as_str() {
+            "XLOOKUP" => probe.first().is_some_and(|a| self.array(a)),
+            _ => self.array(&E::FunctionCall { func: func.clone(), args: probe, ref_site_id }),
+        };
+        let wrap = if line {
+            at != Legacy::References && args.first().is_some_and(|a| self.array(a))
+        } else if !value {
+            false
+        } else if self.kind(&call) == Kind::Reference {
+            at != Legacy::References && multi
+        } else {
+            at == Legacy::Top && (multi || row.is_some_and(|r| r.0.contains('D')))
+        };
+        if wrap {
+            E::ImplicitIntersection { operand: Box::new(call) }
+        } else {
+            call
+        }
+    }
+}
+
+impl Walk<'_> {
+    /// Whether the legacy reading has ONE value where the classifier's static
+    /// view says multi-cell: `XLOOKUP` of one lookup value ([LIVE]
+    /// `ABS(XLOOKUP(1,A1:A5,B1:B5))` stays), an intersection with a single
+    /// cell (`ABS(A1:A3 A2)` stays).
+    fn legacy_single(&mut self, expr: &E) -> bool {
+        match expr {
+            E::FunctionCall { func, args, .. } if function_name(func) == "XLOOKUP" => {
+                !args.first().is_some_and(|a| self.array(a))
+            }
+            E::BinaryOp { left, op: BinaryOperator::Intersect, right } => !(self.array(left) && self.array(right)),
+            _ => false,
         }
     }
 }

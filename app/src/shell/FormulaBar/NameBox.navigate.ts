@@ -47,6 +47,10 @@ export interface ReferenceNavigatorContext {
   dispatch: (action: GridAction) => void;
   /** The active sheet's TRUE index, read at the moment of use. */
   activeSheetIndex: () => number;
+  /** The ACTIVE CELL (0-based), read at the moment of use: a relative defined
+   *  name is read at it, as Excel's Go To and Name Box read it (BUG-0749).
+   *  Absent or null, a name is read as written (anchored at A1). */
+  activeCell?: () => { row: number; col: number } | null;
 }
 
 /** What a navigation did. "unclaimed": no branch knew the text (the Name Box
@@ -61,7 +65,7 @@ export interface ReferenceNavigator {
   selectRange(range: { startRow: number; startCol: number; endRow: number; endCol: number; type?: "cells" | "rows" | "columns" }): void;
   switchToSheet(index: number): Promise<void>;
   goToAddress(address: ParsedNameBoxAddress): Promise<string | null>;
-  goToNamedRange(nr: NamedRange): Promise<string | null>;
+  goToNamedRange(nr: NamedRange, typed?: string): Promise<string | null>;
   goToStructuredReference(reference: string): Promise<string | null>;
   goToExternalAddress(text: string): Promise<{ kind: "none" } | { kind: "done" } | { kind: "refused"; message: string }>;
   /** Branches 0-4 of the Name Box's Enter, in order. */
@@ -224,10 +228,19 @@ export function createReferenceNavigator(ctx: ReferenceNavigatorContext): Refere
    * coordinates on whatever sheet was active — a silent wrong answer — and when
    * it simply did not match it closed the box having done nothing at all.
    */
-  const goToNamedRange = async (nr: NamedRange): Promise<string | null> => {
+  const goToNamedRange = async (nr: NamedRange, typed?: string): Promise<string | null> => {
     let coords: NamedRangeCoords;
+    // ASKED FROM where you are (BUG-0744 / BUG-0749): a sheet's own name from
+    // its sheet, else the active one; a RELATIVE name read at the active cell
+    // -- [LIVE] Excel's Go To "relN" (=Sheet2!B2, defined at A1) from D5
+    // selects E6. The typed text keeps a qualifier (`Sheet2!Rate`).
+    const cell = ctx.activeCell?.() ?? null;
     try {
-      coords = await resolveNamedRangeCoords(nr.name);
+      coords = await resolveNamedRangeCoords(typed ?? nr.name, {
+        sheetIndex: nr.sheetIndex ?? ctx.activeSheetIndex(),
+        row: cell?.row ?? 0,
+        col: cell?.col ?? 0,
+      });
     } catch {
       return `"${nr.name}" does not refer to a range that can be selected (${nr.refersTo}).`;
     }
@@ -360,11 +373,12 @@ export function createReferenceNavigator(ctx: ReferenceNavigatorContext): Refere
     // 3. An existing DEFINED NAME.
     let existing: NamedRange | null = null;
     try {
-      existing = await getNamedRange(value);
+      // Asked FROM the active sheet: its own name of the spelling first.
+      existing = await getNamedRange(value, ctx.activeSheetIndex());
     } catch (error) {
       console.error("[NameBox] Failed to look up name:", error);
     }
-    if (existing) return done(await goToNamedRange(existing));
+    if (existing) return done(await goToNamedRange(existing, value));
 
     // 4. A TABLE NAME. Tables and defined names share one namespace — the
     //    backend refuses a name that would shadow a table — so this cannot

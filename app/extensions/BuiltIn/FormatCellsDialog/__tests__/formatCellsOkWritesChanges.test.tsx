@@ -241,6 +241,35 @@ describe("Borders on a range, and the undo step", () => {
     expect(h.applyFormatting).not.toHaveBeenCalled();
     expect(h.applyBorderPreset).not.toHaveBeenCalled();
   });
+
+  // BUG-0726: the INSIDE lines were loaded from the top-left cell's bottom and
+  // right sides. Excel greys an inside line whose boundaries differ, as it
+  // greys a mixed outer edge [LIVE, 2026-11-06, lane uiforms probe3].
+  it("reads the INSIDE lines across the whole range: one bordered row of three is MIXED, not ON", async () => {
+    // A1 (the top-left) has a bottom line; nothing else does.
+    h.getCell.mockImplementation(async (row: number, col: number) => ({ row, col, styleIndex: row * 10 + col + 1, display: "" }));
+    h.getStyle.mockImplementation(async (i: number) =>
+      i === 1 ? { ...DEFAULT_STYLE, borderBottom: { style: "thin", color: "#000000", width: 1 } } : DEFAULT_STYLE,
+    );
+    await renderDialog(vi.fn());
+    const s = useFormatCellsStore.getState();
+    expect(s.borderInsideHorizontal.mixed, "the top-left cell's bottom stood for every inside line").toBe(true);
+    expect(s.borderInsideVertical).toEqual({ style: "none", color: "#000000" });
+    // An untouched OK leaves every cell's own inside lines as they are.
+    await pressOk();
+    expect(h.applyBorderPreset).not.toHaveBeenCalled();
+    expect(h.applyFormatting).not.toHaveBeenCalled();
+  });
+
+  it("every inner boundary drawn -- by the LOWER cells' tops -- loads the line, although the top-left cell has none", async () => {
+    // Rows 2 and 3 (indexes 1 and 2) carry a top line in every column.
+    h.getCell.mockImplementation(async (row: number, col: number) => ({ row, col, styleIndex: row >= 1 ? 7 : 0, display: "" }));
+    h.getStyle.mockImplementation(async (i: number) =>
+      i === 7 ? { ...DEFAULT_STYLE, borderTop: { style: "thin", color: "#000000", width: 1 } } : DEFAULT_STYLE,
+    );
+    await renderDialog(vi.fn());
+    expect(useFormatCellsStore.getState().borderInsideHorizontal).toEqual({ style: "thin", color: "#000000" });
+  });
 });
 
 describe("a refused write is SHOWN, not logged", () => {

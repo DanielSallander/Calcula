@@ -207,63 +207,328 @@ pub fn additive_terms(expr: &Expression) -> Option<Vec<AdditiveTerm<'_>>> {
     }
 }
 
-/// Can `expr` never be BLANK? True for a non-BLANK literal. (Conservative: an
-/// expression this cannot prove non-BLANK is rendered with the BLANK guard.)
+/// Can `expr` never be BLANK? True for a non-BLANK literal, an `ISBLANK` test
+/// and a `COALESCE` with such an argument. (Conservative: an expression this
+/// cannot prove non-BLANK is rendered with the BLANK guard.)
 pub fn never_blank(expr: &Expression) -> bool {
-    matches!(
-        expr,
+    match expr {
         Expression::LiteralInt(_)
-            | Expression::LiteralFloat(_)
-            | Expression::LiteralBool(_)
-            | Expression::LiteralDate(_)
-            | Expression::LiteralString(_)
-    )
+        | Expression::LiteralFloat(_)
+        | Expression::LiteralBool(_)
+        | Expression::LiteralDate(_)
+        | Expression::LiteralString(_)
+        | Expression::IsBlank(_) => true,
+        // TODAY() and NOW() always answer a date.
+        Expression::DateTimeFunc {
+            function:
+                crate::compute::expression::DateTimeFunction::Today
+                | crate::compute::expression::DateTimeFunction::Now,
+            ..
+        } => true,
+        Expression::Coalesce(items) => items.iter().any(never_blank),
+        _ => false,
+    }
 }
 
-/// The value a BLANK compares as against `literal`: "BLANK or a blank value is
-/// converted to 0, "", or False, depending on the data type of the other
-/// compared value" (Microsoft, *Data types in Power BI*, Comparison
-/// operators). `None` when `literal` is not a number, text or boolean literal
-/// (a date, an expression): the comparison is rendered as SQL's.
-pub fn blank_compares_as(literal: &Expression) -> Option<&'static str> {
-    match literal {
-        Expression::LiteralInt(_) | Expression::LiteralFloat(_) => Some("0"),
-        Expression::LiteralString(_) => Some("''"),
-        Expression::LiteralBool(_) => Some("FALSE"),
+/// The kind of value an expression answers, as far as its SHAPE tells --
+/// what DAX converts a BLANK to when it is compared with such a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueClass {
+    /// A number (any numeric type).
+    Number,
+    /// Text.
+    Text,
+    /// A boolean.
+    Boolean,
+    /// A date or date-time.
+    Date,
+}
+
+impl ValueClass {
+    /// The SQL of what a BLANK compares as against a value of this kind: "All
+    /// comparison operators except == treat BLANK as equal to number 0, empty
+    /// string "", DATE(1899, 12, 30), or FALSE" (Microsoft, *DAX operators*).
+    /// [LIVE] Excel 16's data model: a BLANK date is `< DATE(2020, 1, 1)`,
+    /// `= DATE(1899, 12, 30)` and `> DATE(1899, 12, 29)`, at measure level
+    /// (`MAX(t[d])` of no date) and at row level (`FILTER(T, T[d] =
+    /// DATE(1899, 12, 30))` keeps the BLANK-date rows).
+    pub fn blank_sql(self) -> &'static str {
+        match self {
+            ValueClass::Number => "0",
+            ValueClass::Text => "''",
+            ValueClass::Boolean => "FALSE",
+            ValueClass::Date => "CAST('1899-12-30' AS DATE)",
+        }
+    }
+}
+
+/// The [`ValueClass`] `expr` answers, from its shape alone: a literal, an
+/// arithmetic node, a numeric aggregate (`SUM`, `COUNT`, `AVERAGE`, ...), a
+/// comparison or logical test, a text or date function. `MIN` / `MAX` /
+/// `SELECTEDVALUE` ... of a COLUMN, a bare column and `BLANK()` are `None`:
+/// without the model's column types a comparison whose two sides are both
+/// unknown keeps SQL's rule -- [`value_class_in`] takes them.
+pub fn value_class(expr: &Expression) -> Option<ValueClass> {
+    value_class_in(expr, &no_column_classes)
+}
+
+/// The model's column kinds, for [`value_class_in`]: `(table, column)` ->
+/// the kind of the column's values (`table` is `None` for a bare reference).
+pub type ColumnClasses<'a> = &'a dyn Fn(Option<&str>, &str) -> Option<ValueClass>;
+
+/// A [`ColumnClasses`] that knows no column (the model-free renderers).
+pub fn no_column_classes(_table: Option<&str>, _column: &str) -> Option<ValueClass> {
+    None
+}
+
+impl ValueClass {
+    /// The kind of a model column of type `data_type`.
+    pub fn of_data_type(data_type: &crate::types::DataType) -> Self {
+        use crate::types::DataType as T;
+        match data_type {
+            T::Int32 | T::Int64 | T::Float64 | T::Decimal(_, _) => ValueClass::Number,
+            T::String => ValueClass::Text,
+            T::Boolean => ValueClass::Boolean,
+            T::Date | T::Timestamp => ValueClass::Date,
+        }
+    }
+}
+
+/// [`value_class`] with the model's column kinds: a column reference (and so
+/// `MIN` / `MAX` / `SELECTEDVALUE` ... of a column) answers its column's
+/// kind. So `MAX(t[a]) > MIN(t[b])` over numeric columns reads a BLANK side
+/// as 0, as DAX does ([LIVE] Excel 16's data model: `CALCULATE(MAX(T[a]) >
+/// MIN(T[b]), T[k] = 2)` with `a` BLANK and `b` 3 is FALSE; wave 1 verifier
+/// of BUG-0762). An additive chain with a DATE term (and no subtracted one)
+/// answers a date: `TODAY() - 30`, `MIN(t[d]) + 1` (DAX date arithmetic is in
+/// days); it was classed a number, so the comparison read its date side's
+/// BLANK as 0 and the plan failed.
+pub fn value_class_in(expr: &Expression, columns: ColumnClasses) -> Option<ValueClass> {
+    use crate::compute::expression::{DateTimeFunction as D, TextFunction as T};
+    use ValueClass::{Boolean, Date, Number, Text};
+    let value_class = |e: &Expression| value_class_in(e, columns);
+    fn agree(classes: impl IntoIterator<Item = Option<ValueClass>>) -> Option<ValueClass> {
+        let mut found = None;
+        for class in classes.into_iter().flatten() {
+            match found {
+                None => found = Some(class),
+                Some(c) if c != class => return None,
+                Some(_) => {}
+            }
+        }
+        found
+    }
+    match expr {
+        Expression::LiteralInt(_) | Expression::LiteralFloat(_) => Some(Number),
+        Expression::LiteralString(_) => Some(Text),
+        Expression::LiteralBool(_) => Some(Boolean),
+        Expression::LiteralDate(_) => Some(Date),
+        Expression::Aggregate { operation, operand } => match operation {
+            AggregateOp::Min | AggregateOp::Max | AggregateOp::AnyValue | AggregateOp::Mode => {
+                value_class(operand)
+            }
+            _ => Some(Number),
+        },
+        Expression::ColumnRef(column) => columns(None, column),
+        Expression::QualifiedColumnRef {
+            table_or_var,
+            column,
+        } => columns(Some(table_or_var), column),
+        Expression::BinaryOp {
+            op: ArithmeticOp::Add | ArithmeticOp::Subtract,
+            ..
+        } => {
+            let terms = additive_terms(expr).unwrap_or_default();
+            let dated = terms
+                .iter()
+                .any(|t| !t.negated && value_class(t.expr) == Some(Date));
+            let date_subtracted = terms
+                .iter()
+                .any(|t| t.negated && value_class(t.expr) == Some(Date));
+            if dated && !date_subtracted {
+                Some(Date)
+            } else {
+                Some(Number)
+            }
+        }
+        Expression::BinaryOp { .. }
+        | Expression::SafeDivide { .. }
+        | Expression::CountIf { .. }
+        | Expression::Percentile { .. }
+        | Expression::ScalarFunc { .. } => Some(Number),
+        Expression::Comparison { .. }
+        | Expression::And(..)
+        | Expression::Or(..)
+        | Expression::Not(_)
+        | Expression::Xor(..)
+        | Expression::IsBlank(_)
+        | Expression::InList { .. }
+        | Expression::HasOneValue { .. } => Some(Boolean),
+        Expression::ListAgg { .. } => Some(Text),
+        Expression::TextFunc { function, .. } => match function {
+            T::Exact | T::Contains | T::StartsWith | T::EndsWith => Some(Boolean),
+            T::Find | T::Len | T::Search | T::Unicode | T::Value | T::PathLength => Some(Number),
+            T::Split => None,
+            _ => Some(Text),
+        },
+        Expression::DateTimeFunc { function, .. } => match function {
+            D::Date | D::Today | D::Now | D::DateAdd | D::DateTrunc | D::LastDay | D::EoMonth => {
+                Some(Date)
+            }
+            D::DayName | D::MonthName => Some(Text),
+            _ => Some(Number),
+        },
+        Expression::If {
+            then_expr,
+            else_expr,
+            ..
+        } => agree([value_class(then_expr), value_class(else_expr)]),
+        Expression::Switch { cases, default, .. } => agree(
+            cases
+                .iter()
+                .map(|(_, result)| value_class(result))
+                .chain(default.iter().map(|d| value_class(d))),
+        ),
+        Expression::Coalesce(items) | Expression::Greatest(items) | Expression::Least(items) => {
+            agree(items.iter().map(value_class))
+        }
+        Expression::IfError { expr, alternate } => {
+            agree([value_class(expr), value_class(alternate)])
+        }
+        Expression::NullIf { expr, .. } => value_class(expr),
+        Expression::Iterate { expression, .. } => value_class(expression),
+        Expression::Block {
+            bindings, result, ..
+        } => match result.as_ref() {
+            Expression::ColumnRef(name) => match bindings.iter().rev().find(|(n, _)| n == name) {
+                Some((_, bound)) => value_class(bound),
+                None => None,
+            },
+            other => value_class(other),
+        },
+        Expression::Keep { expr, .. }
+        | Expression::Clear { expr, .. }
+        | Expression::Reset { expr, .. }
+        | Expression::ClearInner { expr, .. }
+        | Expression::ClearOuter { expr, .. }
+        | Expression::ResetInner { expr }
+        | Expression::ResetOuter { expr, .. }
+        | Expression::Traverse { expr, .. }
+        | Expression::Using { expr, .. }
+        | Expression::UseRelationship { expr, .. }
+        | Expression::KeepIn { expr, .. }
+        | Expression::ClearExcept { expr, .. } => value_class(expr),
         _ => None,
     }
 }
 
-/// Wrap a rendered comparison operand so a BLANK compares as DAX's
-/// conversion for the other side's literal ([`blank_compares_as`]):
-/// `COALESCE(COUNTROWS(t), 0) = 0` is TRUE over an empty table, as
-/// `COUNTROWS(t) = 0` is in DAX. Unchanged when the other side is not such a
-/// literal, or this side can never be BLANK.
+/// The value a BLANK compares as against `literal` -- [`ValueClass::blank_sql`]
+/// of a number, text, boolean or date literal; `None` for anything else.
+pub fn blank_compares_as(literal: &Expression) -> Option<&'static str> {
+    if matches!(literal, Expression::Blank) || !never_blank(literal) {
+        return None;
+    }
+    value_class(literal).map(ValueClass::blank_sql)
+}
+
+/// Wrap a rendered comparison operand so a BLANK compares as DAX converts it:
+/// "BLANK or a blank value is converted to 0, "", or False, depending on the
+/// data type of the other compared value" (Microsoft, *Data types in Power
+/// BI*) -- [`ValueClass::blank_sql`] of the OTHER side's [`value_class`], or
+/// of this side's own when the other's is unknown (a valid DAX comparison
+/// compares like with like). Unchanged when this side can never be BLANK, or
+/// neither side's kind is known.
 ///
-/// Applied to a measure-level operand (a count or sum of nothing is BLANK,
-/// and `IF(COUNTROWS(t) = 0, ...)` must keep answering as it did when the
-/// count was 0) AND, since the open-ledger round D, to a ROW-level one
-/// (`t[amount] < 5` in a calculated column, an iterator's row expression, a
-/// KEEP's expression condition): DAX keeps a BLANK row there too. [LIVE]
-/// Excel 16's data model (the Power BI DAX engine), over amounts `10, 0,
-/// BLANK, 7` and names `x, y, BLANK, x`: `FILTER(T, T[amount] < 5)` keeps 2
-/// rows (0 and BLANK), `= 0` 2, `>= 0` 4, `> 0` 2, `<> 10` 3, `<= 0` 2,
-/// `< -1` none; `T[name] = ""` 1, `< "x"` 1, `<> "x"` 2, `> ""` 3, `>= ""`
-/// 4 -- every one the COALESCE rule's answer. `IN {0}` keeps only the 0 row
-/// (strict), which `Expression::InList` already renders.
+/// Every comparison renderer takes it: the plain and conditional renderers
+/// (and so the KEEP-as-CASE-WHEN pushdown), the pipeline's compound-measure
+/// route and the boundary evaluator.
 ///
-/// NOT covered: a KEEP's simple `table[column] op literal` predicate
-/// ([`crate::compute::expression::FilterPredicate`]), which stores its
-/// literal as text with its type lost, renders in two dozen places, and is
-/// also the row-level-security predicate type -- it keeps SQL's comparison.
+/// - Against a LITERAL (the open-ledger rounds C and D), at measure level
+///   (`IF(COUNTROWS(t) = 0, ...)` keeps answering as when the count was 0)
+///   and at row level -- [LIVE] Excel 16's data model (the Power BI DAX
+///   engine), over amounts `10, 0, BLANK, 7` and names `x, y, BLANK, x`:
+///   `FILTER(T, T[amount] < 5)` keeps 2 rows (0 and BLANK), `= 0` 2, `>= 0`
+///   4, `> 0` 2, `<> 10` 3, `<= 0` 2, `< -1` none; `T[name] = ""` 1, `<
+///   "x"` 1, `<> "x"` 2, `> ""` 3, `>= ""` 4.
+/// - Between two AGGREGATES or expressions (BUG-0762, ledger programme 2):
+///   `SUM(t[a]) > SUM(t[b])` with one sum BLANK answered NULL. [LIVE] over
+///   `a`, `b` of `(10, 5), (BLANK, 3), (7, BLANK), (BLANK, BLANK)` per row:
+///   BLANK `>` 3 is FALSE and `<` 3 TRUE; 7 `>` BLANK is TRUE; BLANK `=`
+///   BLANK TRUE, `<>` FALSE, `>=` TRUE, `<` FALSE; BLANK `<` BLANK + 1 TRUE;
+///   `NOT(BLANK > 3)` TRUE; `SUM(a) = BLANK()` TRUE over BLANK and FALSE over
+///   10; a BLANK `MAX(t[name])` is `<` "a" and `=` another BLANK text; a
+///   BLANK `MAX(t[d])` is `< DATE(2020, 1, 1)`.
+///
+/// Two sides of unknown kind (`MAX(t[x]) > MIN(t[y])`, `t[a] > t[b]` in a row
+/// context), which DAX also converts ([LIVE] `FILTER(T, T[a] > T[b])` keeps
+/// the 7-vs-BLANK row), need the model's column types:
+/// [`comparison_operand_in`], which the local pipeline's measure SQL takes
+/// (wave 3); a model-free renderer keeps SQL's rule for them.
+///
+/// NOT covered: a KEEP's own column-vs-column CONDITION (rendered model-free
+/// by the pipeline's condition SQL); `IN`, which is strict in DAX (`BLANK IN
+/// {0}` is FALSE) and answers NULL here as a bare boolean; and a KEEP's simple
+/// `table[column] op literal` predicate
+/// ([`crate::compute::expression::FilterPredicate`]) -- BLANK stays strict
+/// there. Row-level security shares that predicate type but is converted on
+/// its own path (`engine_query::security_filter`) and never reaches this
+/// module (owner decision BUG-0759, 2026-11-06: RLS stays strict on BLANK).
 pub fn comparison_operand(sql: String, this: &Expression, other: &Expression) -> String {
+    comparison_operand_in(sql, this, other, &no_column_classes)
+}
+
+/// [`comparison_operand`] with the model's column kinds ([`value_class_in`]):
+/// the renderers that hold the model (the local pipeline's measure SQL) take
+/// this, so a side whose kind only its column shows (`MAX(t[a])`,
+/// `SELECTEDVALUE(t[x])`, a bare `t[a]` in a row context) reads its BLANK as
+/// the zero of that kind too.
+pub fn comparison_operand_in(
+    sql: String,
+    this: &Expression,
+    other: &Expression,
+    columns: ColumnClasses,
+) -> String {
     if never_blank(this) {
         return sql;
     }
-    match blank_compares_as(other) {
-        Some(zero) => format!("COALESCE({sql}, {zero})"),
+    match value_class_in(other, columns).or_else(|| value_class_in(this, columns)) {
+        Some(class) => format!("COALESCE({sql}, {})", class.blank_sql()),
         None => sql,
     }
+}
+
+/// Render DAX `SWITCH(subject, value1, result1, ..., [else])` over rendered
+/// parts: `(value, value_may_be_blank, result)` per case.
+///
+/// SWITCH matches with STRICT equality -- BLANK matches only BLANK, never 0
+/// or "": [LIVE] Excel 16's data model answers `SWITCH(<BLANK sum>, 0,
+/// "zero", "other")` with "other", `SWITCH(<BLANK sum>, <BLANK sum>, "match",
+/// "no")` with "match" and `SWITCH(<BLANK sum>, <a sum of 0>, "match", "no")`
+/// with "no". (The open-ledger round C had read BLANK as 0 here, as in `=`.)
+/// A case value that can never be BLANK (a literal) renders the plain `CASE
+/// subject WHEN value`, where a NULL subject matches nothing; when some case
+/// value can be BLANK the CASE is searched with `IS NOT DISTINCT FROM`.
+pub fn switch_sql(subject: &str, cases: &[(String, bool, String)], default: Option<&str>) -> String {
+    let mut sql = if cases.iter().any(|(_, may_be_blank, _)| *may_be_blank) {
+        let mut s = String::from("CASE");
+        for (value, _, result) in cases {
+            s.push_str(&format!(
+                " WHEN ({subject}) IS NOT DISTINCT FROM ({value}) THEN {result}"
+            ));
+        }
+        s
+    } else {
+        let mut s = format!("CASE {subject}");
+        for (value, _, result) in cases {
+            s.push_str(&format!(" WHEN {value} THEN {result}"));
+        }
+        s
+    };
+    if let Some(d) = default {
+        sql.push_str(&format!(" ELSE {d}"));
+    }
+    sql.push_str(" END");
+    sql
 }
 
 /// A rendered term of an additive chain (see [`additive_terms`]).
@@ -275,6 +540,9 @@ pub struct RenderedTerm {
     pub sql: String,
     /// The term can never be BLANK ([`never_blank`]).
     pub never_blank: bool,
+    /// The term answers a date ([`ValueClass::Date`]): the chain is DAX date
+    /// arithmetic in days ([`additive_sql`]).
+    pub is_date: bool,
 }
 
 /// Render a flattened `+` / `-` chain with DAX BLANK semantics: a BLANK term
@@ -285,6 +553,46 @@ pub struct RenderedTerm {
 /// `CASE WHEN SUM(x) IS NULL AND SUM(y) IS NULL THEN NULL ELSE
 /// (COALESCE(SUM(x), 0) + COALESCE(SUM(y), 0)) END`.
 pub fn additive_sql(terms: &[RenderedTerm]) -> String {
+    // DAX date arithmetic: ONE added date term and number terms answer the
+    // date that many days on (`TODAY() - 30`, `MIN(t[d]) + 1`). A BLANK date
+    // reads as DATE(1899, 12, 30) ("BLANK ... DATE(1899, 12, 30)", Microsoft,
+    // *DAX operators*), a BLANK number as 0, and the chain is BLANK only when
+    // every term is. Rendered as `date + CAST('<n> days' AS INTERVAL)`:
+    // DataFusion plans neither `date + n` nor `INTERVAL * <integer>`, and the
+    // old `COALESCE(<date>, 0) - 30` failed to plan (whole days: a fraction
+    // of a day is truncated).
+    let dates: Vec<&RenderedTerm> = terms.iter().filter(|t| t.is_date).collect();
+    if let [date] = dates.as_slice() {
+        if !date.negated && terms.len() > 1 {
+            let date_sql = if date.never_blank {
+                date.sql.clone()
+            } else {
+                format!("COALESCE({}, {})", date.sql, ValueClass::Date.blank_sql())
+            };
+            let mut days = String::new();
+            for term in terms.iter().filter(|t| !t.is_date) {
+                let operand = if term.never_blank {
+                    term.sql.clone()
+                } else {
+                    format!("COALESCE({}, 0)", term.sql)
+                };
+                let sign = if term.negated { "-" } else { "+" };
+                days.push_str(&format!(" {sign} {operand}"));
+            }
+            let body = format!(
+                "({date_sql} + CAST(CAST(CAST((0{days}) AS BIGINT) AS VARCHAR) || ' days' AS INTERVAL))"
+            );
+            if terms.iter().any(|t| t.never_blank) {
+                return body;
+            }
+            let all_blank = terms
+                .iter()
+                .map(|t| format!("{} IS NULL", t.sql))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            return format!("CASE WHEN {all_blank} THEN NULL ELSE {body} END");
+        }
+    }
     let mut body = String::from("(");
     for (i, term) in terms.iter().enumerate() {
         let operand = if term.never_blank {
@@ -365,11 +673,13 @@ pub fn binary_sql(
                 negated: false,
                 sql: left.to_string(),
                 never_blank: left_never_blank,
+                is_date: false,
             },
             RenderedTerm {
                 negated: matches!(op, ArithmeticOp::Subtract),
                 sql: right.to_string(),
                 never_blank: right_never_blank,
+                is_date: false,
             },
         ]),
     }
@@ -389,6 +699,21 @@ pub fn render_binary<E>(
     style: DivideStyle,
     render: &mut dyn FnMut(&Expression) -> Result<String, E>,
 ) -> Result<String, E> {
+    render_binary_in(expr, style, &no_column_classes, render)
+}
+
+/// [`render_binary`] with the model's column kinds, so a date COLUMN term
+/// (`MIN(t[d]) + 1`) is date arithmetic too ([`value_class_in`]).
+///
+/// # Errors
+///
+/// Whatever `render` returns for an operand.
+pub fn render_binary_in<E>(
+    expr: &Expression,
+    style: DivideStyle,
+    columns: ColumnClasses,
+    render: &mut dyn FnMut(&Expression) -> Result<String, E>,
+) -> Result<String, E> {
     if let Some(terms) = additive_terms(expr) {
         let mut rendered = Vec::with_capacity(terms.len());
         for term in terms {
@@ -396,6 +721,7 @@ pub fn render_binary<E>(
                 negated: term.negated,
                 sql: render(term.expr)?,
                 never_blank: never_blank(term.expr),
+                is_date: value_class_in(term.expr, columns) == Some(ValueClass::Date),
             });
         }
         return Ok(additive_sql(&rendered));
@@ -579,13 +905,15 @@ mod tests {
             render(&compare(col("a"), ComparisonOp::LessThan, col("b"))),
             "(\"a\" < \"b\")"
         );
+        // [LIVE] a BLANK date is `< DATE(2020, 1, 1)` and `= DATE(1899, 12,
+        // 30)` (BUG-0762; it kept SQL's rule until then).
         assert_eq!(
             render(&compare(
                 col("d"),
                 ComparisonOp::LessThan,
                 Expression::LiteralDate(19_000)
             )),
-            "(\"d\" < CAST(19000 AS DATE))"
+            "(COALESCE(\"d\", CAST('1899-12-30' AS DATE)) < CAST(19000 AS DATE))"
         );
         // A table transformation keeps SQL's comparison.
         assert_eq!(
@@ -593,6 +921,93 @@ mod tests {
                 .to_relational_sql_string()
                 .unwrap(),
             "(\"amount\" < 5)"
+        );
+    }
+
+    #[test]
+    fn a_comparison_of_two_aggregates_reads_a_blank_side_as_the_others_zero() {
+        // BUG-0762: `SUM(a) > SUM(b)` with one sum BLANK answered SQL's NULL.
+        // [LIVE] DAX: BLANK > 3 is FALSE, BLANK = BLANK is TRUE.
+        use crate::compute::expression::{compare, lit_str, qualified_col, ComparisonOp};
+        let render = |e: &Expression| e.to_sql_string().unwrap();
+        let sum = |c: &str| agg(AggregateOp::Sum, col(c));
+        assert_eq!(
+            render(&compare(sum("a"), ComparisonOp::GreaterThan, sum("b"))),
+            "(COALESCE(SUM(\"a\"), 0) > COALESCE(SUM(\"b\"), 0))"
+        );
+        // Against an arithmetic expression, and `x = BLANK()` (TRUE when x is
+        // BLANK or 0, as in DAX).
+        assert_eq!(
+            render(&compare(sum("a"), ComparisonOp::LessThan, sum("b").add(lit_int(1)))),
+            "(COALESCE(SUM(\"a\"), 0) < COALESCE((COALESCE(SUM(\"b\"), 0) + 1), 0))"
+        );
+        assert_eq!(
+            render(&compare(sum("a"), ComparisonOp::Equal, Expression::Blank)),
+            "(COALESCE(SUM(\"a\"), 0) = COALESCE(NULL, 0))"
+        );
+        // A count is a number; MIN / MAX of a column take the other side's
+        // kind; text and dates take theirs.
+        let count = agg(AggregateOp::CountRows, Expression::TableRef("t".into()));
+        let max_name = agg(AggregateOp::Max, qualified_col("t", "name"));
+        assert_eq!(
+            render(&compare(count, ComparisonOp::GreaterThan, max_name.clone())),
+            "(COALESCE(NULLIF(COUNT(*), 0), 0) > COALESCE(MAX(\"name\"), 0))"
+        );
+        assert_eq!(
+            render(&compare(max_name.clone(), ComparisonOp::LessThan, lit_str("a"))),
+            "(COALESCE(MAX(\"name\"), '') < 'a')"
+        );
+        let concat = Expression::TextFunc {
+            function: crate::compute::expression::TextFunction::Upper,
+            args: vec![qualified_col("t", "other")],
+        };
+        assert_eq!(
+            render(&compare(max_name.clone(), ComparisonOp::Equal, concat)),
+            "(COALESCE(MAX(\"name\"), '') = COALESCE(UPPER(\"other\"), ''))"
+        );
+        // Two sides of unknown kind keep SQL's rule (no model types here).
+        let min_other = agg(AggregateOp::Min, qualified_col("t", "other"));
+        assert_eq!(
+            render(&compare(max_name, ComparisonOp::GreaterThan, min_other)),
+            "(MAX(\"name\") > MIN(\"other\"))"
+        );
+        assert_eq!(value_class(&sum("a")), Some(ValueClass::Number));
+        assert_eq!(
+            value_class(&agg(AggregateOp::Max, col("a").multiply(lit_int(2)))),
+            Some(ValueClass::Number)
+        );
+        assert_eq!(value_class(&agg(AggregateOp::Max, col("d"))), None);
+        assert_eq!(value_class(&Expression::LiteralDate(1)), Some(ValueClass::Date));
+        assert_eq!(value_class(&Expression::Blank), None);
+    }
+
+    #[test]
+    fn switch_matches_blank_only_with_blank() {
+        // [LIVE] SWITCH(<BLANK>, 0, "zero", "other") is "other";
+        // SWITCH(<BLANK>, <BLANK>, "match", "no") is "match".
+        let literal_cases = vec![("0".to_string(), false, "'zero'".to_string())];
+        assert_eq!(
+            switch_sql("SUM(x)", &literal_cases, Some("'other'")),
+            "CASE SUM(x) WHEN 0 THEN 'zero' ELSE 'other' END"
+        );
+        let blankable = vec![
+            ("0".to_string(), false, "'zero'".to_string()),
+            ("SUM(y)".to_string(), true, "'match'".to_string()),
+        ];
+        assert_eq!(
+            switch_sql("SUM(x)", &blankable, None),
+            "CASE WHEN (SUM(x)) IS NOT DISTINCT FROM (0) THEN 'zero' \
+             WHEN (SUM(x)) IS NOT DISTINCT FROM (SUM(y)) THEN 'match' END"
+        );
+        let e = Expression::Switch {
+            expr: Box::new(agg(AggregateOp::CountRows, Expression::TableRef("t".into()))),
+            cases: vec![(lit_int(0), lit_int(10))],
+            default: Some(Box::new(lit_int(20))),
+        };
+        assert_eq!(
+            e.to_sql_string().unwrap(),
+            "CASE NULLIF(COUNT(*), 0) WHEN 0 THEN 10 ELSE 20 END",
+            "a BLANK count does not match 0"
         );
     }
 
@@ -616,6 +1031,56 @@ mod tests {
         assert_eq!(
             blank_zero_count_case_when(&AggregateOp::Count, "COUNT(CASE WHEN c THEN x END)".into()),
             "NULLIF(COUNT(CASE WHEN c THEN x END), 0)"
+        );
+    }
+
+    /// With the model's column kinds, two sides only their columns type read
+    /// a BLANK as DAX does, and date arithmetic is in days (wave 3, lane
+    /// engfix: `MAX(t[a]) > MIN(t[b])` answered NULL; `TODAY() - 30` was
+    /// classed a number and its date side COALESCEd to 0, which fails to plan).
+    #[test]
+    fn column_kinds_type_a_comparison_and_date_arithmetic_is_in_days() {
+        use crate::compute::expression::{compare, qualified_col, ComparisonOp, DateTimeFunction};
+        let classes = |_t: Option<&str>, c: &str| match c {
+            "a" | "b" => Some(ValueClass::Number),
+            "d" => Some(ValueClass::Date),
+            _ => None,
+        };
+        let max_a = agg(AggregateOp::Max, qualified_col("t", "a"));
+        let min_b = agg(AggregateOp::Min, qualified_col("t", "b"));
+        let gt = compare(max_a, ComparisonOp::GreaterThan, min_b);
+        assert_eq!(gt.to_sql_string().unwrap(), "(MAX(\"a\") > MIN(\"b\"))");
+        assert_eq!(
+            gt.to_sql_string_with_classes(&classes).unwrap(),
+            "(COALESCE(MAX(\"a\"), 0) > COALESCE(MIN(\"b\"), 0))"
+        );
+        let today = Expression::DateTimeFunc {
+            function: DateTimeFunction::Today,
+            args: vec![],
+        };
+        let month_ago = Expression::BinaryOp {
+            left: Box::new(today),
+            op: ArithmeticOp::Subtract,
+            right: Box::new(lit_int(30)),
+        };
+        assert_eq!(value_class(&month_ago), Some(ValueClass::Date));
+        let min_d = agg(AggregateOp::Min, qualified_col("t", "d"));
+        let day_after = Expression::BinaryOp {
+            left: Box::new(min_d.clone()),
+            op: ArithmeticOp::Add,
+            right: Box::new(lit_int(1)),
+        };
+        assert_eq!(value_class(&day_after), Some(ValueClass::Number), "no model kinds");
+        assert_eq!(value_class_in(&day_after, &classes), Some(ValueClass::Date));
+        let max_d = agg(AggregateOp::Max, qualified_col("t", "d"));
+        let cmp = compare(max_d, ComparisonOp::GreaterThan, month_ago);
+        assert_eq!(
+            cmp.to_sql_string().unwrap(),
+            "(COALESCE(MAX(\"d\"), CAST('1899-12-30' AS DATE)) > COALESCE((CURRENT_DATE + CAST(CAST(CAST((0 - 30) AS BIGINT) AS VARCHAR) || ' days' AS INTERVAL)), CAST('1899-12-30' AS DATE)))"
+        );
+        assert_eq!(
+            day_after.to_sql_string_with_classes(&classes).unwrap(),
+            "(COALESCE(MIN(\"d\"), CAST('1899-12-30' AS DATE)) + CAST(CAST(CAST((0 + 1) AS BIGINT) AS VARCHAR) || ' days' AS INTERVAL))"
         );
     }
 }

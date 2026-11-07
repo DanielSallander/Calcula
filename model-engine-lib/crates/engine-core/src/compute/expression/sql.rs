@@ -30,6 +30,23 @@ impl Expression {
         SqlRenderer::new(DataFusionDialect, &BareQualifier).render(self)
     }
 
+    /// [`Expression::to_sql_string`] with the model's column kinds, so a
+    /// comparison side whose kind only its column shows (`MAX(t[a]) >
+    /// MIN(t[b])`) reads a BLANK as DAX does, and a date column term is date
+    /// arithmetic ([`crate::compute::dax_semantics::value_class_in`]).
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Expression::to_sql_string`].
+    pub fn to_sql_string_with_classes(
+        &self,
+        columns: crate::compute::dax_semantics::ColumnClasses,
+    ) -> EngineResult<String> {
+        SqlRenderer::new(DataFusionDialect, &BareQualifier)
+            .with_column_classes(columns)
+            .render(self)
+    }
+
     /// [`Expression::to_sql_string`] with SQL's (Power Query M's) rules for a
     /// missing value instead of DAX's: `null + 5` is `null` and a count of
     /// nothing is `0` (see [`SqlRenderer::with_relational_semantics`]). The
@@ -333,8 +350,9 @@ mod tests {
         );
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            // A BLANK subject matches a 0 case (DAX), so it reads as 0.
-            "CASE COALESCE(\"status\", 0) WHEN 1 THEN 'Active' WHEN 2 THEN 'Inactive' ELSE 'Unknown' END"
+            // SWITCH is strict: a BLANK subject matches no number ([LIVE]
+            // `SWITCH(<BLANK>, 0, ...)` takes the else; BUG-0762 review).
+            "CASE \"status\" WHEN 1 THEN 'Active' WHEN 2 THEN 'Inactive' ELSE 'Unknown' END"
         );
     }
 
@@ -343,7 +361,7 @@ mod tests {
         let expr = switch(col("status"), vec![(lit_int(1), lit_str("Active"))], None);
         assert_eq!(
             expr.to_sql_string().unwrap(),
-            "CASE COALESCE(\"status\", 0) WHEN 1 THEN 'Active' END"
+            "CASE \"status\" WHEN 1 THEN 'Active' END"
         );
     }
 

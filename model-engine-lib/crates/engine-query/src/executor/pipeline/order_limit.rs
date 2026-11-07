@@ -805,6 +805,7 @@ mod totals {
             None,
             None,
             &[],
+            false,
             None,
             &tokio_util::sync::CancellationToken::new(),
         )

@@ -218,7 +218,7 @@ describe("what the bridge leaves alone", () => {
     expect(h.prevented).toBe(0);
   });
 
-  it("a second finger (no pinch)", () => {
+  it("a second finger, when the bridge has no zoom door (no pinch; the grid's pinch is touchPinchAndTargets.test.ts)", () => {
     const h = harness("pan");
     h.bridge.down(h.ev("down", 1, 1));
     h.bridge.down(h.ev("down", 50, 50, { pointerId: 2, isPrimary: false }));

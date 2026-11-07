@@ -748,7 +748,14 @@ export function CreateChartDialog({
       return;
     }
 
-    readChartDataResolved(overlayChartBindings(editChartId, currentSpec))
+    // An edited chart asks for its names from ITS sheet; a new one from the
+    // sheet it is being inserted on (the active one).
+    readChartDataResolved(
+      overlayChartBindings(editChartId, currentSpec),
+      0,
+      undefined,
+      editChartId != null ? getChartById(editChartId)?.sheetIndex : undefined,
+    )
       .then((result) => {
         setResolvedSpec(result.spec);
         setPreviewData(result.data);

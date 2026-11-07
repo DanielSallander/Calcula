@@ -19,6 +19,7 @@ import type {
   CellConditionalFormat,
   GridRegion,
 } from "@api";
+import { getViewportCells, getStyle } from "@api/lib";
 
 import type { CFState } from "../types";
 import { CFEvents } from "./cfEvents";
@@ -36,9 +37,28 @@ let state: CFState = {
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * The horizontal alignment of each Show Icon Only cell in the evaluated range
+ * that is centred or right-aligned, by "row,col" (BUG-0728): Excel places such
+ * a cell's icon by its alignment, and the overlay that paints it has no style
+ * to read. Filled after each evaluation by `refreshIconAlignments`.
+ */
+let iconAlign = new Map<string, "center" | "right">();
+/** Bumped by each read: only the newest one may land (an older, slower answer
+ *  must never overwrite a newer one). */
+let iconAlignGeneration = 0;
+
 // ============================================================================
 // Getters
 // ============================================================================
+
+/**
+ * A Show Icon Only cell's horizontal alignment when it is "center" or
+ * "right", else undefined (the icon sits at the left).
+ */
+export function getIconAlignForCell(row: number, col: number): "center" | "right" | undefined {
+  return iconAlign.get(`${row},${col}`);
+}
 
 /** Get all cached rules for the current sheet */
 export function getRules(): ConditionalFormatDefinition[] {
@@ -104,6 +124,7 @@ export async function evaluateViewport(
   if (state.rules.length === 0) {
     state.evaluationCache.clear();
     syncOverlayRegions();
+    await refreshIconAlignments();
     return;
   }
 
@@ -136,6 +157,60 @@ export async function evaluateViewport(
       "[ConditionalFormatting] Failed to evaluate viewport:",
       error
     );
+    return;
+  }
+  await refreshIconAlignments();
+}
+
+/**
+ * Read the horizontal alignment of every Show Icon Only cell the evaluation
+ * found (results flagged `hideValue` with an icon), so the overlay can place
+ * the icon as Excel does (rendering/iconSetRenderer.ts `iconPlacementFor`).
+ * One styled read of the cells' bounding rectangle, one style read per
+ * distinct style -- and nothing at all when no such cell is in view. A failed
+ * read is logged and leaves the icons at the left, as before.
+ */
+async function refreshIconAlignments(): Promise<void> {
+  const generation = ++iconAlignGeneration;
+  const wanted: string[] = [];
+  let r0 = Infinity;
+  let c0 = Infinity;
+  let r1 = -Infinity;
+  let c1 = -Infinity;
+  for (const [key, cfs] of state.evaluationCache) {
+    if (!cfs.some((cf) => cf.iconIndex != null && cf.hideValue === true)) continue;
+    const [row, col] = key.split(",").map(Number);
+    wanted.push(key);
+    r0 = Math.min(r0, row);
+    c0 = Math.min(c0, col);
+    r1 = Math.max(r1, row);
+    c1 = Math.max(c1, col);
+  }
+  if (wanted.length === 0) {
+    if (iconAlign.size > 0) {
+      iconAlign = new Map();
+      requestOverlayRedraw();
+    }
+    return;
+  }
+  try {
+    const cells = await getViewportCells(r0, c0, r1, c1);
+    const styleIndexAt = new Map<string, number>();
+    for (const cell of cells) styleIndexAt.set(`${cell.row},${cell.col}`, cell.styleIndex ?? 0);
+    const indexes = [...new Set(wanted.map((key) => styleIndexAt.get(key) ?? 0))];
+    const styles = await Promise.all(indexes.map((index) => getStyle(index)));
+    const alignOf = new Map(indexes.map((index, n) => [index, styles[n]?.textAlign]));
+    if (generation !== iconAlignGeneration) return;
+    const next = new Map<string, "center" | "right">();
+    for (const key of wanted) {
+      const align = alignOf.get(styleIndexAt.get(key) ?? 0);
+      if (align === "center" || align === "right") next.set(key, align);
+    }
+    const changed = next.size !== iconAlign.size || [...next].some(([k, v]) => iconAlign.get(k) !== v);
+    iconAlign = next;
+    if (changed) requestOverlayRedraw();
+  } catch (error) {
+    console.warn("[ConditionalFormatting] reading the Show Icon Only cells' alignment failed:", error);
   }
 }
 
@@ -294,6 +369,9 @@ export function resetState(): void {
     viewportRange: null,
     dirty: true,
   };
+  // A read in flight belongs to the old sheet: it must not land.
+  iconAlignGeneration++;
+  iconAlign = new Map();
 
   removeGridRegionsByType("cf-data-bar");
   removeGridRegionsByType("cf-icon-set");

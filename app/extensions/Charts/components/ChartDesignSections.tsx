@@ -1393,7 +1393,7 @@ export function ChartDataSection(_props: PanelSectionProps): React.ReactElement 
   const switchRowCol = async (): Promise<void> => {
     if (chartId == null || !spec) return;
     try {
-      const dataRef = await resolveDataSource(spec.data);
+      const dataRef = await resolveDataSource(spec.data, getChartById(chartId)?.sheetIndex);
       const newOrientation: SeriesOrientation =
         spec.seriesOrientation === "columns" ? "rows" : "columns";
       const detected = await autoDetectSeriesForOrientation(

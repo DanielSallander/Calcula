@@ -93,6 +93,8 @@ mod transform_preview;
 mod writeback;
 
 #[cfg(test)]
+mod aggregate_compare_tests;
+#[cfg(test)]
 mod blank_member_tests;
 #[cfg(test)]
 mod direct_query_second_column_tests;
@@ -117,13 +119,19 @@ mod disk_cache_tests;
 #[cfg(test)]
 mod dotted_name_tests;
 #[cfg(test)]
+mod format_locale_tests;
+#[cfg(test)]
 mod gvar_tests;
 #[cfg(test)]
 mod having_tests;
 #[cfg(test)]
 mod in_filter_tests;
 #[cfg(test)]
+mod keep_literal_type_tests;
+#[cfg(test)]
 mod keep_scope_tests;
+#[cfg(test)]
+mod many_to_many_tests;
 #[cfg(test)]
 mod materialize_tests;
 #[cfg(test)]
@@ -134,6 +142,8 @@ mod not_in_tests;
 mod query_top_tests;
 #[cfg(test)]
 mod rank_tests;
+#[cfg(test)]
+mod rls_blank_strict_tests;
 #[cfg(test)]
 mod security_tests;
 #[cfg(test)]
@@ -328,6 +338,11 @@ pub struct Engine {
     /// version is the culture's identity -- so changing it changes every
     /// query-cache key. See [`Engine::set_format_culture`].
     format_culture: engine_core::compute::format_string::FormatCulture,
+    /// The further cultures DAX's 3-argument `FORMAT(value, format,
+    /// locale_name)` may name (BUG-0731), beside `format_culture` and the
+    /// built-ins. Host session state like the culture. See
+    /// [`Engine::set_named_format_cultures`].
+    named_format_cultures: Vec<engine_core::compute::format_string::FormatCulture>,
     /// The active security roles, if any. Set by the host **after**
     /// authenticating the user (see [`Engine::set_active_role`] /
     /// [`Engine::set_active_roles`]). With one role, every query is restricted to
@@ -415,18 +430,11 @@ fn map_script_error<T>(result: QueryResult<T>) -> QueryResult<T> {
     result
 }
 
-/// Convert a role [`FilterPredicate`] to a request [`FilterCondition`].
+/// Convert a role [`FilterPredicate`] to a request [`FilterCondition`]: THE
+/// one RLS conversion (`engine_query::security_filter`), which keeps BLANK
+/// strict and never meets the KEEP renderers (owner decision BUG-0759).
 fn predicate_to_filter_condition(p: &FilterPredicate) -> FilterCondition {
-    use engine_core::compute::expression::ComparisonOp;
-    let operator = match p.operator {
-        ComparisonOp::Equal => FilterOperator::Equal,
-        ComparisonOp::NotEqual => FilterOperator::NotEqual,
-        ComparisonOp::GreaterThan => FilterOperator::GreaterThan,
-        ComparisonOp::GreaterThanOrEqual => FilterOperator::GreaterThanOrEqual,
-        ComparisonOp::LessThan => FilterOperator::LessThan,
-        ComparisonOp::LessThanOrEqual => FilterOperator::LessThanOrEqual,
-    };
-    FilterCondition::new(p.column.clone(), operator, p.value.clone())
+    engine_query::security_filter::role_filter_condition(p)
 }
 
 /// The `f64` value of a numeric literal expression, if it is one.
@@ -1324,17 +1332,25 @@ fn build_effective_registry(
     native: &UdfRegistry,
     config: &ScriptSandboxConfig,
     format_culture: &engine_core::compute::format_string::FormatCulture,
+    named_format_cultures: &[engine_core::compute::format_string::FormatCulture],
 ) -> (Arc<UdfRegistry>, Option<EngineError>) {
     let mut effective = native.clone();
     let mut first_error: Option<EngineError> = None;
 
     // The built-in DAX FORMAT (BUG-0522), unless a host deliberately
     // registered its own `calcula_format` natively. Its version is the
-    // culture's identity, so a culture change changes the cache identity.
+    // identity of its cultures, so a culture change changes the cache
+    // identity.
     if native.get(engine_core::compute::format_string::FORMAT_UDF_NAME).is_none() {
         if let Err(e) = effective.register(
-            engine_core::compute::format_string::format_udf(format_culture.clone()),
-            format_culture.identity(),
+            engine_core::compute::format_string::format_udf_with_cultures(
+                format_culture.clone(),
+                named_format_cultures.to_vec(),
+            ),
+            engine_core::compute::format_string::format_udf_version(
+                format_culture,
+                named_format_cultures,
+            ),
         ) {
             first_error = Some(e);
         }
@@ -1424,7 +1440,8 @@ impl Engine {
         let native = Arc::new(UdfRegistry::new());
         let config = ScriptSandboxConfig::default();
         let format_culture = engine_core::compute::format_string::FormatCulture::default();
-        let (effective, script_build_error) = build_effective_registry(&model, &native, &config, &format_culture);
+        let (effective, script_build_error) =
+            build_effective_registry(&model, &native, &config, &format_culture, &[]);
         Self {
             model,
             registry: SourceRegistry::new(),
@@ -1440,6 +1457,7 @@ impl Engine {
             effective_udfs: effective,
             script_sandbox_config: config,
             format_culture,
+            named_format_cultures: Vec::new(),
             script_build_error,
             active_roles: Vec::new(),
             user_identity: None,
@@ -1822,6 +1840,34 @@ impl Engine {
     /// The culture DAX `FORMAT` writes in (see [`Engine::set_format_culture`]).
     pub fn format_culture(&self) -> &engine_core::compute::format_string::FormatCulture {
         &self.format_culture
+    }
+
+    /// Set the further cultures DAX's 3-argument `FORMAT(value,
+    /// format_string, locale_name)` may name (BUG-0731). A locale name is
+    /// looked up in the engine's own culture ([`Engine::set_format_culture`]),
+    /// then these, then the built-ins (en-US, sv-SE, de-DE), by BCP 47 tag
+    /// (case-insensitive; a language-only name such as `"de"` takes the first
+    /// culture of that language). A name none of them answers to fails the
+    /// query; a BLANK or empty name is the engine's own culture. Host session
+    /// state -- Calcula passes every locale it knows. A change rebuilds the
+    /// effective UDF registry and invalidates the query cache; setting the
+    /// list it already has does nothing.
+    pub fn set_named_format_cultures(
+        &mut self,
+        cultures: Vec<engine_core::compute::format_string::FormatCulture>,
+    ) {
+        if self.named_format_cultures == cultures {
+            return;
+        }
+        self.named_format_cultures = cultures;
+        self.rebuild_effective_udfs();
+        self.query_cache.lock().invalidate_all();
+    }
+
+    /// The further cultures the 3-argument `FORMAT` may name (see
+    /// [`Engine::set_named_format_cultures`]).
+    pub fn named_format_cultures(&self) -> &[engine_core::compute::format_string::FormatCulture] {
+        &self.named_format_cultures
     }
 
     /// Names of all registered (native) UDFs, sorted.
@@ -2703,8 +2749,13 @@ impl Engine {
     /// Rebuild the effective UDF registry from the current model, native
     /// UDFs, and sandbox config, capturing any deferred script error.
     fn rebuild_effective_udfs(&mut self) {
-        let (effective, error) =
-            build_effective_registry(&self.model, &self.udfs, &self.script_sandbox_config, &self.format_culture);
+        let (effective, error) = build_effective_registry(
+            &self.model,
+            &self.udfs,
+            &self.script_sandbox_config,
+            &self.format_culture,
+            &self.named_format_cultures,
+        );
         self.effective_udfs = effective;
         self.script_build_error = error;
     }
@@ -3321,6 +3372,12 @@ impl Engine {
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
                 role_filters,
+                // Several active roles were rewritten into the request's
+                // `or_filters` (`build_role_union_request`, which refuses a
+                // user OR slicer beside them): the plan's OR groups are
+                // sealed security that never follows a cross-filter
+                // direction.
+                self.active_roles.len() > 1,
                 token,
             )
             .await,
@@ -3858,6 +3915,7 @@ impl Engine {
             Some(self.max_inline_in_values),
             &role_filters,
             &context_column_exprs,
+            Some(self.effective_udfs.as_ref()),
             &token,
         )
         .await
@@ -4119,6 +4177,14 @@ impl Engine {
             {
                 return Ok(Vec::new());
             }
+            // DAX FORMAT is the engine's own UDF (`calcula_format`) and a call
+            // is a host or script UDF: no source can evaluate either, so a
+            // context column holding one is computed locally. The pushed
+            // GROUP BY named `calcula_format`, which PostgreSQL does not have
+            // (BUG-0731).
+            if inlined.contains_format() || !inlined.call_names().is_empty() {
+                return Ok(Vec::new());
+            }
 
             let mut env: std::collections::HashMap<String, Expression> =
                 std::collections::HashMap::new();
@@ -4323,6 +4389,9 @@ impl Engine {
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
                 &role_filters,
+                // The multi-role union's OR groups are sealed (see
+                // `plan_and_execute`).
+                self.active_roles.len() > 1,
             )
             .await,
         )?;

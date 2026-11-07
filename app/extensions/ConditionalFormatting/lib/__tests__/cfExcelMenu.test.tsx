@@ -237,16 +237,20 @@ describe("Conditional Formatting: Excel's tree [LIVE 2026-10-04]", () => {
 
 describe("A Date Occurring... and the More Rules... rows", () => {
   const SELECTION = { startRow: 1, startCol: 1, endRow: 3, endCol: 2 };
+  // The selection's ACTIVE cell (its end, as the grid draws it): a New Rule
+  // entry is typed for it (BUG-0748).
+  const ACTIVE = { row: 3, col: 2 };
 
   it("A Date Occurring... opens the quick dialog on the date rule", async () => {
     await items.get("cf:dateOccurring")!.action!();
-    expect(h.showDialog).toHaveBeenCalledWith(QUICK_CF_DIALOG_ID, { ruleType: "dateOccurring", selection: SELECTION });
+    expect(h.showDialog).toHaveBeenCalledWith(QUICK_CF_DIALOG_ID, { ruleType: "dateOccurring", selection: SELECTION, activeCell: ACTIVE });
   });
 
   it("Highlight Cells Rules > More Rules... opens New Rule on 'Format only cells that contain'", async () => {
     await items.get("cf:highlightMoreRules")!.action!();
     expect(h.showDialog).toHaveBeenCalledWith(NEW_RULE_DIALOG_ID, {
       selection: SELECTION,
+      activeCell: ACTIVE,
       initialCategory: "formatContaining",
     });
   });
@@ -255,6 +259,7 @@ describe("A Date Occurring... and the More Rules... rows", () => {
     await items.get("cf:topBottomMoreRules")!.action!();
     expect(h.showDialog).toHaveBeenCalledWith(NEW_RULE_DIALOG_ID, {
       selection: SELECTION,
+      activeCell: ACTIVE,
       initialCategory: "topBottom",
     });
   });
@@ -267,6 +272,7 @@ describe("A Date Occurring... and the More Rules... rows", () => {
       act(() => h.gallery.get(id)!.onMoreRules());
       expect(h.showDialog, id).toHaveBeenCalledWith(NEW_RULE_DIALOG_ID, {
         selection: SELECTION,
+        activeCell: ACTIVE,
         initialCategory: "formatByValues",
         initialFormatStyle: style,
       });
@@ -275,7 +281,7 @@ describe("A Date Occurring... and the More Rules... rows", () => {
 
   it("New Rule... itself opens on Excel's first-shown category", async () => {
     await items.get("cf:newRule")!.action!();
-    expect(h.showDialog).toHaveBeenCalledWith(NEW_RULE_DIALOG_ID, { selection: SELECTION });
+    expect(h.showDialog).toHaveBeenCalledWith(NEW_RULE_DIALOG_ID, { selection: SELECTION, activeCell: ACTIVE });
   });
 });
 

@@ -38,6 +38,7 @@ import {
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
 import { formulaA1ToR1C1 } from "../../core/lib/r1c1";
+import { dataTableEditText, dataTableFormulaBarText } from "../../core/lib/dataTableCopy";
 import { setFormulaReferences, clearFormulaReferences } from "../../core/state/gridActions";
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../api/formulaAutocomplete";
 import { isSelectionOwned, onSelectionOwnershipChanged, refuseIfSelectionOwned } from "../../api/selectionOwner";
@@ -269,15 +270,21 @@ export function FormulaInput({
 
               // Show the formula in R1C1 notation when that reference style is
               // active; the A1 form (content) still drives reference highlighting.
+              // A data table's body shows Excel's `{=TABLE(,A1)}` (BUG-0752).
+              const tableText = dataTableFormulaBarText(content, state.referenceStyle === "R1C1");
               setDisplayValue(
-                state.referenceStyle === "R1C1" && content.startsWith("=")
+                tableText !== null ? tableText
+                : state.referenceStyle === "R1C1" && content.startsWith("=")
                   ? formulaA1ToR1C1(content, cellRow, cellCol)
                   : content,
               );
 
               // FIX: Parse formula references for passive highlighting when selecting a formula cell
-              if (content && content.startsWith("=")) {
-                const refs = parseFormulaReferences(content, true);
+              // A data table's body highlights what the bar SHOWS (`=TABLE(,A1)`),
+              // never the identity argument its stored marker carries (M2).
+              const highlighted = tableText !== null ? dataTableEditText(content, false) ?? content : content;
+              if (highlighted && highlighted.startsWith("=")) {
+                const refs = parseFormulaReferences(highlighted, true);
                 dispatch(setFormulaReferences(refs));
               } else {
                 dispatch(clearFormulaReferences());

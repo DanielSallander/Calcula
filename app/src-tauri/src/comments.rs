@@ -1202,6 +1202,124 @@ pub(crate) fn clear_comments_in_range_impl(
     count
 }
 
+/// What a Paste Special > Comments did with its cells (BUG-0725).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteCommentsResult {
+    /// Comments written (a destination's own comment REPLACED, as Excel does).
+    pub pasted: usize,
+    /// Destination comments removed because the copied cell had none.
+    pub removed: usize,
+    /// Cells left alone: the destination holds a Note.
+    pub skipped: usize,
+    /// Why the first skipped cell was skipped.
+    pub first_skip: Option<String>,
+}
+
+/// PASTE SPECIAL > COMMENTS in ONE call (BUG-0725): it was one `add_comment`
+/// call per destination cell. `comments` are the copied cells' comments at
+/// their destinations, `cleared` the destinations whose copied cell had none.
+///
+/// [LIVE, Excel 16, 2026-11-06, lane obj4 c1.ps1] Excel's Paste Special >
+/// Comments and Notes REPLACES a destination's comment with the copied one
+/// (`old-C1` became `src-A1`) and REMOVES the destination's comment where the
+/// copied cell has none (C3's went) -- the per-cell `add_comment` refused a
+/// destination that already had a comment ("A comment already exists"). A
+/// destination holding a NOTE is skipped and counted, as before: notes do not
+/// ride the clipboard, so whether Excel would have pasted a note there cannot
+/// be known here.
+#[tauri::command]
+pub fn paste_comments(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    comments: Vec<AddCommentParams>,
+    cleared: Vec<(u32, u32)>,
+) -> PasteCommentsResult {
+    paste_comments_impl(&state, &file_state, comments, cleared)
+}
+
+/// The body of [`paste_comments`], over plain references. ONE critical section
+/// on the comment store; every change is recorded inside ONE owned undo
+/// transaction (its own step, or the paste's when it holds one open). Nothing
+/// to change constructs no `DocumentEffect`.
+pub(crate) fn paste_comments_impl(
+    state: &AppState,
+    file_state: &FileState,
+    comments: Vec<AddCommentParams>,
+    cleared: Vec<(u32, u32)>,
+) -> PasteCommentsResult {
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut out = PasteCommentsResult::default();
+    // Notes first, read and released (`add_comment_impl`'s order): a cell
+    // holds a note OR a comment, never both.
+    let noted: std::collections::HashSet<(u32, u32)> = {
+        let notes = state.notes.read().unwrap();
+        notes.get(&active_sheet).map(|m| m.keys().copied().collect()).unwrap_or_default()
+    };
+    let (pastes, on_notes): (Vec<AddCommentParams>, Vec<AddCommentParams>) =
+        comments.into_iter().partition(|p| !noted.contains(&(p.row, p.col)));
+    if !on_notes.is_empty() {
+        out.skipped = on_notes.len();
+        out.first_skip = Some("Cell already has a Note. Delete or convert it first.".to_string());
+    }
+    let pending = state.comments.lock_pending().unwrap();
+    let removable: Vec<(u32, u32)> = match pending.get(&active_sheet) {
+        Some(sheet) => cleared.into_iter().filter(|key| sheet.contains_key(key)).collect(),
+        None => Vec::new(),
+    };
+    if pastes.is_empty() && removable.is_empty() {
+        return out;
+    }
+    let effect = DocumentEffect::mutates(file_state);
+    let mut store = pending.authorize(&effect);
+    let sheet = store.entry(active_sheet).or_default();
+    let mut previous: Vec<((u32, u32), Option<Comment>)> = Vec::with_capacity(pastes.len() + removable.len());
+    for key in removable {
+        if let Some(prev) = sheet.remove(&key) {
+            previous.push((key, Some(prev)));
+            out.removed += 1;
+        }
+    }
+    for params in pastes {
+        let key = (params.row, params.col);
+        let comment = match (params.rich_content, params.mentions) {
+            (Some(rich_content), Some(mentions)) => Comment::new_with_mentions(
+                params.row,
+                params.col,
+                active_sheet,
+                params.author_email,
+                params.author_name,
+                params.content,
+                rich_content,
+                mentions,
+            ),
+            _ => Comment::new(
+                params.row,
+                params.col,
+                active_sheet,
+                params.author_email,
+                params.author_name,
+                params.content,
+            ),
+        };
+        previous.push((key, sheet.insert(key, comment)));
+        out.pasted += 1;
+    }
+    drop(store);
+
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let txn = undo_stack.begin_owned_transaction("Paste comments");
+    for ((row, col), prev) in previous {
+        undo_stack.record_custom_restore(
+            "comment".to_string(),
+            comment_undo_bytes(active_sheet, row, col, prev),
+            "Paste comments",
+        );
+    }
+    undo_stack.commit_owned(txn);
+    out
+}
+
 // Range clears of comments, notes and hyperlinks are undoable (one step).
 #[cfg(test)]
 #[path = "range_clear_undo_tests.rs"]

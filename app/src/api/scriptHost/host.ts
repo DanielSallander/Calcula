@@ -564,7 +564,8 @@ interface GrantedSheetWrites {
  * formatted cells from somebody else's (`countOthersUndone`).
  */
 interface GrantedSheetFormats {
-  changes: number;
+  /** Formatting calls that reached the sheet (a no-op call counts: BUG-0770). */
+  calls: number;
   firstRow: number;
   lastRow: number;
   firstCol: number;
@@ -862,8 +863,9 @@ function formattedByRun(writes: GrantedRunWrites, sheet: number, row: number, co
  * rectangles it reached (a size change reaches its whole line) -- recorded
  * whether the call succeeded or failed part-way (rev-sec-4), since a failed
  * call may already have formatted part of them. Read by the report
- * (`formats`: one change per call; the formatting doors do not say how many
- * cells actually changed) and by the rollback's attribution.
+ * (`formats`: CALLS per sheet, never claimed as changes -- the formatting
+ * doors do not say what they changed, and a bold set on cells already bold is
+ * still a call the run made: BUG-0770) and by the rollback's attribution.
  */
 function noteGrantedRunFormat(
   scriptId: string,
@@ -875,7 +877,7 @@ function noteGrantedRunFormat(
   let entry = writes.formats.get(sheet);
   for (const [r0, c0, r1, c1] of rects) {
     if (entry === undefined) {
-      entry = { changes: 0, firstRow: r0, lastRow: r1, firstCol: c0, lastCol: c1, rects: [] };
+      entry = { calls: 0, firstRow: r0, lastRow: r1, firstCol: c0, lastCol: c1, rects: [] };
       writes.formats.set(sheet, entry);
     }
     entry.firstRow = Math.min(entry.firstRow, r0);
@@ -885,7 +887,7 @@ function noteGrantedRunFormat(
     if (entry.rects.length < GRANTED_RUN_FORMAT_RECT_CAP) entry.rects.push([r0, c0, r1, c1]);
     else writes.formatRectsCapped = true;
   }
-  if (entry !== undefined) entry.changes += 1;
+  if (entry !== undefined) entry.calls += 1;
 }
 
 /** A call the granted realm made while its run lasted: the report waits for it. */
@@ -989,7 +991,7 @@ async function reportGrantedRunWrites(
     .sort(([a], [b]) => a - b)
     .map(([sheet, f]) => ({
       sheet,
-      changes: f.changes,
+      calls: f.calls,
       firstRow: f.firstRow,
       lastRow: f.lastRow,
       firstCol: f.firstCol,
@@ -2743,10 +2745,11 @@ export function hostResetAll(options?: HostResetOptions): void {
   if (manualCalcHolders.size > 0 && options?.openedDocument === true) {
     resetManualCalculationTracking();
   } else if (manualCalcHolders.size > 0) {
+    const restore = calculationModeToRestore();
     resetManualCalculationTracking();
     trackResetRestore(
       getLib()
-        .then((lib) => lib.setCalculationMode("automatic"))
+        .then((lib) => lib.setCalculationMode(restore))
         .catch(() => {
           // Best-effort: the backend may already be gone (window teardown).
         }),
@@ -5814,11 +5817,10 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     // ---- unlocked: calculation control (Wave 3, item 7) ----
     case "api.getCalculationMode": {
       const lib = await getLib();
-      const mode = await lib.getCalculationMode();
-      return mode === "manual" ? "manual" : "automatic";
+      return scriptCalculationMode(await lib.getCalculationMode());
     }
     case "api.setCalculationMode": {
-      const [mode] = args as ["automatic" | "manual"];
+      const [mode] = args as [ScriptCalculationMode];
       const lib = await getLib();
       return executeSetCalculationMode(lib, definition.id, mode);
     }
@@ -10184,10 +10186,24 @@ export async function autoFitFromScript(
     // Measure first (reads only), apply after — so a span of empty columns
     // opens no undo transaction at all (the double-click handler cancels its
     // transaction in that case; here it is simply never opened).
+    // The column's GEOMETRY, as the double-click passes it: a wrapped value
+    // is fitted as it wraps at the width the column has now, a rotated one at
+    // its row's height (BUG-0727, Excel). Without it a wrap-text cell sized
+    // nothing, so a script's AutoFit left wrapped columns as they were.
+    const [colDefaults, colWidthList, rowHeightList] = await Promise.all([
+      lib.getDefaultDimensions(),
+      lib.getAllColumnWidths(),
+      lib.getAllRowHeights(),
+    ]);
+    const currentWidths = new Map(colWidthList.map((d) => [d.index, d.size]));
+    const rowHeightOf = new Map(rowHeightList.map((d) => [d.index, d.size]));
     const fits: Array<{ col: number; width: number }> = [];
     for (let c = start; c <= end; c++) {
       const cells = await lib.getCellsInCols(c, c);
-      const optimalWidth = measureOptimalColumnWidth(c, cells, styles, theme, DEFAULT_GRID_CONFIG.minColumnWidth);
+      const optimalWidth = measureOptimalColumnWidth(c, cells, styles, theme, DEFAULT_GRID_CONFIG.minColumnWidth, true, undefined, {
+        currentWidth: currentWidths.get(c) ?? colDefaults.defaultColumnWidth,
+        rowHeight: (row: number) => rowHeightOf.get(row) ?? colDefaults.defaultRowHeight,
+      });
       // Excel: an empty column keeps its current width.
       if (optimalWidth === null) continue;
       fits.push({ col: c, width: optimalWidth });
@@ -13639,6 +13655,27 @@ export async function executeListHyperlinks(
  *  actually FLIPPED it — a user's own manual setting is never overridden). */
 const manualCalcHolders = new Set<string>();
 
+/** The three calculation modes a script can read and set: Excel's
+ *  xlCalculationAutomatic, xlCalculationSemiautomatic ("Automatic except for
+ *  data tables") and xlCalculationManual. */
+export type ScriptCalculationMode = "automatic" | "automaticExceptTables" | "manual";
+
+/** The backend's answer as a script mode (anything unknown reads automatic). */
+function scriptCalculationMode(mode: string): ScriptCalculationMode {
+  return mode === "manual" || mode === "automaticExceptTables" ? mode : "automatic";
+}
+
+/** The mode in effect before the FIRST script hold of manual, which the last
+ *  release gives back EXACTLY: "Automatic except for data tables" stays that,
+ *  it is never widened to Automatic (a release restored "automatic" always,
+ *  so a held-and-released script silently made every data table eager). */
+let modeBeforeManualHold: Exclude<ScriptCalculationMode, "manual"> = "automatic";
+
+/** The mode the last release (or the workbook-swap sweep) restores. */
+export function calculationModeToRestore(): Exclude<ScriptCalculationMode, "manual"> {
+  return modeBeforeManualHold;
+}
+
 /** Test seam: which scripts the host would restore automatic for. */
 export function scriptsHoldingManualCalculation(): ReadonlySet<string> {
   return manualCalcHolders;
@@ -13647,6 +13684,7 @@ export function scriptsHoldingManualCalculation(): ReadonlySet<string> {
 /** Test seam / workbook-swap sweep: forget all manual-mode tracking. */
 export function resetManualCalculationTracking(): void {
   manualCalcHolders.clear();
+  modeBeforeManualHold = "automatic";
 }
 
 /**
@@ -13658,15 +13696,20 @@ export function resetManualCalculationTracking(): void {
 export async function executeSetCalculationMode(
   lib: Awaited<ReturnType<typeof getLib>>,
   scriptId: string,
-  mode: "automatic" | "manual",
-): Promise<"automatic" | "manual"> {
+  mode: ScriptCalculationMode,
+): Promise<ScriptCalculationMode> {
   if (mode === "manual") {
-    const before = await lib.getCalculationMode();
+    const before = scriptCalculationMode(await lib.getCalculationMode());
     // Track the flip — and ALSO a second script joining an existing
     // script-held manual (the mode reads "manual" then, but that manual is
     // script debt, not the user's choice, and the joiner must keep it alive
     // until IT ends too). Only "the USER already had manual and no script is
     // involved" goes untracked.
+    if (before !== "manual" && manualCalcHolders.size === 0) {
+      // The first hold remembers what it replaced, so the last release gives
+      // back exactly that.
+      modeBeforeManualHold = before;
+    }
     if (before !== "manual" || manualCalcHolders.size > 0) {
       manualCalcHolders.add(scriptId);
     }
@@ -13674,12 +13717,13 @@ export async function executeSetCalculationMode(
     manualCalcHolders.delete(scriptId);
   }
   const applied = await lib.setCalculationMode(mode);
-  return applied === "manual" ? "manual" : "automatic";
+  return scriptCalculationMode(applied);
 }
 
 /**
- * Give the calculation mode back for one departing script: automatic again
- * once NO tracked script still holds manual. Exported for tests and called
+ * Give the calculation mode back for one departing script: the mode in effect
+ * before the first hold (automatic, or Automatic except for data tables) once
+ * NO tracked script still holds manual. Exported for tests and called
  * (fire-and-forget) from hostUnmountScript.
  */
 export async function releaseManualCalculation(
@@ -13688,7 +13732,7 @@ export async function releaseManualCalculation(
 ): Promise<void> {
   if (!manualCalcHolders.delete(scriptId)) return;
   if (manualCalcHolders.size > 0) return;
-  await lib.setCalculationMode("automatic");
+  await lib.setCalculationMode(modeBeforeManualHold);
 }
 
 /**

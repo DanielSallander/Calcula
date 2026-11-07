@@ -70,7 +70,49 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 ///
 /// v13 adds LIVE DATA TABLES -- body cells holding the `TABLE(row, col)`
 /// marker (`DATA_TABLE_MIN_FORMAT_VERSION`), Excel's `{=TABLE()}`.
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 13;
+///
+/// v14 adds ONE SPELLING IN TWO NAME SCOPES -- a workbook `Rate` beside a
+/// `Sheet1!Rate`, or two sheets' own `Rate`s
+/// (`SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION`).
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 14;
+
+/// Minimum `.cala` format version a reader must be to handle ONE DEFINED-NAME
+/// SPELLING IN TWO SCOPES (BUG-0744): a workbook `Rate` beside a `Sheet1!Rate`
+/// (`named_ranges` rows of one `defined_name_key` with different `sheetId`s),
+/// the state Excel holds side by side and Copy Sheet makes.
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes.
+/// An older build keyed its name registry by the spelling alone, so loading
+/// the two rows kept whichever came LAST and dropped the other with no error:
+/// when the workbook `Rate` survived, every formula on Sheet1 that read its
+/// own `Rate` silently calculated with the workbook's definition -- a wrong
+/// number shown as right. Stamped ONLY when two rows share a spelling, so a
+/// workbook whose names are all distinct keeps the lowest version that can
+/// express it.
+pub const SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION: u32 = 14;
+
+/// Manifest FEATURE ID declared beside
+/// [`SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION`]'s stamp.
+pub const SCOPED_NAME_SPELLINGS_FEATURE: &str = "scoped_name_spellings";
+
+/// Minimum `.cala` format version a reader must be to handle a LIST
+/// VALIDATION whose source is RELATIVE or names a DELETED sheet (BUG-0745 /
+/// BUG-0750): `data_validations.json` rows whose `rule.list.source.range`
+/// carries `relative` (Excel's `=F1:F2`, read moved by each validated cell's
+/// offset) or `sheetGone` (Excel's `=#REF!$A$1:$A$3`, which refuses every
+/// entry).
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes.
+/// An older build ignores both fields: it reads a relative source as the
+/// top-left cell's list at EVERY cell, and a gone source (no `sheetIndex`) as
+/// the validated sheet's own cells -- each a dropdown that offers, and an
+/// entry check that allows, values the rule does not allow, with no error.
+/// Stamped ONLY when such a source exists.
+pub const DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION: u32 = 14;
+
+/// Manifest FEATURE ID declared beside
+/// [`DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION`]'s stamp.
+pub const DV_LIST_SOURCE_REFERENCE_FEATURE: &str = "dv_list_source_reference";
 
 /// Minimum `.cala` format version a reader must be to handle a LIVE DATA
 /// TABLE: cells whose formula is the `TABLE(row_input, col_input)` marker the
@@ -429,6 +471,27 @@ pub const PIVOT_STYLE_FEATURE: &str = "pivot_style";
 /// items in label order -- a visible loss, never a lie. The READ is
 /// unconditional: the sort rides the field in the pivot's own definition JSON.
 pub const PIVOT_VALUE_SORT_FEATURE: &str = "pivot_value_sort";
+
+/// Manifest FEATURE ID declared when some pivot field keeps a MANUAL item
+/// order (`manual_item_order`, Excel's PivotItem.Position / Move, BUG-0733)
+/// or a grouped level's own sort (`level_sorts`: a manual group's parent or
+/// a date level sorted apart from the field it was grouped from).
+///
+/// Feature id, DELIBERATELY NO format-version link: an older reader shows the
+/// items in source or label order -- a visible loss, never a lie. The READ is
+/// unconditional: both ride the field in the pivot's own definition JSON.
+pub const PIVOT_ITEM_ORDER_FEATURE: &str = "pivot_item_order";
+
+/// Manifest FEATURE ID declared when some AutoFilter remembers the SORT its
+/// data was last sorted by (`sortState` on a filter in the app's
+/// `autofilters.json`, Excel's `AutoFilter.Sort` -- BUG-0740): Data > Reapply
+/// re-filters and re-sorts by it.
+///
+/// Feature id, DELIBERATELY NO format-version link: an older reader drops the
+/// sort, so Reapply re-filters only and the rows stay in the order they are --
+/// a visible loss, never a lie (the rows shown are the filter's either way).
+/// The READ is unconditional: the sort rides the filter's own record.
+pub const AUTOFILTER_SORT_STATE_FEATURE: &str = "autofilter_sort_state";
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

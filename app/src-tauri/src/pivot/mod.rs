@@ -7,9 +7,16 @@ pub mod commands;
 pub mod layout_commands;
 pub mod headless;
 pub mod mask_safety;
+pub mod mask_overlay;
 pub mod totals;
 #[cfg(test)]
 mod regression_tests;
+#[cfg(test)]
+mod mask_overlay_tests;
+#[cfg(test)]
+mod pivotfix_tests;
+#[cfg(test)]
+mod piv4_tests;
 
 // Re-export commands so they are easy to access from main.rs
 pub use commands::*;

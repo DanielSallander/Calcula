@@ -212,6 +212,33 @@ mod formula_spelling_tests;
 #[cfg(test)]
 mod r1c1_fallback_tests;
 
+/// Excel's #CALC! (BUG-0774): empty arrays, nested arrays and an uncalled
+/// LAMBDA in a cell, with TAKE / DROP / HSTACK over arrays (lane formula).
+#[cfg(test)]
+mod calc_error_tests;
+
+/// The range operator's halves, as Excel reads them (BUG-0737, lane formula).
+#[cfg(test)]
+mod range_half_tests;
+
+/// Lane formfix (ledger programme 2, wave 3): lambdas as text and numbers,
+/// COUNT / SUMPRODUCT / AGGREGATE over errors, PIVOTBY / TRIMRANGE / EXPAND
+/// edges, more range halves, optional cell-shaped parameters, qualified names.
+#[cfg(test)]
+mod formfix_tests;
+
+/// Lane form5 (ledger programme 2, wave 5): the shape of the array a function
+/// builds (TRANSPOSE was always a column), AGGREGATE over a reference call's
+/// #REF!, IFS with a LAMBDA condition.
+#[cfg(test)]
+mod form5_tests;
+
+/// Lane form6 (ledger programme 2, wave 6): XLOOKUP's size check, array
+/// lookup_value and blank reference; blank elements of a built array and
+/// COUNTA; AGGREGATE's k; INDEX's area_num; LINEST / LOGEST const and stats.
+#[cfg(test)]
+mod form6_tests;
+
 pub mod array_lift;
 pub mod budget;
 pub mod cell;
@@ -273,7 +300,7 @@ pub use custom_format::{FormatColor, FormatResult, format_color_to_css};
 pub use dependency_extractor::{extract_dependencies, BinaryOperator, BuiltinFunction, Expression, TableSpecifier, UnaryOperator, Value};
 pub use dependency_graph::{CoordSet, CycleError, DependencyGraph};
 pub use grid::CellMap;
-pub use evaluator::{EvalContext, EvalResult, Evaluator, GatherRegionData, GatherSubmission};
+pub use evaluator::{EvalContext, EvalResult, Evaluator, GatherRegionData, GatherSubmission, PivotDataLookup};
 pub use grid::Grid;
 pub use lookup_cache::{begin_pass as begin_lookup_pass, PassGuard as LookupPassGuard};
 pub use navigation::{

@@ -679,6 +679,28 @@ fn script_calculation_state(wb: &Workbook) -> String {
     }
 }
 
+/// Ledger programme 2 wave 4 (dtui verifier): the Rust QuickJS runtime's
+/// `Calcula.application.calculationMode` copied the stored mode string, which
+/// is "automatic" plus a flag under Automatic except for data tables, so a
+/// notebook or module script read "automatic" where the object-script host
+/// answers "automaticExceptTables" (Excel's xlCalculationSemiautomatic).
+///
+/// SABOTAGE: read the bare stored string in `build_app_info` -- fails at
+/// "THIRD MODE HIDDEN".
+#[test]
+fn a_script_reads_the_calculation_mode_except_for_data_tables() {
+    use crate::calculation::{set_calculation_mode_impl, AUTOMATIC_EXCEPT_TABLES};
+    let wb = Workbook::new(1);
+    let read = |wb: &Workbook| crate::scripting::types::build_app_info(&wb.state).calculation_mode;
+    assert_eq!(read(&wb), "automatic");
+    set_calculation_mode_impl(&wb.state, AUTOMATIC_EXCEPT_TABLES);
+    assert_eq!(read(&wb), AUTOMATIC_EXCEPT_TABLES, "THIRD MODE HIDDEN: a script read the bare stored mode");
+    set_calculation_mode_impl(&wb.state, "manual");
+    assert_eq!(read(&wb), "manual");
+    set_calculation_mode_impl(&wb.state, "automatic");
+    assert_eq!(read(&wb), "automatic");
+}
+
 #[test]
 fn a_script_sees_the_hosts_calculation_state() {
     let wb = manual_workbook_with_a_dependent();

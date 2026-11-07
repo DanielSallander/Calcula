@@ -28,6 +28,12 @@ export const conditionalFormatGlyphPainter: ConditionalFormatPainter = {
     }
     // The set and the index arrive together from the rule that produced them
     // (BUG-0107); an index without a set is skipped, never guessed at.
+    //
+    // At the LEFT here even for Show Icon Only: Excel places such an icon by
+    // the cell's horizontal alignment (iconPlacementFor), and this seam hands
+    // the painter no cell style -- the sheet's overlay reads it through the
+    // store (getIconAlignForCell). The floating grid's caller holds the style
+    // (FloatingRange frRenderer.ts, `b.style`); passing it needs the seam.
     const icon = results.find((cf) => cf.iconIndex != null && cf.iconSet != null);
     if (icon && icon.iconIndex != null && icon.iconSet != null) {
       paintIconSetIcon(ctx, box, icon.iconSet, icon.iconIndex);

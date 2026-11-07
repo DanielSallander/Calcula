@@ -37,6 +37,7 @@ import {
   AppEvents,
   addGridRegions,
   removeGridRegionsByType,
+  showToast,
 } from "@api";
 import {
   sortRangeByColumn,
@@ -145,6 +146,21 @@ function publishStatus(): void {
 function syncHiddenRows(result: AutoFilterResult): void {
   dispatchGridAction(setHiddenRows(result.hiddenRows));
   emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+/**
+ * After Data > Reapply: the backend may have RE-SORTED the rows (the filter's
+ * remembered sort, BUG-0740), which moves cells -- so the visible cells are
+ * fetched again (the bare `grid:refresh`; `app:grid-refresh` only redraws
+ * what is cached, and the canvas kept showing the old order). A reapply that
+ * re-filtered but could not re-sort (a merge or a protected cell in the range)
+ * says why rather than leaving the rows unsorted in silence.
+ */
+function afterReapply(result: AutoFilterResult): void {
+  window.dispatchEvent(new CustomEvent("grid:refresh"));
+  if (result.error) {
+    showToast(result.error, { variant: "warning" });
+  }
 }
 
 /**
@@ -298,6 +314,7 @@ export async function reapplyFilter(): Promise<void> {
     state.autoFilterInfo = result.autoFilter;
     syncOverlayRegion();
     syncHiddenRows(result);
+    afterReapply(result);
   }
 }
 
@@ -326,7 +343,18 @@ export async function refreshFilterState(): Promise<void> {
     state.isActive = false;
     state.openDropdownCol = null;
     syncOverlayRegion();
-    clearHiddenRows();
+    // No AutoFilter, but an Advanced Filter in place may still hide rows
+    // (`get_hidden_rows` is the union of both): push those, never an empty
+    // set -- clearing here showed an advanced-filtered sheet's hidden rows
+    // after a sheet switch, a structural edit or a resize that changed the
+    // filter's set, while the backend still hid them.
+    const hiddenRowsList = await getHiddenRows().catch(() => [] as number[]);
+    if (hiddenRowsList.length > 0) {
+      dispatchGridAction(setHiddenRows(hiddenRowsList));
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    } else {
+      clearHiddenRows();
+    }
   }
   emitAppEvent(FilterEvents.FILTER_STATE_REFRESHED);
 }
@@ -660,7 +688,9 @@ export async function removeFilter(): Promise<void> {
  *  controller operation, where the Data menu's reapplyFilter() above shrugs. */
 export async function reapplyFilterCriteria(): Promise<AutoFilterSnapshot> {
   const result = await reapplyAutoFilter();
-  return adoptResult(result, "Reapplying the filter");
+  const snapshot = adoptResult(result, "Reapplying the filter");
+  afterReapply(result);
+  return snapshot;
 }
 
 /** Distinct values in one column, for building a values filter. */

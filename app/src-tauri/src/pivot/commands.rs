@@ -3222,12 +3222,18 @@ pub(crate) async fn refresh_bi_pivot_core(
     ctx: &PivotCmdCtx<'_>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
-    let (mut response, undo) = refresh_bi_pivot_unrecorded(ctx, pivot_id, Vec::new()).await?;
+    // The turn comes BEFORE the definition is read, and stays until the
+    // step is recorded (see BiFieldChangeTurn).
+    let turn = BiFieldChangeTurn::take().await;
+    refresh_bi_model_snapshot(ctx, pivot_id).await?;
+    let bi_request = bi_refresh_request(ctx, pivot_id)?;
+    let (mut response, undo) = update_bi_pivot_fields_unrecorded(ctx, bi_request, Vec::new(), Some(&turn)).await?;
     if ctx.record_undo {
         if let Some(undo) = undo {
             response.overwrite_token = undo.record(ctx.state, "Pivot table field change");
         }
     }
+    drop(turn);
     Ok(response)
 }
 
@@ -3243,9 +3249,19 @@ pub(crate) async fn refresh_bi_pivot_unrecorded(
     pivot_id: PivotId,
     masks: Vec<PostQueryMask>,
 ) -> Result<(PivotViewResponse, Option<BiFieldChangeUndo>), String> {
+    // The turn comes BEFORE the definition is read (see BiFieldChangeTurn).
+    let turn = BiFieldChangeTurn::take().await;
     // The reconstruction resolves every slicer filter's model key against the
     // snapshot: a column added in the Model Editor must not be dropped here.
     refresh_bi_model_snapshot(ctx, pivot_id).await?;
+    let bi_request = bi_refresh_request(ctx, pivot_id)?;
+    update_bi_pivot_fields_unrecorded(ctx, bi_request, masks, Some(&turn)).await
+}
+
+/// The request a refresh rebuilds BI pivot `pivot_id` from: its stored
+/// definition, forced to re-query. Read under the caller's
+/// [`BiFieldChangeTurn`].
+fn bi_refresh_request(ctx: &PivotCmdCtx<'_>, pivot_id: PivotId) -> Result<UpdateBiPivotFieldsRequest, String> {
     let bi_request = {
         let pivot_tables = ctx.pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
         let (definition, cache) = pivot_tables
@@ -3272,7 +3288,7 @@ pub(crate) async fn refresh_bi_pivot_unrecorded(
         bi_request.slicer_fields.as_ref().map_or(0, |v| v.len()),
         bi_request.row_hierarchies.len() + bi_request.column_hierarchies.len()
     );
-    update_bi_pivot_fields_unrecorded(ctx, bi_request, masks).await
+    Ok(bi_request)
 }
 
 /// Re-query BI pivots in the BACKGROUND, recording no undo step, then ask the
@@ -3403,6 +3419,10 @@ async fn ensure_bi_field(
     may_add: bool,
     kept: &mut FilterWriteKeep,
 ) -> Result<EnsuredBiField, String> {
+    // The turn comes BEFORE the definition is read: a rebuild below built
+    // from a definition a queued field change then replaced would put the old
+    // layout back (see BiFieldChangeTurn). Held until the step is recorded.
+    let turn = BiFieldChangeTurn::take().await;
     // Validate against the LIVE model, not the creation-time snapshot.
     refresh_bi_model_snapshot(ctx, pivot_id).await?;
     let (table, column, rebuild) = {
@@ -3468,7 +3488,7 @@ async fn ensure_bi_field(
     // The step the addition WOULD record, handed back: recorded here as ONE
     // "Pivot table field change" (joining an open transaction), or -- in a
     // context that records nothing -- kept for the caller's one step.
-    let (_, undo) = Box::pin(update_bi_pivot_fields_unrecorded(ctx, rebuild, Vec::new())).await?;
+    let (_, undo) = Box::pin(update_bi_pivot_fields_unrecorded(ctx, rebuild, Vec::new(), Some(&turn))).await?;
     if let Some(undo) = undo {
         if ctx.record_undo {
             kept.ensure_token = undo.record(ctx.state, "Pivot table field change");
@@ -3476,6 +3496,7 @@ async fn ensure_bi_field(
             kept.absorb_bi_undo(undo);
         }
     }
+    drop(turn);
 
     let pivot_tables = ctx.pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
     let (definition, cache) = pivot_tables
@@ -5944,6 +5965,11 @@ pub(crate) async fn apply_pivot_filter_core_keeping(
     // float value spelling, a refused query leaving the filter persisted, the
     // 24-grain totals cap, and undo not undoing the routed filter — are listed
     // with citations in docs/design/open-items.md under BUG-0108.
+    //
+    // What closes BUG-0108 instead (2026-11-06) is the MASK OVERLAY in the
+    // local branch below (`mask_overlay.rs`): the mask stays host-side and the
+    // pivot's own query is untouched, while the measures the mask gets wrong
+    // are evaluated again over the visible members and laid over the view.
 
     // EVERY REFUSAL OF A PINNED APPLY, BEFORE THE EFFECT (fix round 4, B5).
     // `pivot_write` mints the document-modified token, and these used to run
@@ -5960,8 +5986,9 @@ pub(crate) async fn apply_pivot_filter_core_keeping(
     // the await below (the Tauri command future must be Send).
     // `Requery` = the edit changed the ENGINE QUERY (a calculation group's
     // item state, a pin added, replaced or dropped) and needs a BI re-query;
-    // `Local(response)` = handled here.
-    let step: FilterStep = {
+    // `Local(response)` = handled here; `Masked` = handled host-side too, but
+    // rendered only after the mask overlay's queries (BUG-0108).
+    let step: ApplyFilterStep = {
         let (effect, mut pivot_tables) = pivot_write(state, pivot_state, file_state, request.pivot_id)?;
         let (definition, cache) = pivot_tables
             .get_mut(&request.pivot_id)
@@ -6168,30 +6195,58 @@ pub(crate) async fn apply_pivot_filter_core_keeping(
             // reconstructs the request from the definition, including the
             // engine filters and hidden_items just applied). The cache is
             // still the pre-edit records here: nothing above replaced it.
-            FilterStep::Requery { pre_definition, pre_cache: cache.clone(), mask: post_query_mask }
+            ApplyFilterStep::Step(FilterStep::Requery { pre_definition, pre_cache: cache.clone(), mask: post_query_mask })
         } else {
-            let view = safe_calculate_pivot(definition, cache);
-            store_view(pivot_state, request.pivot_id, &view);
-            let mut response = view_to_response(&view, definition, cache, &display_locale);
+            // THE MASK OVERLAY (BUG-0108). A filtered state of a pivot holding
+            // a measure the mask gets wrong -- a share of the visible total, a
+            // ratio's totals -- is evaluated again by the engine over the
+            // members the mask leaves visible, BEFORE the one render, so a
+            // click still renders and writes the grid once. Planned here under
+            // this lock (the edit above is already stored), queried with no
+            // lock held. `None` -- render now, exactly as before -- for a
+            // pivot of additive measures (it reads one field of the cache), an
+            // unfiltered one with its own totals, a state evaluated before.
+            let overlay_job = {
+                let bi_meta = pivot_state
+                    .bi_metadata
+                    .read()
+                    .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+                crate::pivot::mask_overlay::plan(definition, cache, bi_meta.get(&request.pivot_id))
+            };
+            if let Some(job) = overlay_job {
+                drop(pivot_tables);
+                ApplyFilterStep::Masked(Box::new(MaskedFilterRender { effect, pre_definition, job }))
+            } else {
+                let view = safe_calculate_pivot(definition, cache);
+                store_view(pivot_state, request.pivot_id, &view);
+                let mut response = view_to_response(&view, definition, cache, &display_locale);
 
-            let destination = definition.destination;
-            let pivot_id = definition.id;
+                let destination = definition.destination;
+                let pivot_id = definition.id;
 
-            drop(pivot_tables);
-            // Resolved with the pivot lock RELEASED: `delete_sheet` and the
-            // calculation pass hold `sheet_names` while they take
-            // `pivot_tables`, so reading names under it is the reverse order.
-            // A filter never moves the pivot, so the pre-edit clone names the
-            // same sheet.
-            let dest_sheet_idx = resolve_dest_sheet_index(state, &pre_definition);
+                drop(pivot_tables);
+                // Resolved with the pivot lock RELEASED: `delete_sheet` and the
+                // calculation pass hold `sheet_names` while they take
+                // `pivot_tables`, so reading names under it is the reverse order.
+                // A filter never moves the pivot, so the pre-edit clone names the
+                // same sheet.
+                let dest_sheet_idx = resolve_dest_sheet_index(state, &pre_definition);
 
-            // SAVED, not merely counted: the step below must put them back.
-            // Always empty on a canvas (its hidden grid holds only output).
-            let overwritten = save_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
-            response.overwritten_cell_count = overwritten.len() as u32;
-            finalize_pivot_update(state, &effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: ctx.pane_control_state, ribbon: ctx.ribbon_filter_state, user_files: ctx.user_files_state }))?;
+                // SAVED, not merely counted: the step below must put them back.
+                // Always empty on a canvas (its hidden grid holds only output).
+                let overwritten = save_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+                response.overwritten_cell_count = overwritten.len() as u32;
+                finalize_pivot_update(state, &effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: ctx.pane_control_state, ribbon: ctx.ribbon_filter_state, user_files: ctx.user_files_state }))?;
 
-            FilterStep::Local(response, local_overwrite_step(pivot_id, pre_definition, overwritten, dest_sheet_idx))
+                ApplyFilterStep::Step(FilterStep::Local(response, local_overwrite_step(pivot_id, pre_definition, overwritten, dest_sheet_idx)))
+            }
+        }
+    };
+
+    let step: FilterStep = match step {
+        ApplyFilterStep::Step(step) => step,
+        ApplyFilterStep::Masked(masked) => {
+            Box::pin(render_masked_filter(ctx, request.pivot_id, *masked, &display_locale)).await?
         }
     };
 
@@ -6361,6 +6416,153 @@ pub(crate) enum FilterStep {
     /// is already stored), for the undo step, and the level-1 selection the
     /// re-query must apply to its NEW records (a dropped pin's replacement).
     Requery { pre_definition: PivotDefinition, pre_cache: PivotCache, mask: Option<PostQueryMask> },
+}
+
+/// What the lock-holding half of [`apply_pivot_filter_core_keeping`] hands
+/// on: a finished [`FilterStep`], or a level-1 edit whose render waits for
+/// its mask overlay (BUG-0108).
+enum ApplyFilterStep {
+    Step(FilterStep),
+    Masked(Box<MaskedFilterRender>),
+}
+
+/// A level-1 filter edit already STORED -- hidden items set, version bumped,
+/// document dirtied -- whose one render waits for the engine queries of its
+/// mask overlay (see `mask_overlay.rs`).
+struct MaskedFilterRender {
+    effect: crate::document_effect::DocumentEffect,
+    /// The definition from before the edit, for the overwrite step and the
+    /// destination sheet (as the local branch keeps it).
+    pre_definition: PivotDefinition,
+    job: crate::pivot::mask_overlay::OverlayJob,
+}
+
+/// Runs a [`MaskedFilterRender`]'s overlay queries with no lock held,
+/// installs the answer on the records it was planned on, and then renders
+/// and writes the pivot exactly as the local branch of
+/// [`apply_pivot_filter_core_keeping`] does. A refused or impossible query
+/// installs nothing it cannot stand behind: the render shows the masked
+/// values, as it did before the overlay existed.
+async fn render_masked_filter(
+    ctx: &PivotCmdCtx<'_>,
+    pivot_id: PivotId,
+    masked: MaskedFilterRender,
+    display_locale: &engine::LocaleSettings,
+) -> Result<FilterStep, String> {
+    let MaskedFilterRender { effect, pre_definition, job } = masked;
+    let answers = crate::pivot::mask_overlay::run(ctx.bi_state, &job).await;
+
+    let mut pivot_tables = ctx
+        .pivot_state
+        .pivot_tables
+        .write(&effect)
+        .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+    let (definition, cache) = pivot_tables
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+    if let Some(answers) = answers {
+        crate::pivot::mask_overlay::install(cache, job, answers);
+    }
+    let view = safe_calculate_pivot(definition, cache);
+    store_view(ctx.pivot_state, pivot_id, &view);
+    let mut response = view_to_response(&view, definition, cache, display_locale);
+    let destination = definition.destination;
+    drop(pivot_tables);
+
+    // As the local branch: the sheet from the pre-edit clone, resolved with
+    // the pivot lock released; the overwritten cells SAVED for the step.
+    let dest_sheet_idx = resolve_dest_sheet_index(ctx.state, &pre_definition);
+    let overwritten = save_overwritten_cells(ctx.state, pivot_id, dest_sheet_idx, destination, &view);
+    response.overwritten_cell_count = overwritten.len() as u32;
+    finalize_pivot_update(
+        ctx.state,
+        &effect,
+        ctx.pivot_state,
+        pivot_id,
+        dest_sheet_idx,
+        destination,
+        &view,
+        Some(PivotRecalcStates {
+            pane: ctx.pane_control_state,
+            ribbon: ctx.ribbon_filter_state,
+            user_files: ctx.user_files_state,
+        }),
+    )?;
+    Ok(FilterStep::Local(response, local_overwrite_step(pivot_id, pre_definition, overwritten, dest_sheet_idx)))
+}
+
+/// The clear path's overlay: [`clear_pivot_filter_local`] renders inside one
+/// synchronous critical section (the sheet-delete cascade shares it and has no
+/// engine to await), so a clear that leaves a filtered state -- another
+/// field's mask -- or an unfiltered one without engine totals of its own gets
+/// its mask overlay HERE, after that render, and the pivot is rendered and
+/// written once more with it. `None` when no overlay was needed or installed:
+/// the first render stands. Also returns the user's cells the second write grew
+/// over (normally none: an overlay changes values, not the layout, short of a
+/// value filter).
+async fn rerender_with_mask_overlay(
+    ctx: &PivotCmdCtx<'_>,
+    pivot_id: PivotId,
+    display_locale: &engine::LocaleSettings,
+) -> Result<Option<(PivotViewResponse, Vec<crate::pivot::operations::SavedCell>)>, String> {
+    let job = {
+        // Planning recomputes the cache's filter mask: a derived-cache write.
+        let derived = pivot_render_effect();
+        let mut pivot_tables = ctx
+            .pivot_state
+            .pivot_tables
+            .write(&derived)
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        let Some((definition, cache)) = pivot_tables.get_mut(&pivot_id) else { return Ok(None) };
+        let bi_meta = ctx
+            .pivot_state
+            .bi_metadata
+            .read()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        crate::pivot::mask_overlay::plan(definition, cache, bi_meta.get(&pivot_id))
+    };
+    let Some(job) = job else { return Ok(None) };
+    let Some(answers) = crate::pivot::mask_overlay::run(ctx.bi_state, &job).await else {
+        return Ok(None);
+    };
+
+    // The corrected cells are the document's output: a real write (the clear
+    // before it has already dirtied the document).
+    let effect = crate::document_effect::DocumentEffect::mutates(ctx.file_state);
+    let mut pivot_tables = ctx
+        .pivot_state
+        .pivot_tables
+        .write(&effect)
+        .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+    let Some((definition, cache)) = pivot_tables.get_mut(&pivot_id) else { return Ok(None) };
+    if !crate::pivot::mask_overlay::install(cache, job, answers) {
+        return Ok(None);
+    }
+    let view = safe_calculate_pivot(definition, cache);
+    store_view(ctx.pivot_state, pivot_id, &view);
+    let mut response = view_to_response(&view, definition, cache, display_locale);
+    let destination = definition.destination;
+    let dest_ref = PivotDestSheet::of(definition);
+    drop(pivot_tables);
+
+    let dest_sheet_idx = dest_ref.resolve(ctx.state);
+    let overwritten = save_overwritten_cells(ctx.state, pivot_id, dest_sheet_idx, destination, &view);
+    response.overwritten_cell_count = overwritten.len() as u32;
+    finalize_pivot_update(
+        ctx.state,
+        &effect,
+        ctx.pivot_state,
+        pivot_id,
+        dest_sheet_idx,
+        destination,
+        &view,
+        Some(PivotRecalcStates {
+            pane: ctx.pane_control_state,
+            ribbon: ctx.ribbon_filter_state,
+            user_files: ctx.user_files_state,
+        }),
+    )?;
+    Ok(Some((response, overwritten)))
 }
 
 /// A level-1 selection a BI re-query applies to the records IT fetched,
@@ -6566,6 +6768,10 @@ pub(crate) async fn clear_pivot_filter_core_keeping(
         field_index
     );
 
+    // The definition before the clear, for an overwrite step the mask
+    // overlay's second write alone would need (see below).
+    let pre_clear = pivot_state_definition(pivot_state, request.pivot_id);
+
     // All lock-holding work happens in the synchronous helper, so no guard
     // can live across the await below (the Tauri command future must be
     // Send). `Requery` = the cleared field needs a BI re-query, whose undo
@@ -6583,6 +6789,40 @@ pub(crate) async fn clear_pivot_filter_core_keeping(
         field_index,
         model_key.as_ref(),
     )?;
+
+    // BUG-0108: that render showed the MASKED roll-up. A state the clear
+    // leaves filtered (another field's mask), or unfiltered without engine
+    // totals of its own, gets its mask overlay and is rendered once more.
+    let step = match step {
+        FilterStep::Local(response, overwrite) => {
+            match Box::pin(rerender_with_mask_overlay(ctx, request.pivot_id, &display_locale)).await? {
+                None => FilterStep::Local(response, overwrite),
+                Some((mut corrected, more)) => {
+                    corrected.overwritten_cell_count = response.overwritten_cell_count + more.len() as u32;
+                    let overwrite = match overwrite {
+                        Some(mut step) => {
+                            step.overwritten_cells.extend(more);
+                            Some(step)
+                        }
+                        None if more.is_empty() => None,
+                        None => pre_clear.map(|pre| {
+                            let dest_sheet_idx = resolve_dest_sheet_index(state, &pre);
+                            BiFieldChangeUndo {
+                                pivot_id: request.pivot_id,
+                                definition: pre,
+                                overwritten_cells: more,
+                                dest_sheet_idx,
+                                prev_col_widths: Vec::new(),
+                                cache: None,
+                            }
+                        }),
+                    };
+                    FilterStep::Local(corrected, overwrite)
+                }
+            }
+        }
+        other => other,
+    };
 
     match step {
         FilterStep::Local(response, overwrite) if ctx.record_undo => {
@@ -6853,12 +7093,15 @@ pub(crate) fn clear_pivot_filter_local(
 /// Amount", PivotLine)`: the data field by NAME, and the line of the other
 /// axis by its items' member KEYS (`ValueSort`).
 ///
+/// A GROUPED field's item (a date level, a number bin, a manual group: a
+/// virtual field the definition does not list) sorts the field it was grouped
+/// from ([`sort_target_field_index`], BUG-0733); the engine hands that
+/// field's sort to its grouped levels, as it does a label sort.
+///
 /// Refuses, with the reason the user sees: a name no value field carries
 /// (compared as written or with a model measure's outer `[...]` stripped), a
-/// field that is not on rows or columns, a GROUPED field (a date level, a
-/// number bin or a manual group is a virtual field the definition does not
-/// list -- sorting those by value is not built), and a line member the cache
-/// cannot name.
+/// field that is not on rows or columns, and a line member the cache cannot
+/// name.
 pub(crate) fn value_sort_of_request(
     definition: &PivotDefinition,
     cache: &PivotCache,
@@ -6878,14 +7121,12 @@ pub(crate) fn value_sort_of_request(
         .or_else(|| definition.value_fields.iter().find(|v| strip(&v.name) == strip(name)))
         .map(|v| v.name.clone())
         .ok_or_else(|| format!("This PivotTable has no value field named '{}'.", name))?;
-    if request.field_index >= cache.fields.len() {
-        return Err("Sorting a grouped field by its values is not available yet.".to_string());
-    }
+    let field_index = sort_target_field_index(cache, request.field_index)?;
     let on_axis = definition
         .row_fields
         .iter()
         .chain(definition.column_fields.iter())
-        .any(|f| f.source_index == request.field_index);
+        .any(|f| f.source_index == field_index);
     if !on_axis {
         return Err("Only a row or column field can be sorted by values.".to_string());
     }
@@ -6900,6 +7141,60 @@ pub(crate) fn value_sort_of_request(
     Ok(Some(pivot_engine::ValueSort { value_field, scope }))
 }
 
+/// The definition field a sort of the field at EFFECTIVE index `field_index`
+/// sorts: the field itself, or -- for a grouped field's item (a virtual field
+/// of the last render) -- the field it was grouped from (BUG-0733). A grouped
+/// field was refused for a value sort, and a label sort of it matched no
+/// definition field and changed nothing.
+pub(crate) fn sort_target_field_index(cache: &PivotCache, field_index: usize) -> Result<usize, String> {
+    cache
+        .virtual_field_origin(field_index)
+        .ok_or_else(|| "The PivotTable changed; that field is no longer in it.".to_string())
+}
+
+/// The member keys of the items of the field at EFFECTIVE index
+/// `field_index` in the order `view` shows them (first appearance in a
+/// header or value cell's group path, reading row by row), with
+/// `move_item`'s item moved: the manual order a Manual sort or a Move
+/// stores (BUG-0733). An item the view does not show (a hidden one) is not
+/// listed, so it follows the listed items in source order when it comes
+/// back, as an item Excel has never placed does.
+pub(crate) fn manual_order_of_view(
+    view: &PivotView,
+    cache: &PivotCache,
+    field_index: usize,
+    move_item: Option<&crate::pivot::types::PivotItemMove>,
+) -> Result<Vec<String>, String> {
+    use crate::pivot::types::PivotItemMoveTo;
+    let mut order: Vec<u32> = Vec::new();
+    for cell in view.cells.iter().flatten() {
+        for &(f, id) in &cell.group_path {
+            if f == field_index && !order.contains(&id) {
+                order.push(id);
+            }
+        }
+    }
+    if let Some(m) = move_item {
+        let from = order
+            .iter()
+            .position(|&id| id == m.value_id)
+            .ok_or_else(|| "The PivotTable changed; that item is no longer shown.".to_string())?;
+        let last = order.len() - 1;
+        let to = match m.to {
+            PivotItemMoveTo::Beginning => 0,
+            PivotItemMoveTo::Up => from.saturating_sub(1),
+            PivotItemMoveTo::Down => (from + 1).min(last),
+            PivotItemMoveTo::End => last,
+        };
+        let id = order.remove(from);
+        order.insert(to, id);
+    }
+    let fc = cache
+        .get_field(field_index)
+        .ok_or_else(|| "The PivotTable changed; that field is no longer in it.".to_string())?;
+    Ok(order.into_iter().map(|id| fc.member_key(id)).collect())
+}
+
 /// Sorts a pivot field by labels, or by the values of a data field along one
 /// line of the other axis (`values_hierarchy`, BUG-0459).
 #[tauri::command]
@@ -6910,6 +7205,30 @@ pub fn sort_pivot_field(
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
+    request: SortPivotFieldRequest,
+) -> Result<PivotViewResponse, String> {
+    sort_pivot_field_core(
+        &state,
+        &file_state,
+        &pivot_state,
+        PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state },
+        request,
+    )
+}
+
+/// [`sort_pivot_field`] over borrowed state.
+///
+/// A GROUPED field of its own -- a manual group's parent, a date level above
+/// the finest -- sorts its own level (`PivotField::level_sorts`), never the
+/// field it was grouped from: Excel keeps the two orders apart [LIVE,
+/// verify-pivotfix probe3 A_ORDERS]. The first BUG-0733 fix mapped it to its
+/// origin, so sorting Group1's items by value also re-sorted the regions
+/// inside every group.
+pub(crate) fn sort_pivot_field_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    recalc_states: PivotRecalcStates<'_>,
     request: SortPivotFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     // The app locale for the display text (leaf lock: taken, cloned and
@@ -6928,7 +7247,11 @@ pub fn sort_pivot_field(
     // document clean. It is plain data (a value field's name and member
     // keys): a pivot edited between the two guards is still sorted safely --
     // a name or key it no longer has sorts by label (`ValueSort`).
-    let value_sort = {
+    // A Manual sort or a Move stores the order the items are shown in now
+    // (the stored view, taken after the tables guard: the order every
+    // render takes them in), so it is decided here too.
+    let manual = matches!(request.sort_by, SortBy::Manual) || request.move_item.is_some();
+    let (value_sort, field_index, level, manual_order) = {
         let tables = pivot_state
             .pivot_tables
             .read()
@@ -6936,31 +7259,54 @@ pub fn sort_pivot_field(
         let (definition, cache) = tables
             .get(&request.pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
-        value_sort_of_request(definition, cache, &request)?
+        let value_sort = if manual { None } else { value_sort_of_request(definition, cache, &request)? };
+        let manual_order = if manual {
+            let views = pivot_state.views.lock().map_err(|e| format!("pivot views lock poisoned: {}", e))?;
+            let view = views
+                .get(&request.pivot_id)
+                .ok_or_else(|| "The PivotTable has not been shown yet; refresh it first.".to_string())?;
+            manual_order_of_view(view, cache, request.field_index, request.move_item.as_ref())?
+        } else {
+            Vec::new()
+        };
+        (
+            value_sort,
+            sort_target_field_index(cache, request.field_index)?,
+            cache.virtual_field_level(request.field_index).map(str::to_string),
+            manual_order,
+        )
     };
-
-    let (effect, mut pivot_tables) = pivot_write(&state, &pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(state, pivot_state, file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
 
-    let sort_order = match request.sort_by {
-        SortBy::Ascending => pivot_engine::SortOrder::Ascending,
-        SortBy::Descending => pivot_engine::SortOrder::Descending,
+    let sort_order = match (request.sort_by, manual) {
+        (_, true) | (SortBy::Manual, _) => pivot_engine::SortOrder::Manual,
+        (SortBy::Ascending, false) => pivot_engine::SortOrder::Ascending,
+        (SortBy::Descending, false) => pivot_engine::SortOrder::Descending,
     };
 
-    // Update sort order for matching fields. A label sort clears a standing
-    // value sort (Excel: AutoSort by the field's own name).
-    for field in &mut definition.row_fields {
-        if field.source_index == request.field_index {
-            field.sort_order = sort_order;
-            field.value_sort = value_sort.clone();
+    // Update sort order for matching fields -- or, for a grouped field of its
+    // own, that grouping level's sort. A label sort clears a standing value
+    // sort (Excel: AutoSort by the field's own name); a manual order is kept
+    // only while the field is Manual.
+    for field in definition.row_fields.iter_mut().chain(definition.column_fields.iter_mut()) {
+        if field.source_index != field_index {
+            continue;
         }
-    }
-    for field in &mut definition.column_fields {
-        if field.source_index == request.field_index {
-            field.sort_order = sort_order;
-            field.value_sort = value_sort.clone();
+        match level.as_deref() {
+            Some(level) => {
+                let slot = field.level_sort_mut(level);
+                slot.sort_order = sort_order;
+                slot.value_sort = value_sort.clone();
+                slot.manual_item_order = manual_order.clone();
+            }
+            None => {
+                field.sort_order = sort_order;
+                field.value_sort = value_sort.clone();
+                field.manual_item_order = manual_order.clone();
+            }
         }
     }
 
@@ -6977,8 +7323,8 @@ pub fn sort_pivot_field(
     drop(pivot_tables);
     let dest_sheet_idx = dest_ref.resolve(&state);
 
-    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
+    response.overwritten_cell_count = count_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(state, &effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(recalc_states))?;
 
     Ok(response)
 }
@@ -7103,20 +7449,77 @@ pub(crate) fn pivot_field_info_core(
     })
 }
 
-/// Sets a pivot item's visibility.
+/// Sets a pivot item's visibility (a script's `api.pivot.setItemVisibility`,
+/// Excel's `PivotItem.Visible`).
+///
+/// A BI pivot's hidden items are a MASK, so the state this leaves gets its
+/// mask overlay (BUG-0108) as a slicer click or a header filter reaching the
+/// same state does: the masked render first, then -- when a measure needs it
+/// -- the overlay planned, evaluated and installed, and the pivot rendered and
+/// written once more (`rerender_with_mask_overlay`, the clear path's step).
+/// It rendered the masked roll-up only, so the same filter state showed
+/// different numbers by route (wave 1 pivotmask verifier, CONFIRMED). A range
+/// pivot plans no overlay and is rendered once, as before.
 #[tauri::command]
-pub fn set_pivot_item_visibility(
-    state: State<AppState>,
+#[allow(clippy::too_many_arguments)]
+pub async fn set_pivot_item_visibility(
+    state: State<'_, AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
+    bi_state: State<'_, BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
     request: SetItemVisibilityRequest,
 ) -> Result<PivotViewResponse, String> {
-    // The app locale for the display text (leaf lock: taken, cloned and
-    // dropped here, before any other guard).
-    let display_locale = crate::pivot::utils::display_locale_of(&state);
+    let ctx = PivotCmdCtx {
+        state: &state,
+        file_state: &file_state,
+        pivot_state: &pivot_state,
+        pane_control_state: &pane_control_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        user_files_state: &user_files_state,
+        bi_state: &bi_state,
+        slicer_state: &slicer_state,
+        record_undo: true,
+    };
+    set_pivot_item_visibility_core(&ctx, request).await
+}
+
+/// [`set_pivot_item_visibility`] over borrowed state.
+pub(crate) async fn set_pivot_item_visibility_core(
+    ctx: &PivotCmdCtx<'_>,
+    request: SetItemVisibilityRequest,
+) -> Result<PivotViewResponse, String> {
+    let display_locale = crate::pivot::utils::display_locale_of(ctx.state);
+    let pivot_id = request.pivot_id;
+    let response = set_pivot_item_visibility_masked(
+        ctx.state,
+        ctx.file_state,
+        ctx.pivot_state,
+        PivotRecalcStates { pane: ctx.pane_control_state, ribbon: ctx.ribbon_filter_state, user_files: ctx.user_files_state },
+        request,
+        &display_locale,
+    )?;
+    match Box::pin(rerender_with_mask_overlay(ctx, pivot_id, &display_locale)).await? {
+        Some((mut corrected, more)) => {
+            corrected.overwritten_cell_count = response.overwritten_cell_count + more.len() as u32;
+            Ok(corrected)
+        }
+        None => Ok(response),
+    }
+}
+
+/// The synchronous edit and masked render of [`set_pivot_item_visibility`].
+fn set_pivot_item_visibility_masked(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    recalc: PivotRecalcStates<'_>,
+    request: SetItemVisibilityRequest,
+    display_locale: &engine::LocaleSettings,
+) -> Result<PivotViewResponse, String> {
     log_info!(
         "PIVOT",
         "set_pivot_item_visibility pivot_id={} field={} item={} visible={}",
@@ -7126,7 +7529,7 @@ pub fn set_pivot_item_visibility(
         request.visible
     );
 
-    let (effect, mut pivot_tables) = pivot_write(&state, &pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(state, pivot_state, file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -7163,18 +7566,18 @@ pub fn set_pivot_item_visibility(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
-    store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache, &display_locale);
+    store_view(pivot_state, request.pivot_id, &view);
+    let mut response = view_to_response(&view, definition, cache, display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
     let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
-    let dest_sheet_idx = dest_ref.resolve(&state);
+    let dest_sheet_idx = dest_ref.resolve(state);
 
-    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
+    response.overwritten_cell_count = count_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(state, &effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(recalc))?;
 
     Ok(response)
 }
@@ -9381,13 +9784,40 @@ pub(crate) async fn update_bi_pivot_fields_core(
     ctx: &PivotCmdCtx<'_>,
     request: UpdateBiPivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
-    let (mut response, undo) = update_bi_pivot_fields_unrecorded(ctx, request, Vec::new()).await?;
+    // The turn is held until the step is recorded (see BiFieldChangeTurn).
+    let turn = BiFieldChangeTurn::take().await;
+    let (mut response, undo) = update_bi_pivot_fields_unrecorded(ctx, request, Vec::new(), Some(&turn)).await?;
     if ctx.record_undo {
         if let Some(undo) = undo {
             response.overwrite_token = undo.record(ctx.state, "Pivot table field change");
         }
     }
+    drop(turn);
     Ok(response)
+}
+
+/// Serializes BI field changes (see [`BiFieldChangeTurn`]).
+static BI_FIELD_CHANGES_IN_ORDER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A turn in the BI field-change queue: ONE BI field change at a time, in the
+/// order they were asked (a fair queue). A change takes its turn BEFORE it
+/// reads the definition it rebuilds from, and keeps it until its undo step is
+/// recorded (when it records one itself). Two concurrent changes could
+/// otherwise record their steps out of storage order -- [B(pre=A),
+/// A(pre=original)] for A stored first -- and Undo would wipe B's change and
+/// end at A's state (W1 pivotmask verifier); and a Refresh or an ensure that
+/// built its request from the definition and THEN waited behind a field change
+/// rebuilt the pivot from the layout that change had just replaced, silently
+/// reverting it (piv5, the piv4 verifier's finding 4). Nothing a turn holder
+/// awaits takes a turn again.
+pub(crate) struct BiFieldChangeTurn {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl BiFieldChangeTurn {
+    pub(crate) async fn take() -> Self {
+        BiFieldChangeTurn { _guard: BI_FIELD_CHANGES_IN_ORDER.lock().await }
+    }
 }
 
 /// [`update_bi_pivot_fields_core`] that hands its undo step BACK instead of
@@ -9404,7 +9834,19 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     ctx: &PivotCmdCtx<'_>,
     request: UpdateBiPivotFieldsRequest,
     masks: Vec<PostQueryMask>,
+    turn: Option<&BiFieldChangeTurn>,
 ) -> Result<(PivotViewResponse, Option<BiFieldChangeUndo>), String> {
+    // ONE BI field change at a time (BiFieldChangeTurn), held to the end:
+    // this one stores its definition and records, releases the tables for the
+    // mask overlay's queries, and renders and hands its undo step back after
+    // them. A caller that read the definition its `request` was built from
+    // (a refresh, an ensure) or that records the step itself passes the turn
+    // it took first; otherwise the turn is taken here. Nothing this awaits
+    // takes a turn again (no caller of this is reached from inside it).
+    let _own_turn = match turn {
+        Some(_) => None,
+        None => Some(BiFieldChangeTurn::take().await),
+    };
     // The app locale for the display text (leaf lock: taken, cloned and
     // dropped here, before any other guard).
     let display_locale = crate::pivot::utils::display_locale_of(ctx.state);
@@ -10697,6 +11139,22 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
         }
     }
 
+    // ---- Which measure columns a mask gets wrong (BUG-0108) ---------------
+    // Read from the LIVE model now, with the records it describes, and kept
+    // ON them: a click later re-uses it without touching the engine, and an
+    // undo that restores older records restores their own classification.
+    // Not for a calculation group or a synthetic measure: the mask overlay
+    // does not describe those, and they keep the masked roll-up. (A values-only
+    // pivot's synthetic "Total" row is classified: the overlay answers its one
+    // leaf from the grand-total grain.)
+    if synthetic_measure.is_none() && calc_item_names.is_empty() {
+        let engine = engine_arc.lock().await;
+        cache.mask_sensitivity = Some(crate::pivot::mask_safety::mask_sensitivity(
+            &engine,
+            &measure_value_col_idx(&result_columns, dim_offset),
+        ));
+    }
+
     // ---- Engine-evaluated totals ------------------------------------------
     // The cache rows are pre-aggregated leaf groups, so the pivot engine's
     // additive roll-up is only correct for additive measures: a "% of total"
@@ -10818,6 +11276,11 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
         sort_by_resolution.get(&(f.table.clone(), f.column.clone())).copied()
     };
 
+    // THE DEFINITION IS REBUILT IN ONE CRITICAL SECTION, which ends with the
+    // mask overlay's plan (BUG-0108): its queries then run with the pivot
+    // lock released -- the block below is that lock's whole scope, so no
+    // guard can live across the await -- and the render re-takes it.
+    let overlay_job = {
     let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
         .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
     let (definition, stored_cache) = pivot_tables
@@ -11232,10 +11695,39 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     }
 
     definition.bump_version();
+    *stored_cache = cache;
+
+    // What the new state's mask overlay needs (`None`: nothing -- a pivot of
+    // additive measures, an unfiltered one with its own totals).
+    crate::pivot::mask_overlay::plan(definition, stored_cache, Some(&meta_snapshot))
+    };
+
+    // ---- The mask overlay (BUG-0108) ----------------------------------------
+    // A filtered state of a pivot holding a measure the mask gets wrong (a
+    // share of the visible total, a ratio's totals) is evaluated again by the
+    // engine over the members the mask leaves visible, BEFORE the one render.
+    // The definition and records stay stored as a consistent pair while the
+    // queries run with no lock held; the answer is installed only on the
+    // records it was planned on.
+    let t_overlay = Instant::now();
+    if let Some(job) = overlay_job {
+        if let Some(answers) = Box::pin(crate::pivot::mask_overlay::run(bi_state, &job)).await {
+            let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
+                .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+            if let Some((_, cache)) = pivot_tables.get_mut(&pivot_id) {
+                crate::pivot::mask_overlay::install(cache, job, answers);
+            }
+        }
+    }
+    let overlay_ms = t_overlay.elapsed().as_secs_f64() * 1000.0;
+    let mut pivot_tables = pivot_state.pivot_tables.write(&effect)
+        .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+    let (definition, stored_cache) = pivot_tables
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
 
     // Calculate pivot view
     let t_calc = Instant::now();
-    *stored_cache = cache;
     let view = safe_calculate_pivot(definition, stored_cache);
     store_view(&pivot_state, pivot_id, &view);
     let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
@@ -11340,12 +11832,13 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     let payload_kb = payload_bytes as f64 / 1024.0;
     log_perf!(
         "PIVOT",
-        "update_bi_pivot_fields pivot_id={} rows={}x{} | query={:.1}ms cache={:.1}ms calc={:.1}ms resp={:.1}ms grid={:.1}ms TOTAL={:.1}ms | payload={:.1}KB",
+        "update_bi_pivot_fields pivot_id={} rows={}x{} | query={:.1}ms cache={:.1}ms overlay={:.1}ms calc={:.1}ms resp={:.1}ms grid={:.1}ms TOTAL={:.1}ms | payload={:.1}KB",
         pivot_id,
         response.row_count,
         response.col_count,
         query_ms,
         cache_ms,
+        overlay_ms,
         calc_ms,
         resp_ms,
         grid_ms,
@@ -13734,6 +14227,12 @@ mod synthetic_total_request_tests {
 
         // The one write site places the MARKED field (review RB3).
         let update = fn_body(&commands, "update_bi_pivot_fields_unrecorded");
+        // BI field changes are serialized end to end, so their undo steps
+        // follow storage order (W1 pivotmask verifier; SABOTAGE piv4-sabU).
+        assert!(
+            update.contains("None => Some(BiFieldChangeTurn::take().await),"),
+            "update_bi_pivot_fields_unrecorded no longer holds the BI field-change queue from its first line"
+        );
         assert!(update.contains("synthetic_total_row_field()"), "update_bi_pivot_fields_unrecorded no longer places the marked synthetic row");
         assert!(!update.contains("PivotField::new(0, \"Total\""), "update_bi_pivot_fields_unrecorded builds an UNMARKED Total row again");
     }
@@ -13792,6 +14291,7 @@ mod value_sort_request_tests {
             values_hierarchy: name.map(str::to_string),
             pivot_item_scope: None,
             scope_group_path: None,
+            move_item: None,
         }
     }
 
@@ -13858,14 +14358,66 @@ mod value_sort_request_tests {
         // Amount is not on rows or columns.
         let err = value_sort_of_request(&def, &cache, &request(3, Some("Sum of Amount"))).unwrap_err();
         assert!(err.contains("row or column field"), "{err}");
-        // A grouped (virtual) field index past the source columns.
+        // A field index no field has (no render made a grouped field there):
+        // BUG-0733 sorts a grouped field by its origin, so only an index
+        // nothing answers to is refused.
         let err = value_sort_of_request(&def, &cache, &request(9, Some("Sum of Amount"))).unwrap_err();
-        assert!(err.contains("grouped field"), "{err}");
+        assert!(err.contains("no longer in it"), "{err}");
         // A clicked member the cache cannot name.
         def.row_fields[1].value_sort = None;
         let mut req = request(1, Some("Sum of Amount"));
         req.scope_group_path = Some(vec![(42, 0)]);
         let err = value_sort_of_request(&def, &cache, &req).unwrap_err();
         assert!(err.contains("no longer exists"), "{err}");
+    }
+
+    /// BUG-0733: a GROUPED field sorts by value. A number-binned Size field
+    /// (1-10 / 11-20 / 21-30) is a virtual field of the render, which the
+    /// request names; it was refused ("Sorting a grouped field by its values
+    /// is not available yet"). Excel [LIVE, pivotfix probe2] sorts a grouped
+    /// field's bins by `AutoSort xlDescending, "Sum of Amount"` like any
+    /// field. The sort lands on the field the bins were made from, and the
+    /// render orders the bins by their sums: 11-20 (100), 21-30 (50), 1-10 (15).
+    ///
+    /// SABOTAGE (pivotfix-sabG): `sort_target_field_index` answers the index
+    /// unmapped -- fails at "GROUPED" (the bin is no definition field).
+    #[test]
+    fn a_grouped_fields_bins_sort_by_value() {
+        let mut def = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        let mut size = PivotField::new(0, "Size".into());
+        size.grouping = pivot_engine::FieldGrouping::NumberBinning { start: 1.0, end: 30.0, interval: 10.0 };
+        def.row_fields = vec![size];
+        def.value_fields = vec![ValueField::new(1, "Sum of Amount".into(), AggregationType::Sum)];
+        let mut cache = PivotCache::new(def.id, 2);
+        cache.set_field_name(0, "Size".to_string());
+        cache.set_field_name(1, "Amount".to_string());
+        for (i, (size, amount)) in [(1.0, 10.0), (2.0, 5.0), (11.0, 100.0), (21.0, 50.0)].iter().enumerate() {
+            cache.add_record(i as u32, &[CellValue::Number(*size), CellValue::Number(*amount)]);
+        }
+        let before = pivot_engine::calculate_pivot(&def, &mut cache);
+        let labels: Vec<String> = row_labels(&before).split('|').map(str::to_string).collect();
+        assert_eq!(labels.len(), 3, "fixture: three bins, ascending: {labels:?}");
+        let bin_field = before
+            .cells
+            .iter()
+            .flatten()
+            .find(|c| c.formatted_value == labels[0] && !c.group_path.is_empty())
+            .map(|c| c.group_path.last().unwrap().0)
+            .expect("fixture: the first bin's header");
+        assert!(bin_field >= cache.fields.len(), "fixture: a bin is a VIRTUAL field ({bin_field})");
+
+        let req = request(bin_field, Some("Sum of Amount"));
+        let sort = value_sort_of_request(&def, &cache, &req).expect("GROUPED: a grouped field sorts by value");
+        let target = sort_target_field_index(&cache, bin_field).expect("the bins' origin");
+        assert_eq!(target, 0, "the bins sort the Size field");
+        let field = def.row_fields.iter_mut().find(|f| f.source_index == target).expect("the origin is a row field");
+        field.sort_order = pivot_engine::SortOrder::Descending;
+        field.value_sort = sort;
+        let view = pivot_engine::calculate_pivot(&def, &mut cache);
+        assert_eq!(
+            row_labels(&view),
+            format!("{}|{}|{}", labels[1], labels[2], labels[0]),
+            "the bins by their sums, largest first"
+        );
     }
 }

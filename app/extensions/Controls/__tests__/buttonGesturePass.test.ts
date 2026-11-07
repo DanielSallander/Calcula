@@ -20,6 +20,20 @@
 //          metadata) and the macro-run provider, which records what it was
 //          handed. The census that only Core's pointer raises this press is in
 //          src/api/__tests__/explicitMacroRun.test.ts.
+// DETERMINISM (BUG-0778): the outcomes are waited for as CONDITIONS, never as
+//          a count of event-loop turns. The click path awaits the door, the
+//          metadata read and the provider, and the activation publishes the
+//          button's region after its own awaits; the test used to assume
+//          both had finished after a fixed number of setTimeout(0) turns
+//          (`drain`: 6 x 5), which a slower run (a cold module import
+//          inside the activation, a loaded worker) can outlast -- the run
+//          then landed after the assertion, or in the NEXT test, whose
+//          `runs` it polluted. Now: the region is waited for before the first
+//          press, each run is waited for by `vi.waitFor`, and "nothing
+//          ran" is asserted where it is decidable at once -- the door is
+//          asked SYNCHRONOUSLY inside the release (buttonPress.ts onPressUp
+//          -> run -> runControlAction -> invoke), so a release that asks
+//          nothing has asked nothing for good.
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
 import { loadHarness, settle, type Loader } from "../../ModelMenu/__tests__/lifecycleHarness";
@@ -140,6 +154,11 @@ async function drain(): Promise<void> {
   for (let i = 0; i < 6; i++) await settle();
 }
 
+/** Wait until `n` macro runs have been handed over -- a condition, not a turn count. */
+async function runsReach(n: number): Promise<void> {
+  await vi.waitFor(() => expect(runs).toHaveLength(n), { timeout: 10_000, interval: 5 });
+}
+
 beforeAll(async () => {
   area = document.createElement("div");
   area.setAttribute("data-grid-area", "");
@@ -151,6 +170,8 @@ beforeAll(async () => {
   await ext.activate(harness.context);
   await settle();
   overlays = await import("@api/gridOverlays");
+  // The activation publishes the button's region after its own awaits.
+  await vi.waitFor(() => regionOf(BUTTON), { timeout: 10_000, interval: 5 });
   const { floatingControlZoneAt } = await import("../lib/controlZoneAt");
   overlays.registerGridOverlay({ type: "floating-control", render: () => {}, zoneAt: floatingControlZoneAt });
   designMode = await import("../lib/designMode");
@@ -188,8 +209,8 @@ describe("the floating button's release is a person's click: it carries the pass
     await drain();
     expect(runs, "the PRESS ran the macro").toEqual([]);
     release(INSIDE);
-    await drain();
     expect(h.backendCalls, "the click did not ask the door first").toContain("run_control_action");
+    await runsReach(1);
     expect(runs.map((r) => r.macroId)).toEqual(["macro-report"]);
     const { explicitRun, ...rest } = runs[0].options ?? {};
     expect(rest).toEqual({
@@ -204,7 +225,7 @@ describe("the floating button's release is a person's click: it carries the pass
     for (let i = 0; i < 2; i++) {
       corePress();
       release(INSIDE);
-      await drain();
+      await runsReach(i + 1);
     }
     expect(runs).toHaveLength(2);
     const [a, b] = runs.map((r) => r.options?.explicitRun);
@@ -218,6 +239,8 @@ describe("the floating button's release is a person's click: it carries the pass
     corePress();
     move(OFF);
     release(OFF);
+    // Decided at the release: the door is asked synchronously inside it.
+    expect(h.backendCalls).not.toContain("run_control_action");
     await drain();
     expect(runs).toEqual([]);
     expect(h.backendCalls).not.toContain("run_control_action");
@@ -229,6 +252,7 @@ describe("the floating button's release is a person's click: it carries the pass
     try {
       corePress();
       release(INSIDE);
+      expect(h.backendCalls).not.toContain("run_control_action");
       await drain();
       expect(runs).toEqual([]);
       expect(h.backendCalls).not.toContain("run_control_action");

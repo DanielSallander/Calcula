@@ -177,14 +177,17 @@ pub struct ExplicitRunSheetWrites {
 }
 
 /// One sheet a granted run FORMATTED (owner, 2026-11-04), as the page counted
-/// it: how many formatting calls reached it, and the bounding box of what they
-/// reached (0-based, inclusive; a row height reaches its whole row).
+/// it: how many formatting CALLS reached it, and the bounding box of what they
+/// reached (0-based, inclusive; a row height reaches its whole row). A call is
+/// counted whether or not it changed anything (a bold applied to cells already
+/// bold is still a call the run made): the formatting doors do not say what
+/// they changed, so the row says "calls", never "changes" (BUG-0770).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExplicitRunSheetFormats {
     /// The TRUE state-vector index of the sheet.
     pub sheet: usize,
-    pub changes: u32,
+    pub calls: u32,
     pub first_row: u32,
     pub last_row: u32,
     pub first_col: u32,
@@ -286,9 +289,9 @@ fn validate_report(report: &ExplicitRunWritesReport) -> Result<(), String> {
                 f.sheet + 1
             ));
         }
-        if f.changes == 0 {
+        if f.calls == 0 {
             return Err(format!(
-                "The report names formatting on sheet {} with no change; nothing was recorded.",
+                "The report names formatting on sheet {} with no call; nothing was recorded.",
                 f.sheet + 1
             ));
         }
@@ -490,21 +493,24 @@ pub(crate) fn audit_explicit_run_writes_core(
     }
     // WHAT IT FORMATTED (owner, 2026-11-04): one always-on `ScriptExecuted` row
     // per sheet, in the same shape with `formatting: true` and the number of
-    // formatting changes in place of a cell count -- a whole-column format is
-    // one change, never a million cells.
+    // formatting CALLS in place of a cell count -- a whole-column format is
+    // one call, never a million cells. It says what the run ASKED for and where,
+    // not that anything changed: a call that set what the cells already had is
+    // still counted, and "changed the formatting" would then be untrue
+    // (BUG-0770).
     for f in &report.formats {
         let name = names.get(f.sheet).cloned().unwrap_or_else(|| format!("Sheet{}", f.sheet + 1));
         let description = format!(
-            "'{}' from the application '{}'{}, which you started from {}, changed the formatting of {}!{} \
-             ({} formatting change{}){}",
+            "'{}' from the application '{}'{}, which you started from {}, made formatting calls on {}!{} \
+             ({} formatting call{}){}",
             run.macro_id,
             run.application,
             button_phrase,
             door_phrase(door),
             name,
             formatted_range(f),
-            f.changes,
-            if f.changes == 1 { "" } else { "s" },
+            f.calls,
+            if f.calls == 1 { "" } else { "s" },
             caveat
         );
         let mut extra: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
@@ -512,7 +518,7 @@ pub(crate) fn audit_explicit_run_writes_core(
         extra.insert("surfaceId".into(), Value::from(run.macro_id.as_str()));
         extra.insert("sheet".into(), Value::from(f.sheet));
         extra.insert("formatting".into(), Value::from(true));
-        extra.insert("formatChanges".into(), Value::from(f.changes));
+        extra.insert("formatCalls".into(), Value::from(f.calls));
         extra.insert("firstRow".into(), Value::from(f.first_row));
         extra.insert("lastRow".into(), Value::from(f.last_row));
         extra.insert("firstCol".into(), Value::from(f.first_col));

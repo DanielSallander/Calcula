@@ -174,7 +174,12 @@ impl WorkbookHolds {
             // keyed by. Re-uppercasing it (`to_uppercase`) was harmless only
             // for ASCII; the incoming side's `to_uppercase` never met a
             // ligature key (`PÆRESALG` against `PAERESALG`).
-            .map(|(key, nr)| (key.clone(), HeldItem { id: key.clone(), name: nr.name.clone(), stamp: None }))
+            // A sheet's own name is held under `"{sheet}!{key}"` (BUG-0744):
+            // it holds the spelling `key` all the same.
+            .map(|(key, nr)| {
+                let key = crate::named_ranges::name_part_of_registry_key(key).to_string();
+                (key.clone(), HeldItem { id: key, name: nr.name.clone(), stamp: None })
+            })
             .collect();
         Ok(Self { modules, notebooks, names })
     }

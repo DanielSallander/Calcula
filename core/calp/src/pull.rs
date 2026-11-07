@@ -186,6 +186,11 @@ pub struct PullResult {
     /// the author's designations, and a working copy without them would push
     /// the application with its writeback regions silently removed.
     pub writeback_regions: Vec<crate::writeback::WritebackRegionDeclaration>,
+    /// The version's MODEL writeback column declarations, from the same
+    /// verified manifest. Their ids are routed and filed like region ids, so a
+    /// subscribe and a refresh record them in the subscription's ledger and
+    /// refuse one another subscription already declares (BUG-0734).
+    pub model_writebacks: Vec<crate::writeback::ModelWritebackDeclaration>,
 }
 
 /// A generic custom object pulled from an application (distribution brick 4).
@@ -1172,6 +1177,7 @@ pub fn pull_with_options(
         publisher_name: ver_manifest.publisher_name.clone(),
         publisher_key: ver_manifest.publisher_key.clone(),
         writeback_regions: ver_manifest.writeback_regions.clone().unwrap_or_default(),
+        model_writebacks: ver_manifest.model_writebacks.clone().unwrap_or_default(),
     })
 }
 

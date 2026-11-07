@@ -1,8 +1,9 @@
 //! FILENAME: app/src/core/lib/gridRenderer/layout/autoFit.ts
 // PURPOSE: Auto-fit (best-fit) measurement for double-click column/row resize.
 // CONTEXT: Mirrors Excel's AutoFit semantics: fit the widest RENDERED cell in
-//          the whole column (per-cell fonts, formatted display text), skip
-//          wrap-text and merged-across cells, leave empty columns unchanged,
+//          the whole column (per-cell fonts, formatted display text), fit a
+//          wrap-text cell as it wraps now (BUG-0727), skip merged-across cells,
+//          leave empty columns unchanged,
 //          reset empty rows to the default height. Extension-rendered content
 //          (pivot overlays, filter buttons) participates via the
 //          @api/autoFitContributors registry.
@@ -44,6 +45,7 @@ import { buildCellFont, pointsToPixels } from "../fonts";
 import {
   parseTextOrientation,
   rotatedTextExtent,
+  rotatedWrapLength,
   stackedTextExtent,
   ORIENTATION_LINE_HEIGHT_FACTOR,
   type TextOrientation,
@@ -73,6 +75,7 @@ function orientedTextExtent(
   orientation: Exclude<TextOrientation, { kind: "horizontal" }>,
   text: string,
   fontSizePoints: number,
+  wrapLength?: number,
 ): { width: number; height: number } {
   const lineHeight = pointsToPixels(fontSizePoints) * LINE_HEIGHT_FACTOR;
   if (orientation.kind === "stacked") {
@@ -80,9 +83,14 @@ function orientedTextExtent(
   }
   // A hard break puts rotated text on several lines (the painter's
   // `layoutRotatedLines`): the block is the widest line by one pitch per line.
-  // Wrap Text's own breaks depend on the row height being fitted and are not
-  // modelled here; a wrapped value is measured at its hard breaks only.
-  const lines = splitHardBreaks(text);
+  // `wrapLength`: Wrap Text's own breaks, at the length the painter breaks a
+  // rotated line at (`rotatedWrapLength` of the row's content box) -- the
+  // COLUMN fit of a wrapped rotated value, whose row height is known. Row
+  // AutoFit passes none: Excel fits the row to the value on ONE line whether
+  // Wrap Text is on or off [LIVE, 2026-11-06, lane uimisc probe2: 178.5pt at
+  // +-90, 132pt at +-45, 99.75pt at 30, the same with wrap on and off at 45.75
+  // and 108.75pt wide columns], which is the wrap-off measurement.
+  const lines = wrapLength !== undefined ? wrapText(ctx, text, wrapLength).map((l) => l.trimEnd()) : splitHardBreaks(text);
   let widest = 0;
   for (const line of lines) widest = Math.max(widest, ctx.measureText(line).width);
   return rotatedTextExtent(widest, lineHeight * lines.length, orientation.degrees);
@@ -205,11 +213,57 @@ function maxRichTextFontSize(runs: RichTextRun[], baseFontSize: number): number 
 }
 
 /**
+ * The column's geometry a WRAPPED value is fitted at (BUG-0727): its width
+ * now, which a horizontal value wraps at, and each row's height, which a
+ * rotated value wraps at.
+ */
+export interface ColumnFitLayout {
+  currentWidth: number;
+  rowHeight: (row: number) => number;
+  /**
+   * The sheet's STANDARD column width: a column narrower than it wraps its
+   * words at this width for the fit, as Excel's does (see
+   * `measureOptimalColumnWidth`). Absent: the current width alone.
+   */
+  standardWidth?: number;
+}
+
+/**
+ * The width a wrapped horizontal value is laid out at for a column AutoFit:
+ * the column's current width, or the sheet's STANDARD column width when the
+ * column is narrower -- unless a word of the value is wider than that room, in
+ * which case Excel's character breaking (not modelled) is left to the current
+ * width, as before. Excel [LIVE, Excel 16 over COM, 2026-11-06, dtui/probe4.ps1,
+ * Calibri 11, wrapped A1, ColumnWidth 1..12 then AutoFit, the standard width
+ * 8.43 = 48pt]: "one two three four five six seven eight" fits 46.5pt (five
+ * lines) at every width from 9pt to 45.75pt, 49.5 at 51, 56.25 at 56.25 and
+ * 61.5, 66.75 at 66.75; "a bb ccc dddd eeeee ffffff" 43.5 up to 51pt, 51.75 at
+ * 56.25; "WWWW WWWW" 41.25 and "aa bb" 31.5 at every width -- each the widest
+ * line of the value wrapped at max(width, 48pt). A single word that must break
+ * by character ("abcdefghij", 54pt on one line) fits 30.75pt, two balanced
+ * lines, at every width up to 30pt, and grows with the width from 35.25pt: a
+ * different rule, not derived from these measurements.
+ */
+function wrappedFitRoom(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  current: number,
+  standard: number | undefined,
+): number {
+  if (standard === undefined || standard <= current) return current;
+  const words = text.split(/\s+/).filter((w) => w !== "");
+  if (words.some((w) => ctx.measureText(w).width > standard)) return current;
+  return standard;
+}
+
+/**
  * Measure the optimal width for a column based on its cell contents.
  *
  * Excel semantics:
  * - Each cell measured with its own font on its formatted display text.
- * - Wrap-text cells never widen a column (their text fits any width).
+ * - A wrap-text cell is fitted as it wraps at the column's current width (its
+ *   widest line), a rotated one as it wraps at its row's height -- given the
+ *   geometry (`layout`); without it a wrap-text cell sizes nothing.
  * - Cells merged across columns are ignored.
  * - The header letter is NOT content — an empty column stays unchanged.
  *
@@ -240,6 +294,7 @@ export function measureOptimalColumnWidth(
   minWidth: number,
   includeContributions = true,
   rows?: ReadonlyArray<{ startRow: number; endRow: number }>,
+  layout?: ColumnFitLayout,
 ): number | null {
   const ctx = getMeasureContext();
   let maxWidth = 0;
@@ -291,17 +346,58 @@ export function measureOptimalColumnWidth(
     }
 
     const style = cell.styleIndex < styles.length ? styles[cell.styleIndex] : undefined;
+    const orientation = parseTextOrientation(style?.textRotation);
 
-    // Wrap-text cells never widen a column (Excel: their text is defined to
-    // fit whatever width the column has)
-    if (style?.wrapText) {
+    // WRAPPED TEXT (BUG-0727). Excel fits the column to the value AS WRAPPED AT
+    // THE COLUMN'S CURRENT WIDTH -- its widest line -- and, for rotated text,
+    // to the block wrapped at the ROW's height [LIVE, 2026-11-06, lane uimisc
+    // probe2; Calibri 11, "one two three four five six seven eight", 175.5pt on
+    // one line: 213.75pt wide -> 178.5 (one line), 161.25 -> 152.25, 82.5 ->
+    // 66.75, 56.25 -> 56.25; a 90-degree wrapped value in a 30pt row -> 139.5pt,
+    // in a 60pt row -> 64.5pt]. Without the column's geometry (`layout`) there
+    // is nothing to wrap at, and a wrapped value sizes nothing, as before.
+    const wrapped = style?.wrapText === true;
+    if (wrapped && !layout) {
       continue;
     }
 
     hasContent = true;
-    const orientation = parseTextOrientation(style?.textRotation);
     let textWidth: number;
-    if (orientation.kind !== "horizontal") {
+    if (wrapped && layout && orientation.kind === "angle") {
+      const fontString = buildFontString(style, theme.cellFontFamily, theme.cellFontSize);
+      if (fontString !== lastFont) {
+        ctx.font = fontString;
+        lastFont = fontString;
+      }
+      // The painter's content box for this cell's row (rendering/cells.ts:
+      // the row height less its top and bottom padding).
+      const rowHeight = layout.rowHeight(cell.row);
+      const wrapLength = rotatedWrapLength(orientation.degrees, { left: 0, right: 0, top: PADDING_Y, bottom: rowHeight - PADDING_Y });
+      textWidth = orientedTextExtent(ctx, orientation, cell.display, style?.fontSize || theme.cellFontSize, wrapLength).width;
+    } else if (wrapped && layout && orientation.kind === "horizontal") {
+      // The widest line the painter draws at the current width (the same
+      // `wrapText` and the same room: the width less the padding and the
+      // indent it really draws, layout/cellIndent.ts).
+      const fontString = buildFontString(style, theme.cellFontFamily, theme.cellFontSize);
+      if (fontString !== lastFont) {
+        ctx.font = fontString;
+        lastFont = fontString;
+      }
+      const chromeX = PADDING_X * 2 + effectiveIndentPx(style?.textAlign, style?.indent);
+      // A column narrower than the sheet's standard width wraps the words at
+      // the standard width (`wrappedFitRoom`, Excel [LIVE]).
+      const available = wrappedFitRoom(
+        ctx,
+        cell.display,
+        layout.currentWidth - chromeX,
+        layout.standardWidth !== undefined ? layout.standardWidth - chromeX : undefined,
+      );
+      textWidth = 0;
+      for (const line of wrapText(ctx, cell.display, available)) {
+        // A wrapped line's trailing space is no ink: the fit is to the glyphs.
+        textWidth = Math.max(textWidth, ctx.measureText(line.trimEnd()).width);
+      }
+    } else if (orientation.kind !== "horizontal") {
       // ROTATED OR STACKED: the column needs the block's WIDTH -- one line for
       // Rotate Text Up/Down, the widest character for stacked text -- not the
       // length of the text, which now runs down the cell. Measured as the

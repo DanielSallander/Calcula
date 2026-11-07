@@ -44,7 +44,11 @@ pub struct CellDigest {
     pub v: String,
     /// The raw CellValue as JSON (catches changes invisible in display text).
     pub raw: Value,
-    /// Canonical (non-localized) formula without leading '=', if any.
+    /// Canonical (non-localized) formula without leading '=', if any -- the
+    /// STORED form (`formula_string_raw`, what a save writes), never the display
+    /// form: the display collapses a named LAMBDA's resolved `__INVOKE__` marker
+    /// into its friendly name, so two different stored formulas digested alike
+    /// and an undo or reload that changed one of them passed (BUG-0751).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub f: Option<String>,
     /// Style index into usedStyles.
@@ -219,7 +223,7 @@ fn digest_cells(
             CellDigest {
                 v: crate::format_cell_value(&cell.value, style, locale),
                 raw: to_value_or_null(&cell.value),
-                f: cell.formula_string(),
+                f: cell.formula_string_raw(),
                 s: cell.style_index,
                 rt: to_value_or_null(&cell.rich_text),
             },
@@ -901,4 +905,34 @@ pub(crate) fn build_workbook_state_digest(
     });
 
     Ok(digest)
+}
+
+#[cfg(test)]
+mod stored_form_tests {
+    use super::*;
+
+    /// BUG-0751: the digest's formula is the STORED form a save writes
+    /// (`formula_string_raw`), never the display form, which collapses a named
+    /// LAMBDA's resolved `__INVOKE__` marker into its friendly name -- so two
+    /// different stored formulas digested alike, and an undo or a reload that
+    /// changed one into the other passed every oracle.
+    ///
+    /// SABOTAGE (namescalp-digest): digest `cell.formula_string()` again --
+    /// fails at "THE STORED FORM".
+    #[test]
+    fn the_digest_keeps_the_stored_formula_not_the_display() {
+        let cell = engine::Cell::new_formula("=__INVOKE__(\"Double\",LAMBDA(x,x*2),5)".to_string());
+        let display = cell.formula_string().expect("a formula");
+        let stored = cell.formula_string_raw().expect("a formula");
+        assert_ne!(display, stored, "precondition: the display collapses the marker ({display} vs {stored})");
+        let mut grid = engine::Grid::new();
+        grid.set_cell(0, 0, cell);
+        let styles = engine::StyleRegistry::new();
+        let locale = engine::LocaleSettings::from_locale_id("en-US");
+        let mut used = BTreeMap::new();
+        let cells = digest_cells(&grid, &styles, &locale, &mut used);
+        let f = cells.values().next().and_then(|c| c.f.clone()).expect("the cell's formula");
+        assert_eq!(f, stored, "THE STORED FORM is digested");
+        assert!(f.contains(engine::ast_render::NAMED_INVOKE_MARKER), "{f}");
+    }
 }

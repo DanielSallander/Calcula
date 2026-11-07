@@ -50,6 +50,7 @@ import {
   type EditSheetRef,
 } from "../lib/editSheetIdentity";
 import { formulaA1ToR1C1, formulaR1C1ToA1 } from "../lib/r1c1";
+import { dataTableEditText } from "../lib/dataTableCopy";
 import { isSheetGroupingActive, getGroupedSheetIndices } from "../state/sheetGrouping";
 import { cellEvents, cellToChange } from "../lib/cellEvents";
 import { emitAppEvent, AppEvents } from "../lib/events";
@@ -1261,6 +1262,13 @@ export function useEditing(): UseEditingReturn {
         }
       }
 
+      // A data table's body cell opens on Excel's `=TABLE(,A1)`: never the
+      // identity argument Calcula stores, the inputs absolute in R1C1
+      // (`dataTableEditText`). Committing it is refused by the backend as
+      // Excel refuses it ("That function isn't valid.").
+      const tableEdit = initialValue === undefined ? dataTableEditText(value, false) : null;
+      if (tableEdit !== null) value = tableEdit;
+
       // Reference highlighting always parses the A1 form; capture it before any
       // R1C1 display swap below.
       const a1Value = value;
@@ -1268,7 +1276,9 @@ export function useEditing(): UseEditingReturn {
       // In R1C1 mode, edit an existing formula in R1C1 notation (commitEdit
       // converts it back to A1 before writing). Fresh input started by typing
       // (initialValue provided) is already in the active style, so leave it.
-      if (initialValue === undefined && state.referenceStyle === "R1C1" && value.startsWith("=")) {
+      if (tableEdit !== null && state.referenceStyle === "R1C1") {
+        value = dataTableEditText(value, true) ?? value;
+      } else if (initialValue === undefined && state.referenceStyle === "R1C1" && value.startsWith("=")) {
         value = formulaA1ToR1C1(value, editRow, editCol);
       }
 

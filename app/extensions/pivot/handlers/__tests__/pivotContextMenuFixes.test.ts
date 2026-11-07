@@ -91,12 +91,13 @@ import {
   getPivotFieldUniqueValues,
   expandCollapseLevel,
   deletePivotTable,
+  sortPivotField,
   type PivotCellData,
   type PivotRowData,
   type PivotViewResponse,
 } from "../../lib/pivot-api";
 import { cachePivotView, deleteCachedPivotView, getCellWindowCache } from "../../lib/pivotViewStore";
-import { registerPivotContextMenuItems } from "../pivotContextMenu";
+import { registerPivotContextMenuItems, sortFieldDialogData } from "../pivotContextMenu";
 import {
   getCachedCellData,
   getItemLabelForCell,
@@ -535,5 +536,45 @@ describe("value-cell helpers", () => {
     install(smallView());
     expect(expandDisabledReason(ctxAt(3, 1), true)).toBeNull();
     expect(expandDisabledReason(ctxAt(1, 1), false)).toBeNull();
+  });
+});
+
+describe("Move moves the item by hand (BUG-0733)", () => {
+  it("Move \"West\" Up sends ONE manual sort naming West's member id and the move", async () => {
+    install(smallView());
+    const up = findItem("pivot:move:up");
+    expect(up.disabled ?? false).toBe(false);
+    await up.onClick(ctxAt(3, 0));
+    expect(sortPivotField).toHaveBeenCalledWith({
+      pivotId: "p1",
+      fieldIndex: 3,
+      sortBy: "manual",
+      moveItem: { valueId: 6, to: "up" },
+    });
+    await findItem("pivot:move:end").onClick(ctxAt(1, 0));
+    expect(sortPivotField).toHaveBeenLastCalledWith({
+      pivotId: "p1",
+      fieldIndex: 3,
+      sortBy: "manual",
+      moveItem: { valueId: 5, to: "end" },
+    });
+  });
+
+  it("the Sort dialog opens on the field's current sort", () => {
+    install(
+      smallView({
+        rowFieldSummaries: [
+          { fieldIndex: 3, fieldName: "Region", hasActiveFilter: false, sortOrder: "desc", sortByValueField: "Sum of Sales" },
+        ],
+      } as never),
+    );
+    expect(sortFieldDialogData(ctxAt(1, 0), "p1", 3)).toEqual({
+      pivotId: "p1",
+      fieldIndex: 3,
+      fieldName: "Region",
+      valueFieldNames: ["Sum of Sales", "Count of Sales"],
+      currentOrder: "descending",
+      currentBy: "Sum of Sales",
+    });
   });
 });

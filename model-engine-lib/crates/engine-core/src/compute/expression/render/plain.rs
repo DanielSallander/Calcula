@@ -143,8 +143,8 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 // DAX compares a BLANK as 0 / "" / FALSE against a literal of
                 // that type (`COUNTROWS(t) = 0` is TRUE over an empty table).
                 if self.semantics == Semantics::Dax {
-                    l = dax_semantics::comparison_operand(l, left, right);
-                    r = dax_semantics::comparison_operand(r, right, left);
+                    l = dax_semantics::comparison_operand_in(l, left, right, self.column_classes());
+                    r = dax_semantics::comparison_operand_in(r, right, left, self.column_classes());
                 }
                 format!("({l} {} {r})", op.as_sql())
             }
@@ -187,35 +187,21 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 cases,
                 default,
             } => {
-                let mut subject = self.render_plain(expr)?;
-                // SWITCH compares with `=`: a BLANK subject matches DAX's
-                // conversion for the case values' type when they all share
-                // one (`SWITCH(COUNTROWS(t), 0, ...)` matches over no rows).
-                if self.semantics == Semantics::Dax {
-                    if let Some((first, _)) = cases.first() {
-                        let zero = dax_semantics::blank_compares_as(first);
-                        if zero.is_some()
-                            && cases
-                                .iter()
-                                .all(|(v, _)| dax_semantics::blank_compares_as(v) == zero)
-                        {
-                            subject = dax_semantics::comparison_operand(subject, expr, first);
-                        }
-                    }
-                }
-                let mut sql = format!("CASE {subject}");
-                for (val, result) in cases {
-                    sql.push_str(&format!(
-                        " WHEN {} THEN {}",
-                        self.render_plain(val)?,
-                        self.render_plain(result)?
-                    ));
-                }
-                if let Some(d) = default {
-                    sql.push_str(&format!(" ELSE {}", self.render_plain(d)?));
-                }
-                sql.push_str(" END");
-                sql
+                // SWITCH matches with STRICT equality: BLANK matches only
+                // BLANK, never 0 ([LIVE]; `dax_semantics::switch_sql`).
+                let subject = self.render_plain(expr)?;
+                let rendered = cases
+                    .iter()
+                    .map(|(val, result)| {
+                        Ok((
+                            self.render_plain(val)?,
+                            self.switch_value_may_be_blank(val),
+                            self.render_plain(result)?,
+                        ))
+                    })
+                    .collect::<EngineResult<Vec<_>>>()?;
+                let default = default.as_ref().map(|d| self.render_plain(d)).transpose()?;
+                dax_semantics::switch_sql(&subject, &rendered, default.as_deref())
             }
             Expression::SafeDivide {
                 numerator,
@@ -532,6 +518,18 @@ impl<D: Dialect> SqlRenderer<'_, D> {
     /// Build the `CASE WHEN` condition for simple KEEP filter predicates:
     /// qualified column, comparison operator, quoted literal, joined with
     /// ` AND `.
+    ///
+    /// The literal is QUOTED whatever the column holds: this renderer has no
+    /// model, and the mode serves the PostgreSQL pushdown, where a quoted
+    /// literal is of unknown type and takes the COLUMN's (`amount > '9'`
+    /// compares numbers, `code < '9'` text). The model-aware local renderers
+    /// type it from the column instead
+    /// ([`crate::compute::context::format_filter_value`], BUG-0758). BLANK
+    /// stays strict (`NULL op x` is not TRUE): DAX's BLANK-as-0 rule for a
+    /// KEEP's simple predicate is an open DAX-parity item. Row-level security
+    /// shares the [`FilterPredicate`] type but never this renderer: it is
+    /// converted by `engine_query::security_filter`, strict on BLANK by owner
+    /// decision (BUG-0759, 2026-11-06).
     fn keep_condition(&self, filters: &[FilterPredicate]) -> EngineResult<String> {
         let parts = filters
             .iter()

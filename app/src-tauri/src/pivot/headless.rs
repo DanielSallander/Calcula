@@ -327,7 +327,8 @@ pub(crate) async fn bi_pivot_filtered_view(
     let formats_changed = carry_value_formats(&mut def, &real_def);
     if !(def.row_fields.is_empty() && def.column_fields.is_empty()) {
         // The real pivot's LOOK: its layout and each field's display settings
-        // (sort, subtotals, collapsed members, grouping), by field name. The
+        // (sort -- a hand-placed order and grouped levels' sorts included --
+        // subtotals, collapsed members, grouping), by field name. The
         // rebuilt request carries none of them ("keep current layout").
         carry_display_settings(&mut def, &real_def);
         view = safe_calculate_pivot(&def, &mut cache);
@@ -387,6 +388,8 @@ fn carry_display_settings(def: &mut pivot_engine::PivotDefinition, real: &pivot_
         field.collapsed_items = old.collapsed_items.clone();
         field.show_all_items = old.show_all_items;
         field.grouping = old.grouping.clone();
+        field.manual_item_order = old.manual_item_order.clone();
+        field.level_sorts = old.level_sorts.clone();
         field.number_format = old.number_format.clone();
     }
 }
@@ -923,8 +926,9 @@ fn measure_only_kept_items(field: &DesignQueryFieldRef, all_values: Option<&[Str
 /// is therefore re-spelled through `f64`'s round-trip form. The blank member
 /// -- its key "" or the legacy "(blank)" -- is spelled the way the engine's
 /// IN-list reads it (`bi::member::engine_in_value`, ruling Q8), and anything
-/// that is not a number stays as written.
-fn engine_spelling(data_type: Option<&bi_engine::DataType>, item: &str) -> String {
+/// that is not a number stays as written. Shared with the mask overlay
+/// (`mask_overlay.rs`), whose IN-lists carry pivot member keys.
+pub(crate) fn engine_spelling(data_type: Option<&bi_engine::DataType>, item: &str) -> String {
     if pivot_engine::is_blank_member_key(item) {
         return crate::bi::member::engine_in_value(item);
     }

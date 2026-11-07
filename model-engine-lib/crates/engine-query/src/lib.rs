@@ -12,6 +12,7 @@ pub mod executor;
 pub mod in_memory_connector;
 pub mod parquet_connector;
 pub mod planner;
+pub mod security_filter;
 pub mod registry;
 pub mod request;
 pub mod rest_connector;

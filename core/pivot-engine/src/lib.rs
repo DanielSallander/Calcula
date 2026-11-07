@@ -20,4 +20,4 @@ pub mod calculated;
 pub use definition::*;
 pub use cache::*;
 pub use view::*;
-pub use engine::{calculate_pivot, drill_down, hidden_member_ids};
+pub use engine::{apply_definition_filters, calculate_pivot, drill_down, hidden_member_ids};

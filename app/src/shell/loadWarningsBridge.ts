@@ -16,7 +16,9 @@
 // Since round 17 `save_file` emits it too, once an .xlsx export is written,
 // when the file could not hold something and left it out (a hyperlink the
 // format refuses, a defined name Excel does not allow; section `xlsxExport`)
-// -- it used to be a stderr line only.
+// -- it used to be a stderr line only. And an .xlsx OPEN says what it could not
+// carry (section `xlsxImport`): a formula Calcula cannot read, opened as its
+// value, and a table filter it cannot hold (BUG-0740).
 //
 // One event, one bridge -- the shape of dirtyStateBridge.ts.
 
@@ -28,7 +30,7 @@ import { showToast } from "../api/notifications";
 export const BACKEND_LOAD_WARNINGS_EVENT = "document:load-warnings";
 
 /** Payload of {@link BACKEND_LOAD_WARNINGS_EVENT}. `section` is an id
- *  (`sheetNames`, `autoFilters`, `xlsxExport`) and `message` the ready sentence the user
+ *  (`sheetNames`, `autoFilters`, `xlsxExport`, `xlsxImport`) and `message` the ready sentence the user
  *  reads -- worded by the backend in plain words; file names and parser
  *  errors stay in its log (rev13C). The backend emits every warning only once
  *  the open has succeeded. */

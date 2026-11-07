@@ -158,6 +158,10 @@ function activate(context: ExtensionContext): void {
       startCol: sel.startCol ?? sel.activeCol,
       endRow: sel.endRow ?? sel.activeRow,
       endCol: sel.endCol ?? sel.activeCol,
+      // The ACTIVE cell, when the grid names one apart from the far corner: a
+      // New Rule entry is typed for it (BUG-0748), as Excel reads it.
+      ...(sel.activeRow !== undefined ? { activeRow: sel.activeRow } : {}),
+      ...(sel.activeCol !== undefined ? { activeCol: sel.activeCol } : {}),
     });
     scheduleScopeRefresh();
   });

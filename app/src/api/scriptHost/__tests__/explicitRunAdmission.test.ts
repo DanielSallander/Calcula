@@ -811,8 +811,8 @@ describe("a granted run FORMATS on any sheet, on the trail and undone whole (own
       grantId,
       completed: true,
       formats: [
-        { sheet: 0, changes: 2, firstRow: 1, lastRow: 5, firstCol: 0, lastCol: 4 },
-        { sheet: 1, changes: 1, firstRow: 0, lastRow: 1_048_575, firstCol: 2, lastCol: 2 },
+        { sheet: 0, calls: 2, firstRow: 1, lastRow: 5, firstCol: 0, lastCol: 4 },
+        { sheet: 1, calls: 1, firstRow: 0, lastRow: 1_048_575, firstCol: 2, lastCol: 2 },
       ],
     });
   });
@@ -839,7 +839,7 @@ describe("a granted run FORMATS on any sheet, on the trail and undone whole (own
     expect(h.reports[0]).toMatchObject({
       completed: false,
       rolledBack: true,
-      formats: [{ sheet: 0, changes: 1, firstRow: 2, lastRow: 2, firstCol: 2, lastCol: 2 }],
+      formats: [{ sheet: 0, calls: 1, firstRow: 2, lastRow: 2, firstCol: 2, lastCol: 2 }],
     });
     expect(h.reports[0].othersUndone, "the run's own format was counted as somebody else's").toBeUndefined();
   });
@@ -914,7 +914,7 @@ describe("a granted run FORMATS on any sheet, on the trail and undone whole (own
     expect(h.resizes).toEqual(["rows [[6,8]] 30"]);
     expect(h.reports[0]).toMatchObject({
       failedCalls: 1,
-      formats: [{ sheet: 0, changes: 1, firstRow: 6, lastRow: 8, firstCol: 0, lastCol: 16_383 }],
+      formats: [{ sheet: 0, calls: 1, firstRow: 6, lastRow: 8, firstCol: 0, lastCol: 16_383 }],
     });
   });
 

@@ -123,13 +123,24 @@ struct RenderCtx<'a> {
     collapse: bool,
     path: Vec<usize>,
     spans: Option<&'a mut SpanMap>,
-    /// Show a name spelled like a cell that no binder in scope binds QUOTED
-    /// (the formula bar's spelling, [`render_cell_shaped_name`]).
+    /// The formula bar's DISPLAY choices: a whole table as its bare name
+    /// (`Tbl`, stored `Tbl[]`).
     quote_names: bool,
+    /// Show a name spelled like a cell that no binder in scope binds QUOTED
+    /// ([`render_cell_shaped_name`]): always in the formula bar, and in the
+    /// STORED text of a formula that declares no cell-shaped LET / LAMBDA
+    /// name -- there nothing else tells the name from the cell it spells on
+    /// the next load (BUG-0739).
+    quote_cell_names: bool,
     /// The LET names and LAMBDA parameters in scope at this point of the
     /// walk, so a name spelled like a cell that NONE of them binds is shown
     /// quoted ([`render_cell_shaped_name`]).
     bound: Vec<String>,
+    /// The formula is read in R1C1 (it declares a cell-shaped LET / LAMBDA
+    /// name or holds an unbound R1C1 spelling), where `Sheet2!A:A` is a range
+    /// of two NAMES held like a qualified name `Sheet2!A` -- so that one keeps
+    /// its `A:A` spelling (lane formfix).
+    r1c1_reading: bool,
 }
 
 impl RenderCtx<'_> {
@@ -174,15 +185,22 @@ pub const NAMED_INVOKE_MARKER: &str = "__INVOKE__";
 /// authored call rather than the expanded LAMBDA. Use [`render_formula_raw`]
 /// wherever the expanded form must be preserved (persistence / round-tripping).
 pub fn render_formula(expr: &Expression) -> String {
-    render_expr_quoting(expr, true, true)
+    render_expr_quoting(expr, true, true, true)
 }
 
 /// Like [`render_formula`] but preserves the literal `__INVOKE__(...)` marker
 /// instead of collapsing it to the friendly function name. Used by persistence
 /// so the saved (and re-parsed-on-load) formula keeps the resolved form that
 /// dependency extraction and evaluation rely on.
+///
+/// A NAME SPELLED LIKE A CELL is written quoted (`J825+'D5'`) unless the
+/// formula declares a cell-shaped LET / LAMBDA name (BUG-0739): such a
+/// formula is read in R1C1 on every load (`parser::apply_r1c1_fallback`), so
+/// its bare names read back as names -- but one read in R1C1 only for an R1C1
+/// spelling (`=R[-1]C+D5`) has none left once entry resolved it, and a bare
+/// `D5` would come back as the CELL. The parser reads the quote back.
 pub fn render_formula_raw(expr: &Expression) -> String {
-    render_expr_quoting(expr, false, false)
+    render_expr_quoting(expr, false, false, !parser::parser::declares_cell_shaped_name(expr))
 }
 
 /// Collapse a PERSISTED formula string to the form the user sees.
@@ -209,14 +227,27 @@ pub fn render_formula_raw(expr: &Expression) -> String {
 /// a comparison against the original spelling is what the caller had before,
 /// which is a worse answer than the collapse and a much better one than "".
 pub fn collapse_formula_text(raw: &str) -> String {
-    if !raw.contains(NAMED_INVOKE_MARKER) {
+    // A quote may be a cell-shaped name the stored text quotes
+    // (`render_formula_raw`, BUG-0739), which this text must not carry.
+    if !raw.contains(NAMED_INVOKE_MARKER) && !raw.contains('\'') {
         return raw.to_string();
     }
-    // Collapsed, but a name spelled like a cell stays BARE
-    // (`render_cell_shaped_name`): the .xlsx writer reads this text and
-    // writes such a name `_xlnm.D1`, which a quote would hide from it.
+    // Collapsed, with a name spelled like a cell quoted exactly where the
+    // persisted text quotes it ([`render_formula_raw`]): in a formula that
+    // declares NO cell-shaped LET / LAMBDA name and holds no R1C1-only name
+    // (a bare `C` / `R`). Bare there, `J59+D5` reads
+    // as the CELL D5 -- to the .xlsx writer, which turns this text into
+    // Excel's file text, and to every reader of the file -- where the
+    // formula holds the name `'D5'` (Excel's `J59+_xlnm.D5`, written by
+    // `xlsx_formula_text` from the quote). A formula that does either is read
+    // in R1C1, so its bare names are names, and stays bare (the writer's own
+    // R1C1 reading, `mark_r1c1_fallback`, spells each of its cells).
     match parser::parse(raw) {
-        Ok(ast) => render_expr_quoting(&ast, true, false),
+        Ok(ast) => {
+            let quote_cell_names =
+                !parser::parser::declares_cell_shaped_name(&ast) && !parser::parser::holds_unbound_r1c1_name(&ast);
+            render_expr_quoting(&ast, true, false, quote_cell_names)
+        }
         Err(_) => raw.to_string(),
     }
 }
@@ -235,27 +266,43 @@ pub fn render_with_spans(expr: &Expression, collapse: bool) -> (String, SpanMap)
             path: Vec::new(),
             spans: Some(&mut spans),
             quote_names: collapse,
+            quote_cell_names: collapse,
             bound: Vec::new(),
+            r1c1_reading: reads_in_r1c1(expr),
         };
         render_into(expr, &mut ctx, &mut out);
     }
     (out, spans)
 }
 
-/// The renderer with its two display choices: collapse the named-invoke
-/// marker, and quote a name spelled like a cell that nothing binds
-/// ([`render_cell_shaped_name`]; the formula bar only).
-fn render_expr_quoting(expr: &Expression, collapse: bool, quote_names: bool) -> String {
+/// The renderer with its display choices: collapse the named-invoke marker,
+/// show a whole table bare (`quote_names`, the formula bar only), and quote a
+/// name spelled like a cell that nothing binds ([`render_cell_shaped_name`]).
+fn render_expr_quoting(expr: &Expression, collapse: bool, quote_names: bool, quote_cell_names: bool) -> String {
     let mut out = String::new();
     let mut ctx = RenderCtx {
         collapse,
         path: Vec::new(),
         spans: None,
         quote_names,
+        quote_cell_names,
         bound: Vec::new(),
+        r1c1_reading: reads_in_r1c1(expr),
     };
     render_into(expr, &mut ctx, &mut out);
     out
+}
+
+/// Whether `expr` is read in R1C1 (`parser::apply_r1c1_fallback`).
+fn reads_in_r1c1(expr: &Expression) -> bool {
+    parser::parser::declares_cell_shaped_name(expr) || parser::parser::holds_unbound_r1c1_name(expr)
+}
+
+/// Whether `name` is spelled like an A1 column (`A`, `XFD`).
+fn is_column_spelling(name: &str) -> bool {
+    (1..=3).contains(&name.len())
+        && name.chars().all(|c| c.is_ascii_alphabetic())
+        && name.chars().fold(0u32, |n, c| n * 26 + (c.to_ascii_uppercase() as u32 - 'A' as u32 + 1)) <= 16_384
 }
 
 /// THE renderer. Every AST->text surface in the product bottoms out here.
@@ -276,45 +323,47 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
         // `Sheet2!A1` in a formula read in R1C1 is that sheet's NAME, held as
         // the range of the name with itself (`parser::apply_r1c1_fallback`):
         // written back the way it was typed, one name behind its sheet.
+        // A SHEET-QUALIFIED NAME (`Sheet1!Rate`, BUG-0744/0749) is the same
+        // node, written `Sheet1!Rate` as typed [LIVE, lane formfix p1.json].
         Expression::Range { sheet: sheet @ Some(_), start: s, end: e, .. }
             if matches!(
                 (s.as_ref(), e.as_ref()),
                 (Expression::NamedRef { name: a, .. }, Expression::NamedRef { name: b, .. })
-                    if a.eq_ignore_ascii_case(b) && is_cell_spelling(a)
+                    if a.eq_ignore_ascii_case(b)
+                        && (is_cell_spelling(a) || !(ctx.r1c1_reading && is_column_spelling(a)))
             ) =>
         {
             out.push_str(&render_sheet_prefix(sheet));
-            // Bare, not Excel's `Sheet2!'A1'`: a quote after `!` does not
-            // parse back (`render_cell_shaped_name`).
-            if let Expression::NamedRef { name, .. } = s.as_ref() {
-                ctx.bound.push(name.clone());
-            }
+            // Excel's `Sheet2!'A1'` [LIVE, lane formula p1.json], which the
+            // parser reads back as this sheet name (BUG-0739); bare where the
+            // name needs no quote (`quote_cell_names`).
             ctx.enter(0);
-            render_into(s, ctx, out);
-            ctx.leave();
-            if matches!(s.as_ref(), Expression::NamedRef { .. }) {
-                ctx.bound.pop();
+            if let Expression::NamedRef { name, .. } = s.as_ref() {
+                let start = out.len();
+                if ctx.quote_cell_names && is_cell_spelling(name) {
+                    out.push('\'');
+                    out.push_str(name);
+                    out.push('\'');
+                } else {
+                    out.push_str(name);
+                }
+                let end = out.len();
+                ctx.record(start, end);
             }
+            ctx.leave();
         }
 
         Expression::Range { sheet, start: s, end: e, .. } => {
             out.push_str(&render_sheet_prefix(sheet));
-            // A name half is quoted only where the parser reads a quote back
-            // as a range half: never behind a sheet (`Sheet2!D1:D2`, a range
-            // of names in R1C1 -- a quote after `!` names no sheet), and the
-            // END only after a quoted START (`'D1':'D2'`, `'D1':X1`; `X1:D2`
-            // and `$D$1:D2` stay bare, and the R1C1 fallback reads their
-            // names). A half left bare counts as bound for this range.
+            // A name half is quoted wherever the parser reads a quote back as
+            // a range half: either half of an unqualified range (`'D1':'D2'`,
+            // `'D1':X1`, `J881:'D5'`, `$D1961:'D5'` -- Excel's formula bar
+            // [LIVE, lane formd p1/p2], BUG-0739), never behind a sheet
+            // (`Sheet2!D1:D2`, a range of names in R1C1). A half left bare
+            // counts as bound for this range.
             let depth = ctx.bound.len();
-            let start_quoted = sheet.is_none()
-                && matches!(s.as_ref(), Expression::NamedRef { name, .. }
-                    if ctx.quote_names
-                        && parser::parser::is_cell_spelling(name)
-                        && !ctx.bound.iter().any(|b| b.eq_ignore_ascii_case(name)));
             let bare_halves: Vec<&Expression> = if sheet.is_some() {
                 vec![s.as_ref(), e.as_ref()]
-            } else if !start_quoted {
-                vec![e.as_ref()]
             } else {
                 Vec::new()
             };
@@ -330,8 +379,10 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
             ctx.enter(1);
             // `Sheet1!A1:Sheet1!A3` keeps its second qualifier, as Excel's
             // formula bar does (BUG-0646): the parser stores it on the end
-            // corner. A corner without one renders bare, as it always has.
-            if matches!(e.as_ref(), Expression::CellRef { sheet: Some(_), .. }) && sheet.is_some() {
+            // corner -- and so does `A1:Sheet1!A3`, whose FIRST half is
+            // unqualified (BUG-0737, [LIVE] shown as typed). A corner without
+            // one renders bare, as it always has.
+            if matches!(e.as_ref(), Expression::CellRef { sheet: Some(_), .. }) {
                 render_into(e, ctx, out);
             } else {
                 render_no_sheet_into(e, ctx, out);
@@ -415,6 +466,9 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
                     for a in &args[..last] {
                         if let Expression::NamedRef { name, .. } = a {
                             ctx.bound.push(name.clone());
+                        } else if let Some(name) = parser::parser::optional_parameter_name(a) {
+                            // `[A1]`, an optional parameter, binds `A1` too.
+                            ctx.bound.push(name.to_string());
                         }
                     }
                 }
@@ -460,12 +514,14 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
             } else {
                 let _ = write!(out, "{}:{}!", start_sheet, end_sheet);
             }
-            // A name behind the span (`Sheet1:Sheet2!A1`, read in R1C1) stays
-            // bare: a quote after `!` would not parse back.
+            // A name behind the span (`Sheet1:Sheet2!A1`, read in R1C1) is
+            // quoted as Excel shows it (`Sheet1:Sheet2!'A1'` [LIVE, lane
+            // formula p1.json]), which the parser reads back (BUG-0739); the
+            // halves of a range of names behind it stay bare.
             let depth = ctx.bound.len();
             let halves: Vec<&Expression> = match reference.as_ref() {
                 Expression::Range { start, end, .. } => vec![start.as_ref(), end.as_ref()],
-                other => vec![other],
+                _ => Vec::new(),
             };
             for half in halves {
                 if let Expression::NamedRef { name, .. } = half {
@@ -473,7 +529,19 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
                 }
             }
             ctx.enter(0);
-            render_into(reference, ctx, out);
+            match reference.as_ref() {
+                // Behind the span a name is never a LET / LAMBDA binding, so
+                // it is quoted whatever binds its spelling.
+                Expression::NamedRef { name, .. } if ctx.quote_cell_names && parser::parser::is_cell_spelling(name) => {
+                    let start = out.len();
+                    out.push('\'');
+                    out.push_str(name);
+                    out.push('\'');
+                    let end = out.len();
+                    ctx.record(start, end);
+                }
+                _ => render_into(reference, ctx, out),
+            }
             ctx.leave();
             ctx.bound.truncate(depth);
         }
@@ -732,14 +800,16 @@ fn is_cell_spelling(name: &str) -> bool {
 /// (`LET(A1,5,A1)`). Such a name exists only in a formula Excel reads in R1C1
 /// (`parser::parser::apply_r1c1_fallback`), where it is #NAME?.
 ///
-/// DISPLAY ONLY (`quote_names`: [`render_formula`], and the collapsed
-/// [`render_with_spans`]): the raw text persistence writes keeps the bare
-/// spelling, which reads back as the same name (the formula still declares
-/// the binder), and so does [`collapse_formula_text`], whose text the .xlsx
-/// writer turns into Excel's file text (`_xlnm.D1`). The parser reads the
-/// quoted spelling back as the same name.
+/// WHERE IT IS QUOTED (`quote_cell_names`): always in the formula bar
+/// ([`render_formula`], the collapsed [`render_with_spans`]); in the raw text
+/// persistence writes only when the formula declares NO cell-shaped binder
+/// (BUG-0739, [`render_formula_raw`]) -- one that does reads back in R1C1, so
+/// its bare names are names again -- and in [`collapse_formula_text`] by the
+/// same rule, whose text the .xlsx writer turns into Excel's file text
+/// (`'D1'` -> `_xlnm.D1`). The parser reads the quoted spelling back as the
+/// same name.
 fn render_cell_shaped_name(name: &str, ctx: &mut RenderCtx<'_>, out: &mut String) {
-    let quoted = ctx.quote_names
+    let quoted = ctx.quote_cell_names
         && parser::parser::is_cell_spelling(name)
         && !ctx.bound.iter().any(|b| b.eq_ignore_ascii_case(name));
     if quoted {

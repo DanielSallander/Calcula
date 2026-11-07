@@ -64,7 +64,10 @@ export const CONTAINER_BINDING_KIND = "control";
  * `background.show` / `border.show` -- they are DERIVED from `fill` /
  * `strokeWidth` and have no key of their own: bind the fill or the width.
  * A navigator's padding rows are null too: its `padding` key is WP-B's, bound
- * from its Properties tab.
+ * from its Properties tab. Background TRANSPARENCY binds on every kind
+ * (BUG-0772): a shape's path and a button's face read the same
+ * `containerBackgroundTransparency` key Core fades a picture or navigator by,
+ * so a formula follows the key that paints.
  */
 export const CONTAINER_BINDING_PATHS = {
   shape: {
@@ -107,7 +110,7 @@ export const CONTAINER_BINDING_PATHS = {
     "spacing.belowDivider": "/properties/containerSpacingBelowDivider",
     "background.show": null,
     "background.color": "/properties/fill",
-    "background.transparency": null,
+    "background.transparency": "/properties/containerBackgroundTransparency",
     "border.show": null,
     "border.color": "/properties/stroke",
     "border.width": "/properties/strokeWidth",
@@ -160,7 +163,7 @@ export const CONTAINER_BINDING_PATHS = {
     "spacing.belowDivider": "/properties/containerSpacingBelowDivider",
     "background.show": null,
     "background.color": "/properties/fill",
-    "background.transparency": null,
+    "background.transparency": "/properties/containerBackgroundTransparency",
     "border.show": null,
     "border.color": "/properties/stroke",
     "border.width": "/properties/strokeWidth",
@@ -213,7 +216,7 @@ export const CONTAINER_BINDING_PATHS = {
     "spacing.belowDivider": null,
     "background.show": null,
     "background.color": "/properties/fill",
-    "background.transparency": null,
+    "background.transparency": "/properties/containerBackgroundTransparency",
     "border.show": null,
     "border.color": "/properties/borderColor",
     "border.width": "/properties/strokeWidth",

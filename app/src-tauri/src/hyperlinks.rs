@@ -10,7 +10,7 @@ use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
 
 /// The "hyperlink" restore payload: what one cell held before the change.
-fn hyperlink_undo_bytes(sheet_index: usize, row: u32, col: u32, previous: Option<Hyperlink>) -> Vec<u8> {
+pub(crate) fn hyperlink_undo_bytes(sheet_index: usize, row: u32, col: u32, previous: Option<Hyperlink>) -> Vec<u8> {
     #[derive(Serialize)]
     struct HyperlinkSnapshot {
         sheet_index: usize,

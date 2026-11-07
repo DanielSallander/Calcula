@@ -946,6 +946,49 @@ fn fill_down_on_a_floating_grid_shifts_relative_references_on_the_backing_sheet(
     assert!(err.contains("Cannot change cell"), "got: {err}");
 }
 
+/// Ledger programme 2 wave 3 (W2 uimisc new defect): a floating grid's Fill
+/// Down did not repeat the source's merges, which the sheet's does (BUG-0768,
+/// `fill_merge_pattern`). Excel [LIVE, Excel 16 COM, 2026-11-06, lane uimisc
+/// probe2 B2: FillDown A1:A6 from a merged A1:A2 merged A3:A4 and A5:A6]. The
+/// repeated merges are taken back by the same Ctrl+Z; a destination holding a
+/// merge that is not the source's pattern changes nothing, as on the sheet.
+///
+/// SABOTAGE: make the object fill's `pattern_merges` empty -- fails at
+/// "MERGES NOT REPEATED".
+#[test]
+fn fill_down_on_a_floating_grid_repeats_the_sources_merges() {
+    let wb = Workbook::new(1);
+    let (t, backing) = float1(&wb, 6, 2);
+    type_in(&wb, &t, 0, 0, "x");
+    merge(&wb, &t, (0, 0, 1, 0), MergeOptions::default()).expect("merge A1:A2");
+    let before = depth(&wb);
+    super::fill_range_on_target(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, &t, (0, 0, 1, 0), (2, 0, 5, 0),
+    )
+    .expect("fill A1:A2 down to A6");
+    assert_eq!(
+        backing_merges(&wb, backing),
+        vec![region(0, 0, 1, 0), region(2, 0, 3, 0), region(4, 0, 5, 0)],
+        "MERGES NOT REPEATED: the source's A1:A2 merge is copied down the fill"
+    );
+    assert_eq!(backing_value(&wb, backing, 2, 0), CellValue::Text("x".to_string()));
+    assert_eq!(depth(&wb), before + 1, "a fill is ONE undo step");
+    undo_once(&wb);
+    assert_eq!(backing_merges(&wb, backing), vec![region(0, 0, 1, 0)], "one Ctrl+Z takes the repeated merges back");
+    assert!(backing_cell(&wb, backing, 2, 0).is_none(), "and the cells");
+
+    // A foreign merge in the destination: nothing changes (Excel [LIVE,
+    // pastec/probe-fill2.ps1]).
+    merge(&wb, &t, (3, 0, 3, 1), MergeOptions::default()).expect("merge A4:B4");
+    let before = depth(&wb);
+    super::fill_range_on_target(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, &t, (0, 0, 1, 0), (2, 0, 5, 0),
+    )
+    .expect("a fill over a foreign merge changes nothing");
+    assert_eq!(depth(&wb), before, "nothing recorded");
+    assert!(backing_cell(&wb, backing, 2, 0).is_none(), "nothing written");
+}
+
 // ---------------------------------------------------------------------------
 // Merge
 // ---------------------------------------------------------------------------

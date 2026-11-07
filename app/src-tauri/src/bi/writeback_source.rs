@@ -199,7 +199,8 @@ fn selector_range_ref(sel: &calp::writeback::RegionSelector) -> String {
 /// Enumerate + load + govern every writeback dataset this workbook can see.
 /// Pure registry I/O — no engine access, no grid locks. Mirrors
 /// `build_gather_data`'s enumeration (same subscription skips, same
-/// signature-verified manifests, same first-subscription-wins per region), so
+/// signature-verified manifests, same claim set per region: a region id more
+/// than one subscription claims is read from none, BUG-0734), so
 /// the dataset tables and GATHER can never disagree about what exists.
 ///
 /// ONE DELIBERATE DIVERGENCE: `rebuild_gather_cache` additionally skips HTTP
@@ -227,8 +228,16 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
         Err(_) => return result,
     };
     let own_identity = get_subscriber_identity(state).ok();
+    // Region id -> every subscription (by INDEX) that claims it: its ledger's
+    // `writebackRegion` rows (an unreachable claimant still counts), plus each
+    // verified manifest read below -- the claim set GATHER and the submit
+    // count (BUG-0734). A region two subscriptions claim is answered as a
+    // REFUSAL below: the dataset keeps its place (a model table bound to it
+    // still resolves) but carries no rows and a note saying why.
+    let mut claimants = crate::calp_commands::recorded_region_claimants(&subs.subscriptions);
+    let first_subscription_dataset = result.len();
 
-    for sub in &subs.subscriptions {
+    for (sub_index, sub) in subs.subscriptions.iter().enumerate() {
         // Same skips as build_gather_data: dev and file-channel subscriptions
         // have no versioned submission tree.
         if calp::dev_mode::is_dev_subscription(sub) {
@@ -264,6 +273,9 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
             Some(r) if !r.is_empty() => r.clone(),
             _ => continue,
         };
+        for region in &regions {
+            claimants.entry(region.id.clone()).or_default().insert(sub_index);
+        }
 
         // Publisher audience = possession of the package's signing key — the
         // exact proof the approve/reject path (`require_publisher`) demands.
@@ -360,9 +372,10 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
             .collect();
 
         for region in regions {
-            // First subscription declaring a region wins, matching the submit
-            // path and build_gather_data. A region the author pass already
-            // serves is built as a shadow.
+            // One dataset per region id: a second subscription declaring it
+            // makes the id SHARED, which is answered after the walk (BUG-0734),
+            // matching the submit path and GATHER. A region the author pass
+            // already serves is built as a shadow.
             let shadow = author_regions.contains(&region.id);
             if !shadow && !seen_regions.insert(region.id.clone()) {
                 continue;
@@ -424,6 +437,26 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
                 shadow,
             });
         }
+    }
+
+    // ONE REGION, ONE APPLICATION (BUG-0734): a region id more than one
+    // subscription claims feeds no model table -- the first subscription used
+    // to win, so a model table and its measures totalled another
+    // application's answers while GATHER of the same id was #REF!. The dataset
+    // stays (a bound table keeps resolving, and the import list shows it) with
+    // no rows and the refusal as its note.
+    for dataset in result.iter_mut().skip(first_subscription_dataset) {
+        if dataset.origin != DatasetOrigin::Subscription {
+            continue;
+        }
+        let Some(indices) = claimants.get(&dataset.region.id).filter(|set| set.len() > 1) else {
+            continue;
+        };
+        dataset.rows.clear();
+        dataset.note = crate::calp_commands::region_shared_refusal(
+            &dataset.region.id,
+            &crate::calp_commands::claimant_labels(&subs.subscriptions, indices),
+        );
     }
 
     result

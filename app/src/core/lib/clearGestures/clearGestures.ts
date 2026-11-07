@@ -227,8 +227,8 @@ async function enteredAsOneCellEdit(blocks: Block[]): Promise<boolean> {
  * other blocks as `moreAreas`, and the backend gates EVERY block before it
  * writes any (BUG-0395) -- Excel's whole-selection refusal [LIVE, 2026-11-04:
  * A1 unlocked and C1 locked on a protected sheet, both selected, Delete
- * refuses and A1 keeps its value]. Only Remove Hyperlinks still goes block
- * by block (it reads each block's links first).
+ * refuses and A1 keeps its value]. Remove Hyperlinks reads each block's links
+ * first, then makes ONE call over the blocks that hold any (BUG-0736).
  *
  * `group` is the sheet group (groupedSheetsFor). Its write is the VERY FIRST
  * one: ONE `clearRangeOnSheets` over every block, listing the active sheet
@@ -305,16 +305,23 @@ async function writesFor(
     }
   }
   if (kind === "removeHyperlinks") {
+    // ONE backend call over every block that holds a link (BUG-0736): the
+    // command's own "removeHyperlinks" clears, on each LINKED cell only, the
+    // link and the cell's format (a cell without a link keeps its formatting),
+    // gates every area before it writes any, and records ONE undo step. It was
+    // one format clear per linked cell plus one link clear per block.
+    const holding: Block[] = [];
     for (const b of blocks) {
-      const { startRow: r0, startCol: c0, endRow: r1, endCol: c1 } = b;
-      const linked = await linkedCellsIn(b);
-      if (linked.length === 0) continue;
-      // The FORMATS of each linked cell -- never of the block: a cell without
-      // a link keeps its formatting. Then the links themselves.
-      for (const { row, col } of linked) {
-        add(0, () => clearRangeWithOptions(row, col, row, col, "formats"));
-      }
-      add(1, () => clearHyperlinksInRange(r0, c0, r1, c1));
+      if ((await linkedCellsIn(b)).length > 0) holding.push(b);
+    }
+    if (holding.length > 0) {
+      const [first, ...rest] = holding;
+      const more = rest.map(({ startRow, startCol, endRow, endCol }) => ({ startRow, startCol, endRow, endCol }));
+      add(0, () =>
+        more.length > 0
+          ? clearRangeWithOptions(first.startRow, first.startCol, first.endRow, first.endCol, "removeHyperlinks", undefined, { moreAreas: more })
+          : clearRangeWithOptions(first.startRow, first.startCol, first.endRow, first.endCol, "removeHyperlinks"),
+      );
     }
   }
   // A block that added nothing (Remove Hyperlinks without a link) leaves no

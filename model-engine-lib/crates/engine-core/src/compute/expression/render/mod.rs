@@ -189,6 +189,12 @@ pub struct SqlRenderer<'a, D: Dialect> {
     /// arithmetic, IF, a scalar function, a nested KEEP, COUNTROWS -- rather
     /// than only the shapes a fixed arm list knew.
     keep_scope: std::cell::RefCell<Vec<String>>,
+    /// The model's column kinds, when the caller holds the model
+    /// ([`SqlRenderer::with_column_classes`]): a comparison side whose kind
+    /// only its column shows then reads its BLANK as DAX does
+    /// ([`crate::compute::dax_semantics::comparison_operand_in`]), and a date
+    /// column term is date arithmetic.
+    column_classes: Option<crate::compute::dax_semantics::ColumnClasses<'a>>,
 }
 
 impl<'a, D: Dialect> SqlRenderer<'a, D> {
@@ -206,7 +212,24 @@ impl<'a, D: Dialect> SqlRenderer<'a, D> {
             thisrow_alias: None,
             semantics: Semantics::Dax,
             keep_scope: std::cell::RefCell::new(Vec::new()),
+            column_classes: None,
         }
+    }
+
+    /// Give the renderer the model's column kinds (see the field).
+    #[must_use]
+    pub fn with_column_classes(
+        mut self,
+        columns: crate::compute::dax_semantics::ColumnClasses<'a>,
+    ) -> Self {
+        self.column_classes = Some(columns);
+        self
+    }
+
+    /// The column kinds this renderer was given, or none.
+    fn column_classes(&self) -> crate::compute::dax_semantics::ColumnClasses<'a> {
+        self.column_classes
+            .unwrap_or(&crate::compute::dax_semantics::no_column_classes)
     }
 
     /// Render arithmetic and counting with SQL's (Power Query M's) rules
@@ -232,9 +255,10 @@ impl<'a, D: Dialect> SqlRenderer<'a, D> {
                 let r = render(right)?;
                 Ok(format!("({l} {} {r})", op.as_sql()))
             }
-            _ => crate::compute::dax_semantics::render_binary(
+            _ => crate::compute::dax_semantics::render_binary_in(
                 expr,
                 self.dialect.divide_style(),
+                self.column_classes(),
                 render,
             ),
         }
@@ -317,6 +341,15 @@ impl<'a, D: Dialect> SqlRenderer<'a, D> {
             Some(condition) => format!("CASE WHEN {} THEN {sql} END", self.case_cond(&condition)),
             None => sql,
         }
+    }
+
+    /// Whether a `SWITCH` case value can be BLANK, so a BLANK subject must
+    /// match it: DAX's SWITCH compares with STRICT equality, BLANK matching
+    /// only BLANK ([`crate::compute::dax_semantics::switch_sql`]). Always false
+    /// under relational semantics (table transformations keep SQL's `CASE x
+    /// WHEN v`).
+    fn switch_value_may_be_blank(&self, value: &Expression) -> bool {
+        self.semantics == Semantics::Dax && !crate::compute::dax_semantics::never_blank(value)
     }
 
     /// A KEEP / filter predicate as the WHEN of a `CASE` in this dialect

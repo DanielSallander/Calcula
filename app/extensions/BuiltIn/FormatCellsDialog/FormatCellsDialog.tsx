@@ -59,7 +59,7 @@ import {
   getCellTargetCells,
   type CellTargetRef,
 } from "@api/cellTarget";
-import { outerEdgeSides } from "./lib/borderEdges";
+import { outerEdgeSides, insideLineSides, type EdgeReader } from "./lib/borderEdges";
 import { announceFormattingResult } from "@api/announceFormatting";
 import { activeCellOf } from "@api/activeCell";
 
@@ -208,26 +208,22 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         // and two more buttons are the lines inside it (Excel). Each outer
         // edge is read along its WHOLE length and shows MIXED (greyed) when
         // its cells differ (BUG-0365, lib/borderEdges.ts) -- it used to be
-        // read from one corner cell. The inside lines come from the top-left
-        // cell's inner sides.
+        // read from one corner cell. The inside lines are read the same way,
+        // every inner boundary of the range (BUG-0726): they came from the
+        // top-left cell's inner sides, so one bordered row showed the line ON
+        // for the whole range.
         if (multiRow || multiCol) {
-          const topLeft = await styleAt(startRow, startCol, seedTarget);
-          const edges = await outerEdgeSides(
-            { startRow, startCol, endRow, endCol },
-            {
-              cells: async (strip) =>
-                seedTarget
-                  ? (await getCellTargetCells(seedTarget, strip)).cells
-                  : await getViewportCells(strip.startRow, strip.startCol, strip.endRow, strip.endCol),
-              style: (index) => getStyle(index),
-              styleAt: (r, c) => styleAt(r, c, seedTarget),
-            },
-          );
-          loadFromStyle({
-            ...edges,
-            borderInsideHorizontal: multiRow ? sideOf(topLeft.borderBottom) : sideOf(undefined),
-            borderInsideVertical: multiCol ? sideOf(topLeft.borderRight) : sideOf(undefined),
-          });
+          const rect = { startRow, startCol, endRow, endCol };
+          const reader: EdgeReader = {
+            cells: async (strip) =>
+              seedTarget
+                ? (await getCellTargetCells(seedTarget, strip)).cells
+                : await getViewportCells(strip.startRow, strip.startCol, strip.endRow, strip.endCol),
+            style: (index) => getStyle(index),
+            styleAt: (r, c) => styleAt(r, c, seedTarget),
+          };
+          const [edges, inside] = await Promise.all([outerEdgeSides(rect, reader), insideLineSides(rect, reader)]);
+          loadFromStyle({ ...edges, ...inside });
         }
 
         // Load cell protection. A floating grid's cell: its style's flags

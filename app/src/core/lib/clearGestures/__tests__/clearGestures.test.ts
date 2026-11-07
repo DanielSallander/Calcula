@@ -217,23 +217,19 @@ describe("Clear All", () => {
 });
 
 describe("Remove Hyperlinks (Excel: the links AND the linked cells' formatting)", () => {
-  it("clears the formats of each LINKED cell only, then the links -- one undo step", async () => {
+  it("is ONE backend removeHyperlinks call over the block (the command clears each LINKED cell's link and format)", async () => {
     links = [
       [0, 0],
       [2, 3],
     ];
     await runClearGesture("removeHyperlinks", host(sel(0, 0, 3, 3)));
-    expect(api.clearRangeWithOptions.mock.calls).toEqual([
-      [0, 0, 0, 0, "formats"],
-      [2, 3, 2, 3, "formats"],
-    ]);
-    // A cell in the selection with no link keeps its formatting (B1 in the probe).
-    expect(api.clearRangeWithOptions.mock.calls.some((c) => c[0] === 1 || c[1] === 1)).toBe(false);
-    expect(api.clearHyperlinksInRange.mock.calls).toEqual([[0, 0, 3, 3]]);
+    // The command's own removeHyperlinks: the backend clears the links and the
+    // formats of the LINKED cells only (B1 in the probe keeps its format;
+    // clear_hyperlinks_tests.rs pins that half) in ONE undo step of its own.
+    expect(api.clearRangeWithOptions.mock.calls).toEqual([[0, 0, 3, 3, "removeHyperlinks"]]);
+    expect(api.clearHyperlinksInRange, "the link clear is the command's own half").not.toHaveBeenCalled();
     expect(api.clearRange, "values stay").not.toHaveBeenCalled();
-    expect(api.beginUndoTransaction).toHaveBeenCalledTimes(1);
-    expect(api.beginUndoTransaction.mock.calls[0][0]).toBe("Remove Hyperlinks");
-    expect(api.commitUndoTransaction).toHaveBeenCalledWith(9);
+    expect(api.beginUndoTransaction, "one call is its own undo step").not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledTimes(1);
   });
 
@@ -253,17 +249,17 @@ describe("Remove Hyperlinks (Excel: the links AND the linked cells' formatting)"
       [0, 0, 1, 1],
     ]);
     expect(invoke, "no raw invoke").not.toHaveBeenCalled();
-    expect(api.clearRangeWithOptions.mock.calls).toEqual([[10, 10, 10, 10, "formats"]]);
-    expect(api.clearHyperlinksInRange.mock.calls).toEqual([[10, 10, 10, 11]]);
+    expect(api.clearRangeWithOptions.mock.calls).toEqual([[10, 10, 10, 11, "removeHyperlinks"]]);
+    expect(api.clearHyperlinksInRange).not.toHaveBeenCalled();
   });
 
-  it("a refused format clear is shown and the empty step cancelled", async () => {
+  it("a refused clear is shown and nothing else runs", async () => {
     links = [[0, 0]];
     api.clearRangeWithOptions.mockRejectedValue("The cell is on a protected sheet.");
     await runClearGesture("removeHyperlinks", host(sel(0, 0, 0, 0)));
     expect(dialogs.alertAsync).toHaveBeenCalledWith("The cell is on a protected sheet.");
     expect(api.clearHyperlinksInRange).not.toHaveBeenCalled();
-    expect(api.cancelUndoTransaction).toHaveBeenCalledWith(9);
+    expect(emit).not.toHaveBeenCalled();
   });
 });
 
@@ -375,18 +371,22 @@ describe("Clear All over several areas, a LATER area refused", () => {
     expect(writes()).toEqual(["clearCommentsInRange", "clearNotesInRange"]);
   });
 
-  it("Remove Hyperlinks: every linked cell's formats, then the links", async () => {
+  it("BUG-0736 Remove Hyperlinks: every area in ONE call with moreAreas (one undo step, all or nothing)", async () => {
     links = [
       [0, 0],
       [5, 5],
     ];
     await runClearGesture("removeHyperlinks", host(twoAreas()));
-    expect(writes()).toEqual([
-      "clearRangeWithOptions",
-      "clearRangeWithOptions",
-      "clearHyperlinksInRange",
-      "clearHyperlinksInRange",
-    ]);
+    expect(writes()).toEqual(["clearRangeWithOptions"]);
+    const sent = api.clearRangeWithOptions.mock.calls[0];
+    expect(sent[4]).toBe("removeHyperlinks");
+    const firstArea = sent.slice(0, 4);
+    const more = (sent[6] as { moreAreas: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }> }).moreAreas;
+    expect(more).toHaveLength(1);
+    expect([firstArea, [more[0].startRow, more[0].startCol, more[0].endRow, more[0].endCol]]).toEqual(
+      [[0, 0, 0, 0], [5, 5, 5, 5]],
+    );
+    expect(api.beginUndoTransaction, "the one call records its own step").not.toHaveBeenCalled();
   });
 });
 

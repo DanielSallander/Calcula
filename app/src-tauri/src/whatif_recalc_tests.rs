@@ -1412,10 +1412,34 @@ fn a_whatif_run_is_refused_while_another_is_running_and_writes_nothing() {
 /// body and the restore of the borrowed input used to land on index 1 --
 /// Sheet1's A10 overwritten with trial values and Sheet1's E column filled.
 ///
+/// DETERMINISTIC (BUG-0778): the tab used to be moved by a second thread that
+/// polled for a trial value, so whether it landed mid-run was timing; it now
+/// moves at a fixed point -- after the first trial, holding no lock, exactly
+/// where another command can run (`data_tables::AFTER_TRIAL_FOR_TEST`).
+///
 /// SABOTAGE: make `RunSheet::index` answer the index the run started with.
 #[test]
 fn a_data_table_follows_its_sheet_when_a_tab_moves_mid_run() {
-    const ROWS: u32 = 400;
+    const ROWS: u32 = 6;
+    thread_local! {
+        /// Whether the move ran while the body was still unwritten.
+        static MOVED_MID_RUN: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+    fn move_sheet3_to_the_front(state: &crate::AppState) {
+        crate::sheets::move_sheet_impl(
+            state,
+            &FileState::default(),
+            &crate::slicer::SlicerState::new(),
+            &crate::timeline_slicer::TimelineSlicerState::new(),
+            &crate::ribbon_filter::RibbonFilterState::new(),
+            2,
+            0,
+        )
+        .expect("move Sheet3 to the front");
+        // Still mid-run: the body is written only after the last trial.
+        let unwritten = state.grids.read().unwrap()[2].get_cell(10 + ROWS - 1, 4).is_none();
+        MOVED_MID_RUN.with(|m| m.set(Some(unwritten)));
+    }
     let wb = Wb::new();
     wb.add_sheet("Sheet3");
     wb.set(9, 0, "keep"); // Sheet1!A10, what the misdirected trials overwrote
@@ -1426,52 +1450,26 @@ fn a_data_table_follows_its_sheet_when_a_tab_moves_mid_run() {
         wb.set(10 + r, 3, &(r + 1).to_string()); // D11..
     }
     let sheet2 = wb.id_at(1);
-    let timeline = crate::timeline_slicer::TimelineSlicerState::new();
-
-    let moved_mid_run = std::thread::scope(|scope| {
-        let wbr = &wb;
-        let timeline = &timeline;
-        let mover = scope.spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            while std::time::Instant::now() < deadline {
-                let trial_written = {
-                    let grids = wbr.state.grids.read().unwrap();
-                    let idx = wbr.index_of(sheet2);
-                    grids[idx].get_cell(9, 0).is_some_and(|c| c.value != CellValue::Number(1.0))
-                };
-                if trial_written {
-                    crate::sheets::move_sheet_impl(
-                        &wbr.state, &wbr.file, &wbr.slicer, timeline, &wbr.filters, 2, 0,
-                    )
-                    .expect("move Sheet3 to the front");
-                    // Still mid-run: the body is written only after the last trial.
-                    let grids = wbr.state.grids.read().unwrap();
-                    let idx = wbr.index_of(sheet2);
-                    return grids[idx].get_cell(10 + ROWS - 1, 4).is_none();
-                }
-                std::thread::sleep(std::time::Duration::from_micros(200));
-            }
-            false
-        });
-        let r = crate::data_tables::data_table_one_var_impl(
-            &wb.state,
-            &wb.file,
-            &wb.states(),
-            DataTableOneVarParams {
-                sheet_index: 1,
-                start_row: 9,
-                start_col: 3,
-                end_row: 9 + ROWS,
-                end_col: 4,
-                row_input_row: None,
-                row_input_col: None,
-                col_input_row: Some(9),
-                col_input_col: Some(0),
-            },
-        );
-        assert!(r.error.is_none(), "data table: {:?}", r.error);
-        mover.join().unwrap()
-    });
+    crate::data_tables::AFTER_TRIAL_FOR_TEST.with(|h| h.set(Some((0, move_sheet3_to_the_front))));
+    let r = crate::data_tables::data_table_one_var_impl(
+        &wb.state,
+        &wb.file,
+        &wb.states(),
+        DataTableOneVarParams {
+            sheet_index: 1,
+            start_row: 9,
+            start_col: 3,
+            end_row: 9 + ROWS,
+            end_col: 4,
+            row_input_row: None,
+            row_input_col: None,
+            col_input_row: Some(9),
+            col_input_col: Some(0),
+        },
+    );
+    crate::data_tables::AFTER_TRIAL_FOR_TEST.with(|h| h.set(None));
+    assert!(r.error.is_none(), "data table: {:?}", r.error);
+    let moved_mid_run = MOVED_MID_RUN.with(|m| m.get()) == Some(true);
     assert!(moved_mid_run, "precondition: the tab moved while the table was still running");
 
     let s2 = wb.index_of(sheet2);
@@ -2499,7 +2497,7 @@ fn a_data_table_under_manual_calculation_waits_for_f9() {
 
 /// Excel [LIVE, whatifcalc/probe1-2]: every body cell is part of one array --
 /// typing into one, clearing part of the body and pasting onto part of it are
-/// refused ("Cannot change part of a data table."), and `=TABLE(..)` cannot be
+/// refused ("Can't change part of a data table."), and `=TABLE(..)` cannot be
 /// typed anywhere ("That function isn't valid."). Clearing a rectangle that
 /// holds the WHOLE body removes the table.
 ///
@@ -2513,6 +2511,17 @@ fn part_of_a_data_table_cannot_be_changed() {
     let typed = wb.edit(1, 11, "3");
     assert_eq!(typed.err().as_deref(), Some(part), "EDITED PART: typing into L2 was not refused");
     assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"), "L2 is still the table's");
+    // F2, Enter on a body cell re-enters its own marker: Excel answers the
+    // function, not the table [LIVE, Excel 16, 2026-11-06, dtui/probe2.ps1:
+    // "That function isn't valid.", and the same after F2, x, Enter].
+    // SABOTAGE: ask the body before the typed TABLE in `check_cell_edit` --
+    // fails at "F2 ENTER".
+    assert_eq!(
+        wb.edit(1, 11, "=TABLE(,A1)").err().as_deref(),
+        Some(engine::data_table::TABLE_NOT_VALID),
+        "F2 ENTER: re-entering a body cell's own marker is refused as the function"
+    );
+    assert_eq!(wb.formula(0, 1, 11).as_deref(), Some("TABLE(,A1)"));
     assert_eq!(
         wb.edit(5, 5, "=TABLE(,A1)").err().as_deref(),
         Some(engine::data_table::TABLE_NOT_VALID),
@@ -3164,7 +3173,7 @@ fn every_edit_route_refreshes_the_live_data_tables() {
     // own -- every table computed twice. They now refresh ONCE, through that
     // entry point, and carry no tail refresh.
     for (src, sig) in [
-        (&data, "pub fn sort_range("),
+        (&data, "pub(crate) fn sort_range_core("),
         (&data, "pub fn remove_duplicates("),
         (&consolidate, "pub fn consolidate_data("),
     ] {
@@ -3190,8 +3199,9 @@ fn every_edit_route_refreshes_the_live_data_tables() {
         (&merge, "pub fn merge_cells_core("),
         (&names, "pub fn create_named_range("),
         (&names, "pub(crate) fn update_named_range_core("),
-        (&names, "pub(crate) fn delete_named_range_core("),
-        (&names, "pub(crate) fn rename_named_range_core("),
+        // The scoped bodies (BUG-0744): the plain cores delegate to them.
+        (&names, "pub(crate) fn delete_named_range_scoped("),
+        (&names, "pub(crate) fn rename_named_range_scoped_core("),
     ] {
         assert!(body(src, sig).contains("data_tables::refresh_after_edit("), "{sig} does not refresh the live data tables");
     }
@@ -3223,3 +3233,10 @@ mod data_table_move_tests;
 /// module so it reuses `Wb`.
 #[path = "data_table_refresh_tests.rs"]
 mod data_table_refresh_tests;
+
+/// Ledger programme 2 (2026-11-06, lane dtable): the data table's creation is
+/// one undo step, Automatic except for data tables, a fill over a whole body,
+/// a scenario refreshing the tables, a `.calp` merge's own tables. A child
+/// module so it reuses `Wb`.
+#[path = "data_table_dtable_tests.rs"]
+mod data_table_dtable_tests;

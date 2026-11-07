@@ -392,6 +392,11 @@ export interface HeaderFieldSummary {
   fieldIndex: number;
   fieldName: string;
   hasActiveFilter: boolean;
+  /** The field's sort as the view applied it (a grouped field's own level
+   *  sort): what the Sort (<field>) dialog opens on. */
+  sortOrder?: SortOrder;
+  /** The value field (by name) the field is sorted by, when sorted by value. */
+  sortByValueField?: string | null;
 }
 
 /** Lightweight row descriptor for windowed responses (no cell data). */
@@ -836,8 +841,19 @@ export type AggregationFunction =
 /** Pivot filter type (Excel: PivotFilterType) */
 export type PivotFilterType = "unknown" | "value" | "manual" | "label" | "date";
 
-/** Sort direction (Excel: SortBy) */
-export type SortBy = "ascending" | "descending";
+/** Sort direction (Excel: SortBy). "manual" is Excel's Manual: the items keep
+ *  the order they are shown in and can be moved by hand (`moveItem`). */
+export type SortBy = "ascending" | "descending" | "manual";
+
+/** Where Move puts a pivot item (Excel's item menu Move > Move "X" Up / Down /
+ *  to Beginning / to End). */
+export type PivotItemMoveTo = "beginning" | "up" | "down" | "end";
+
+/** One item moved by hand: its member id (the header cell's `groupPath`). */
+export interface PivotItemMove {
+  valueId: number;
+  to: PivotItemMoveTo;
+}
 
 /** Pivot axis (Excel: PivotAxis) */
 export type PivotAxis = "unknown" | "row" | "column" | "data" | "filter";
@@ -1235,6 +1251,10 @@ export interface SortPivotFieldRequest {
   /** The line of the other axis as `[fieldIndex, valueId]` pairs -- the
    *  clicked value cell's `groupPath` past its row's items. */
   scopeGroupPath?: Array<[number, number]>;
+  /** Move ONE item by hand (Excel's PivotItem.Position): the field turns
+   *  Manual, keeping the order its items are shown in with this one moved;
+   *  `sortBy` and the value-sort settings are ignored. */
+  moveItem?: PivotItemMove;
 }
 
 /** Request to set pivot item visibility */

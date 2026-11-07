@@ -252,6 +252,13 @@ pub fn calp_push_merge_apply(
         // and the recalculation is not optional here, because piece-level
         // disjointness says nothing about whether your formulas READ the cells
         // theirs changed.
+        //
+        // A NEW DATA TABLE in their version is THEIR table, not a typed
+        // `=TABLE(..)` (BUG-0757: the merge was refused "That function isn't
+        // valid."): the marker claim names exactly the marker cells the laid
+        // grids hold, so the data-table door installs them -- and still refuses
+        // a write over part of one of ours. Closed when this block ends.
+        let _version_tables = crate::data_tables::claim_version_tables(&modified_grids);
         crate::scripting::commands::apply_script_modified_grids(
             &state,
             &file_state,
@@ -546,6 +553,15 @@ fn overlay_their_cells(
             &sheet.sheet_id,
             &positions,
             &renames,
+            // Their SPILLED values are not laid as literals over this copy's
+            // own arrays, and this copy's own spilled values where theirs has
+            // nothing (a SHRUNK array) are not cleared: the origin and its
+            // inputs are laid, and the install's recalculation re-derives the
+            // spill here (wave-3 verifier, backmisc; wave 5, misc5 --
+            // BUG-0775's gate refused every merge whose version only grew or
+            // shrank an array). A literal of ours where their array spills is
+            // cleared, so the array can spill.
+            Some(&crate::calp_commands::local_spill_outputs(state, local_index)?),
         )?
         .ok_or_else(|| format!("v{head} is missing data for the sheet '{}'.", sheet.name))?;
 

@@ -34,8 +34,15 @@
 //     columns / rows, resize at a border) or on the fill handle: the mouse drag
 //     of that thing;
 //   - long press: the context menu of what is under the finger;
-//   - double tap: a double-click (edit the cell).
-//   No pinch zoom (owner recommendation Q29): a second finger is ignored.
+//   - double tap: a double-click (edit the cell);
+//   - PINCH (BUG-0729): two fingers zoom the sheet, 10% to 400%, through the
+//     same zoom state the zoom slider and Ctrl+wheel set (Excel for Windows
+//     pinch-zooms its grid). A second finger landing while the first is
+//     panning or pressing ends that gesture -- a held object press is
+//     released where it was -- and the two fingers' distance scales the
+//     zoom the pinch began at; once one lifts, the other does nothing
+//     until it lifts too. A third finger is ignored. Without a zoom door
+//     (`deps.zoom`) a second finger is ignored, as before.
 //
 // Interactive DOM (an input, a textarea, a select, contentEditable, and any
 // element that CLAIMS the pointer -- core/lib/pointerClaims.ts) keeps the
@@ -43,6 +50,10 @@
 
 /** What a touch that starts at a point should do once it moves. */
 export type TouchPressKind = "drag" | "pan";
+
+/** Excel's zoom range, the zoom slider's (render factor: 0.1 = 10%). */
+export const PINCH_ZOOM_MIN = 0.1;
+export const PINCH_ZOOM_MAX = 4;
 
 /** The pixel distance a finger may wander before a press becomes a drag or a pan. */
 export const TOUCH_SLOP_PX = 10;
@@ -86,6 +97,8 @@ export interface TouchBridgeDeps extends TouchBridgeEffects {
   classify(clientX: number, clientY: number, target: EventTarget | null): TouchPressKind;
   /** True when the touch is not the bridge's to take (interactive DOM, a claimed element). */
   isNative(target: EventTarget | null): boolean;
+  /** The sheet's zoom (render factor), for a pinch; absent: no pinch. */
+  zoom?: { get(): number; set(zoom: number): void };
 }
 
 type Phase =
@@ -93,6 +106,7 @@ type Phase =
   | { kind: "pending"; id: number; x0: number; y0: number; x: number; y: number; target: EventTarget; timer: unknown }
   | { kind: "drag"; id: number; x: number; y: number; target: EventTarget; timer: unknown; moved: boolean; x0: number; y0: number }
   | { kind: "pan"; id: number; x: number; y: number }
+  | { kind: "pinch"; ids: [number, number]; d0: number; z0: number; last: number }
   | { kind: "done"; id: number };
 
 /**
@@ -102,6 +116,8 @@ type Phase =
 export class TouchGestureBridge {
   private phase: Phase = { kind: "idle" };
   private lastTap: { t: number; x: number; y: number } | null = null;
+  /** Where each finger on the grid is now (a pinch reads two of them). */
+  private readonly fingers = new Map<number, { x: number; y: number }>();
 
   constructor(private readonly deps: TouchBridgeDeps) {}
 
@@ -112,12 +128,17 @@ export class TouchGestureBridge {
 
   down(e: TouchPointerLike): void {
     if (e.pointerType !== "touch") return;
-    // A second finger while one is down: no pinch, no second gesture.
-    if (!e.isPrimary || this.phase.kind !== "idle") return;
+    if (this.phase.kind !== "idle" || this.fingers.size > 0) this.fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    // A SECOND finger while one is down: a pinch, when there is a zoom door.
+    if (!e.isPrimary || this.phase.kind !== "idle") {
+      this.startPinch(e);
+      return;
+    }
     if (!e.target || this.deps.isNative(e.target)) return;
     // Owning the touch: no compatibility mouse events from the browser (they
     // would arrive AFTER ours and press the grid a second time).
     e.preventDefault();
+    this.fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     const target = e.target;
     const drag = this.deps.classify(e.clientX, e.clientY, target) === "drag";
     const timer = this.deps.setTimer(() => this.longPress(), LONG_PRESS_MS);
@@ -142,6 +163,19 @@ export class TouchGestureBridge {
 
   move(e: TouchPointerLike): void {
     const p = this.phase;
+    if (e.pointerType === "touch" && this.fingers.has(e.pointerId)) this.fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (p.kind === "pinch") {
+      if (!p.ids.includes(e.pointerId)) return;
+      e.preventDefault();
+      const d = this.spread(p.ids);
+      if (d === null || p.d0 <= 0) return;
+      const z = Math.round(Math.min(PINCH_ZOOM_MAX, Math.max(PINCH_ZOOM_MIN, (p.z0 * d) / p.d0)) * 100) / 100;
+      if (z !== p.last) {
+        p.last = z;
+        this.deps.zoom?.set(z);
+      }
+      return;
+    }
     if (p.kind === "idle" || p.kind === "done" || e.pointerId !== p.id) return;
     e.preventDefault();
     if (p.kind === "drag") {
@@ -169,7 +203,16 @@ export class TouchGestureBridge {
   }
 
   up(e: TouchPointerLike): void {
+    this.fingers.delete(e.pointerId);
     const p = this.phase;
+    if (p.kind === "pinch") {
+      if (!p.ids.includes(e.pointerId)) return;
+      e.preventDefault();
+      // One finger lifted: the other does nothing until it lifts too.
+      const other = p.ids[0] === e.pointerId ? p.ids[1] : p.ids[0];
+      this.phase = this.fingers.has(other) ? { kind: "done", id: other } : { kind: "idle" };
+      return;
+    }
     if (p.kind === "idle" || e.pointerId !== p.id) return;
     e.preventDefault();
     if (p.kind === "drag") {
@@ -199,7 +242,14 @@ export class TouchGestureBridge {
   }
 
   cancel(e: TouchPointerLike): void {
+    this.fingers.delete(e.pointerId);
     const p = this.phase;
+    if (p.kind === "pinch") {
+      if (!p.ids.includes(e.pointerId)) return;
+      const other = p.ids[0] === e.pointerId ? p.ids[1] : p.ids[0];
+      this.phase = this.fingers.has(other) ? { kind: "done", id: other } : { kind: "idle" };
+      return;
+    }
     if (p.kind === "idle" || e.pointerId !== p.id) return;
     if (p.kind === "drag") {
       this.deps.clearTimer(p.timer);
@@ -209,6 +259,34 @@ export class TouchGestureBridge {
       this.deps.clearTimer(p.timer);
     }
     this.phase = { kind: "idle" };
+  }
+
+  /**
+   * A second finger: end the first finger's gesture and start a PINCH from
+   * the zoom as it is now. Nothing without a zoom door, a known first finger
+   * or while a pinch (or its tail) is already running.
+   */
+  private startPinch(e: TouchPointerLike): void {
+    const p = this.phase;
+    const zoom = this.deps.zoom;
+    if (!zoom || (p.kind !== "pending" && p.kind !== "pan" && p.kind !== "drag")) return;
+    if (!this.fingers.has(p.id) || this.fingers.size !== 2) return;
+    e.preventDefault();
+    if (p.kind === "pending" || p.kind === "drag") this.deps.clearTimer(p.timer);
+    // A held object press is released where it was, as a cancelled drag is.
+    if (p.kind === "drag") this.deps.mouse("mouseup", p.target, p.x, p.y, { button: 0, buttons: 0, detail: 1 });
+    const ids: [number, number] = [p.id, e.pointerId];
+    const d0 = this.spread(ids) ?? 0;
+    const z0 = zoom.get();
+    this.lastTap = null;
+    this.phase = { kind: "pinch", ids, d0, z0, last: z0 };
+  }
+
+  /** The distance between two fingers, or null when one is not known. */
+  private spread(ids: [number, number]): number | null {
+    const a = this.fingers.get(ids[0]);
+    const b = this.fingers.get(ids[1]);
+    return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : null;
   }
 
   /** A still finger held LONG_PRESS_MS: the context menu of what is under it. */
@@ -296,7 +374,7 @@ const GHOST_TYPES = ["click", "dblclick", "contextmenu"] as const;
  */
 export function installTouchBridge(
   element: HTMLElement,
-  deps: Pick<TouchBridgeDeps, "classify" | "pan"> & { isNative?: (t: EventTarget | null) => boolean },
+  deps: Pick<TouchBridgeDeps, "classify" | "pan" | "zoom"> & { isNative?: (t: EventTarget | null) => boolean },
 ): () => void {
   const view = element.ownerDocument?.defaultView ?? window;
   /** The mouse events this bridge dispatched: never a duplicate. */
@@ -307,6 +385,7 @@ export function installTouchBridge(
   const bridge = new TouchGestureBridge({
     classify: deps.classify,
     pan: deps.pan,
+    ...(deps.zoom ? { zoom: deps.zoom } : {}),
     isNative: (t) => isNativeTouchTarget(t) || (deps.isNative?.(t) ?? false),
     mouse(type, target, clientX, clientY, init) {
       const ctor = view.MouseEvent ?? MouseEvent;

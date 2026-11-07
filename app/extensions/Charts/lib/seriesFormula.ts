@@ -41,12 +41,15 @@ export interface SeriesReferences {
  * @param spec - The chart specification
  * @param seriesIndex - 0-based index into spec.series[]
  * @param sheetName - Name of the sheet containing the chart's data
+ * @param askingSheet - The sheet the chart is ON: a defined name or an
+ *   unqualified range is read from it (the active sheet when left out)
  * @returns The SERIES formula string (e.g., "=SERIES(Sheet1!$B$1,Sheet1!$A$2:$A$4,Sheet1!$B$2:$B$4,1)")
  */
 export async function buildSeriesFormula(
   spec: ChartSpec,
   seriesIndex: number,
   sheetName: string,
+  askingSheet?: number,
 ): Promise<string> {
   const series = spec.series[seriesIndex];
   if (!series) return "";
@@ -69,7 +72,7 @@ export async function buildSeriesFormula(
   }
 
   try {
-    const dataRef = await resolveDataSource(spec.data);
+    const dataRef = await resolveDataSource(spec.data, askingSheet);
     const refs = computeSeriesRanges(spec, seriesIndex, dataRef, sheetName);
 
     const nameArg = refs.nameRef
@@ -90,12 +93,14 @@ export async function buildSeriesFormula(
  * @param spec - The chart specification
  * @param seriesIndex - 0-based index into spec.series[]
  * @param sheetName - Name of the sheet containing the chart's data
+ * @param askingSheet - The sheet the chart is ON (see {@link buildSeriesFormula})
  * @returns Resolved ranges for name, category, and values
  */
 export async function getSeriesReferences(
   spec: ChartSpec,
   seriesIndex: number,
   sheetName: string,
+  askingSheet?: number,
 ): Promise<SeriesReferences> {
   const series = spec.series[seriesIndex];
   if (!series) return {};
@@ -114,7 +119,7 @@ export async function getSeriesReferences(
   if (isPivotDataSource(spec.data) || isDesignQueryDataSource(spec.data)) return {};
 
   try {
-    const dataRef = await resolveDataSource(spec.data);
+    const dataRef = await resolveDataSource(spec.data, askingSheet);
     return computeSeriesRanges(spec, seriesIndex, dataRef, sheetName);
   } catch {
     return {};

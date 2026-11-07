@@ -1291,19 +1291,21 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
 
-        assert_eq!(decls.len(), 110, "AppState field count changed");
+        assert_eq!(decls.len(), 111, "AppState field count changed");
         assert_eq!(persisted.len(), 64, "Persisted<T> count changed");
         assert_eq!(bare.len(), 42, "bare Mutex/RwLock count changed");
         assert_eq!(
             neither,
-            ["undo_stack", "calc_cancel", "sheet_structure_generation", "whatif_run"],
-            "exactly four fields carry neither wrapper: `undo_stack` is `UndoHistory`, \
+            ["undo_stack", "calc_cancel", "sheet_structure_generation", "whatif_run", "calculation_except_tables"],
+            "exactly five fields carry neither wrapper: `undo_stack` is `UndoHistory`, \
              which holds its OWN Mutex (do not read this as unlocked and add one), \
              `calc_cancel` is `CancelToken(Arc<AtomicBool>)`, genuinely lock-free, \
              `sheet_structure_generation` is an `AtomicU64` that adds no edge to the lock \
              order on purpose (do not wrap it in a Mutex: it is bumped under sheet locks), \
-             and `whatif_run` is the what-if single-flight `AtomicBool`, taken before any \
-             lock and never waited on"
+             `whatif_run` is the what-if single-flight `AtomicBool`, taken before any \
+             lock and never waited on, and `calculation_except_tables` is the `AtomicBool` \
+             that qualifies an automatic `calculation_mode` as Automatic except for data \
+             tables (BUG-0754), written under the mode's own lock"
         );
         assert_eq!(
             persisted.len() + bare.len() + neither.len(),

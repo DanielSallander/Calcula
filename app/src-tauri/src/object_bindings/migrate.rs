@@ -374,7 +374,7 @@ fn migrate_controls(
 /// sheet (the `specReferenceSheet` rule), else the chart's own worksheet, else
 /// -- a canvas chart whose data names no sheet -- the first visible worksheet.
 fn chart_reference_sheet(world: &FormulaWorld, host: usize, spec_json: &str) -> usize {
-    if let Some(data) = formula::chart_data_sheet(spec_json, &world.sheet_names, &world.sheet_ids, &world.named_ranges) {
+    if let Some(data) = formula::chart_data_sheet(spec_json, host, &world.sheet_names, &world.sheet_ids, &world.named_ranges) {
         if !world.sheet_kinds.get(data).is_some_and(|k| k.is_canvas()) {
             return data;
         }

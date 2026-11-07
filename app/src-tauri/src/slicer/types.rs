@@ -239,8 +239,9 @@ fn default_button_radius() -> f64 {
 pub struct SlicerItem {
     /// The member KEY: invariant canonical text. The selection stores keys,
     /// and selection and has-data are decided by key (BUG-0166). The blank
-    /// member's key is "" (ruling Q8). A TABLE-source slicer's key is its
-    /// display text (DC2: AutoFilter matches display text).
+    /// member's key is "" (ruling Q8). A TABLE-source slicer's key is the
+    /// cell's invariant value (`table_member_key`, BUG-0523); its table's
+    /// AutoFilter is written by the display texts those keys show.
     pub key: String,
     /// The app-locale display text ("(Blank)" for the blank member).
     pub label: String,

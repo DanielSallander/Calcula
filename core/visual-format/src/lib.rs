@@ -555,6 +555,139 @@ pub fn control_paints_container_key(control_type: &str, key: &str) -> Option<boo
     Some(control_paints_container_field(control_type, &field_id(pointer)))
 }
 
+/// The slicer family's name in [`FAMILY_PAINTED_CONTAINER_FIELDS`].
+pub const FAMILY_SLICER: &str = "slicer";
+/// The timeline slicer family's name in [`FAMILY_PAINTED_CONTAINER_FIELDS`].
+pub const FAMILY_TIMELINE: &str = "timeline";
+/// The floating grid family's name in [`FAMILY_PAINTED_CONTAINER_FIELDS`].
+pub const FAMILY_FLOATING_GRID: &str = "floatingGrid";
+
+/// WHICH CONTAINER FIELDS A SLICER, A TIMELINE AND A FLOATING GRID PAINT
+/// FROM THEIR STORED `container` (BUG-0773, the BUG-0491 rule for the families
+/// that keep their container as ONE JSON record rather than flat keys), as
+/// field ids or whole groups -- [`CONTROL_PAINTED_CONTAINER_FIELDS`]'s
+/// spelling. Decided from the painters: each family's
+/// `fieldOffered(<family>ContainerCapabilities(), id)` (Slicer
+/// `slicerContainerCapabilities`, TimelineSlicer
+/// `timelineContainerCapabilities`, FloatingRange `frContainerCapabilities`),
+/// minus the title's IDENTITY leaves, which live outside the container (a
+/// slicer's and a timeline's title text and visibility are `headerText` /
+/// `showHeader`; a floating grid's are its NAME and `showTitle`). So: no
+/// subtitle, no divider, no `title.wrap` (one-line header) on any of them, no
+/// gradient on a slicer or a timeline, and no lock aspect or spacing on a
+/// floating grid (its size is whole rows and columns; its title bar sits on
+/// its cells). Every other field a door is handed would be stored, listed to
+/// the AI and carried in a `.calp` while nothing paints it.
+pub const FAMILY_PAINTED_CONTAINER_FIELDS: &[(&str, &[&str])] = &[
+    (FAMILY_SLICER, &["padding", "lockAspect", "title.headingLevel", "title.fontFamily", "title.fontSize", "title.bold", "title.italic", "title.underline", "title.color", "title.background", "title.align", "spacing.custom", "spacing.belowTitle", "background.show", "background.color", "background.transparency", "border", "shadow"]),
+    (FAMILY_TIMELINE, &["padding", "lockAspect", "title.headingLevel", "title.fontFamily", "title.fontSize", "title.bold", "title.italic", "title.underline", "title.color", "title.background", "title.align", "spacing.custom", "spacing.belowTitle", "background.show", "background.color", "background.transparency", "border", "shadow"]),
+    (FAMILY_FLOATING_GRID, &["padding", "title.headingLevel", "title.fontFamily", "title.fontSize", "title.bold", "title.italic", "title.underline", "title.color", "title.background", "title.align", "background", "border", "shadow"]),
+];
+
+/// Does `family` paint container field `field_id`? `None` for a family with
+/// no row (not this rule's business).
+pub fn family_paints_container_field(family: &str, field_id: &str) -> Option<bool> {
+    FAMILY_PAINTED_CONTAINER_FIELDS.iter().find(|(f, _)| *f == family).map(|(_, tokens)| {
+        tokens.iter().any(|token| {
+            *token == field_id || field_id.strip_prefix(token).is_some_and(|rest| rest.starts_with('.'))
+        })
+    })
+}
+
+/// Every field a stored container SETS, as `(field id, value)`: one leaf per
+/// field pointer, plus the whole `background.gradient`.
+pub fn container_set_fields(container: &VisualContainerFormat) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    let Ok(Value::Object(root)) = serde_json::to_value(container) else {
+        return out;
+    };
+    for (group, value) in root {
+        match value {
+            Value::Object(children) => {
+                for (key, leaf) in children {
+                    out.push((format!("{group}.{key}"), leaf));
+                }
+            }
+            leaf => out.push((group, leaf)),
+        }
+    }
+    out
+}
+
+/// The sentence for a field `family` does not paint.
+fn unpainted_field_sentence(family: &str, field: &str) -> String {
+    let what = match family {
+        FAMILY_SLICER => "A slicer",
+        FAMILY_TIMELINE => "A timeline",
+        FAMILY_FLOATING_GRID => "A floating grid",
+        other => other,
+    };
+    let real = match (family, field) {
+        (FAMILY_SLICER | FAMILY_TIMELINE, "title.text") => Some("headerText"),
+        (FAMILY_SLICER | FAMILY_TIMELINE, "title.show") => Some("showHeader"),
+        (FAMILY_FLOATING_GRID, "title.text") => Some("its name (rename it)"),
+        (FAMILY_FLOATING_GRID, "title.show") => Some("showTitle"),
+        _ => None,
+    };
+    match real {
+        Some(real) => format!(
+            "container.{field} is not how {} keeps that setting: nothing would paint it. Write {real} instead. Nothing was changed.",
+            what.to_lowercase()
+        ),
+        None => format!("{what} does not paint container.{field}: nothing would show it. Nothing was changed."),
+    }
+}
+
+/// THE DOOR RULE for a family's container write (BUG-0773): `incoming`
+/// replaces `stored`. A field the family does not paint
+/// ([`FAMILY_PAINTED_CONTAINER_FIELDS`]) that the write SETS or CHANGES is
+/// refused with a sentence naming the real setting where one exists; one the
+/// stored record already carried unchanged (a document saved before this
+/// rule, re-sent whole by the Format pane) is not a reason to refuse an edit
+/// of something else -- it is DROPPED instead, so it is never stored again.
+/// `Ok` is the container to store (possibly empty). A family with no row
+/// stores `incoming` as it is.
+pub fn check_family_container_write(
+    family: &str,
+    incoming: &VisualContainerFormat,
+    stored: Option<&VisualContainerFormat>,
+) -> Result<VisualContainerFormat, String> {
+    let stored_fields: Vec<(String, Value)> = stored.map(container_set_fields).unwrap_or_default();
+    let mut dead: Vec<String> = Vec::new();
+    for (field, value) in container_set_fields(incoming) {
+        if family_paints_container_field(family, &field) != Some(false) {
+            continue;
+        }
+        let carried = stored_fields.iter().any(|(f, v)| *f == field && *v == value);
+        if !carried {
+            return Err(unpainted_field_sentence(family, &field));
+        }
+        dead.push(field);
+    }
+    if dead.is_empty() {
+        return Ok(incoming.clone());
+    }
+    let Ok(Value::Object(mut root)) = serde_json::to_value(incoming) else {
+        return Ok(incoming.clone());
+    };
+    for field in &dead {
+        match field.split_once('.') {
+            Some((group, key)) => {
+                if let Some(Value::Object(children)) = root.get_mut(group) {
+                    children.remove(key);
+                    if children.is_empty() {
+                        root.remove(group);
+                    }
+                }
+            }
+            None => {
+                root.remove(field.as_str());
+            }
+        }
+    }
+    serde_json::from_value(Value::Object(root)).map_err(|e| e.to_string())
+}
+
 // ---------- leaf checks ----------
 
 /// `""` (the family default) | `#rgb` | `#rrggbb` | `#rrggbbaa`, hex in either case.

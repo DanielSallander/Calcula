@@ -227,7 +227,7 @@ fn ladder_in_format(
     // a cell that LOOKS exactly right and is wrong to every test over it:
     // `ISNA` FALSE, `IFERROR` passing it straight through, `ISTEXT` TRUE and
     // `COUNTA` counting a string. See `typed_error_literal`.
-    if let Some(error) = typed_error_literal(&upper) {
+    if let Some(error) = typed_error_literal(&upper).or_else(|| pasted_error_literal(&upper, writer)) {
         return (error_cell(error), None);
     }
     if let Some(num) = parse_number(trimmed, locale) {
@@ -258,6 +258,18 @@ fn ladder_in_format(
         return (formula_cell(format!("={}", invariant), writer), None);
     }
     (Cell::new_text(trimmed.to_string()), None)
+}
+
+/// The error a PASTED value's literal is, for the one error that cannot be
+/// TYPED (BUG-0774): `#CALC!`. A copied `#CALC!` cell is pasted as its
+/// literal (`commands::data::paste_literal`) and must come back the error it
+/// was copied from, as Excel's Paste Values keeps it ([LIVE]: Paste Values of
+/// `=LAMBDA(x,x)` saves a static `#CALC!`, `xlsx_writer::excel_error_literal`)
+/// -- while a TYPED `#CALC!` is text ([LIVE, Excel 16, lane formula p1.json:
+/// `Range.Formula = "#CALC!"` stores the text, `ISERROR` FALSE]), which is why
+/// the literal is not on the lexer's list `typed_error_literal` reads.
+fn pasted_error_literal(upper: &str, writer: Writer) -> Option<CellError> {
+    (writer == Writer::Pasted && upper == CellError::Calc.as_literal()).then_some(CellError::Calc)
 }
 
 /// The error a typed entry SPELLS, or `None` if it merely starts with a `#`.

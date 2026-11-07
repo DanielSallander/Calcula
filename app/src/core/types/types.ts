@@ -1667,8 +1667,29 @@ export type ListSource =
         startCol: number;
         endRow: number;
         endCol: number;
+        /**
+         * Which parts are RELATIVE (typed without `$`), as written for the
+         * validated range's top-left cell: Excel reads a relative part moved
+         * by each cell's offset (`=F1:F2` on H2:H4 lists F2:F3 at H3).
+         * Absent = every part absolute.
+         */
+        relative?: ListSourceRelative;
+        /**
+         * The source's sheet was deleted: Excel shows `=#REF!$A$1:$A$3`,
+         * keeps the dropdown and refuses every entry. `sheetIndex` is then
+         * absent and means nothing.
+         */
+        sheetGone?: boolean;
       };
     };
+
+/** Which corners' row and column of a list source are relative. */
+export interface ListSourceRelative {
+  startRow: boolean;
+  startCol: boolean;
+  endRow: boolean;
+  endCol: boolean;
+}
 
 /**
  * List validation rule (dropdown).
@@ -2055,6 +2076,20 @@ export interface AddCommentParams {
   content: string;
   richContent?: string;
   mentions?: CommentMention[];
+}
+
+/**
+ * What a Paste Special > Comments did (`pasteComments`, BUG-0725).
+ */
+export interface PasteCommentsResult {
+  /** Comments written (a destination's own comment replaced, as Excel does). */
+  pasted: number;
+  /** Destination comments removed because the copied cell had none. */
+  removed: number;
+  /** Cells left alone because they hold a Note. */
+  skipped: number;
+  /** Why the first skipped cell was skipped. */
+  firstSkip: string | null;
 }
 
 /**

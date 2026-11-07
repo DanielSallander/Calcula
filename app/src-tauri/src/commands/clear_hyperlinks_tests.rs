@@ -93,7 +93,7 @@ impl Fx {
 fn remove_hyperlinks_clears_the_links_and_only_the_linked_cells_formats() {
     let fx = Fx::new();
     let depth = fx.undo_depth();
-    let result = clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &fx.params(ClearApplyTo::RemoveHyperlinks)).expect("remove");
+    let result = clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &fx.params(ClearApplyTo::RemoveHyperlinks), &[]).expect("remove");
     assert_eq!(result.count, 2, "two linked cells in A1:B2");
     assert_eq!(fx.linked(), vec![(2, 2)], "the links in A1:B2 are gone, C3's stays");
     assert_eq!(fx.style(0, 0), Some(0), "A1 is back to Normal");
@@ -115,7 +115,7 @@ fn remove_hyperlinks_clears_the_links_and_only_the_linked_cells_formats() {
 #[test]
 fn clear_hyperlinks_keeps_every_format() {
     let fx = Fx::new();
-    let result = clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &fx.params(ClearApplyTo::Hyperlinks)).expect("clear");
+    let result = clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &fx.params(ClearApplyTo::Hyperlinks), &[]).expect("clear");
     assert_eq!(result.count, 2);
     assert_eq!(fx.linked(), vec![(2, 2)]);
     assert_eq!((fx.style(0, 0), fx.style(1, 0), fx.style(0, 1)), (Some(3), Some(5), Some(4)));
@@ -129,11 +129,46 @@ fn a_range_without_links_changes_nothing() {
     let fx = Fx::new();
     let depth = fx.undo_depth();
     let params = ClearRangeParams { start_row: 0, start_col: 1, end_row: 0, end_col: 1, apply_to: ClearApplyTo::RemoveHyperlinks, sheet_index: None, target: None };
-    let result = clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &params).expect("no-op");
+    let result = clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &params, &[]).expect("no-op");
     assert_eq!(result.count, 0);
     assert_eq!(fx.style(0, 1), Some(4));
     assert!(!fx.file.is_dirty());
     assert_eq!(fx.undo_depth(), depth);
+}
+
+/// BUG-0766: the sheet-protection gate of the two hyperlink clears was asked
+/// by the CALLER under a `read()` dropped before the links and formats were
+/// written -- a read-drop-write window. It is now asked inside
+/// `clear_hyperlinks_apply_to`, under the grid / style guards the write goes
+/// through, for every area. Locked linked cells on a protected sheet: refused,
+/// no link removed, clean, no step; and the command's own hyperlink branch no
+/// longer asks the dropped-lock form first.
+///
+/// SABOTAGE: drop the `check_sheet_protection_range_in` loop from
+/// `clear_hyperlinks_apply_to` -- "a protected sheet's links were cleared".
+#[test]
+fn a_protected_sheet_refuses_both_hyperlink_clears_under_the_held_guards() {
+    let fx = Fx::new();
+    let depth = fx.undo_depth();
+    let seed = crate::document_effect::test_seed_effect();
+    fx.state.sheet_protection.write(&seed).unwrap().entry(0).or_default().protected = true;
+    for kind in [ClearApplyTo::Hyperlinks, ClearApplyTo::RemoveHyperlinks] {
+        let err = clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &fx.params(kind), &[]);
+        assert!(err.is_err(), "a protected sheet's links were cleared ({kind:?})");
+        // ...and through a second area alone (all or nothing over the areas).
+        let off = ClearRangeParams { start_row: 9, start_col: 9, end_row: 9, end_col: 9, ..fx.params(kind) };
+        assert!(clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &off, &[(0, 0, 1, 1)]).is_err(), "a protected second area was not gated");
+    }
+    assert_eq!(fx.linked(), vec![(0, 0), (1, 0), (2, 2)], "no link was removed");
+    assert_eq!(fx.style(0, 0), Some(3));
+    assert!(!fx.file.is_dirty());
+    assert_eq!(fx.undo_depth(), depth);
+
+    let src = include_str!("data.rs");
+    let inner = &src[src.find("pub fn clear_range_with_options_inner(").expect("inner moved")..];
+    let branch = &inner[inner.find("ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks) {").expect("branch moved")..];
+    let branch = &branch[..branch.find("\n    }\n").unwrap()];
+    assert!(!branch.contains("check_sheet_protection_range("), "the hyperlink branch asks protection under a dropped lock again");
 }
 
 /// The off-sheet path refuses the two kinds rather than doing half of them

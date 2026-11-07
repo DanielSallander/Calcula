@@ -23,10 +23,12 @@ use crate::manifest::{
     CANVAS_WALLPAPER_FEATURE, RIBBON_FILTER_VISUAL_TARGETS_FEATURE, SHEET_DEFAULT_SIZES_FEATURE,
     CALCULATION_MODE_FEATURE,
     CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION,
-    OBJECT_BINDINGS_FEATURE, OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PIVOT_STYLE_FEATURE, PIVOT_VALUE_SORT_FEATURE, VISUAL_CONTAINER_FEATURE,
-    SPARKLINE_GROUP_AREAS_FEATURE, TABLE_TOTALS_ROW_LABEL_FEATURE,
+    OBJECT_BINDINGS_FEATURE, OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PIVOT_ITEM_ORDER_FEATURE, PIVOT_STYLE_FEATURE, PIVOT_VALUE_SORT_FEATURE, VISUAL_CONTAINER_FEATURE,
+    SPARKLINE_GROUP_AREAS_FEATURE, TABLE_TOTALS_ROW_LABEL_FEATURE, AUTOFILTER_SORT_STATE_FEATURE,
     CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION,
     DATA_TABLE_FEATURE, DATA_TABLE_MIN_FORMAT_VERSION,
+    SCOPED_NAME_SPELLINGS_FEATURE, SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION,
+    DV_LIST_SOURCE_REFERENCE_FEATURE, DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
     SPILL_EXTENT_MIN_FORMAT_VERSION,
@@ -92,6 +94,28 @@ fn is_data_table_formula(formula: &str) -> bool {
     parser::parse(&with_eq).is_ok_and(|ast| engine::data_table::is_table_call(&ast))
 }
 
+/// Do two defined names share a spelling (Excel's `defined_name_key`), one per
+/// scope? See SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION.
+fn has_scoped_name_spellings(names: &[persistence::SavedNamedRange]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    names.iter().any(|nr| !seen.insert(identity::defined_name_key(&nr.name)))
+}
+
+/// Does a sheet's opaque validation payload hold a LIST source that is
+/// relative or names a deleted sheet? See
+/// DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION.
+fn validations_hold_list_source_reference(ranges: &serde_json::Value) -> bool {
+    ranges.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            let source = row.pointer("/validation/rule/list/source/range");
+            source.is_some_and(|s| {
+                s.get("relative").is_some_and(|r| r.as_object().is_some_and(|o| o.values().any(|v| v.as_bool() == Some(true))))
+                    || s.get("sheetGone").and_then(|g| g.as_bool()) == Some(true)
+            })
+        })
+    })
+}
+
 /// Does a sheet's opaque sparkline blob hold a group with more than one AREA
 /// (a non-empty `moreAreas`)? See SPARKLINE_GROUP_AREAS_FEATURE.
 /// Whether a saved pivot definition sorts some row or column field by value
@@ -103,6 +127,32 @@ fn pivot_definition_sorts_by_value(definition: &serde_json::Value) -> bool {
             .and_then(|v| v.as_array())
             .is_some_and(|fields| fields.iter().any(|f| f.get("value_sort").is_some_and(|v| !v.is_null())))
     })
+}
+
+/// Whether a saved pivot definition keeps a manual item order or a grouped
+/// level's own sort on some row or column field (a non-empty
+/// `manual_item_order` / `level_sorts`). See PIVOT_ITEM_ORDER_FEATURE.
+fn pivot_definition_keeps_an_item_order(definition: &serde_json::Value) -> bool {
+    ["row_fields", "column_fields"].iter().any(|zone| {
+        definition.get(zone).and_then(|v| v.as_array()).is_some_and(|fields| {
+            fields.iter().any(|f| {
+                ["manual_item_order", "level_sorts"]
+                    .iter()
+                    .any(|k| f.get(*k).and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()))
+            })
+        })
+    })
+}
+
+/// Whether some AutoFilter in the app's `autofilters.json` (a user file,
+/// keyed by sheet position) remembers a sort (a non-null `sortState`). See
+/// AUTOFILTER_SORT_STATE_FEATURE.
+fn autofilters_remember_a_sort(workbook: &persistence::Workbook) -> bool {
+    workbook
+        .user_files
+        .get("autofilters.json")
+        .and_then(|bytes| serde_json::from_slice::<std::collections::HashMap<String, serde_json::Value>>(bytes).ok())
+        .is_some_and(|filters| filters.values().any(|f| f.get("sortState").is_some_and(|s| !s.is_null())))
 }
 
 fn sparkline_blob_has_areas(groups_json: &str) -> bool {
@@ -262,10 +312,27 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         manifest.features.push(DATA_TABLE_FEATURE.to_string());
         stamp_feature_format_version(&mut manifest, DATA_TABLE_MIN_FORMAT_VERSION);
     }
+    // ONE NAME SPELLING IN TWO SCOPES (BUG-0744): an older reader kept one of
+    // the two and dropped the other, so a sheet's formulas could silently read
+    // the workbook's definition (see SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION).
+    // Only when two rows share a spelling.
+    if has_scoped_name_spellings(&workbook.named_ranges) {
+        manifest.features.push(SCOPED_NAME_SPELLINGS_FEATURE.to_string());
+        stamp_feature_format_version(&mut manifest, SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION);
+    }
+    // A RELATIVE or GONE list-validation source (BUG-0745 / BUG-0750): an
+    // older reader ignores both fields and offers the wrong list as the rule's
+    // (see DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION). Only when one exists.
+    if workbook.data_validations.iter().any(|d| validations_hold_list_source_reference(&d.ranges)) {
+        manifest.features.push(DV_LIST_SOURCE_REFERENCE_FEATURE.to_string());
+        stamp_feature_format_version(&mut manifest, DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION);
+    }
     // The calculation mode (Excel's calcMode="manual"): a feature id and NO
     // version link -- an older reader loses the mode, it is not misled about a
-    // value (see CALCULATION_MODE_FEATURE). Declared only when manual.
-    if workbook.calculation_manual {
+    // value (see CALCULATION_MODE_FEATURE). Declared only when manual, or
+    // Automatic except for data tables (BUG-0754: an older reader opens that
+    // automatic and refreshes its tables -- a lost setting, not a lie).
+    if workbook.calculation_manual || workbook.calculation_except_tables {
         manifest.features.push(CALCULATION_MODE_FEATURE.to_string());
     }
     // User-hidden rows/columns: an authority that lives nowhere else, so an
@@ -445,6 +512,18 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     // -- an older reader shows label order (see PIVOT_VALUE_SORT_FEATURE).
     if workbook.pivot_definitions.iter().any(|d| pivot_definition_sorts_by_value(&d.definition)) {
         manifest.features.push(PIVOT_VALUE_SORT_FEATURE.to_string());
+    }
+    // A manual item order or a grouped level's own sort (BUG-0733): a feature
+    // id, no version link -- an older reader shows source / label order.
+    if workbook.pivot_definitions.iter().any(|d| pivot_definition_keeps_an_item_order(&d.definition)) {
+        manifest.features.push(PIVOT_ITEM_ORDER_FEATURE.to_string());
+    }
+    // An AutoFilter's remembered SORT (BUG-0740): a feature id, no version
+    // link -- an older reader drops it and Reapply re-filters only, a visible
+    // loss (see AUTOFILTER_SORT_STATE_FEATURE). It rides the filter's record in
+    // the app's user file `autofilters.json`.
+    if autofilters_remember_a_sort(workbook) {
+        manifest.features.push(AUTOFILTER_SORT_STATE_FEATURE.to_string());
     }
     // Object property BINDINGS (D-BIND): a feature id AND a version link. The
     // literal stays on each object's own record, so an older reader that
@@ -783,8 +862,9 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     }
     // The calculation mode, written ONLY when manual: the file's absence is
     // "automatic", as a missing calcMode is in Excel's calcPr.
-    if workbook.calculation_manual {
-        let mode_json = serde_json::to_string_pretty(&SavedCalcMode { mode: "manual".to_string() })?;
+    if workbook.calculation_manual || workbook.calculation_except_tables {
+        let mode = if workbook.calculation_manual { "manual" } else { CALC_MODE_EXCEPT_TABLES };
+        let mode_json = serde_json::to_string_pretty(&SavedCalcMode { mode: mode.to_string() })?;
         zip.start_file(CALC_MODE_FILE, options.clone())?;
         zip.write_all(mode_json.as_bytes())?;
     }
@@ -1386,8 +1466,10 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         .is_some_and(|state| state.calculation_incomplete);
     // Absent for a workbook saved under automatic calculation. Read whether or
     // not the manifest declares the feature id.
-    let calculation_manual = read_optional_json::<SavedCalcMode>(&mut archive, CALC_MODE_FILE)?
-        .is_some_and(|saved| saved.mode.eq_ignore_ascii_case("manual"));
+    let saved_calc_mode = read_optional_json::<SavedCalcMode>(&mut archive, CALC_MODE_FILE)?;
+    let calculation_manual = saved_calc_mode.as_ref().is_some_and(|saved| saved.mode.eq_ignore_ascii_case("manual"));
+    let calculation_except_tables =
+        saved_calc_mode.as_ref().is_some_and(|saved| saved.mode.eq_ignore_ascii_case(CALC_MODE_EXCEPT_TABLES));
     let controls: Vec<persistence::SavedSheetControls> =
         read_optional_json::<Vec<persistence::SavedSheetControls>>(&mut archive, "controls.json")?
             .unwrap_or_default();
@@ -1491,6 +1573,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         pending_recalc,
         calculation_incomplete,
         calculation_manual,
+        calculation_except_tables,
         // The version this file WAS written at, carried inbound so the host's
         // load path can run a one-time recovery for anything a pre-feature
         // writer could not record. Never read by the writer.
@@ -1523,8 +1606,12 @@ struct SavedCalcState {
 /// The archive entry holding [`SavedCalcMode`].
 const CALC_MODE_FILE: &str = "calc_mode.json";
 
+/// `calc_mode.json`'s mode for Automatic except for data tables (BUG-0754).
+const CALC_MODE_EXCEPT_TABLES: &str = "automaticExceptTables";
+
 /// `calc_mode.json`: the calculation mode the workbook was saved under
-/// (`Workbook::calculation_manual`), written only for "manual".
+/// (`Workbook::calculation_manual`), written only for "manual" -- or
+/// [`CALC_MODE_EXCEPT_TABLES`] (`Workbook::calculation_except_tables`).
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedCalcMode {
@@ -1763,6 +1850,7 @@ mod tests {
             pending_recalc: None,
             calculation_incomplete: false,
             calculation_manual: false,
+            calculation_except_tables: false,
             floating_ranges: Vec::new(),
             format_version: 0,
             object_bindings: Vec::new(),
@@ -2794,6 +2882,28 @@ mod tests {
         assert!(read_calcula_bytes(&stripped).unwrap().calculation_manual, "the read must not depend on the id");
     }
 
+    /// BUG-0754: a workbook saved under Automatic except for data tables
+    /// (Excel's `calcMode="autoNoTable"`) reopens in that mode, under the same
+    /// `calculation_mode` feature id and without raising the version: an older
+    /// reader opens it automatic and refreshes its tables at every edit -- a
+    /// lost setting, never a stale value shown as current.
+    ///
+    /// SABOTAGE: write "manual" for the except-tables mode in `calc_mode.json`.
+    #[test]
+    fn automatic_except_tables_round_trips_by_feature_id_without_a_version_link() {
+        let automatic = make_test_workbook();
+        let auto_manifest = read_calcula_manifest(&write_calcula_bytes(&automatic).unwrap()).unwrap();
+        let mut semi = make_test_workbook();
+        semi.calculation_except_tables = true;
+        let bytes = write_calcula_bytes(&semi).unwrap();
+        let back = read_calcula_bytes(&bytes).unwrap();
+        assert!(back.calculation_except_tables, "the except-tables mode was lost on reopen");
+        assert!(!back.calculation_manual, "MANUAL: the except-tables mode came back as manual calculation");
+        let manifest = read_calcula_manifest(&bytes).unwrap();
+        assert!(manifest.features.iter().any(|f| f == CALCULATION_MODE_FEATURE), "{:?}", manifest.features);
+        assert_eq!(manifest.format_version, auto_manifest.format_version, "no version link: a loss, not a lie");
+    }
+
     /// A canvas whose interactions hold one default and two pairs (P4).
     fn canvas_with_interactions() -> persistence::CanvasLayout {
         let r = |kind: &str, id: &str| persistence::CanvasObjectRef { kind: kind.to_string(), id: id.to_string() };
@@ -3132,7 +3242,44 @@ mod tests {
         }
         assert!(FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION < CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION);
         assert!(CALCULATION_INCOMPLETE_MIN_FORMAT_VERSION < DATA_TABLE_MIN_FORMAT_VERSION);
-        assert_eq!(DATA_TABLE_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
+        assert!(DATA_TABLE_MIN_FORMAT_VERSION < SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION);
+        assert_eq!(SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
+    }
+
+    fn a_name(name: &str, sheet_id: Option<SheetId>, refers_to: &str) -> persistence::SavedNamedRange {
+        persistence::SavedNamedRange {
+            name: name.to_string(),
+            refers_to: refers_to.to_string(),
+            sheet_id,
+            comment: None,
+            folder: None,
+        }
+    }
+
+    /// BUG-0744: one spelling in two scopes links v14 (an older reader kept one
+    /// of the two and could read the workbook's `Rate` for a sheet's own), and
+    /// both rows come back; names of distinct spellings -- in any scopes --
+    /// keep the lower version.
+    /// SABOTAGE (names-cala): `has_scoped_name_spellings` answers false --
+    /// fails at "TWO SCOPES LINK".
+    #[test]
+    fn one_name_spelling_in_two_scopes_links_the_format_version() {
+        let mut workbook = make_test_workbook();
+        let sheet = workbook.sheets[0].id;
+        workbook.named_ranges = vec![a_name("Rate", None, "=1"), a_name("Tax", Some(sheet), "=2")];
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        assert!(manifest_of(&bytes).format_version < SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION, "distinct spellings stay lower");
+
+        workbook.named_ranges = vec![a_name("Rate", None, "=1"), a_name("RATE", Some(sheet), "=2")];
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let manifest = manifest_of(&bytes);
+        assert_eq!(manifest.format_version, SCOPED_NAME_SPELLINGS_MIN_FORMAT_VERSION, "TWO SCOPES LINK");
+        assert!(manifest.features.iter().any(|f| f == SCOPED_NAME_SPELLINGS_FEATURE));
+        let back = read_calcula_bytes(&bytes).unwrap();
+        let mut scopes: Vec<(String, Option<SheetId>)> =
+            back.named_ranges.iter().map(|n| (n.refers_to.clone(), n.sheet_id)).collect();
+        scopes.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(scopes, vec![("=1".to_string(), None), ("=2".to_string(), Some(sheet))]);
     }
 
     /// A workbook whose Sheet1 holds a live one-variable data table: the body
@@ -3177,6 +3324,36 @@ mod tests {
         assert_eq!(l2.formula.as_deref(), Some("=TABLE(,A1)"));
         assert!(matches!(l2.value, SavedCellValue::Number(n) if n == 10.0));
         assert!(is_data_table_formula("=TABLE(A1,D1)") && !is_data_table_formula("=TABLES(A1)"));
+    }
+
+    /// BUG-0745 / BUG-0750: a list validation whose source is relative or names
+    /// a deleted sheet links version 14; an absolute one does not.
+    /// SABOTAGE (cfdvb-zip): the stamp is never applied.
+    #[test]
+    fn a_relative_or_gone_list_source_links_the_format_version() {
+        let with_source = |range: serde_json::Value| {
+            let mut wb = make_test_workbook();
+            let sheet_id = wb.sheets[0].id;
+            wb.data_validations = vec![persistence::SavedSheetDataValidations {
+                sheet_id,
+                ranges: serde_json::json!([{
+                    "startRow": 0, "startCol": 7, "endRow": 2, "endCol": 7,
+                    "validation": { "rule": { "list": { "source": { "range": range }, "inCellDropdown": true } } }
+                }]),
+            }];
+            manifest_of(&write_calcula_bytes(&wb).unwrap())
+        };
+        let absolute = with_source(serde_json::json!({ "sheetIndex": 0, "startRow": 0, "startCol": 5, "endRow": 1, "endCol": 5 }));
+        assert!(absolute.format_version < DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION, "an absolute source stays lower");
+        assert!(!absolute.features.iter().any(|f| f == DV_LIST_SOURCE_REFERENCE_FEATURE));
+        let relative = with_source(serde_json::json!({
+            "sheetIndex": 0, "startRow": 0, "startCol": 5, "endRow": 1, "endCol": 5,
+            "relative": { "startRow": true, "startCol": true, "endRow": true, "endCol": true }
+        }));
+        assert_eq!(relative.format_version, DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION, "NO LINK: a relative source");
+        assert!(relative.features.iter().any(|f| f == DV_LIST_SOURCE_REFERENCE_FEATURE), "{:?}", relative.features);
+        let gone = with_source(serde_json::json!({ "startRow": 0, "startCol": 0, "endRow": 2, "endCol": 0, "sheetGone": true }));
+        assert_eq!(gone.format_version, DV_LIST_SOURCE_REFERENCE_MIN_FORMAT_VERSION, "NO LINK: a gone source");
     }
 
     /// A split ALONE stamps it too: the split is as unrecoverable as the zoom.
@@ -3226,6 +3403,12 @@ mod tests {
             CellError::Conflict,
             CellError::Blocked,
             CellError::Limit,
+            // BUG-0774. No format-version link and no feature id: the cell
+            // keeps the literal, and an older reader's `from_literal` reads an
+            // unknown one as #VALUE! -- the error Excel's own file degrades it
+            // to for an older Excel (`#VALUE!` plus rich-value metadata), and
+            // the one an older evaluator computes for these formulas itself.
+            CellError::Calc,
         ];
         for e in variants {
             let saved = persistence::SavedCellValue::from_value(&engine::CellValue::Error(e.clone()));
@@ -4297,19 +4480,19 @@ mod tests {
         assert!(err.starts_with("charts.json in this file could not be read"), "{err}");
     }
 
-    /// v14 -- one above this build -- is refused through the reader gate,
+    /// v15 -- one above this build -- is refused through the reader gate,
     /// while a v10 file (a binding), a v11 file (a floating grid that hides
-    /// a row), a v12 file (an incomplete calculation) and a v13 file (a live
-    /// data table) open.
+    /// a row), a v12 file (an incomplete calculation), a v13 file (a live
+    /// data table) and a v14 file (one name spelling in two scopes) open.
     #[test]
-    fn a_v14_file_is_refused() {
-        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 14);
+    fn a_v15_file_is_refused() {
+        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 15);
         let workbook = make_test_workbook();
         let bytes = write_calcula_bytes(&workbook).unwrap();
         let v14 = rewrite_archive(&bytes, |name, content| {
             (name == "manifest.json").then(|| {
                 let mut m: Manifest = serde_json::from_slice(content).unwrap();
-                m.format_version = 14;
+                m.format_version = 15;
                 serde_json::to_vec_pretty(&m).unwrap()
             })
         });
@@ -4615,6 +4798,59 @@ mod tests {
         assert!(!declares(&none, PIVOT_VALUE_SORT_FEATURE), "{:?}", none.features);
         assert_eq!(rows.format_version, none.format_version, "a value sort must never raise the format version");
         assert_eq!(loaded.pivot_definitions[0].definition["row_fields"][0]["value_sort"], sort);
+    }
+
+    /// BUG-0733: a pivot field's manual item order, or a grouped level's own
+    /// sort, declares `pivot_item_order` and never raises the version (an
+    /// older reader shows source or label order: a visible loss); both
+    /// survive the archive; an empty list declares nothing.
+    ///
+    /// SABOTAGE (piv4-sabF): read a key other than the two.
+    #[test]
+    fn pivot_item_order_declares_a_feature_id_but_never_raises_the_version() {
+        let with_field = |field: serde_json::Value| {
+            let mut wb = make_test_workbook();
+            let mut pivot = a_pivot(None, None);
+            pivot.definition["row_fields"] = serde_json::json!([field]);
+            wb.pivot_definitions = vec![pivot];
+            wb
+        };
+        let manual = serde_json::json!({"source_index": 1, "name": "Region", "manual_item_order": ["West", "East"]});
+        let level = serde_json::json!({"source_index": 1, "name": "Region", "level_sorts": [{"level": "group", "sort_order": "Descending"}]});
+        let plain = serde_json::json!({"source_index": 1, "name": "Region", "manual_item_order": []});
+        let (m, loaded) = written_manifest(&with_field(manual.clone()));
+        let (l, _) = written_manifest(&with_field(level));
+        let (none, _) = written_manifest(&with_field(plain));
+        assert!(declares(&m, PIVOT_ITEM_ORDER_FEATURE), "{:?}", m.features);
+        assert!(declares(&l, PIVOT_ITEM_ORDER_FEATURE), "{:?}", l.features);
+        assert!(!declares(&none, PIVOT_ITEM_ORDER_FEATURE), "{:?}", none.features);
+        assert_eq!(m.format_version, none.format_version, "an item order must never raise the format version");
+        assert_eq!(loaded.pivot_definitions[0].definition["row_fields"][0]["manual_item_order"], manual["manual_item_order"]);
+    }
+
+    /// An AutoFilter's remembered sort (BUG-0740) declares its feature id, and
+    /// only then, never raises the format version, and comes back with the
+    /// filter. SABOTAGE (tabxlsx-featsort): `autofilters_remember_a_sort`
+    /// answers false.
+    #[test]
+    fn autofilter_sort_state_declares_a_feature_id_but_never_raises_the_version() {
+        let with_filter = |sort: serde_json::Value| {
+            let mut wb = make_test_workbook();
+            let mut filter = serde_json::json!({ "startRow": 0, "startCol": 0, "endRow": 4, "endCol": 1, "columnFilters": {}, "hiddenRows": [], "enabled": true });
+            if !sort.is_null() {
+                filter["sortState"] = sort;
+            }
+            wb.user_files.insert("autofilters.json".to_string(), serde_json::to_vec(&serde_json::json!({ "0": filter })).unwrap());
+            wb
+        };
+        let sort = serde_json::json!({ "fields": [{ "key": 1, "ascending": false }], "matchCase": false });
+        let (with, loaded) = written_manifest(&with_filter(sort.clone()));
+        let (without, _) = written_manifest(&with_filter(serde_json::Value::Null));
+        assert!(declares(&with, AUTOFILTER_SORT_STATE_FEATURE), "{:?}", with.features);
+        assert!(!declares(&without, AUTOFILTER_SORT_STATE_FEATURE), "{:?}", without.features);
+        assert_eq!(with.format_version, without.format_version, "a remembered sort must never raise the format version");
+        let back: serde_json::Value = serde_json::from_slice(&loaded.user_files["autofilters.json"]).unwrap();
+        assert_eq!(back["0"]["sortState"], sort);
     }
 
     #[test]

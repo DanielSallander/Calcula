@@ -256,10 +256,18 @@ export async function runAutoFitColumnWidth(host: AutoFitCommandHost, args?: unk
     const rows = covering.some((b) => b.startRow === 0 && b.endRow >= config.totalRows - 1)
       ? undefined
       : covering.map((b) => ({ startRow: b.startRow, endRow: b.endRow }));
-    const optimal = measureOptimalColumnWidth(col, cells, styles, theme, config.minColumnWidth, true, rows);
+    const current = dims?.columnWidths.get(col) ?? config.defaultCellWidth;
+    // A wrapped value is fitted as it wraps at the width it has NOW, a rotated
+    // one at its row's height (BUG-0727, Excel).
+    const layout = {
+      currentWidth: current,
+      rowHeight: (row: number) => dims?.rowHeights.get(row) ?? config.defaultCellHeight,
+      // A column narrower than the standard width wraps its words at it.
+      standardWidth: config.defaultCellWidth,
+    };
+    const optimal = measureOptimalColumnWidth(col, cells, styles, theme, config.minColumnWidth, true, rows, layout);
     // Nothing to fit: Excel leaves the width alone.
     if (optimal === null) continue;
-    const current = dims?.columnWidths.get(col) ?? config.defaultCellWidth;
     if (optimal === current) continue;
     if (growOnly && optimal < current) continue;
     changes.push({ index: col, size: optimal });
@@ -446,7 +454,12 @@ async function runTargetAutoFit(
     const cells = [...(cellsByLine.get(index)?.values() ?? [])];
     const optimal =
       axis === "cols"
-        ? measureOptimalColumnWidth(index, cells, styles, theme, config.minColumnWidth, false)
+        ? measureOptimalColumnWidth(index, cells, styles, theme, config.minColumnWidth, false, undefined, {
+            // The grid's own geometry: a wrapped value wraps at it (BUG-0727).
+            currentWidth: lines.colWidths[index] ?? config.defaultCellWidth,
+            rowHeight: (row: number) => lines.rowHeights[row] ?? config.defaultCellHeight,
+            standardWidth: config.defaultCellWidth,
+          })
         : measureOptimalRowHeight(
             cells,
             styles,

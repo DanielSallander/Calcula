@@ -333,6 +333,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn format_takes_an_optional_locale_name_and_no_fourth_argument() {
+        // BUG-0731: the third argument parsed and was dropped from the SQL.
+        let three = parse_measure_expression(r#"FORMAT(SUM(S[x]), "Currency", "de-DE")"#).unwrap();
+        assert!(three.contains_format());
+        assert_eq!(
+            three.to_sql_string().unwrap(),
+            "calcula_format(SUM(\"x\"), 'Currency', 'de-DE')"
+        );
+        let two = parse_measure_expression(r#"FORMAT(SUM(S[x]), "Currency")"#).unwrap();
+        assert_eq!(two.to_sql_string().unwrap(), "calcula_format(SUM(\"x\"), 'Currency')");
+        let err = parse_measure_expression(r#"FORMAT(SUM(S[x]), "0", "de-DE", "x")"#).unwrap_err();
+        assert!(err.to_string().contains("at most 3"), "{err}");
+    }
+
+    #[test]
     fn parse_abs() {
         let expr = parse_measure_expression("ABS(SUM(S[diff]))").unwrap();
         assert_eq!(expr.to_sql_string().unwrap(), "ABS(SUM(\"diff\"))");

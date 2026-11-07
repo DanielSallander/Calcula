@@ -92,6 +92,9 @@ export interface CtrlEnterDeps {
   shift(inputs: FormulaShiftInput[]): Promise<string[]>;
   /** The value type the ACTIVE cell holds now (get_range_cells_typed). */
   typeAt(row: number, col: number): Promise<CellValueType>;
+  /** Whether the cell's number format is Text (`@`): asked of an active cell
+   *  the fill leaves out, whose format still decides the entry's kind. */
+  textFormatAt(row: number, col: number): Promise<boolean>;
 }
 
 /**
@@ -100,8 +103,18 @@ export interface CtrlEnterDeps {
  * first, through the backend's typed-entry ladder, then every other cell with
  * what the active cell became. Returns the cells the writes reported.
  *
- * The active cell is written even when the list leaves it out (it is the cell
- * being edited). Both writes belong in ONE undo step -- the caller holds it.
+ * An active cell the list leaves out -- on a row or column hidden while the
+ * sheet is in filter mode -- is NOT written: Excel [LIVE, 2026-11-06, lane
+ * uimisc probe3 C13: filter <>3 hiding row 4, B2:B6 selected with B4 active,
+ * `x` Ctrl+Enter writes B2, B3, B5 and B6 and leaves B4 empty]. The ACTIVE
+ * cell's format still decides the entry's kind [LIVE, Excel 16, 2026-11-06,
+ * lane dtui probe3, the same filter: a Text-formatted B4 makes `007` the text
+ * "007" and `=A2` the text "=A2" in the General B2, B3, B5; a General B4 makes
+ * `5` the NUMBER 5 in a Text-formatted B2]. So a Text-formatted active cell
+ * puts the entry as text in every cell; otherwise the first listed cell takes
+ * it through the ladder in its place -- its own Text rung skipped (`pasted`),
+ * a formula moved there from the active cell first. Both writes belong in ONE
+ * undo step -- the caller holds it.
  */
 export async function ctrlEnterFill(
   value: string,
@@ -109,11 +122,44 @@ export async function ctrlEnterFill(
   anchor: Cell,
   deps: CtrlEnterDeps,
 ): Promise<CellData[]> {
-  const first = await deps.write([{ row: anchor.row, col: anchor.col, value }]);
-  const others = cells.filter((c) => c.row !== anchor.row || c.col !== anchor.col);
+  const listed = cells.some((c) => c.row === anchor.row && c.col === anchor.col);
+  const decider = listed ? anchor : cells[0];
+  if (!decider) return [];
+  if (!listed && (await deps.textFormatAt(anchor.row, anchor.col))) {
+    // A Text-formatted active cell: the entry is TEXT in every cell, as it
+    // would have been in the active cell -- a formula's text unshifted.
+    const escaped = value.trimStart().startsWith("'") ? value : `'${value.trim()}`;
+    return deps.write(cells.map(({ row, col }) => ({ row, col, value: escaped, pasted: true, invariant: true })));
+  }
+  let entry = value;
+  if (!listed) {
+    // The entry is typed for the ACTIVE cell: a formula is moved to the cell
+    // that takes it first. A text that is not a formula moves unchanged, and
+    // then goes in as typed (`-5` stays the number, not the formula =-5).
+    const text = value.trim();
+    if (text.startsWith("=") || text.startsWith("+") || text.startsWith("-")) {
+      const formula = text.startsWith("=") ? text : `=${text}`;
+      const [moved] = await deps.shift([
+        {
+          formula,
+          rowDelta: decider.row - anchor.row,
+          colDelta: decider.col - anchor.col,
+          sourceRow: anchor.row,
+          sourceCol: anchor.col,
+        },
+      ]);
+      if (typeof moved === "string" && moved !== formula) entry = text.startsWith("=") ? moved : moved.slice(1);
+    }
+  }
+  // A stand-in for an active cell the fill leaves out takes the entry as the
+  // (General) active cell would read it: its own Text format is not asked.
+  const first = await deps.write([
+    listed ? { row: decider.row, col: decider.col, value: entry } : { row: decider.row, col: decider.col, value: entry, pasted: true },
+  ]);
+  const others = cells.filter((c) => c.row !== decider.row || c.col !== decider.col);
   if (others.length === 0) return first;
 
-  const stored = first.find((c) => c.row === anchor.row && c.col === anchor.col && c.sheetIndex == null);
+  const stored = first.find((c) => c.row === decider.row && c.col === decider.col && c.sheetIndex == null);
   let updates: CellUpdateInput[];
   if (stored?.formula) {
     // A FORMULA, in the spelling typed: `+B1` is the formula =+B1 (the backend
@@ -135,14 +181,22 @@ export async function ctrlEnterFill(
       throw new Error("Ctrl+Enter: the formula could not be adjusted for every selected cell.");
     }
     updates = others.map(({ row, col }, i) => ({ row, col, value: shifted[i], pasted: true }));
-  } else if ((await deps.typeAt(anchor.row, anchor.col)) === "text") {
+  } else if ((await deps.typeAt(decider.row, decider.col)) === "text") {
     // TEXT in the active cell (a Text-formatted active cell, an apostrophe, or
     // plain words) is text in every cell: behind the apostrophe escape, which
     // stores the rest verbatim, so `007` or `=B1` stays the text the active
     // cell shows even in a General cell. An entry that already starts with the
     // escape is sent as typed (it means the same thing in every cell).
+    //
+    // As a PASTED invariant write, so the other cells keep their format: a
+    // TYPED `'007` makes a General cell Text (the backend's stand-in for
+    // Excel's prefix character, typed_entry.rs `apostrophe_implied_format`),
+    // but Excel's Ctrl+Enter leaves them as they are -- `007` or `=B1` with a
+    // Text-formatted active A1 is the text "007" / "=B1" in a General A2 that
+    // STAYS General, with no prefix character [LIVE, Excel 16, 2026-11-06,
+    // lane uimisc probe2 C9/K2: A2 NumberFormat General, PrefixCharacter ""].
     const escaped = value.trimStart().startsWith("'") ? value : `'${value.trim()}`;
-    updates = others.map(({ row, col }) => ({ row, col, value: escaped }));
+    updates = others.map(({ row, col }) => ({ row, col, value: escaped, pasted: true, invariant: true }));
   } else {
     // A number, a date, TRUE / FALSE, an error, or nothing: the same entry in
     // every cell, `pasted` so a Text-formatted cell takes the number too.

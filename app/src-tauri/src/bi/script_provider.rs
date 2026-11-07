@@ -72,8 +72,9 @@ impl HostModelProvider {
         let cap_store = self.app.state::<crate::scripting::CapabilityStore>();
         if !cap_store.is_granted(surface, capability) {
             let app_state = self.app.state::<crate::AppState>();
+            let file_state = self.app.state::<crate::persistence::FileState>();
             crate::net_commands::record_capability_call(
-                &app_state.audit_log,
+                &crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state),
                 capability,
                 surface,
                 false,
@@ -90,10 +91,16 @@ impl HostModelProvider {
 
     /// Record a successful capability call (always-on trail; detail is
     /// non-sensitive: connection + a short specifier, never full SQL).
-    fn audit_ok(&self, capability: &str, surface: &str, detail: &str) {
+    ///
+    /// `epoch` is the document epoch read when the call BEGAN
+    /// ([`Self::entry_epoch`], BUG-0735): a notebook cell blocks on the model
+    /// for up to a minute, and a File > Open in that minute must not get the
+    /// row.
+    fn audit_ok(&self, epoch: u64, capability: &str, surface: &str, detail: &str) {
         let app_state = self.app.state::<crate::AppState>();
+        let file_state = self.app.state::<crate::persistence::FileState>();
         crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            &crate::machine_audit::WorkbookAudit::of_epoch(&app_state.audit_log, &file_state, epoch),
             capability,
             surface,
             true,
@@ -106,10 +113,11 @@ impl HostModelProvider {
     /// down is exactly what a reviewer of the trail wants to see; without this
     /// the only recorded denial is "capability not granted". The reason is the
     /// engine's own message (object names, never row data).
-    fn audit_failed(&self, capability: &str, surface: &str, detail: &str, reason: &str) {
+    fn audit_failed(&self, epoch: u64, capability: &str, surface: &str, detail: &str, reason: &str) {
         let app_state = self.app.state::<crate::AppState>();
+        let file_state = self.app.state::<crate::persistence::FileState>();
         crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            &crate::machine_audit::WorkbookAudit::of_epoch(&app_state.audit_log, &file_state, epoch),
             capability,
             surface,
             false,
@@ -131,16 +139,22 @@ impl HostModelProvider {
         detail: &str,
         run: impl FnOnce() -> Result<T, ModelProviderError>,
     ) -> Result<T, ModelProviderError> {
+        let epoch = self.entry_epoch();
         match run() {
             Ok(v) => {
-                self.audit_ok(capability, surface, detail);
+                self.audit_ok(epoch, capability, surface, detail);
                 Ok(v)
             }
             Err(e) => {
-                self.audit_failed(capability, surface, detail, &e.message);
+                self.audit_failed(epoch, capability, surface, detail, &e.message);
                 Err(e)
             }
         }
+    }
+
+    /// The document epoch a call begins on (see [`Self::audit_ok`]).
+    fn entry_epoch(&self) -> u64 {
+        self.app.state::<crate::persistence::FileState>().settled_document_epoch()
     }
 
     fn resolve_conn(&self, connection: &str) -> Result<ConnectionId, ModelProviderError> {
@@ -202,6 +216,7 @@ fn result_to_table(mut result: BiQueryResult) -> ModelTable {
 impl ModelDataProvider for HostModelProvider {
     fn connections(&self, surface: &str) -> Result<String, ModelProviderError> {
         self.check_cap(surface, "bi.query")?;
+        let epoch = self.entry_epoch();
         // Whitelisted, NON-sensitive summaries only: no connection strings,
         // servers, database names, or model paths reach script code.
         let summaries: Vec<serde_json::Value> = {
@@ -224,7 +239,7 @@ impl ModelDataProvider for HostModelProvider {
                 })
                 .collect()
         };
-        self.audit_ok("bi.query", surface, "model.connections");
+        self.audit_ok(epoch, "bi.query", surface, "model.connections");
         serde_json::to_string(&summaries).map_err(|e| {
             ModelProviderError::new(ModelProviderErrorKind::Query, format!("Serialize failed: {}", e))
         })

@@ -94,6 +94,7 @@ import {
 // and the flag means "Core's own cell edit is open". Raised here it had no
 // edit behind it, and an unmount while focused left it up for good (E12).
 import { isAddressLike } from "./NameBox.address";
+import { isValidDefinedName } from "../../api/definedNameSyntax";
 // Every navigation -- typed, picked from the list -- through the navigator the
 // Go To dialog also runs (NameBox.navigate.ts).
 import { createReferenceNavigator } from "./NameBox.navigate";
@@ -156,24 +157,15 @@ function buildRefersTo(
 }
 
 /**
- * Basic client-side name validation: a first filter. The backend's
- * `NamedRange::is_valid_name` decides and refuses more (R1C1-shaped names such
- * as `R1C1` / `RC` / `C`, Lotus-style `A1.B1`, over 255 characters, as
- * Excel does); its refusal is reported through `reportProblem` below.
+ * Whether the Name Box may DEFINE `name`: Excel's whole defined-name rule
+ * (`isValidDefinedName`, the mirror of the backend's
+ * `identity::is_valid_defined_name`, BUG-0741 -- this used to be a first
+ * filter that refused `\abc`, `a\b`, `abc?` and `NULL`, which Excel takes, and
+ * let `R1C1` / `RC` / `A1.B1` reach a backend refusal), and never anything the
+ * Name Box itself reads as an address.
  */
 function isValidName(name: string): boolean {
-  if (!name || name.length === 0) return false;
-
-  const first = name[0];
-  if (!/[a-zA-Z_]/.test(first)) return false;
-
-  for (let i = 1; i < name.length; i++) {
-    const ch = name[i];
-    if (!/[a-zA-Z0-9_.]/.test(ch)) return false;
-  }
-
-  const upper = name.toUpperCase();
-  if (upper === "TRUE" || upper === "FALSE" || upper === "NULL") return false;
+  if (!isValidDefinedName(name)) return false;
 
   // Cannot be a cell reference. Shares the Name Box's own parser so the two can
   // never disagree about what an address is — a second regex here is how "A1"
@@ -544,8 +536,15 @@ export function NameBox(): React.ReactElement {
       createReferenceNavigator({
         dispatch,
         activeSheetIndex: () => state.sheetContext.activeSheetIndex,
+        activeCell: () =>
+          state.selection
+            ? {
+                row: state.selection.activeRow ?? state.selection.endRow,
+                col: state.selection.activeCol ?? state.selection.endCol,
+              }
+            : null,
       }),
-    [dispatch, state.sheetContext.activeSheetIndex],
+    [dispatch, state.sheetContext.activeSheetIndex, state.selection],
   );
 
   /** Leave edit mode after an entry that was honoured. */

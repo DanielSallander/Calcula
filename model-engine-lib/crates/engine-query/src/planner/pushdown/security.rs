@@ -22,30 +22,18 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use engine_connectors::{FilterCondition, FilterOperator};
-use engine_core::compute::expression::{ComparisonOp, FilterPredicate};
+use engine_connectors::FilterCondition;
+use engine_core::compute::expression::FilterPredicate;
 use engine_core::error::EngineError;
 use engine_core::model::DataModel;
-
-/// Map an engine-core [`ComparisonOp`] to a connector [`FilterOperator`].
-///
-/// Total: every `ComparisonOp` variant has a `FilterOperator` counterpart, so
-/// role predicates always push down faithfully.
-pub(super) fn comparison_to_filter_operator(op: ComparisonOp) -> FilterOperator {
-    match op {
-        ComparisonOp::Equal => FilterOperator::Equal,
-        ComparisonOp::NotEqual => FilterOperator::NotEqual,
-        ComparisonOp::GreaterThan => FilterOperator::GreaterThan,
-        ComparisonOp::GreaterThanOrEqual => FilterOperator::GreaterThanOrEqual,
-        ComparisonOp::LessThan => FilterOperator::LessThan,
-        ComparisonOp::LessThanOrEqual => FilterOperator::LessThanOrEqual,
-    }
-}
 
 /// Convert one role [`FilterPredicate`] into a connector [`FilterCondition`].
 ///
 /// The [`FilterCondition`] is table-agnostic (column / op / value); callers
 /// place it on the fetch of the predicate's own [`FilterPredicate::table`].
+/// It is [`crate::security_filter::role_filter_condition`], THE one RLS
+/// conversion: BLANK strict, separate from every KEEP renderer (owner
+/// decision BUG-0759).
 pub(super) fn predicate_to_condition(predicate: &FilterPredicate) -> FilterCondition {
     // A dynamic RLS predicate (USERNAME()/CUSTOMDATA()) must be substituted to a
     // concrete identity by the facade before planning, so the planner never sees
@@ -55,11 +43,7 @@ pub(super) fn predicate_to_condition(predicate: &FilterPredicate) -> FilterCondi
         predicate.dynamic.is_none(),
         "unsubstituted dynamic RLS predicate reached the planner"
     );
-    FilterCondition::new(
-        predicate.column.clone(),
-        comparison_to_filter_operator(predicate.operator),
-        predicate.value.clone(),
-    )
+    crate::security_filter::role_filter_condition(predicate)
 }
 
 /// Collect the role's [`FilterCondition`]s that target a specific table.
@@ -82,19 +66,23 @@ pub(super) fn role_filtered_tables(role_filters: &[FilterPredicate]) -> HashSet<
 }
 
 /// Is `dim` restrictable on `fact` by the single mechanism the executor
-/// implements — a **single-hop, active, single-column equi** relationship?
+/// implements — a **single-hop, active, single-column equi** relationship,
+/// in either cross-filter direction?
 ///
-/// This MUST agree exactly with the IN-propagation gate in
-/// `executor/pipeline/local_aggregation.rs` (`rel.conditions().len() == 1 &&
-/// rel.is_equi_only()` over an *active* relationship found by
-/// [`DataModel::find_relationship`]). The relevance check and the executor's
-/// propagation are the two halves of one contract: if they disagree, RLS
-/// either over-restricts (an enforcement we never apply) or — far worse —
-/// under-restricts (a leak). Keep them in lockstep.
+/// The relevance check and the executor's key propagation are the two halves
+/// of one contract: if they disagree, RLS either over-restricts (an
+/// enforcement we never apply) or — far worse — under-restricts (a leak).
+/// They are kept in lockstep by sharing ONE gate,
+/// [`crate::security_filter::role_restriction_propagates`], over the same
+/// *active* relationship found by [`DataModel::find_relationship`]. A role's
+/// restriction propagates whatever the relationship's cross-filter direction
+/// (owner decision 2026-11-06, a security filter never widens): the
+/// direction rule a SLICER follows (`pre_aggregate::filter_reaches_fact`)
+/// must never be added here, nor to the executor's role propagation.
 fn fact_restrictable_by_dimension(model: &DataModel, fact: &str, dim: &str) -> bool {
     model
         .find_relationship(fact, dim)
-        .map(|rel| rel.conditions().len() == 1 && rel.is_equi_only())
+        .map(crate::security_filter::role_restriction_propagates)
         .unwrap_or(false)
 }
 
@@ -226,6 +214,9 @@ pub(crate) fn rls_relevance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security_filter::role_filter_operator;
+    use engine_connectors::FilterOperator;
+    use engine_core::compute::expression::ComparisonOp;
     use engine_core::model::{
         Cardinality, Column, JoinCondition, JoinOperator, Relationship, Table,
     };
@@ -277,15 +268,15 @@ mod tests {
     #[test]
     fn op_mapping_is_total() {
         assert_eq!(
-            comparison_to_filter_operator(ComparisonOp::Equal),
+            role_filter_operator(ComparisonOp::Equal),
             FilterOperator::Equal
         );
         assert_eq!(
-            comparison_to_filter_operator(ComparisonOp::NotEqual),
+            role_filter_operator(ComparisonOp::NotEqual),
             FilterOperator::NotEqual
         );
         assert_eq!(
-            comparison_to_filter_operator(ComparisonOp::LessThanOrEqual),
+            role_filter_operator(ComparisonOp::LessThanOrEqual),
             FilterOperator::LessThanOrEqual
         );
     }
@@ -312,6 +303,49 @@ mod tests {
             "dimension RLS related to the fact must be relevant"
         );
         assert_eq!(extra, vec!["Geography".to_string()]);
+    }
+
+    /// A role on the MANY side (Sales) restricts a measure on the ONE side
+    /// (Geography) although the relationship filters in a single direction:
+    /// a role filter never follows the cross-filter direction (owner
+    /// decision 2026-11-06), so Sales is pulled in for the executor's key
+    /// propagation -- the same gate the executor uses
+    /// (`security_filter::role_restriction_propagates`), whatever the
+    /// relationship's cross-filter direction. End to end:
+    /// `bi-engine` `many_to_many_tests::
+    /// a_role_filter_on_the_many_side_restricts_the_one_side_in_every_direction`.
+    #[test]
+    fn a_fact_role_restricts_a_one_side_measure_across_a_single_direction() {
+        let model = star_model();
+        let rel = model.find_relationship("Sales", "Geography").unwrap();
+        assert_ne!(
+            rel.propagation(),
+            engine_core::model::FilterPropagation::Both,
+            "the fixture filters in a single direction"
+        );
+        for propagation in [
+            engine_core::model::FilterPropagation::Auto,
+            engine_core::model::FilterPropagation::None,
+            engine_core::model::FilterPropagation::Both,
+        ] {
+            assert!(
+                crate::security_filter::role_restriction_propagates(
+                    &rel.clone().with_propagation(propagation)
+                ),
+                "{propagation:?}"
+            );
+        }
+        let role = vec![FilterPredicate::new(
+            "Sales",
+            "amount",
+            ComparisonOp::GreaterThan,
+            "50",
+        )];
+        let query_tables: HashSet<String> = ["Geography".to_string()].into_iter().collect();
+        let (relevant, extra) =
+            rls_relevance(&role, &query_tables, &["Geography"], &model).unwrap();
+        assert!(relevant, "a fact role restricts the one side");
+        assert_eq!(extra, vec!["Sales".to_string()]);
     }
 
     #[test]

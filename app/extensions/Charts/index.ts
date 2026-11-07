@@ -459,7 +459,7 @@ async function emitChartSelectionEvent(): Promise<void> {
         if (sheet) sheetName = sheet.name;
       }
 
-      const formula = await buildSeriesFormula(chart.spec, sub.seriesIndex, sheetName);
+      const formula = await buildSeriesFormula(chart.spec, sub.seriesIndex, sheetName, chart.sheetIndex);
       payload.seriesFormula = formula;
     } catch {
       // If formula computation fails, emit without it
@@ -2816,7 +2816,7 @@ function activate(context: ExtensionContext): void {
     const { resolveDataSource } = await import("./lib/dataSourceResolver");
     let dataRef: DataRangeRef;
     try {
-      dataRef = await resolveDataSource(spec.data);
+      dataRef = await resolveDataSource(spec.data, chart.sheetIndex);
     } catch {
       return;
     }

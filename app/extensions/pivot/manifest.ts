@@ -32,6 +32,7 @@ import { GroupDialog } from "./components/GroupDialog";
 import { FieldSettingsDialog } from "./components/FieldSettingsDialog";
 import { PivotOptionsDialog } from "./components/PivotOptionsDialog";
 import DrillThroughBehaviorDialog from "./components/DrillThroughBehaviorDialog";
+import { SortFieldDialog } from "./components/SortFieldDialog";
 import { FilterDropdown } from "./components/FilterDropdown";
 import { PivotHeaderFilterDropdown } from "./components/PivotHeaderFilterDropdown";
 import type { HeaderFieldSummary } from "./lib/pivot-api";
@@ -307,6 +308,23 @@ function DrillThroughBehaviorDialogWrapper(props: DialogProps): React.ReactEleme
 export const DrillThroughBehaviorDialogDefinition: DialogDefinition = {
   id: PIVOT_DRILL_BEHAVIOR_DIALOG_ID,
   component: DrillThroughBehaviorDialogWrapper,
+  priority: 100,
+};
+
+/** Excel's "Sort (<field>)" dialog: Sort > More Sort Options... (BUG-0733). */
+export const PIVOT_SORT_FIELD_DIALOG_ID = "pivot:sortFieldDialog";
+
+function SortFieldDialogWrapper(props: DialogProps): React.ReactElement {
+  return React.createElement(SortFieldDialog, {
+    isOpen: props.isOpen,
+    onClose: props.onClose,
+    data: props.data,
+  });
+}
+
+export const PivotSortFieldDialogDefinition: DialogDefinition = {
+  id: PIVOT_SORT_FIELD_DIALOG_ID,
+  component: SortFieldDialogWrapper,
   priority: 100,
 };
 

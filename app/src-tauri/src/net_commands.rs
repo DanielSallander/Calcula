@@ -132,8 +132,13 @@ pub fn grant_script_net_origin(
 /// capability use — not just grid mutations — survives reload. `detail` is an
 /// optional NON-SENSITIVE specifier (e.g. a net origin or a SQL prefix); never
 /// the full URL/SQL, which may carry query strings / credentials.
+///
+/// `audit` names the workbook the call belongs to, fixed at the command's
+/// ENTRY (BUG-0735): every one of these gates is async, so File > Open / New
+/// can replace the workbook while the call awaits, and the row then goes to
+/// this computer's trail rather than into the workbook now on screen.
 pub(crate) fn record_capability_call(
-    audit_log: &crate::document_effect::Persisted<calp::audit::AuditLog>,
+    audit: &crate::machine_audit::WorkbookAudit<'_>,
     capability: &str,
     script_id: &str,
     ok: bool,
@@ -163,28 +168,10 @@ pub(crate) fn record_capability_call(
             error.map(|e| format!(" ({})", e)).unwrap_or_default()
         ),
     };
-    // The entry RECORDS an action; it is not itself one. See `CleanReason::AuditTrail`.
-    let audit_effect = crate::document_effect::DocumentEffect::deliberately_clean(
-        crate::document_effect::CleanReason::AuditTrail,
-    );
-    match audit_log.write(&audit_effect) {
-        Ok(mut audit) => {
-            audit.record_with_extra(calp::audit::AuditEvent::CapabilityCall, &desc, "local", &now, extra);
-        }
-        // A poisoned audit lock silently dropped the entry, which is the one
-        // failure mode an always-on transparency trail must not have: the trail
-        // would read as "this script made no capability calls" while it made
-        // them. It still cannot be persisted, but it is no longer invisible.
-        Err(_) => {
-            crate::log_warn!(
-                "AUDIT",
-                "capability call NOT audited (audit log lock poisoned): capability={} script={} ok={}",
-                capability,
-                if script_id.is_empty() { "<none>" } else { script_id },
-                ok
-            );
-        }
-    }
+    // The entry RECORDS an action; it is not itself one (`CleanReason::AuditTrail`,
+    // inside `WorkbookAudit::record`, which also reports a poisoned trail
+    // rather than dropping the row unseen).
+    audit.record(calp::audit::AuditEvent::CapabilityCall, &desc, "local", &now, extra);
 }
 
 /// Write-through sink for the frontend broker's audit ring: persists a
@@ -197,6 +184,7 @@ pub(crate) fn record_capability_call(
 #[tauri::command]
 pub fn audit_record_capability(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     script_id: String,
     capability: String,
     ok: bool,
@@ -205,8 +193,10 @@ pub fn audit_record_capability(
     window: Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // A sync command (main thread): the workbook live now is the one the
+    // broker's call ran in, as far as this door can know.
     record_capability_call(
-        &state.audit_log,
+        &crate::machine_audit::WorkbookAudit::at_entry(&state.audit_log, &file_state),
         &capability,
         &script_id,
         ok,
@@ -261,12 +251,16 @@ fn is_credential_header(name: &str) -> bool {
 pub async fn script_http_fetch(
     cap_store: State<'_, CapabilityStore>,
     app_state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     bi_state: State<'_, crate::bi::BiState>,
     request: HttpFetchRequest,
     window: Window,
 ) -> Result<HttpFetchResponse, String> {
     // (a) window guard — main window only.
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every row of this call belongs to (BUG-0735): fixed now,
+    // before the request awaits the network.
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state);
 
     let script_id = request.script_id.clone();
 
@@ -313,7 +307,7 @@ pub async fn script_http_fetch(
             origin,
             request.url
         );
-        record_capability_call(&app_state.audit_log, "net.fetch", &script_id, false, Some(&origin), Some("origin not granted"));
+        record_capability_call(&audit, "net.fetch", &script_id, false, Some(&origin), Some("origin not granted"));
         return Err(format!("PermissionDenied: net.fetch not granted for {}", origin));
     }
 
@@ -325,7 +319,7 @@ pub async fn script_http_fetch(
             script_id,
             origin
         );
-        record_capability_call(&app_state.audit_log, "net.fetch", &script_id, false, Some(&origin), Some("rate limited"));
+        record_capability_call(&audit, "net.fetch", &script_id, false, Some(&origin), Some("rate limited"));
         return Err(e);
     }
 
@@ -391,7 +385,7 @@ pub async fn script_http_fetch(
                 script_id,
                 spec.slot
             );
-            record_capability_call(&app_state.audit_log, "net.fetch", &script_id, false, Some(&origin), Some("secretHeader without bi.connector"));
+            record_capability_call(&audit, "net.fetch", &script_id, false, Some(&origin), Some("secretHeader without bi.connector"));
             return Err("PermissionDenied: secretHeader requires the bi.connector capability".to_string());
         }
         match crate::bi::script_source::find_binding_owner(&bi_state, &spec.source_id) {
@@ -403,7 +397,7 @@ pub async fn script_http_fetch(
                     script_id,
                     spec.source_id
                 );
-                record_capability_call(&app_state.audit_log, "net.fetch", &script_id, false, Some(&origin), Some("secretHeader for unowned connector"));
+                record_capability_call(&audit, "net.fetch", &script_id, false, Some(&origin), Some("secretHeader for unowned connector"));
                 return Err(format!(
                     "PermissionDenied: connector '{}' is not installed or not owned by this script",
                     spec.source_id
@@ -445,7 +439,7 @@ pub async fn script_http_fetch(
             // origin whose request then failed left no row at all, so the
             // trail showed a script's reach without showing what came of it.
             record_capability_call(
-                &app_state.audit_log,
+                &audit,
                 "net.fetch",
                 &script_id,
                 false,
@@ -487,7 +481,7 @@ pub async fn script_http_fetch(
                         status
                     );
                     record_capability_call(
-                        &app_state.audit_log,
+                        &audit,
                         "net.fetch",
                         &script_id,
                         false,
@@ -508,7 +502,7 @@ pub async fn script_http_fetch(
                     e
                 );
                 record_capability_call(
-                    &app_state.audit_log,
+                    &audit,
                     "net.fetch",
                     &script_id,
                     false,
@@ -533,7 +527,7 @@ pub async fn script_http_fetch(
         status,
         buf.len()
     );
-    record_capability_call(&app_state.audit_log, "net.fetch", &script_id, true, Some(&origin), None);
+    record_capability_call(&audit, "net.fetch", &script_id, true, Some(&origin), None);
 
     Ok(HttpFetchResponse {
         status,

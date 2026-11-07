@@ -4,16 +4,18 @@
 //! Handles saving and loading spreadsheet files in XLSX format.
 
 mod error;
+mod xlsx_autofilter;
 mod xlsx_chart_reader;
 mod xlsx_data_tables;
 mod xlsx_formula_text;
+mod xlsx_named_styles;
 mod xlsx_reader;
 mod xlsx_style_reader;
 mod xlsx_tables;
 mod xlsx_writer;
 
 pub use error::PersistenceError;
-pub use xlsx_reader::{load_xlsx, read_xlsx_manual_calculation};
+pub use xlsx_reader::{load_xlsx, read_xlsx_calculation_mode, read_xlsx_manual_calculation, take_xlsx_import_losses, XlsxImportLosses};
 pub use xlsx_writer::{save_xlsx, save_xlsx_reporting_losses, save_xlsx_with_calculation_mode, XlsxExportLosses};
 
 use engine::cell::{Cell, CellValue, DictKey, RichTextRun};
@@ -235,6 +237,15 @@ pub struct Workbook {
     /// (the session keeps its own), it is never misled about a value. `false`
     /// for an `.xlsx` read, whose mode the host reads from `calcPr` itself.
     pub calculation_manual: bool,
+    /// The workbook was saved under AUTOMATIC EXCEPT FOR DATA TABLES (Excel's
+    /// xlCalculationSemiautomatic, `<calcPr calcMode="autoNoTable"/>`,
+    /// BUG-0754): calculation automatic, the live data tables left for F9.
+    /// Recorded and adopted like [`Self::calculation_manual`] (never both):
+    /// `calc_mode.json` says `"automaticExceptTables"`, under the same
+    /// `calculation_mode` feature id and NO version link -- an older reader
+    /// opens it automatic and refreshes the tables at every edit, a mode the
+    /// user sees is lost, never a stale value shown as current.
+    pub calculation_except_tables: bool,
     /// INBOUND ONLY: the `format_version` the archive this workbook was READ
     /// from carried, or `0` when it did not come from a versioned `.cala`
     /// (constructed in memory, or read from `.xlsx`, which has no such stamp).
@@ -797,6 +808,7 @@ impl Workbook {
             pending_recalc: None,
             calculation_incomplete: false,
             calculation_manual: false,
+            calculation_except_tables: false,
             // Not read from an archive. See the field doc.
             format_version: 0,
             object_bindings: Vec::new(),
@@ -843,6 +855,7 @@ impl Workbook {
             pending_recalc: None,
             calculation_incomplete: false,
             calculation_manual: false,
+            calculation_except_tables: false,
             // Not read from an archive. See the field doc.
             format_version: 0,
             object_bindings: Vec::new(),

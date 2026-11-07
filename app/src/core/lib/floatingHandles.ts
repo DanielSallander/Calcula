@@ -55,10 +55,12 @@ import { isObjectInSelection } from "../../api/objectSelection";
 import { getLayoutSurface, isRegionLocked, type DraggedEdges } from "./layoutSurface";
 import { getGridStateSnapshot } from "../state/GridContext";
 import { floatingReferencePickActive } from "./referencePickState";
+import { touchTarget } from "./pointerPrecision";
 import {
   FLOATING_HANDLE_HIT_HALF,
   FLOATING_HANDLE_MIDPOINT_MIN_EDGE,
   FLOATING_HANDLE_PAINT_SIZE,
+  FLOATING_HANDLE_TOUCH_OUTER_REACH,
 } from "./floatingHandleMetrics";
 
 // ============================================================================
@@ -213,8 +215,15 @@ export function floatingHandleGeometry(rect: FloatingCanvasRect, mode: FloatingH
 
 /** Whether (px, py) is inside a handle's HIT square (inclusive). */
 export function floatingHandleHits(handle: FloatingHandle, px: number, py: number): boolean {
-  const r = handle.hit;
-  return px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height;
+  // A finger or a pen grabs it within a 44 px touch target (BUG-0729) --
+  // short of a chart's quick-access buttons on the right
+  // (FLOATING_HANDLE_TOUCH_OUTER_REACH).
+  const r = touchTarget(handle.hit);
+  let right = r.x + r.width;
+  if (handle.edges?.right) {
+    right = Math.min(right, Math.max(handle.hit.x + handle.hit.width, handle.cx + FLOATING_HANDLE_TOUCH_OUTER_REACH));
+  }
+  return px >= r.x && px <= right && py >= r.y && py <= r.y + r.height;
 }
 
 /** The handles `region` offers at its place on the canvas (none for a cell-anchored region). */

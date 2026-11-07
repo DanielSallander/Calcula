@@ -167,3 +167,61 @@ fn indicator_reads_find_the_same_items_whichever_way_the_range_was_drawn() {
     assert_eq!(sorted_notes(0, 0, 3, 3), vec![(1, 2)]);
     assert_eq!(sorted_notes(3, 3, 0, 0), vec![(1, 2)], "an upward-drawn range found no notes");
 }
+
+/// BUG-0725: Paste Special > Comments is ONE call and ONE undo step, and it is
+/// Excel's paste [LIVE, lane obj4 c1.ps1]: a destination's comment is
+/// REPLACED by the copied one (the per-cell `add_comment` refused it), a
+/// destination whose copied cell had none loses its comment, and a cell
+/// holding a Note is skipped and counted.
+///
+/// SABOTAGE (obj4-pc): drop the `removable` pass (no removal) -- fails at
+/// "THE COPIED CELL HAD NONE".
+#[test]
+fn paste_comments_replaces_removes_and_is_one_undo_step() {
+    let book = book();
+    let before = depth(&book);
+    let params = |row: u32, col: u32, text: &str| crate::comments::AddCommentParams {
+        row,
+        col,
+        author_email: "x@y".into(),
+        author_name: "you".into(),
+        content: text.into(),
+        rich_content: None,
+        mentions: None,
+    };
+    let r = crate::comments::paste_comments_impl(
+        &book.state,
+        &book.file,
+        vec![params(1, 1, "pasted over first"), params(5, 5, "new"), params(1, 2, "over a note")],
+        vec![(2, 2), (7, 7)],
+    );
+    assert_eq!((r.pasted, r.removed, r.skipped), (2, 1, 1), "{r:?}");
+    assert!(r.first_skip.as_deref().unwrap_or("").contains("Note"));
+    assert_eq!(depth(&book), before + 1, "ONE step for the whole paste");
+    assert!(book.file.is_dirty());
+    {
+        let comments = book.state.comments.read().unwrap();
+        let sheet = comments.get(&0).unwrap();
+        assert_eq!(sheet.get(&(1, 1)).map(|c| c.content.as_str()), Some("pasted over first"), "REPLACED");
+        assert_eq!(sheet.get(&(5, 5)).map(|c| c.content.as_str()), Some("new"));
+        assert!(!sheet.contains_key(&(2, 2)), "THE COPIED CELL HAD NONE: the destination's comment goes");
+        assert!(!sheet.contains_key(&(1, 2)), "a noted cell takes no comment");
+    }
+    undo(&book);
+    let comments = book.state.comments.read().unwrap();
+    let sheet = comments.get(&0).unwrap();
+    assert_eq!(sheet.get(&(1, 1)).map(|c| c.content.as_str()), Some("first"));
+    assert_eq!(sheet.get(&(2, 2)).map(|c| c.content.as_str()), Some("second"));
+    assert!(!sheet.contains_key(&(5, 5)));
+}
+
+/// Nothing to change records nothing and leaves the document clean.
+#[test]
+fn a_paste_comments_that_changes_nothing_stays_clean() {
+    let book = book();
+    let before = depth(&book);
+    let r = crate::comments::paste_comments_impl(&book.state, &book.file, Vec::new(), vec![(7, 7)]);
+    assert_eq!((r.pasted, r.removed, r.skipped), (0, 0, 0));
+    assert_eq!(depth(&book), before);
+    assert!(!book.file.is_dirty());
+}

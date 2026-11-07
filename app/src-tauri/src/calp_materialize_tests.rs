@@ -827,7 +827,7 @@ fn a_refreshed_chart_lands_on_the_old_local_sheet_including_a_returning_one() {
     let sheet_ids = vec![new_sheet_id(), old_data, old_dashboard];
     let mut entries = Vec::new();
 
-    crate::calp_commands::apply_refreshed_charts(&mut charts, &sub, &pulled, &sheet_ids, &mut entries);
+    crate::calp_commands::apply_refreshed_charts(&mut charts, &sub, &pulled, &sheet_ids, &mut entries, &mut Vec::new());
 
     assert!(!charts.iter().any(|c| c.id == owned_v1), "the application's v1 chart was replaced");
     assert!(charts.iter().any(|c| c.id == mine), "the subscriber's own chart was never touched");
@@ -2729,7 +2729,8 @@ fn a_detached_sheets_scoped_name_stays_scoped_through_a_refresh() {
     h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
     let report = h.index_of("Report");
     assert_eq!(
-        h.state.named_ranges.read().unwrap()["LOCALRATE"].sheet_index,
+        // Held under its (scope, name) key (BUG-0744).
+        h.state.named_ranges.read().unwrap()[&crate::named_ranges::registry_key(Some(report), "LocalRate")].sheet_index,
         Some(report),
         "precondition: the name arrived scoped to its sheet"
     );
@@ -2740,8 +2741,9 @@ fn a_detached_sheets_scoped_name_stays_scoped_through_a_refresh() {
     h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
 
     let names = h.state.named_ranges.read().unwrap();
+    assert!(!names.contains_key("LOCALRATE"), "the detached sheet's name became workbook-scoped");
     assert_eq!(
-        names["LOCALRATE"].sheet_index,
+        names[&crate::named_ranges::registry_key(Some(h.index_of("Report")), "LocalRate")].sheet_index,
         Some(h.index_of("Report")),
         "the detached sheet's name became workbook-scoped"
     );
@@ -2975,6 +2977,7 @@ fn a_held_back_cell_reads_the_working_copys_renamed_sheet_not_the_authors_own() 
         &report_id,
         &[(0, 0), (9, 9)],
         &renames,
+        None,
     )
     .expect("read")
     .expect("the base has the sheet");
@@ -3000,6 +3003,7 @@ fn a_held_back_cell_reads_the_working_copys_renamed_sheet_not_the_authors_own() 
         &new_sheet_id().to_string(),
         &[(0, 0)],
         &renames,
+        None,
     )
     .expect("read")
     .is_none());
@@ -3008,6 +3012,84 @@ fn a_held_back_cell_reads_the_working_copys_renamed_sheet_not_the_authors_own() 
     assert!(crate::calp_commands::working_copy_sheet_renames(&h.state, registry, "other")
         .unwrap()
         .is_empty());
+}
+
+/// A LAID VERSION'S SPILLED VALUES ARE NOT LAID (wave-3 verifier, backmisc).
+/// The merge (head) and the hold-back (base) lay a published version's cells
+/// over the working copy; a version whose dynamic array only GREW (an input
+/// row added) diffs its spilled cells as changed, and laying them as literals
+/// over this copy's own array was refused cell by cell as a write into a
+/// spilled value (BUG-0775's background gate; the active sheet's batch) -- the
+/// merge could never be applied. Both doors read with `local_spilled`: the
+/// origin and the inputs come back as cells, the spilled cells as EMPTY (the
+/// version has no content there; a cell of this copy that is one of its own
+/// spilled values is left out instead -- see
+/// `a_lay_in_settles_a_shrunk_array_and_a_literal_in_a_grown_one`), and the
+/// install's recalculation re-derives the array.
+///
+/// SABOTAGE (obj4-lay): drop the `derived` rule in
+/// `published_cells_in_local_names` -- fails at "SPILLED VALUES ARE NOT LAID".
+#[test]
+fn a_laid_versions_spilled_values_are_left_to_the_recalculation() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    // Data: A1:A5 inputs, B1 = an array spilling B1:B5 (its spilled values
+    // value-only cells, as the writer saves them), A6 a new input.
+    let mut data = Sheet::new("Data".to_string());
+    for r in 0..6u32 {
+        data.cells.insert((r, 0), SavedCell::from_cell(&Cell::new_number(f64::from(r + 1))));
+    }
+    let mut origin = SavedCell::from_cell(&Cell::new_formula("SEQUENCE(5)".to_string()));
+    origin.spill = Some((4, 1));
+    data.cells.insert((0, 1), origin);
+    for r in 1..5u32 {
+        data.cells.insert((r, 1), SavedCell::from_cell(&Cell::new_number(f64::from(r + 1))));
+    }
+    let mut wb = Workbook::default();
+    wb.sheets = vec![data];
+    let data_id = wb.sheets[0].id.to_string();
+    publish_sheets(&dir, prof.path(), &wb, vec![0]);
+
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let manifest = reg.get_version_manifest("literals", "1.0.0").unwrap();
+    let positions = [(0, 1), (1, 1), (4, 1), (5, 0), (7, 7)];
+    let none = std::collections::HashSet::new();
+    let read = |local: Option<&std::collections::HashSet<(u32, u32)>>| {
+        crate::calp_commands::published_cells_in_local_names(
+            &reg,
+            "literals",
+            "1.0.0",
+            &manifest,
+            &data_id,
+            &positions,
+            &calp::sheet_renames::SheetRenames::default(),
+            local,
+        )
+        .expect("read")
+        .expect("the version has the sheet")
+    };
+    let laid: Vec<((u32, u32), bool)> = read(Some(&none)).into_iter().map(|(p, c)| (p, c.is_some())).collect();
+    assert_eq!(
+        laid,
+        vec![((0, 1), true), ((1, 1), false), ((4, 1), false), ((5, 0), true), ((7, 7), false)],
+        "SPILLED VALUES ARE NOT LAID: the origin and the input are cells; B2, B5 and an absent cell are empty"
+    );
+    // Positive control: read as saved, B2 and B5 are the version's values (the
+    // diff views and the materialize tests read this way).
+    let raw = read(None);
+    assert_eq!(raw.len(), positions.len());
+    assert!(raw[1].1.is_some() && raw[2].1.is_some(), "as saved, the spilled values are value-only cells");
+
+    // The helper itself: the extent minus the origin, and nothing for a
+    // value-only cell that merely carries an `sp` (no formula, no array).
+    let parsed: calcula_format::sheet_data::SheetData = serde_json::from_slice(
+        &reg.read_artifact("literals", "1.0.0", &format!("sheets/{data_id}/data.json")).unwrap().unwrap(),
+    )
+    .unwrap();
+    let derived = crate::calp_commands::published_spill_outputs(&parsed);
+    let mut derived: Vec<(u32, u32)> = derived.into_iter().collect();
+    derived.sort_unstable();
+    assert_eq!(derived, vec![(1, 1), (2, 1), (3, 1), (4, 1)]);
 }
 
 /// A SHEET SWAPPED AFTER IT WAS VERIFIED is refused, not written into the
@@ -3038,6 +3120,7 @@ fn a_published_sheet_swapped_after_verification_is_refused() {
             &report_id,
             &[(0, 0)],
             &calp::sheet_renames::SheetRenames::default(),
+            None,
         )
     };
     // Positive control: the verified bytes read.
@@ -3213,6 +3296,26 @@ fn the_refresh_gone_walker_and_the_sheet_delete_write_one_text() {
         assert!(by_delete.contains("#REF!"), "{by_delete}");
     }
     assert_eq!(gone.rename_formula("=SUM(Data!A1:A3)").as_deref(), Some("=SUM(#REF!A1:A3)"));
+
+    // A 3-D SPAN with the deleted sheet as an endpoint (BUG-0751): both move
+    // the endpoint inward over the tabs [LIVE, lane namescalp p2.ps1], the
+    // walker given the tabs' order as the refresh and the delete give it.
+    // Sheet1, Mid, Data (deleted, index 2), Other.
+    let after4 = vec!["Sheet1".to_string(), "Mid".to_string(), "Other".to_string()];
+    let gone4 = calp::sheet_renames::SheetRenames::default()
+        .with_gone(["Data"])
+        .with_span_order(["Sheet1", "Mid", "Data", "Other"]);
+    for (formula, expected) in [
+        ("=SUM(Sheet1:Data!A1)", "=SUM(Sheet1:Mid!A1)"),
+        ("=SUM(Data:Other!A1)", "=SUM(Other!A1)"),
+        ("=SUM(Mid:Data!A1:B2)", "=SUM(Mid!A1:B2)"),
+    ] {
+        let by_delete = crate::repair_formula_text_on_delete_at(formula, "Data", 2, &after4)
+            .unwrap_or_else(|| panic!("the delete repairs {formula}"));
+        let by_refresh = gone4.rename_formula(formula).unwrap_or_else(|| panic!("the walker rewrites {formula}"));
+        assert_eq!(by_delete, expected, "the host's span rule for {formula}");
+        assert_eq!(by_refresh, by_delete, "ONE SPAN TEXT: one deletion, two texts for {formula}");
+    }
 }
 
 /// A SECOND DEV SUBSCRIBE to the same source is refused before anything
@@ -6449,7 +6552,7 @@ fn a_pulled_name_the_subscribers_ui_would_refuse_refuses_the_whole_pull() {
             let sheet = p.sheets[0].package_sheet_id;
             p.tables.push(saved_table_named(sheet, "C"));
         }),
-        ("rate", "the table 'rate' and the defined name 'Rate' have the same name", |p| {
+        ("rate", "the table 'rate' and the workbook-scoped defined name 'Rate' have the same name", |p| {
             let sheet = p.sheets[0].package_sheet_id;
             p.tables.push(saved_table_named(sheet, "rate"));
         }),
@@ -6629,4 +6732,196 @@ fn a_refreshed_name_never_shares_a_name_with_the_subscribers_table() {
         "REFRESH SHADOWS: the refreshed name 'Rate' landed beside the subscriber's table 'Rate'"
     );
     assert_eq!(h.state.table_names.read().unwrap()["RATE"].1, own_table, "the subscriber's table is kept");
+}
+
+/// BUG-0741, THE RENAME-AND-REUSE EDGE: v2 of the application renames its own
+/// table `Sales` to `SalesTbl` and reuses `Sales` for a defined name, and drops
+/// its own name `Rate` for a table `Rate`. Both of the application's new
+/// objects land: what the application itself owned (its ledger) never blocks
+/// its own next version. Before, the names were upserted while v1's table
+/// `Sales` still held the namespace (refused as "this workbook's table"), and
+/// v1's leftover name `Rate` made the materializer refuse the table `Rate`.
+///
+/// SABOTAGE (names-reuse): the `own_tables` exemption is dropped from the
+/// refresh's name upsert -- fails at "REUSED NAME".
+#[test]
+fn a_refresh_that_renames_its_own_table_and_reuses_the_spelling_lands_both() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut v1 = data_and_report(); // carries the workbook name `Rate`
+    let (data, report) = (v1.sheets[0].id, v1.sheets[1].id);
+    v1.tables = vec![saved_table_named(data, "Sales")];
+    publish_as(&dir, prof.path(), &v1, vec![0, 1], "reuse", (1, 0, 0), None);
+
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "reuse"), MaterializeMode::Subscribe);
+    assert!(h.state.table_names.read().unwrap().contains_key("SALES"), "precondition: v1's table landed");
+    assert!(h.state.named_ranges.read().unwrap().contains_key("RATE"), "precondition: v1's name landed");
+
+    let mut v2 = v1.clone();
+    v2.tables = vec![saved_table_named(data, "SalesTbl"), saved_table_named(report, "Rate")];
+    v2.named_ranges = vec![persistence::SavedNamedRange {
+        name: "Sales".to_string(),
+        refers_to: "=Data!$A$1".to_string(),
+        sheet_id: None,
+        comment: None,
+        folder: None,
+    }];
+    publish_as(&dir, prof.path(), &v2, vec![0, 1], "reuse", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "reuse"))]);
+
+    let names = h.state.named_ranges.read().unwrap().clone();
+    let tables = h.state.table_names.read().unwrap().clone();
+    assert_eq!(names.get("SALES").map(|n| n.refers_to.as_str()), Some("=Data!$A$1"), "REUSED NAME: v2's name Sales");
+    assert!(tables.contains_key("SALESTBL"), "v2's renamed table");
+    assert!(!tables.contains_key("SALES"), "v1's table is gone");
+    assert!(tables.contains_key("RATE"), "REUSED TABLE: v2's table Rate");
+    assert!(!names.contains_key("RATE"), "v1's dropped name Rate is gone");
+}
+
+/// BUG-0741: the pull door's own table gate. A pulled table whose name Excel
+/// would not take is not landed (`R1C1`, `?x`); one Excel takes is, a
+/// two-character backslash name included (`\a`, which a TABLE may have
+/// [LIVE q4.ps1]); and a SHEET-scoped name of the subscriber's does not block
+/// a table of its spelling (Excel lets the two share one), while a workbook
+/// name does.
+///
+/// SABOTAGE (names-pull): the `is_valid_table_name` gate in
+/// `materialize_pulled_tables` is removed -- fails at "INVALID TABLE NAME".
+#[test]
+fn the_pull_door_lands_only_table_names_excel_takes() {
+    let h = Harness::new();
+    let effect = test_effect();
+    let sheet = h.state.sheet_ids.read().unwrap()[0];
+    for (name, scope) in [("Loc", Some(0usize)), ("Glob", None)] {
+        let nr = crate::named_ranges::NamedRange {
+            name: name.to_string(),
+            sheet_index: scope,
+            refers_to: "=1".to_string(),
+            comment: None,
+            folder: None,
+        };
+        h.state.named_ranges.write(&effect).unwrap().insert(nr.registry_key(), nr);
+    }
+    let tables: Vec<persistence::SavedTable> =
+        ["R1C1", "?x", "\\a", "Good", "Loc", "Glob"].iter().map(|n| saved_table_named(sheet, n)).collect();
+    let map: std::collections::HashMap<identity::SheetId, usize> = [(sheet, 0usize)].into_iter().collect();
+    let landed = crate::calp_commands::materialize_pulled_tables(&effect, &h.state, &tables, &map, None).unwrap();
+    let names = h.state.table_names.read().unwrap().clone();
+    assert!(!names.contains_key("R1C1"), "INVALID TABLE NAME: a table named R1C1 landed");
+    assert!(!names.contains_key("?X"), "INVALID TABLE NAME: a table named ?x landed");
+    assert!(names.contains_key("\\A"), "Excel takes \\a as a table name");
+    assert!(names.contains_key("GOOD"));
+    assert!(names.contains_key("LOC"), "a sheet-scoped name does not block a table of its spelling");
+    assert!(!names.contains_key("GLOB"), "a workbook name does");
+    assert_eq!(landed, 3);
+}
+
+/// Ledger programme 2 wave 5 (misc5, obj4-verify-7): the two cases the
+/// lay-in's spill rule still refused or broke. (1) A version whose array only
+/// SHRANK (B1 `=SEQUENCE(5)` -> `=SEQUENCE(3)`): its diff names B4:B5 as
+/// emptied, the lay-in cleared them -- but here they are this copy's own
+/// spilled values, so BUG-0775's spilled-cell gate refused the whole merge.
+/// They are derived on both sides now and left to the recalculation. (2) A
+/// version whose array GREW over a cell where this copy still holds a literal
+/// (E3 "x", E1 `=SEQUENCE(2)` -> `=SEQUENCE(3)`): the spilled position was
+/// skipped, the literal stayed, and the merged array showed #SPILL!. It is
+/// laid EMPTY now, so the array spills. Then the laid cells go through the
+/// real batch -- the gate passes and both arrays spill as the version has them.
+///
+/// SABOTAGE (misc5-shr): drop the "nothing in the version, one of this copy's
+/// own spilled values" skip in `published_cells_in_local_names` -- fails at
+/// "SHRUNK ARRAY". SABOTAGE (misc5-lit): skip a version's spilled position
+/// instead of laying it empty -- fails at "LITERAL BLOCKS THE GROWN ARRAY".
+#[test]
+fn a_lay_in_settles_a_shrunk_array_and_a_literal_in_a_grown_one() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    // The version: B1 = SEQUENCE(3) spilling B1:B3, E1 = SEQUENCE(3) spilling
+    // E1:E3 (their spilled values value-only cells, as the writer saves them).
+    let mut data = Sheet::new("Data".to_string());
+    for col in [1u32, 4] {
+        let mut origin = SavedCell::from_cell(&Cell::new_formula("SEQUENCE(3)".to_string()));
+        origin.spill = Some((2, col));
+        data.cells.insert((0, col), origin);
+        for r in 1..3u32 {
+            data.cells.insert((r, col), SavedCell::from_cell(&Cell::new_number(f64::from(r + 1))));
+        }
+    }
+    let mut wb = Workbook::default();
+    wb.sheets = vec![data];
+    let data_id = wb.sheets[0].id.to_string();
+    publish_sheets(&dir, prof.path(), &wb, vec![0]);
+
+    // This copy: B1 = SEQUENCE(5) (B1:B5), E1 = SEQUENCE(2) (E1:E2), E3 = "x".
+    let state = crate::create_app_state();
+    *state.locale.lock().unwrap() = engine::LocaleSettings::invariant();
+    let file = crate::persistence::FileState::default();
+    let files = crate::persistence::UserFilesState::default();
+    let pivots = crate::pivot::types::PivotState::new();
+    let typed = |row: u32, col: u32, value: &str| crate::api_types::CellUpdateInput {
+        row,
+        col,
+        value: value.to_string(),
+        style_index: None,
+        invariant: Some(true),
+        pasted: None,
+        moved: None,
+        source: None,
+    };
+    let write = |updates: Vec<crate::api_types::CellUpdateInput>| {
+        crate::commands::data::update_cells_batch_core(&state, &file, &files, &pivots, updates, None, None, None, None)
+            .map(|_| ())
+    };
+    write(vec![typed(0, 1, "=SEQUENCE(5)"), typed(0, 4, "=SEQUENCE(2)"), typed(2, 4, "x")]).expect("this copy");
+    let local = crate::calp_commands::local_spill_outputs(&state, 0).expect("spill map");
+    let mut spilled: Vec<(u32, u32)> = local.iter().copied().collect();
+    spilled.sort_unstable();
+    assert_eq!(spilled, vec![(1, 1), (1, 4), (2, 1), (3, 1), (4, 1)], "precondition: this copy's spilled cells");
+    assert!(
+        crate::commands::data::check_spill_protection_cells(&state, 0, &[(3, 1)]).is_err(),
+        "precondition: clearing B4 here is a write into a spilled value"
+    );
+
+    // What the merge's diff names: both origins, B4:B5 emptied, E2:E3 spilled.
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let manifest = reg.get_version_manifest("literals", "1.0.0").unwrap();
+    let positions = [(0, 1), (3, 1), (4, 1), (0, 4), (1, 4), (2, 4)];
+    let laid = crate::calp_commands::published_cells_in_local_names(
+        &reg,
+        "literals",
+        "1.0.0",
+        &manifest,
+        &data_id,
+        &positions,
+        &calp::sheet_renames::SheetRenames::default(),
+        Some(&local),
+    )
+    .expect("read")
+    .expect("the version has the sheet");
+    let at: Vec<(u32, u32)> = laid.iter().map(|(p, _)| *p).collect();
+    assert!(
+        !at.contains(&(3, 1)) && !at.contains(&(4, 1)),
+        "SHRUNK ARRAY: B4:B5 are this copy's spilled values and must be left to the recalculation, got {at:?}"
+    );
+    assert!(!at.contains(&(1, 4)), "E2 is spilled on both sides");
+    assert!(
+        laid.iter().any(|(p, c)| *p == (2, 4) && c.is_none()),
+        "LITERAL BLOCKS THE GROWN ARRAY: E3 must be laid empty, got {at:?}"
+    );
+    let cells: Vec<(u32, u32)> = laid.iter().map(|(p, _)| *p).collect();
+    crate::commands::data::check_spill_protection_cells(&state, 0, &cells).expect("the gate passes what is laid");
+
+    // Laid through the real batch: both arrays spill as the version has them.
+    let updates: Vec<crate::api_types::CellUpdateInput> = laid
+        .iter()
+        .map(|((r, c), cell)| typed(*r, *c, &cell.as_ref().and_then(|s| s.formula.clone()).map(|f| format!("={f}")).unwrap_or_default()))
+        .collect();
+    write(updates).expect("the merged cells install");
+    let grid = state.grids.read().unwrap()[0].clone();
+    let value = |r: u32, c: u32| grid.get_cell(r, c).map(|cell| cell.value.clone()).unwrap_or(engine::CellValue::Empty);
+    assert_eq!(value(2, 1), engine::CellValue::Number(3.0));
+    assert_eq!(value(3, 1), engine::CellValue::Empty, "B4 released by the shrunk array");
+    assert_eq!(value(2, 4), engine::CellValue::Number(3.0), "E3 is the grown array's, not #SPILL!");
+    assert_eq!(value(0, 4), engine::CellValue::Number(1.0), "E1 spills");
 }

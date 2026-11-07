@@ -3486,22 +3486,24 @@ declare interface UnlockedAPI {
 
   // -- Calculation control --
 
-  /** Whether formulas recalculate automatically after every change, or only
-   *  when asked ("manual"). */
-  getCalculationMode(): Promise<"automatic" | "manual">;
+  /** Whether formulas recalculate automatically after every change, every
+   *  formula but the data tables does ("automaticExceptTables", Excel's
+   *  Automatic except for data tables), or only when asked ("manual"). */
+  getCalculationMode(): Promise<"automatic" | "automaticExceptTables" | "manual">;
   /**
-   * Switch recalculation between "automatic" and "manual" — VBA's
-   * `Application.Calculation`. In manual mode nothing recalculates until you
+   * Switch recalculation between "automatic", "automaticExceptTables" and
+   * "manual" — VBA's `Application.Calculation`. In manual mode nothing recalculates until you
    * call `recalculate()` (or the user presses F9), which is how a script makes
    * ten thousand writes land fast.
    *
    * THE SAFETY NET: if your script set "manual" and then stops for ANY reason
    * — unmount, a crash, the debugger's Stop, the workbook being swapped —
-   * Calcula restores "automatic". A dead script can never leave the workbook
+   * Calcula restores the mode it replaced ("automatic", or
+   * "automaticExceptTables"). A dead script can never leave the workbook
    * silently uncalculating. (If the USER had already set manual themselves,
    * your unmount does not override their choice.)
    */
-  setCalculationMode(mode: "automatic" | "manual"): Promise<"automatic" | "manual">;
+  setCalculationMode(mode: "automatic" | "automaticExceptTables" | "manual"): Promise<"automatic" | "automaticExceptTables" | "manual">;
   /**
    * Recalculate now — the active sheet by default, the whole workbook with
    * `{ full: true }` (what F9 does, including refreshing CUBE formulas).

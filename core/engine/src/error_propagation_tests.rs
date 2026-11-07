@@ -384,7 +384,6 @@ fn every_text_argument_is_guarded_against_an_error() {
         ("as_text", "the method itself — it renders the literal by design"),
         ("text_or_error", "the guard; it calls as_text on the non-error arm"),
         ("eval_concat", "`&` — apply_binary_values already returned on either operand being an error"),
-        ("fn_concatenate", "guards each argument with an explicit `if let Error` before coercing"),
         ("fn_text", "guards BOTH arguments explicitly at the top of the function"),
         ("fn_valuetotext", "documented value renderer — the deliberate exemption, tested above"),
         ("fn_arraytotext", "same; renders an array's members INCLUDING error cells"),

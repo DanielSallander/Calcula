@@ -19,6 +19,7 @@ import {
 import type { AutocompleteAcceptedPayload } from "@api";
 import { isValidName, formatRefersTo } from "../lib/nameUtils";
 import { isSelectionOwned } from "@api/selectionOwner";
+import { INVALID_NAME_MESSAGE } from "../lib/invalidNameMessage";
 
 const v = (name: string) => `var(${name})`;
 
@@ -117,6 +118,7 @@ const styles = {
     color: "#e74c3c",
     fontSize: 11,
     marginTop: 2,
+    whiteSpace: "pre-line" as const,
   },
   footer: {
     display: "flex",
@@ -297,9 +299,7 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
   const handleOk = useCallback(async () => {
     // Validate name
     if (!isValidName(name)) {
-      setValidationError(
-        "Invalid name. Names must start with a letter or underscore, contain only letters, numbers, underscores, and periods, and cannot be cell references."
-      );
+      setValidationError(INVALID_NAME_MESSAGE);
       return;
     }
 
@@ -332,7 +332,8 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
         // product no longer has is worse than no dialog — it teaches the user
         // to click through warnings.
         if (targetName.toUpperCase() !== editName.toUpperCase()) {
-          const renamed = await renameNamedRange(editName, targetName);
+          // The name OF ITS SCOPE: a workbook Rate and a local Rate are two names.
+          const renamed = await renameNamedRange(editName, targetName, editSheetIndex ?? null);
           if (!renamed.success) {
             setValidationError(renamed.error ?? "Failed to rename named range.");
             setIsSubmitting(false);
@@ -375,7 +376,7 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
       setValidationError(`Error: ${error}`);
       setIsSubmitting(false);
     }
-  }, [name, scopeIndex, refersTo, comment, folder, mode, editName, onClose]);
+  }, [name, scopeIndex, refersTo, comment, folder, mode, editName, editSheetIndex, onClose]);
 
   if (!isOpen) return null;
 

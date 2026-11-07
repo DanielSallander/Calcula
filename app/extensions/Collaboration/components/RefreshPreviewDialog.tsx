@@ -49,6 +49,7 @@ import { useDialogWindow } from "@api/dialogWindow";
 import { DialogBody, DialogPane, useDialogSplit, dialogWidth } from "@api/dialogLayout";
 import { ThreeWayRow, type RowChoice } from "./ThreeWayRow";
 import { ButtonActionsNotice, ButtonLinksNotice, InlineButtonCodeNotice } from "./ButtonActionsNotice";
+import { ObjectsNotAddedNotice } from "./ObjectsNotAddedNotice";
 import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
 import { describeRefreshCard, formatSubscriptionTarget } from "../lib/environments";
 
@@ -73,6 +74,9 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
   // code written as a formula, which cannot be approved as exact bytes. Static
   // inline code is held again under the new version and asks for approval.
   const [removedInlineButtonCode, setRemovedInlineButtonCode] = useState<string[]>([]);
+  // Charts and ribbon filters the refresh did NOT add because the workbook
+  // already holds one under that id or name (BUG-0734).
+  const [objectsNotAdded, setObjectsNotAdded] = useState<string[]>([]);
   /** cellKey -> choice. Absent means "keep mine", the default. */
   const [choices, setChoices] = useState<Record<string, RowChoice>>({});
 
@@ -248,6 +252,7 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
       setRemovedButtonActions(r.buttonActionsRemoved ?? []);
       setRemovedButtonLinks(r.buttonLinksRemoved ?? []);
       setRemovedInlineButtonCode(r.inlineButtonCodeRemoved ?? []);
+      setObjectsNotAdded(r.objectsNotAdded ?? []);
       setResult(
         `Refreshed ${r.subscriptionsRefreshed} subscription(s). ` +
           `${r.sheetsAdded} added, ${r.sheetsUpdated} updated, ${r.sheetsRemoved} removed. ` +
@@ -281,6 +286,7 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
     setRemovedButtonActions([]);
     setRemovedButtonLinks([]);
     setRemovedInlineButtonCode([]);
+    setObjectsNotAdded([]);
     try {
       const r = await resetSubscription(s.registryUrl, s.packageName);
       await announceSubscribedContentReplaced();
@@ -412,6 +418,9 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
               removed={removedInlineButtonCode}
               testId="refresh-inline-button-code-removed"
             />
+          )}
+          {!loading && result && (
+            <ObjectsNotAddedNotice objects={objectsNotAdded} testId="refresh-objects-not-added" />
           )}
 
           {!loading && !result && error && !preview && (

@@ -41,8 +41,20 @@ import { formatNumber, parseNumber } from "@api/locale";
 // State
 // ============================================================================
 
+/**
+ * The calculation modes, as Excel's Formulas > Calculation Options lists them:
+ * Automatic, Automatic Except for Data Tables (xlCalculationSemiautomatic,
+ * BUG-0754: every formula recalculates, the live data tables wait for F9), and
+ * Manual.
+ */
+type CalculationMode = "automatic" | "automaticExceptTables" | "manual";
+
+function isCalculationMode(mode: string): mode is CalculationMode {
+  return mode === "automatic" || mode === "automaticExceptTables" || mode === "manual";
+}
+
 /** Current calculation mode. Drives the checked state of submenu items via getters. */
-let currentMode: "automatic" | "manual" = "automatic";
+let currentMode: CalculationMode = "automatic";
 
 /** Current iterative calculation state. */
 let iterationEnabled = false;
@@ -66,13 +78,13 @@ let calculateBeforeSave = true;
  * so the last answer to arrive is the mode in effect.
  */
 export function adoptModeInEffect(mode: string): void {
-  if (mode === "automatic" || mode === "manual") {
+  if (isCalculationMode(mode)) {
     currentMode = mode;
   }
 }
 
 /** The mode the menu's checkmark shows (for tests). */
-export function getMenuCalculationMode(): "automatic" | "manual" {
+export function getMenuCalculationMode(): CalculationMode {
   return currentMode;
 }
 
@@ -145,6 +157,30 @@ export function registerCalculationMenuItems(): () => void {
         })
         .catch((err) => {
           console.error("[CalculationOptions] Failed to set automatic mode:", err);
+        });
+    },
+  };
+
+  // Excel's "Automatic Except for Data Tables": leaving Manual for it is a
+  // recalculation of every formula but the tables, and leaving it for
+  // Automatic recalculates the tables -- both in the BACKEND, as for
+  // Automatic above.
+  const exceptTablesItem = {
+    id: "formulas:calcOptions:automaticExceptTables",
+    label: "Automatic Except for Data Tables",
+    icon: IconAutomatic,
+    get checked() { return currentMode === "automaticExceptTables"; },
+    action: () => {
+      const previous = currentMode;
+      currentMode = "automaticExceptTables";
+      setCalculationMode("automaticExceptTables")
+        .then((inEffect) => {
+          adoptModeInEffect(inEffect);
+          emitAppEvent(AppEvents.GRID_REFRESH);
+        })
+        .catch((err) => {
+          console.error("[CalculationOptions] Failed to set automatic-except-tables mode:", err);
+          currentMode = previous; // Revert on error
         });
     },
   };
@@ -272,6 +308,7 @@ export function registerCalculationMenuItems(): () => void {
     icon: IconCalcOptions,
     children: [
       autoItem,
+      exceptTablesItem,
       manualItem,
       { id: "formulas:calcOptions:iterSep", label: "", separator: true },
       iterationToggleItem,
@@ -339,7 +376,7 @@ export function registerCalculationMenuItems(): () => void {
 export async function syncCalculationMode(): Promise<void> {
   try {
     const mode = await getCalculationMode();
-    if (mode === "automatic" || mode === "manual") {
+    if (isCalculationMode(mode)) {
       currentMode = mode;
     }
   } catch (err) {

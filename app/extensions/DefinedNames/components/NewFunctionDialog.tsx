@@ -31,6 +31,7 @@ import {
   setFormulaEditorParams,
   LANGUAGE_ID,
 } from "./MonacoFormulaSetup";
+import { INVALID_NAME_MESSAGE } from "../lib/invalidNameMessage";
 
 const v = (name: string) => `var(${name})`;
 
@@ -131,6 +132,7 @@ const styles = {
     color: "#e74c3c",
     fontSize: 11,
     marginTop: 2,
+    whiteSpace: "pre-line" as const,
   },
   footer: {
     display: "flex",
@@ -403,9 +405,7 @@ export function NewFunctionDialog(props: DialogProps): React.ReactElement | null
   const handleOk = useCallback(async () => {
     // Validate function name
     if (!isValidName(name)) {
-      setValidationError(
-        "Invalid name. Names must start with a letter or underscore, contain only letters, numbers, underscores, and periods, and cannot be cell references."
-      );
+      setValidationError(INVALID_NAME_MESSAGE);
       return;
     }
 

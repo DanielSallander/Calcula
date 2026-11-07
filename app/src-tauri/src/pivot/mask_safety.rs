@@ -1,9 +1,17 @@
 //! FILENAME: app/src-tauri/src/pivot/mask_safety.rs
 //! Decides whether a BI pivot's measures can survive HOST-SIDE filtering.
 //!
-//! # STATUS: correct, tested, and NOT WIRED (2026-09-13)
+//! # STATUS (2026-11-06): the ROUTING stays unwired; the CLASSIFIER drives the mask overlay
 //!
-//! Nothing calls this yet. It was written to close BUG-0108 by routing ordinary
+//! [`mask_behaviour`] / [`mask_sensitivity`] are wired: they tell the mask
+//! overlay (`mask_overlay.rs`, BUG-0108) which measure columns of a BI pivot's
+//! records a level-1 mask gets wrong, and that overlay re-evaluates exactly
+//! those over the members the mask leaves visible -- WITHOUT sending the mask
+//! into the pivot's own query. Everything below this header about routing is
+//! still true and still unwired: [`measures_are_mask_unsafe`] and
+//! [`effective_filter_level`] are not called.
+//!
+//! The routing was written to close BUG-0108 by routing ordinary
 //! (level-1) slicers into the engine for the pivots that need it, the routing
 //! was implemented, and an adversarial pass then found NINE defects it would
 //! introduce — one of which turns currently-CORRECT answers into a hard query
@@ -141,6 +149,181 @@ pub(crate) fn effective_filter_level(requested: u8, route_level_one: bool) -> u8
     } else {
         0
     }
+}
+
+/// What a host-side (level-1) filter mask does to ONE measure's numbers in a
+/// BI pivot -- and so whether, and where, the mask overlay
+/// (`mask_overlay.rs`) must ask the engine for them again over the members the
+/// mask leaves visible. Asked of the EXPANDED expression, for the reason
+/// [`measures_are_mask_unsafe`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaskBehaviour {
+    /// `SUM` / `COUNT` / `COUNTROWS` of a column, nothing else: the masked
+    /// roll-up IS the visible set's value at every grain, so a click on a
+    /// pivot of such measures costs no engine query at all.
+    Additive,
+    /// Each record holds its own group's value, so a visible LEAF is right --
+    /// but a total is not the sum of its leaves: a ratio, an average, a
+    /// distinct count, `MIN` / `MAX`. Its subtotals and grand totals (and its
+    /// leaves, when the records are split by an off-axis slicer or filter
+    /// column) need the engine's answer.
+    Totals,
+    /// Even a LEAF value depends on rows the mask hides: a context operation
+    /// (`ALLSELECTED`, `CLEAR_INNER`, `RESET`, `KEEP`, ...), a window, or
+    /// `ISFILTERED` (folded from the request, so a mask is invisible to it).
+    /// BUG-0108's own class.
+    LeafAndTotals,
+    /// Time intelligence: LEFT TO THE MASK (blocker 5 of the BUG-0108 list).
+    /// The records were evaluated per period with the full calendar, which is
+    /// what a marked date table gives in Power BI (a `DATESYTD` replaces the
+    /// filters on the date table); a slicer on the axis's own date column sent
+    /// into the engine would truncate the window to the visible periods
+    /// instead -- replacing a right leaf with a wrong one.
+    LeftToTheMask,
+}
+
+/// The variant tags of the filter-context time-intelligence nodes as the
+/// expression's JSON spells them (an externally tagged enum:
+/// `{"ToDate":{...}}`). [`bi_engine::Expression::contains_time_intelligence`]
+/// recurses into a fixed set of combinators only, and the engine's full walker
+/// is private to it, so a node buried anywhere else is found by its tag.
+const TIME_INTELLIGENCE_TAGS: [&str; 5] = [
+    "\"ToDate\":",
+    "\"PeriodShift\":",
+    "\"DatesInPeriod\":",
+    "\"DatesBetween\":",
+    "\"SemiAdditiveBalance\":",
+];
+
+/// Whether `expr` holds a filter-context time-intelligence node ANYWHERE.
+/// Every such node is also a window node, so only a windowed expression pays
+/// for the JSON walk; an expression that cannot be serialized counts as one
+/// (left to the mask, which is what it had before).
+fn contains_time_intelligence_anywhere(expr: &bi_engine::Expression) -> bool {
+    if expr.contains_time_intelligence() {
+        return true;
+    }
+    if !expr.has_window() {
+        return false;
+    }
+    match serde_json::to_string(expr) {
+        Ok(json) => TIME_INTELLIGENCE_TAGS.iter().any(|tag| json.contains(tag)),
+        Err(_) => true,
+    }
+}
+
+/// [`MaskBehaviour`] of the model measure `measure_name`, read LIVE from
+/// `engine` (see "Why it is a live read of the model" above). An unknown
+/// measure or a circular reference fails CLOSED: `LeafAndTotals`, so the
+/// engine is asked -- and whatever it cannot answer keeps the masked value.
+pub(crate) fn mask_behaviour(engine: &bi_engine::Engine, measure_name: &str) -> MaskBehaviour {
+    let model = engine.model();
+    let Ok(measure) = model.measure(measure_name) else {
+        return MaskBehaviour::LeafAndTotals;
+    };
+    let Ok(expanded) = bi_engine::expression::expand_measure_refs(measure.expression(), model) else {
+        return MaskBehaviour::LeafAndTotals;
+    };
+    if contains_time_intelligence_anywhere(&expanded) {
+        return MaskBehaviour::LeftToTheMask;
+    }
+    if expanded.has_context_ops() || expanded.has_window() || expanded.contains_is_filtered() {
+        return MaskBehaviour::LeafAndTotals;
+    }
+    let additive_op = matches!(
+        expanded.as_simple_aggregate(),
+        Some((bi_engine::AggregateOp::Sum | bi_engine::AggregateOp::Count | bi_engine::AggregateOp::CountRows, _))
+    );
+    if !additive_op {
+        return MaskBehaviour::Totals;
+    }
+    // A sum is a sum of its groups only over the table the groups PARTITION:
+    // the fact side. Over a dimension (the one side of a relationship) the
+    // records grouped by another table's columns share its rows -- a product
+    // sold in two regions is counted in both -- so that total is the engine's.
+    let aggregated_table = match &expanded {
+        bi_engine::Expression::Aggregate { operand, .. } => match operand.as_ref() {
+            bi_engine::Expression::QualifiedColumnRef { table_or_var, .. } => table_or_var.clone(),
+            bi_engine::Expression::TableRef(table) => table.clone(),
+            _ => measure.table().to_string(),
+        },
+        _ => measure.table().to_string(),
+    };
+    if aggregated_table.is_empty() {
+        // No home table to judge: ask the engine.
+        return MaskBehaviour::Totals;
+    }
+    let one_side = model.relationships().iter().any(|r| {
+        let (from, to) = (r.from_table(), r.to_table());
+        match r.cardinality() {
+            bi_engine::Cardinality::ManyToOne => to.eq_ignore_ascii_case(&aggregated_table),
+            bi_engine::Cardinality::OneToMany => from.eq_ignore_ascii_case(&aggregated_table),
+            bi_engine::Cardinality::ManyToMany => {
+                from.eq_ignore_ascii_case(&aggregated_table) || to.eq_ignore_ascii_case(&aggregated_table)
+            }
+            bi_engine::Cardinality::OneToOne => false,
+        }
+    });
+    // The groups must PARTITION the aggregated table's rows (wave 1 pivotmask
+    // verifier): a table no relationship ties to the others is not filtered
+    // by their columns -- every leaf shows its WHOLE sum, so a masked roll-up
+    // of two leaves is twice the total Power BI shows -- and a many-to-many
+    // relationship or a filter propagating BOTH ways anywhere in the model
+    // lets one row reach several groups. Only a lone table (the groups are its
+    // own columns) or the MANY side of an active relationship is additive;
+    // anything else is the engine's to total, which costs a query, never a
+    // wrong number. (A pivot that groups a related fact by a table that does
+    // not filter it is still judged per measure, not per axis.)
+    let relationships = model.relationships();
+    let many_side = relationships.iter().any(|r| {
+        r.is_active()
+            && match r.cardinality() {
+                bi_engine::Cardinality::ManyToOne => r.from_table().eq_ignore_ascii_case(&aggregated_table),
+                bi_engine::Cardinality::OneToMany => r.to_table().eq_ignore_ascii_case(&aggregated_table),
+                _ => false,
+            }
+    });
+    let lone_table = model.tables().len() == 1;
+    let ambiguous = relationships.iter().any(|r| {
+        r.is_active()
+            && (r.cardinality() == bi_engine::Cardinality::ManyToMany
+                || r.propagation() == bi_engine::FilterPropagation::Both)
+    });
+    if one_side || ambiguous || !(many_side || lone_table) {
+        MaskBehaviour::Totals
+    } else {
+        MaskBehaviour::Additive
+    }
+}
+
+/// The [`pivot_engine::MaskSensitivity`] of a BI pivot's freshly queried
+/// records: `value_columns` maps each (measure, calculation item) the query
+/// returned to its CACHE column (`totals::measure_value_col_idx`). A
+/// calculation item's column is never listed (the overlay does not describe
+/// calculation groups, whose totals are hidden anyway).
+pub(crate) fn mask_sensitivity(
+    engine: &bi_engine::Engine,
+    value_columns: &std::collections::HashMap<(String, Option<String>), usize>,
+) -> pivot_engine::MaskSensitivity {
+    let mut out = pivot_engine::MaskSensitivity::default();
+    for ((measure, item), &column) in value_columns {
+        if item.is_some() {
+            continue;
+        }
+        match mask_behaviour(engine, measure) {
+            MaskBehaviour::Additive | MaskBehaviour::LeftToTheMask => {}
+            MaskBehaviour::Totals => out.total_fields.push(column),
+            MaskBehaviour::LeafAndTotals => {
+                out.total_fields.push(column);
+                out.leaf_fields.push(column);
+            }
+        }
+    }
+    out.total_fields.sort_unstable();
+    out.total_fields.dedup();
+    out.leaf_fields.sort_unstable();
+    out.leaf_fields.dedup();
+    out
 }
 
 #[cfg(test)]
@@ -368,6 +551,199 @@ mod tests {
              collapses its own value list and makes a compound RESET measure a \
              hard query error."
         );
+    }
+
+    // ---- the mask overlay's classifier (BUG-0108) ---------------------------
+
+    #[test]
+    fn plain_sums_and_counts_are_additive_and_cost_a_click_nothing() {
+        // The fast path's guarantee: a pivot of these never asks the engine
+        // on a slicer click. If one of them answered anything else, every
+        // ordinary BI pivot would pay an engine round trip per click.
+        let engine = engine_with(&[
+            ("Revenue", "SUM(Sales[Amount])"),
+            ("Rows", "COUNTROWS(Sales)"),
+            ("Counted", "COUNT(Sales[Amount])"),
+        ]);
+        for name in ["Revenue", "Rows", "Counted"] {
+            assert_eq!(mask_behaviour(&engine, name), MaskBehaviour::Additive, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_sum_over_a_dimension_table_is_not_additive_across_other_tables() {
+        // Product is the ONE side of Sales -> Product: grouped by a Sales
+        // column, the records share product rows, so their sum double-counts.
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![
+                        bi_engine::Column::new("ProdId", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("Amount", bi_engine::DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                bi_engine::Table::new(
+                    "Product",
+                    vec![
+                        bi_engine::Column::new("Id", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("Price", bi_engine::DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(bi_engine::Relationship::many_to_one("Sales_Product", "Sales", "ProdId", "Product", "Id"))
+            .add_measure(bi_engine::Measure::new(
+                "Fact Sum",
+                bi_engine::parse_measure_expression("SUM(Sales[Amount])").unwrap(),
+            ))
+            .add_measure(bi_engine::Measure::new(
+                "Dimension Sum",
+                bi_engine::parse_measure_expression("SUM(Product[Price])").unwrap(),
+            ))
+            .add_measure(bi_engine::Measure::new(
+                "Dimension Rows",
+                bi_engine::parse_measure_expression("COUNTROWS(Product)").unwrap(),
+            ))
+            .build()
+            .unwrap();
+        let engine = bi_engine::Engine::new(model);
+        assert_eq!(mask_behaviour(&engine, "Fact Sum"), MaskBehaviour::Additive);
+        assert_eq!(mask_behaviour(&engine, "Dimension Sum"), MaskBehaviour::Totals);
+        assert_eq!(mask_behaviour(&engine, "Dimension Rows"), MaskBehaviour::Totals);
+    }
+
+    /// Wave 1 pivotmask verifier: a SUM is the sum of its groups only when the
+    /// groups PARTITION its table. A DISCONNECTED table (Budget, tied to
+    /// nothing) is not filtered by the axis: every leaf shows the whole
+    /// budget, and a masked roll-up of two leaves is twice what Power BI
+    /// shows. A relationship filtering BOTH ways lets one row reach several
+    /// groups. Both are the engine's to total.
+    ///
+    /// SABOTAGE (pivotfix-sabJ): the partition check removed -- fails at
+    /// "DISCONNECTED" (Additive).
+    #[test]
+    fn a_sum_over_a_table_the_axis_does_not_partition_is_not_additive() {
+        let table = |name: &str, cols: &[&str]| {
+            bi_engine::Table::new(
+                name,
+                cols.iter().map(|c| bi_engine::Column::new(*c, bi_engine::DataType::Int64)).collect(),
+            )
+            .unwrap()
+        };
+        let measure = |name: &str, text: &str| {
+            bi_engine::Measure::new(name, bi_engine::parse_measure_expression(text).unwrap())
+        };
+        let disconnected = bi_engine::DataModel::builder()
+            .add_table(table("Sales", &["ProdId", "Amount"]))
+            .add_table(table("Product", &["Id", "Price"]))
+            .add_table(table("Budget", &["Amount"]))
+            .add_relationship(bi_engine::Relationship::many_to_one("Sales_Product", "Sales", "ProdId", "Product", "Id"))
+            .add_measure(measure("Fact Sum", "SUM(Sales[Amount])"))
+            .add_measure(measure("Budget Sum", "SUM(Budget[Amount])"))
+            .build()
+            .unwrap();
+        let engine = bi_engine::Engine::new(disconnected);
+        assert_eq!(mask_behaviour(&engine, "Budget Sum"), MaskBehaviour::Totals, "DISCONNECTED");
+        assert_eq!(mask_behaviour(&engine, "Fact Sum"), MaskBehaviour::Additive, "the related fact still is");
+
+        let both_ways = bi_engine::DataModel::builder()
+            .add_table(table("Sales", &["ProdId", "Amount"]))
+            .add_table(table("Product", &["Id", "Price"]))
+            .add_relationship(
+                bi_engine::Relationship::many_to_one("Sales_Product", "Sales", "ProdId", "Product", "Id")
+                    .with_propagation(bi_engine::FilterPropagation::Both),
+            )
+            .add_measure(measure("Fact Sum", "SUM(Sales[Amount])"))
+            .build()
+            .unwrap();
+        let engine = bi_engine::Engine::new(both_ways);
+        assert_eq!(mask_behaviour(&engine, "Fact Sum"), MaskBehaviour::Totals, "BOTH WAYS");
+    }
+
+    #[test]
+    fn a_ratio_or_an_average_needs_its_totals_but_not_its_leaves() {
+        // Each record is its own group's ratio, so a visible leaf is right;
+        // a total of ratios is not their sum.
+        let engine = engine_with(&[
+            ("Ratio", "DIVIDE(SUM(Sales[Amount]), COUNTROWS(Sales))"),
+            ("Average", "AVERAGE(Sales[Amount])"),
+            ("Distinct", "DISTINCTCOUNT(Sales[Region])"),
+        ]);
+        for name in ["Ratio", "Average", "Distinct"] {
+            assert_eq!(mask_behaviour(&engine, name), MaskBehaviour::Totals, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_share_of_the_visible_total_needs_its_leaves_too_even_one_reference_away() {
+        // BUG-0108's own class, and the reason the expression is expanded
+        // first: `[Share Pct]` looks additive until it is inlined.
+        let engine = engine_with(&[
+            ("Selected", "DIVIDE(SUM(Sales[Amount]), SUM(Sales[Amount], ALLSELECTED()))"),
+            (
+                "Share",
+                "SUM(Sales[Amount]) / SUM(Sales[Amount], CLEAR_INNER(Sales[Region]))",
+            ),
+            ("Share Pct", "[Share]"),
+            ("Of All", "DIVIDE(SUM(Sales[Amount]), SUM(Sales[Amount], RESET()))"),
+        ]);
+        for name in ["Selected", "Share", "Share Pct", "Of All"] {
+            assert_eq!(mask_behaviour(&engine, name), MaskBehaviour::LeafAndTotals, "{name}");
+        }
+        assert_eq!(
+            mask_behaviour(&engine, "No Such Measure"),
+            MaskBehaviour::LeafAndTotals,
+            "an unknown measure fails closed: ask the engine"
+        );
+    }
+
+    #[test]
+    fn time_intelligence_is_left_to_the_mask_wherever_it_is_buried() {
+        // Blocker 5: a slicer on the axis's own date column would truncate the
+        // window to the visible periods. A node inside a combinator
+        // `contains_time_intelligence` does not walk is found by its tag.
+        let engine = engine_with(&[
+            ("Ytd", "YTD(SUM(Sales[Amount]))"),
+            ("Ytd Share", "DIVIDE(YTD(SUM(Sales[Amount])), SUM(Sales[Amount]))"),
+            ("Ytd Ref", "[Ytd]"),
+            // A scalar function is a combinator `contains_time_intelligence`
+            // does not walk: only the tag search finds this one.
+            ("Ytd Abs", "ABS(YTD(SUM(Sales[Amount])))"),
+        ]);
+        let engine_model = engine.model();
+        let abs = bi_engine::expression::expand_measure_refs(
+            engine_model.measure("Ytd Abs").unwrap().expression(),
+            engine_model,
+        )
+        .unwrap();
+        assert!(!abs.contains_time_intelligence(), "fixture: the engine's own predicate misses it");
+        for name in ["Ytd", "Ytd Share", "Ytd Ref", "Ytd Abs"] {
+            assert_eq!(mask_behaviour(&engine, name), MaskBehaviour::LeftToTheMask, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_sensitivity_lists_the_cache_columns_of_the_measures_a_mask_gets_wrong() {
+        let engine = engine_with(&[
+            ("Revenue", "SUM(Sales[Amount])"),
+            ("Ratio", "DIVIDE(SUM(Sales[Amount]), COUNTROWS(Sales))"),
+            ("Selected", "DIVIDE(SUM(Sales[Amount]), SUM(Sales[Amount], ALLSELECTED()))"),
+        ]);
+        let columns: std::collections::HashMap<(String, Option<String>), usize> = [
+            (("Revenue".to_string(), None), 1),
+            (("Ratio".to_string(), None), 2),
+            (("Selected".to_string(), None), 3),
+            (("Selected".to_string(), Some("Item".to_string())), 4),
+        ]
+        .into_iter()
+        .collect();
+        let sensitivity = mask_sensitivity(&engine, &columns);
+        assert_eq!(sensitivity.total_fields, vec![2, 3], "the ratio and the share, never the sum or a calc item");
+        assert_eq!(sensitivity.leaf_fields, vec![3], "only the share's leaves");
     }
 
     #[test]

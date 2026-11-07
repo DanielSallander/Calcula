@@ -33,11 +33,14 @@
 //! WHY THE SEED STAYS
 //! ------------------
 //! It was tempting to delete the load-path seed instead, and that is the fix
-//! the bug was filed with a warning against. `load_xlsx` hard-codes
-//! `user_files: HashMap::new()`, so an imported workbook NEVER has an
-//! `autofilters.json` — the `show_filter_button` carried in the table metadata
-//! is the only record of its filters that exists. Deleting the seed would have
-//! silently stripped the filter buttons from every imported workbook. With the
+//! the bug was filed with a warning against. When this was written `load_xlsx`
+//! returned no `autofilters.json` at all; it now writes one for the table and
+//! sheet filters it can hold (`persistence::xlsx_autofilter`), a table with a
+//! bare `<autoFilter ref>` included; but a .cala saved without the filter, or
+//! a table that lost the sheet's one slot to another filter on import, has no
+//! entry, and the `show_filter_button` carried in the table metadata is then
+//! the only record of its filter. Deleting the seed would strip those filter
+//! buttons. With the
 //! flag now cleared on removal, the seed only ever fires for a table that still
 //! says it wants buttons, which is exactly its job.
 

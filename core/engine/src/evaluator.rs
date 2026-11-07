@@ -49,6 +49,12 @@ fn fuel_units(n: u64) -> i64 {
     }
 }
 
+/// What a GETPIVOTDATA lookup answers: `None` when the pivot SHOWS no cell
+/// for the request (#REF!), `Some(Ok(n))` for a number, and `Some(Err(e))`
+/// when the cell it names holds an error -- Excel's GETPIVOTDATA returns that
+/// error (`#DIV/0!` beside a `#DIV/0!` value cell), never #REF! (BUG-0760).
+pub type PivotDataLookup = Option<Result<f64, CellError>>;
+
 /// THE ONE numeric-overflow gate for arithmetic results.
 ///
 /// Excel's largest representable magnitude is 1.7976931348623158E+308 and a
@@ -720,10 +726,17 @@ impl EvalResult {
                     entries.iter().map(|(k, v)| (k.clone(), v.to_cell_value())).collect()
                 ))
             }
-            EvalResult::Lambda { .. } => {
-                // Lambdas stored in cells display as a text indicator
-                CellValue::Text("#LAMBDA".to_string())
-            }
+            // AN UNCALLED LAMBDA REACHING A CELL IS EXCEL'S #CALC! (BUG-0774).
+            // [LIVE, Excel 16, lane formula p1.json/p2.json] `=LAMBDA(x,x)`,
+            // `=LET(f,LAMBDA(x,x),f)`, `=IF(TRUE,LAMBDA(x,x))` and
+            // `=IFERROR(LAMBDA(x,x),"c")` are #CALC!, and a lambda ELEMENT of
+            // an array is #CALC! in its own cell (`=VSTACK(LAMBDA(x,x),1)`
+            // spills #CALC! | 1) -- while the lambda itself is no error value
+            // (`=ISERROR(LAMBDA(x,x))` FALSE, `=TYPE(..)` 128). So it is this
+            // boundary, where a value becomes a cell, that turns it into the
+            // error. It stored the text "#LAMBDA", which no formula over the
+            // cell could tell from a string.
+            EvalResult::Lambda { .. } => CellValue::Error(CellError::Calc),
         }
     }
 
@@ -824,14 +837,20 @@ impl EvalResult {
     /// rather than a reference.
     ///
     /// EXCEL DRAWS THIS LINE AND SO DOES CALCULA. A handful of functions return
-    /// a *reference* — `INDEX`, `OFFSET`, `INDIRECT`, and an implicit
-    /// intersection — and a blank survives them, which is why
+    /// a *reference* — `INDEX`, `OFFSET`, `INDIRECT`, `XLOOKUP` (lane form6,
+    /// `fn_xlookup`) and an implicit intersection — and a blank survives
+    /// them, which is why
     /// `=COUNT(INDEX(A1:A12,6))` over a blank cell is 0 in Excel and
     /// `=ISBLANK(INDEX(…))` is TRUE. Everything else returns a value, and a
     /// blank collapses at the boundary: `VLOOKUP` landing on an empty cell
     /// returns the NUMBER 0, which is why `=ISBLANK(VLOOKUP(…))` is FALSE even
     /// when the cell it found is empty. That asymmetry is real Excel behaviour
     /// and the source of the `IF(VLOOKUP(…)="","",…)` idiom users write.
+    /// (CAUTION: Excel 16 measured on 2026-11-06 [LIVE, lane form6 f7.txt]
+    /// answers `=ISBLANK(VLOOKUP(1,A1:E5,5,FALSE))` and
+    /// `=ISBLANK(LOOKUP(1,A1:A5,E1:E5))` TRUE over an empty E1 -- the VLOOKUP
+    /// and LOOKUP half of this paragraph is filed as a defect, not yet
+    /// changed.)
     ///
     /// Calcula stops there: it does NOT implement full reference propagation
     /// through `IF`/`CHOOSE`. That is a separate, owner-visible decision,
@@ -936,6 +955,10 @@ impl EvalResult {
     pub fn text_or_error(&self) -> Result<String, CellError> {
         match self {
             EvalResult::Error(e) => Err(e.clone()),
+            // A function has no text: [LIVE, Excel 16, lane formfix p1.json]
+            // `=LEN(LAMBDA(x,x))`, `=UPPER(..)`, `=CONCAT(..)`, `=T(..)` are
+            // #VALUE!. It read as the text "#LAMBDA" (LEN 7).
+            EvalResult::Lambda { .. } => Err(CellError::Value),
             other => Ok(other.as_text()),
         }
     }
@@ -1143,6 +1166,12 @@ pub struct EvalContext {
 pub struct GatherRegionData {
     /// List of (submitter_display_name, submitter_id, value) tuples.
     pub submissions: Vec<GatherSubmission>,
+    /// The region id is declared by MORE THAN ONE subscribed application, so
+    /// no application's answers can be told apart from another's (BUG-0734).
+    /// Every GATHER function then answers `#REF!` -- the reference names no
+    /// one region -- rather than an empty list that a SUM shows as a
+    /// plausible 0 with nothing said on the sheet.
+    pub refused: bool,
 }
 
 /// A single submission entry in the gather cache.
@@ -1198,8 +1227,8 @@ pub struct Evaluator<'a> {
     file_reader: Option<&'a dyn Fn(&str) -> Option<String>>,
     /// Optional pivot data lookup for GETPIVOTDATA function.
     /// Args: (data_field_name, pivot_cell_row, pivot_cell_col, field_item_pairs: Vec<(field_name, item_value)>)
-    /// Returns: the aggregated value, or None if not found.
-    pivot_data_fn: Option<&'a dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    /// Returns: the cell's value or error, or None if not found ([`PivotDataLookup`]).
+    pivot_data_fn: Option<&'a dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> PivotDataLookup>,
     /// Optional writeback data lookup for GATHER functions.
     /// Takes a region_id and returns pre-fetched submission data.
     gather_fn: Option<&'a dyn Fn(&str) -> GatherRegionData>,
@@ -1582,7 +1611,7 @@ impl<'a> Evaluator<'a> {
     /// Sets the pivot data lookup closure for GETPIVOTDATA function.
     pub fn set_pivot_data_fn(
         &mut self,
-        f: &'a dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>,
+        f: &'a dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> PivotDataLookup,
     ) {
         self.pivot_data_fn = Some(f);
     }
@@ -2167,6 +2196,17 @@ impl<'a> Evaluator<'a> {
         if let (Some(own), Expression::CellRef { sheet: Some(theirs), .. }) = (sheet, end) {
             if !identity::sheet_names_equal(own, theirs) {
                 return EvalResult::Error(CellError::Value);
+            }
+        }
+        // `A1:Sheet1!A3` -- an UNQUALIFIED first half is the formula's own
+        // sheet, so the second must name it (BUG-0737) [LIVE, lane formula
+        // p1.json: in Sheet1 `=SUM(A1:Sheet1!A3)` is 6, `=SUM(A1:Sheet2!A3)`
+        // #VALUE!].
+        if let (None, Expression::CellRef { sheet: Some(theirs), .. }) = (sheet, end) {
+            if let Some(ctx) = &self.multi_sheet {
+                if !identity::sheet_names_equal(&ctx.current_sheet, theirs) {
+                    return EvalResult::Error(CellError::Value);
+                }
             }
         }
         let grid = match self.resolve_grid_for_sheet(sheet) {
@@ -2846,6 +2886,12 @@ impl<'a> Evaluator<'a> {
         if let EvalResult::Error(e) = right_val {
             return EvalResult::Error(e.clone());
         }
+        // A function is no operand of any operator [LIVE, Excel 16, lane
+        // formfix p1.json: `=LAMBDA(x,x)+1`, `=LAMBDA(x,x)&"a"` and
+        // `=LAMBDA(x,x)=1` are #VALUE!; the comparison answered FALSE].
+        if matches!(left_val, EvalResult::Lambda { .. }) || matches!(right_val, EvalResult::Lambda { .. }) {
+            return EvalResult::Error(CellError::Value);
+        }
 
         match op {
             // Arithmetic operations
@@ -2952,6 +2998,11 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_concat(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
+        // A function has no text [LIVE, lane formfix p1.json:
+        // `=LAMBDA(x,x)&"a"` and `="a"&LAMBDA(x,x)` are #VALUE!].
+        if matches!(left, EvalResult::Lambda { .. }) || matches!(right, EvalResult::Lambda { .. }) {
+            return EvalResult::Error(CellError::Value);
+        }
         let left_str = left.as_text();
         let right_str = right.as_text();
         // A SIZE CAP, on the axis the fuel counter cannot see.
@@ -4517,7 +4568,9 @@ impl<'a> Evaluator<'a> {
                             if eval_args.len() != params.len() {
                                 return EvalResult::Error(CellError::Value);
                             }
-                            return self.invoke_lambda_with_captured(&params, &body, &eval_args, &captured);
+                            let arg_refs: Vec<Option<Expression>> =
+                                args[callee_idx + 1..].iter().map(|a| self.reference_of_binding(a)).collect();
+                            return self.invoke_lambda_with_captured(&params, &body, &eval_args, &captured, &arg_refs);
                         }
                         _ => return EvalResult::Error(CellError::Value),
                     }
@@ -4552,7 +4605,8 @@ impl<'a> Evaluator<'a> {
                         if eval_args.len() != params.len() {
                             return EvalResult::Error(CellError::Value);
                         }
-                        self.invoke_lambda_with_captured(&params, &body, &eval_args, &captured)
+                        let arg_refs: Vec<Option<Expression>> = args.iter().map(|a| self.reference_of_binding(a)).collect();
+                        self.invoke_lambda_with_captured(&params, &body, &eval_args, &captured, &arg_refs)
                     }
                     // User-defined function (UDF) hook. Order matters: a LET/LAMBDA
                     // binding above SHADOWS a same-named UDF. Args are evaluated so
@@ -4829,6 +4883,11 @@ impl<'a> Evaluator<'a> {
                     Self::collect_numbers_recursive(value, numbers, None)?;
                 }
             }
+            // A function is no number and no skippable value: [LIVE, Excel 16,
+            // lane formfix p1.json] `=SUM(LAMBDA(x,x))`, `=SUM(1,LAMBDA(x,x))`,
+            // `=AVERAGE(..)`, `=MAX(..)`, `=PRODUCT(..)` are #VALUE!. Calcula
+            // skipped it (SUM 0, AVERAGE #DIV/0!).
+            EvalResult::Lambda { .. } => return Err(CellError::Value),
             other => {
                 let n = if direct { other.as_number() } else { other.as_indirect_number() };
                 if let Some(n) = n {
@@ -4941,11 +5000,13 @@ impl<'a> Evaluator<'a> {
     }
 
     fn fn_count(&self, args: &[Expression]) -> EvalResult {
-        // COUNT counts only numeric values
-        match self.collect_numbers(args) {
-            Ok(numbers) => EvalResult::Number(numbers.len() as f64),
-            Err(e) => EvalResult::Error(e),
-        }
+        // COUNT counts only numeric values -- and NEVER answers an error: an
+        // error argument, an error in an array or an error cell is simply not
+        // a number [LIVE, Excel 16, lane formfix p1.json: `=COUNT(NA())` 0,
+        // `=COUNT(1/0)` 0, `=COUNT(1,NA(),2)` 2, `=COUNT({1,#N/A,3})` 2,
+        // `=COUNT(FILTER(A1:A5,A1:A5>100))` 0, `=COUNT(LAMBDA(x,x))` 0].
+        // Calcula propagated the first error it met.
+        self.count_arguments(args, true)
     }
 
     fn fn_counta(&self, args: &[Expression]) -> EvalResult {
@@ -4957,12 +5018,129 @@ impl<'a> Evaluator<'a> {
         // backwards: it excluded `""` (which Excel counts) and had no way to
         // exclude a blank (which Excel does not), because a blank arrived here
         // as the number 0.
-        match self.collect_values(args) {
-            Ok(values) => {
-                let count = values.iter().filter(|v| !v.is_blank()).count();
-                EvalResult::Number(count as f64)
+        //
+        // An ERROR is a value too, and is counted [LIVE, lane formfix p1.json:
+        // `=COUNTA(NA())` 1, `=COUNTA(1,NA(),2)` 3, `=COUNTA({1,#N/A,3})` 3,
+        // `=COUNTA(FILTER(A1:A5,A1:A5>100))` 1, `=COUNTA(LAMBDA(x,x))` 1].
+        self.count_arguments(args, false)
+    }
+
+    /// COUNT (`numbers_only`) and COUNTA over their arguments: Excel's
+    /// direct-vs-indirect rule for what COUNT takes as a number
+    /// (`collect_numbers_recursive`), errors counted by COUNTA and skipped by
+    /// COUNT at any depth. Only the work budget's #LIMIT! -- Calcula refusing
+    /// to finish, not a value -- still stops the count.
+    fn count_arguments(&self, args: &[Expression], numbers_only: bool) -> EvalResult {
+        // `blanks`: the argument is an array a function BUILT, whose blank
+        // elements COUNTA counts (`Self::builds_value_array`).
+        fn walk(v: EvalResult, source: Option<&Expression>, numbers_only: bool, blanks: bool, n: &mut f64) -> Result<(), CellError> {
+            match v {
+                EvalResult::Error(CellError::Limit) => return Err(CellError::Limit),
+                EvalResult::Error(_) | EvalResult::Lambda { .. } => {
+                    if !numbers_only {
+                        *n += 1.0;
+                    }
+                }
+                EvalResult::Blank => {
+                    if blanks && !numbers_only {
+                        *n += 1.0;
+                    }
+                }
+                EvalResult::Array(items) | EvalResult::List(items) => {
+                    for item in items {
+                        walk(item, None, numbers_only, blanks, n)?;
+                    }
+                }
+                EvalResult::Dict(entries) => {
+                    for (_, value) in entries {
+                        walk(value, None, numbers_only, blanks, n)?;
+                    }
+                }
+                other => {
+                    if !numbers_only {
+                        *n += 1.0;
+                    } else {
+                        let direct = matches!(source, Some(e) if !Evaluator::is_reference_argument(e));
+                        let number = if direct { other.as_number() } else { other.as_indirect_number() };
+                        if number.is_some() {
+                            *n += 1.0;
+                        }
+                    }
+                }
             }
-            Err(e) => EvalResult::Error(e),
+            Ok(())
+        }
+        let mut n = 0.0;
+        for arg in args {
+            let blanks = Self::builds_value_array(arg);
+            if let Err(e) = walk(self.evaluate(arg), Some(arg), numbers_only, blanks, &mut n) {
+                return EvalResult::Error(e);
+            }
+        }
+        EvalResult::Number(n)
+    }
+
+    /// Whether `expr` is a call that BUILDS an array of values -- whose blank
+    /// elements are elements, not empty cells. COUNTA counts every element of
+    /// such an array, blanks included, while it skips the empty cells of a
+    /// REFERENCE [LIVE, Excel 16, lane form6 p6v.log, E1:F5 empty:
+    /// `=COUNTA(TRANSPOSE(E1:E3))` 3, `=COUNTA(CHOOSEROWS(E1:F3,1))` 2,
+    /// `=COUNTA(VSTACK(E1:E2))`, `(HSTACK(..))`, `(SORTBY(E1:E2,{1;2}))`,
+    /// `(TOROW(..))`, `(SORT(..))` 2, `=COUNTA(WRAPROWS(E1:E4,2))` 4,
+    /// `=COUNTA(UNIQUE(E1:E2))` 1, `=COUNTA(FILTER(E1:E3,{1;1;1}))` 3,
+    /// `=COUNTA(MAP(E1:E3,LAMBDA(x,x)))` 3,
+    /// `=COUNTA(INDEX(TRANSPOSE(E1:E2),1,1))` 1,
+    /// `=COUNTA(XLOOKUP({1;2},A1:A5,E1:E5))` 2 -- while `=COUNTA(E1:E3)`,
+    /// `(TAKE(E1:E3,2))`, `(DROP(E1:E3,1))`, `(INDEX(E1:F3,0,1))`,
+    /// `(LET(x,E1:E3,x))`, `(IF(TRUE,E1:E2))`, `(CHOOSE(1,E1:E2))`,
+    /// `(OFFSET(E1,0,0,3))`, `(INDIRECT("E1:E3"))` and the scalar
+    /// `(XLOOKUP(1,A1:A5,E1:F5))` are 0]. The elements stay BLANK all the
+    /// same -- `=ISBLANK(TRANSPOSE(E1:E2))` is TRUE,TRUE and
+    /// `=TRANSPOSE(E1:E2)&"x"` x,x -- so the difference is COUNTA's alone.
+    /// A call not listed here keeps the reference reading (blanks skipped).
+    fn builds_value_array(expr: &Expression) -> bool {
+        let Expression::FunctionCall { func, args, .. } = expr else {
+            return false;
+        };
+        match func {
+            BuiltinFunction::Transpose
+            | BuiltinFunction::ChooseRows
+            | BuiltinFunction::ChooseCols
+            | BuiltinFunction::VStack
+            | BuiltinFunction::HStack
+            | BuiltinFunction::SortBy
+            | BuiltinFunction::Sort
+            | BuiltinFunction::ToRow
+            | BuiltinFunction::ToCol
+            | BuiltinFunction::WrapRows
+            | BuiltinFunction::WrapCols
+            | BuiltinFunction::Unique
+            | BuiltinFunction::Filter
+            | BuiltinFunction::Expand
+            | BuiltinFunction::Map
+            | BuiltinFunction::ByRow
+            | BuiltinFunction::ByCol
+            | BuiltinFunction::MakeArray
+            | BuiltinFunction::Scan => true,
+            // Over a built array these read its VALUES; over a reference they
+            // return a reference.
+            BuiltinFunction::Index | BuiltinFunction::Take | BuiltinFunction::Drop => {
+                args.first().is_some_and(Self::builds_value_array)
+            }
+            // XLOOKUP returns a reference for ONE key, and an array of values
+            // for an array of keys.
+            BuiltinFunction::XLookup => args.first().is_some_and(|key| {
+                matches!(
+                    key,
+                    Expression::ArrayLiteral { .. }
+                        | Expression::Range { .. }
+                        | Expression::ColumnRef { .. }
+                        | Expression::RowRef { .. }
+                        | Expression::SpillRef { .. }
+                        | Expression::FunctionCall { func: BuiltinFunction::Sequence, .. }
+                ) || Self::builds_value_array(key)
+            }),
+            _ => false,
         }
     }
 
@@ -5438,6 +5616,11 @@ impl<'a> Evaluator<'a> {
         if let EvalResult::Error(e) = condition {
             return EvalResult::Error(e);
         }
+        // A LAMBDA is no truth value [LIVE, Excel 16, verify-formfix p1.json:
+        // `=IF(LAMBDA(x,x),1,2)` is #VALUE!; Calcula took the FALSE branch].
+        if matches!(condition, EvalResult::Lambda { .. }) {
+            return EvalResult::Error(CellError::Value);
+        }
 
         // AN ARRAY CONDITION LIFTS — this is the classic `=SUM(IF(range>x,
         // range))` idiom, and the reason IF is not simply listed with the other
@@ -5577,15 +5760,24 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let num = match self.evaluate(&args[0]).as_number() {
-            Some(n) => n,
-            None => return EvalResult::Error(CellError::Value),
+        // An ERROR argument is the answer, not #VALUE! ([LIVE, Excel 16, lane
+        // form6 f8.txt] `=ROUND(NA(),0)` #N/A, `=ROUND(1,1/0)` #DIV/0!, and
+        // so `=ROUND(LINEST(..,TRUE,TRUE),6)` keeps LINEST's #N/A cells).
+        let num = match self.evaluate(&args[0]) {
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            v => match v.as_number() {
+                Some(n) => n,
+                None => return EvalResult::Error(CellError::Value),
+            },
         };
 
         let digits = if args.len() == 2 {
-            match self.evaluate(&args[1]).as_number() {
-                Some(d) => d as i32,
-                None => return EvalResult::Error(CellError::Value),
+            match self.evaluate(&args[1]) {
+                EvalResult::Error(e) => return EvalResult::Error(e),
+                v => match v.as_number() {
+                    Some(d) => d as i32,
+                    None => return EvalResult::Error(CellError::Value),
+                },
             }
         } else {
             0
@@ -5820,10 +6012,10 @@ impl<'a> Evaluator<'a> {
 
         for arg in args {
             let val = self.evaluate(arg);
-            if let EvalResult::Error(e) = val {
-                return EvalResult::Error(e);
-            }
-            let part = val.as_text();
+            let part = match val.text_or_error() {
+                Ok(part) => part,
+                Err(e) => return EvalResult::Error(e),
+            };
             if (result.len() as u64).saturating_add(part.len() as u64) > MAX_TEXT_LEN as u64 {
                 return EvalResult::Error(CellError::Limit);
             }
@@ -6189,18 +6381,29 @@ impl<'a> Evaluator<'a> {
         if let EvalResult::Error(e) = &lookup_val {
             return EvalResult::Error(e.clone());
         }
+        // AN ARRAY lookup_value LIFTS: one lookup per element, packed in the
+        // lookup_value's shape, each element's answer cut to its top-left
+        // cell when it is a row or column of a 2-D return array [LIVE, Excel
+        // 16, lane form6 p6v.log: `=XLOOKUP({2;3},A1:A5,B1:B5)` 20;30,
+        // `=XLOOKUP({2,3;4,5},A1:A5,B1:B5)` 20,30;40,50,
+        // `=XLOOKUP({2;9},A1:A5,B1:B5,"nf")` 20;nf,
+        // `=XLOOKUP({2;3},A1:A3,A1:C3)` 2;3,
+        // `=XLOOKUP({1;9},A1:A5,B1:B5,{"a","b"})` 10;a,
+        // `=XLOOKUP({2;3},A1:A5,B1:B3)` #VALUE!;#VALUE!]. The array was
+        // matched as ONE value, so every such formula was #N/A.
+        let lifted = array_lift::lifts(&lookup_val);
 
         // FAST PATH eligibility (PERF-03): literal same-sheet 1-D vectors on
         // both sides. Decided structurally so no argument evaluates twice;
         // materialization of literal ranges is pure, so deferring it to the
         // fallback below is unobservable.
-        let fast = self.xlookup_fast_descs(&args[1], &args[2]);
+        let fast = if lifted { None } else { self.xlookup_fast_descs(&args[1], &args[2]) };
 
         // Evaluate lookup_array and return_array (flatten ranges into flat lists)
         let mut arrays_pre = if fast.is_none() {
             Some((
-                self.evaluate(&args[1]).into_flatten(),
-                self.evaluate(&args[2]).into_flatten(),
+                self.evaluate(&args[1]),
+                self.evaluate(&args[2]),
             ))
         } else {
             None
@@ -6235,8 +6438,20 @@ impl<'a> Evaluator<'a> {
         }
 
         if let Some((key_rect, key_axis, ret_rect, ret_axis, ret_len)) = fast {
-            if match_mode == 0 && search_mode == 1 {
-                use crate::lookup_cache as lc;
+            use crate::lookup_cache as lc;
+            // The cache answers only when the two vectors run the SAME way and
+            // are the SAME length. Anything else -- a column of keys against a
+            // shorter column or a row, a single key cell against a column -- is
+            // the scan's to answer, and the scan's size check makes it #VALUE!
+            // [LIVE, lane form6: `=XLOOKUP(2,A1:A5,B1:B3)` #VALUE!]. The cache
+            // used to read the idx-th return cell of whatever it was given.
+            let key_len = match key_axis {
+                lc::Axis::RectCol(_) => (key_rect.max_row - key_rect.min_row + 1) as usize,
+                lc::Axis::RectRow(_) => (key_rect.max_col - key_rect.min_col + 1) as usize,
+                _ => 0,
+            };
+            let same_shape = std::mem::discriminant(&key_axis) == std::mem::discriminant(&ret_axis) && key_len == ret_len;
+            if same_shape && match_mode == 0 && search_mode == 1 {
                 let grid = self.get_grid_for_sheet(&None);
                 let watch = Self::axis_watch_rect(&key_rect, key_axis);
                 let served = lc::with_active(|cache| {
@@ -6259,15 +6474,13 @@ impl<'a> Evaluator<'a> {
                                 lc::Axis::RectRow(row) => (row, ret_rect.min_col + idx),
                                 _ => unreachable!(),
                             };
-                            // XLOOKUP returns a VALUE, so a blank result cell
-                            // collapses to 0 here — see `collapse_blank`. It
-                            // must stay bit-identical to the scan path or the
-                            // cached/scan differential battery fails.
+                            // XLOOKUP returns the REFERENCE it found, so a
+                            // blank result cell stays BLANK -- see the scan
+                            // below, which this must match bit for bit.
                             match grid.get_cell(r, c) {
                                 Some(cell) => self.cell_value_to_result(&cell.value),
                                 None => EvalResult::Blank,
                             }
-                            .collapse_blank()
                         }
                         Some(_) => EvalResult::Error(CellError::NA),
                         None => {
@@ -6282,47 +6495,106 @@ impl<'a> Evaluator<'a> {
                 // No active pass / cache full: fall through to the legacy path.
             }
         }
-        let (lookup_array, return_array) = match arrays_pre.take() {
+        let (key_value, return_value) = match arrays_pre.take() {
             Some(pair) => pair,
             None => (
-                self.evaluate(&args[1]).into_flatten(),
-                self.evaluate(&args[2]).into_flatten(),
+                self.evaluate(&args[1]),
+                self.evaluate(&args[2]),
             ),
         };
-
-        // Find the matching index
-        let found_index = match match_mode {
-            0 => self.xlookup_exact(&lookup_val, &lookup_array, search_mode),
-            -1 => self.xlookup_approx_smaller(&lookup_val, &lookup_array, search_mode),
-            1 => self.xlookup_approx_larger(&lookup_val, &lookup_array, search_mode),
-            2 => self.xlookup_wildcard(&lookup_val, &lookup_array, search_mode),
-            _ => None,
-        };
-
-        // Return the corresponding value from return_array, or if_not_found, or #N/A
-        match found_index {
-            Some(idx) => {
-                if idx < return_array.len() {
-                    // XLOOKUP returns a VALUE, so a blank result cell is the
-                    // number 0 -- and this MUST match the cached path, which
-                    // already collapsed. Without it the same formula answered
-                    // differently depending on whether a lookup-cache pass was
-                    // active, and `search_mode=-1` always scans, so both
-                    // spellings could coexist in one workbook.
-                    return_array[idx].clone().collapse_blank()
-                } else {
-                    EvalResult::Error(CellError::NA)
-                }
-            }
-            None => {
-                // If [if_not_found] argument is provided, evaluate and return it
-                if args.len() > 3 {
-                    self.evaluate(&args[3])
-                } else {
-                    EvalResult::Error(CellError::NA)
-                }
-            }
+        // An ERROR for either array is the answer ([LIVE, lane form6]
+        // `=XLOOKUP(2,1/0,B1:B5)` and `=XLOOKUP(2,A1:A5,1/0)` #DIV/0!); it was
+        // searched as a one-element array and came back #N/A.
+        if let EvalResult::Error(e) = &key_value {
+            return EvalResult::Error(e.clone());
         }
+        if let EvalResult::Error(e) = &return_value {
+            return EvalResult::Error(e.clone());
+        }
+        // THE SIZE CHECK [LIVE, Excel 16, lane form6 p6v.log]. A COLUMN of
+        // keys looks down the rows and the return array must have exactly as
+        // many rows; a ROW of keys looks across the columns and it must have
+        // exactly as many columns; ONE key cell looks down a one-row return
+        // array, else across a one-column one. Anything else is #VALUE!, and
+        // so is a 2-D lookup array: `=XLOOKUP(2,A1:A5,B1:B3)`,
+        // `=XLOOKUP(2,A1:A5,A1:C3)`, `=XLOOKUP(10,A1:C1,A1:B3)`,
+        // `=XLOOKUP(2,A1:A3,B1:D1)`, `=XLOOKUP(2,A1:B5,B1:B5)`,
+        // `=XLOOKUP(1,{1,2},{5;6})` are #VALUE! -- whether the key is found or
+        // not -- while `=XLOOKUP(1,A1,B1:B2)` is 10;20. Calcula never checked:
+        // it read the idx-th cell of whatever it was given (#N/A past its end).
+        // A row of a 2-D return array is the answer of a vertical lookup, a
+        // column the answer of a horizontal one (`=XLOOKUP(2,A1:A3,A1:C3)`
+        // 2,20,200, `=XLOOKUP(10,A1:C1,A1:C3)` 10;20;30).
+        let (key_rows, key_cols) = array_lift::shape(&key_value);
+        let (ret_rows, ret_cols, ret_cells) = array_lift::cells(&return_value);
+        let vertical: Option<bool> = if key_rows > 1 && key_cols > 1 {
+            None
+        } else if key_cols == 1 && key_rows > 1 {
+            (ret_rows == key_rows).then_some(true)
+        } else if key_rows == 1 && key_cols > 1 {
+            (ret_cols == key_cols).then_some(false)
+        } else if ret_rows == 1 {
+            Some(true)
+        } else if ret_cols == 1 {
+            Some(false)
+        } else {
+            None
+        };
+        let lookup_array = key_value.into_flatten();
+
+        // THE RESULT IS A REFERENCE: a blank result cell stays BLANK, so
+        // `ISBLANK(XLOOKUP(..))` is TRUE, COUNTA does not count it and
+        // `XLOOKUP(..)&"x"` is "x" [LIVE, lane form6 p6v.log, over the empty
+        // E1:F5: `=ISBLANK(XLOOKUP(1,A1:A5,E1:E5))` TRUE,
+        // `=COUNTA(XLOOKUP(1,A1:A5,E1:F5))` 0, `=XLOOKUP(1,A1:A5,E1:E5)&"x"`
+        // x]. The cell that holds such a formula still shows 0, as `=E1` does
+        // (`EvalResult::to_cell_value`). This collapsed the blank to the
+        // number 0, which made every one of those answers wrong.
+        let slice = |idx: usize, vertical: bool| -> EvalResult {
+            if vertical {
+                array_lift::pack(1, ret_cols, (0..ret_cols).map(|c| ret_cells[idx * ret_cols + c].clone()).collect())
+            } else {
+                array_lift::pack(ret_rows, 1, (0..ret_rows).map(|r| ret_cells[r * ret_cols + idx].clone()).collect())
+            }
+        };
+        let not_found = std::cell::OnceCell::new();
+        let not_found = || -> EvalResult {
+            not_found
+                .get_or_init(|| if args.len() > 3 { self.evaluate(&args[3]) } else { EvalResult::Error(CellError::NA) })
+                .clone()
+        };
+        let one = |needle: &EvalResult| -> EvalResult {
+            let Some(vertical) = vertical else {
+                return EvalResult::Error(CellError::Value);
+            };
+            let found = match match_mode {
+                0 => self.xlookup_exact(needle, &lookup_array, search_mode),
+                -1 => self.xlookup_approx_smaller(needle, &lookup_array, search_mode),
+                1 => self.xlookup_approx_larger(needle, &lookup_array, search_mode),
+                2 => self.xlookup_wildcard(needle, &lookup_array, search_mode),
+                _ => None,
+            };
+            match found {
+                Some(idx) if idx < if vertical { ret_rows } else { ret_cols } => slice(idx, vertical),
+                Some(_) => EvalResult::Error(CellError::NA),
+                None => not_found(),
+            }
+        };
+        if !lifted {
+            return one(&lookup_val);
+        }
+        let (rows, cols, needles) = array_lift::cells(&lookup_val);
+        let answers = needles
+            .iter()
+            .map(|needle| match needle {
+                EvalResult::Error(e) => EvalResult::Error(e.clone()),
+                needle => {
+                    let answer = one(needle);
+                    if array_lift::lifts(&answer) { array_lift::at(&answer, 0, 0) } else { answer }
+                }
+            })
+            .collect();
+        array_lift::pack(rows, cols, answers)
     }
 
     /// Checks whether an Expression is a range-like expression (produces an array).
@@ -7528,11 +7800,70 @@ impl<'a> Evaluator<'a> {
         for i in (0..args.len()).step_by(2) {
             let cond = self.evaluate(&args[i]);
             if let EvalResult::Error(e) = cond { return EvalResult::Error(e); }
+            // A LAMBDA is no truth value, as in IF [LIVE, Excel 16, lane
+            // form5 p1.log: `=IFS(LAMBDA(x,x),1)` and
+            // `=IFS(FALSE,1,LAMBDA(x,x),2)` are #VALUE!; Calcula read it as
+            // FALSE and answered #N/A].
+            if matches!(cond, EvalResult::Lambda { .. }) {
+                return EvalResult::Error(CellError::Value);
+            }
+            // AN ARRAY CONDITION LIFTS, from this pair on: each cell takes the
+            // value of the first pair whose condition is TRUE there, #N/A when
+            // none is [LIVE, lane form5 p2.log: `=IFS({TRUE,FALSE},1)` is
+            // 1,#N/A, `=IFS({TRUE;FALSE},1,TRUE,2)` 1;2]. Pairs before it were
+            // scalar FALSE and stay short-circuited, as IF's are.
+            if array_lift::lifts(&cond) {
+                return self.ifs_lifted(cond, &args[i..]);
+            }
             if cond.as_boolean().unwrap_or(false) {
                 return self.evaluate(&args[i + 1]);
             }
         }
         EvalResult::Error(CellError::NA)
+    }
+
+    /// IFS from its first ARRAY condition on (`fn_ifs`): every remaining
+    /// condition and value is evaluated once and indexed per cell.
+    fn ifs_lifted(&self, first_condition: EvalResult, pairs: &[Expression]) -> EvalResult {
+        let mut conditions = vec![first_condition];
+        conditions.extend(pairs.iter().skip(2).step_by(2).map(|e| self.evaluate(e)));
+        let values: Vec<EvalResult> = pairs.iter().skip(1).step_by(2).map(|e| self.evaluate(e)).collect();
+        let operands: Vec<&EvalResult> = conditions.iter().chain(values.iter()).collect();
+        let (rows, cols) = match array_lift::broadcast_shape(&operands) {
+            Some((0, _)) | Some((_, 0)) => return EvalResult::Error(CellError::Value),
+            Some(shape) => shape,
+            None => (1, 1),
+        };
+        let cells = (rows as u64).saturating_mul(cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
+        let mut out = Vec::with_capacity(cells as usize);
+        for r in 0..rows {
+            for c in 0..cols {
+                let mut cell = EvalResult::Error(CellError::NA);
+                for (condition, value) in conditions.iter().zip(values.iter()) {
+                    match array_lift::at(condition, r, c) {
+                        EvalResult::Error(e) => {
+                            cell = EvalResult::Error(e);
+                            break;
+                        }
+                        EvalResult::Lambda { .. } => {
+                            cell = EvalResult::Error(CellError::Value);
+                            break;
+                        }
+                        test if test.as_boolean().unwrap_or(false) => {
+                            cell = array_lift::at(value, r, c);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                out.push(cell);
+            }
+        }
+        array_lift::pack(rows, cols, out)
     }
 
     fn fn_switch(&self, args: &[Expression]) -> EvalResult {
@@ -7576,9 +7907,33 @@ impl<'a> Evaluator<'a> {
 
     fn fn_sumproduct(&self, args: &[Expression]) -> EvalResult {
         if args.is_empty() { return EvalResult::Error(CellError::Value); }
-        let arrays: Vec<Vec<EvalResult>> = args.iter().map(|a| self.eval_flat(a)).collect();
+        // AN ERROR IN ANY ARRAY IS THE ANSWER, an argument that IS an error
+        // before the shapes are compared [LIVE, Excel 16, lane formfix p1.json:
+        // `=SUMPRODUCT(FILTER(A1:A5,A1:A5>100))` #CALC!, `=SUMPRODUCT(NA())`
+        // #N/A, `=SUMPRODUCT(1/0)` #DIV/0!, `=SUMPRODUCT({1,#N/A})` #N/A,
+        // `=SUMPRODUCT(A1:A5,FILTER(..))` #CALC!, `=SUMPRODUCT(SEQUENCE(0))`
+        // #CALC!]. Calcula read every error as 0 (and the empty FILTER as an
+        // array of one 0), so the formula answered 0. A lambda is #VALUE!.
+        let mut values: Vec<EvalResult> = Vec::with_capacity(args.len());
+        for a in args {
+            match self.evaluate(a) {
+                e @ EvalResult::Error(_) => return e,
+                EvalResult::Lambda { .. } => return EvalResult::Error(CellError::Value),
+                v => values.push(v),
+            }
+        }
+        // THE SHAPES must agree, rows by columns -- not the flat lengths
+        // [LIVE, Excel 16, verify-formfix p1.json: `=SUMPRODUCT({1;2},{3,4})`
+        // is #VALUE!; Calcula compared the lengths, 2 = 2, and answered 11].
+        let shapes: Vec<(usize, usize)> = values.iter().map(array_lift::shape).collect();
+        let arrays: Vec<Vec<EvalResult>> = values.into_iter().map(EvalResult::into_flatten).collect();
+        for arr in &arrays {
+            if let Some(EvalResult::Error(e)) = arr.iter().find(|v| v.is_error()) {
+                return EvalResult::Error(e.clone());
+            }
+        }
         let len = arrays[0].len();
-        if arrays.iter().any(|a| a.len() != len) {
+        if arrays.iter().any(|a| a.len() != len) || shapes.iter().any(|s| *s != shapes[0]) {
             return EvalResult::Error(CellError::Value);
         }
         // The materializers above charged each array's length; the nested loop
@@ -7589,7 +7944,10 @@ impl<'a> Evaluator<'a> {
         for i in 0..len {
             let mut product = 1.0;
             for arr in &arrays {
-                product *= arr[i].as_number().unwrap_or(0.0);
+                // Only a NUMBER multiplies: text and logicals are 0 [LIVE, lane
+                // formfix p3.json: `=SUMPRODUCT({TRUE,2})` 2, `({"3",2})` 2,
+                // `(TRUE)` 0] -- why `--(..)` is written inside it.
+                product *= arr[i].as_indirect_number().unwrap_or(0.0);
             }
             total += product;
         }
@@ -8331,11 +8689,96 @@ impl<'a> Evaluator<'a> {
             range_args
         };
 
+        // AN ARGUMENT THAT IS NO REFERENCE: an ERROR as a whole is the answer
+        // whatever the options say, and the reference form (1-13) takes no
+        // array at all [LIVE, Excel 16, lane formfix p1.json:
+        // `=AGGREGATE(9,6,FILTER(A1:A5,A1:A5>100))` #CALC!,
+        // `=AGGREGATE(9,6,1/0)` #DIV/0!, `=AGGREGATE(9,6,A1:A5,FILTER(..))`
+        // #CALC!, `=AGGREGATE(14,6,1/0,1)` #DIV/0!, `=AGGREGATE(9,6,{1,2})`
+        // #VALUE!, while `=AGGREGATE(14,6,{1,#N/A,3},1)` is 3 -- option 6
+        // skips the error ELEMENTS of an array]. Calcula skipped the whole
+        // error (0) and summed the array (3). Each is evaluated once: the
+        // array form keeps the values it evaluated here.
+        let mut array_values: Vec<EvalResult> = Vec::new();
+        let mut reference_args: Vec<Expression> = Vec::with_capacity(data_args.len());
+        for arg in data_args {
+            // A CALL OR AN OPERATOR THAT RETURNS A REFERENCE is a reference
+            // argument, read as the reference it returns -- so hidden rows and
+            // nested aggregates are skipped in it too [LIVE, Excel 16, lane
+            // form4 / verify-formfix p1.json, A1:A5 = 1..5:
+            // `=AGGREGATE(9,6,TRIMRANGE(A1:A5))` 15, `(9,6,A1:.A5)` 15,
+            // `(9,6,LET(r,A1:A5,r))` 15, `(9,6,TAKE(A1:A5,3))` 6,
+            // `(9,6,DROP(A1:A5,1))` 14, `(9,6,LAMBDA(x,x)(A1:A5))` 15,
+            // `(9,6,A1:A5 A2:A3)` 5, `(9,6,INDEX(A1:A5,0))` 15]. Calcula's
+            // reference test knew none of these, so each was #VALUE! (and
+            // INDEX(..,0) its first cell). The resolver is the range
+            // operator's (`range_half_reference`); what it cannot follow takes
+            // the path below unchanged.
+            let followable = matches!(
+                arg,
+                Expression::FunctionCall { .. }
+                    | Expression::NamedRef { .. }
+                    | Expression::BinaryOp { op: BinaryOperator::Intersect, .. }
+            ) || matches!(arg, Expression::Range { start, end, .. }
+                if !matches!((start.as_ref(), end.as_ref()), (Expression::CellRef { .. }, Expression::CellRef { .. })));
+            //
+            // A REFERENCE CALL THAT HAS NO REFERENCE TO GIVE answers its own
+            // error, whatever the options say -- option 6 ignores errors IN
+            // the cells, not a reference that does not exist [LIVE, Excel 16,
+            // lane form5 p1.log / p4.log]: `=AGGREGATE(9,6,INDEX(A1:A5,9))`,
+            // `(9,6,OFFSET(A1,-1,0))`, `(9,6,INDIRECT("zz"))`,
+            // `(9,6,A1:A2,INDEX(A1:A5,9))` and `(14,6,INDEX(A1:A5,9),1)` are
+            // #REF!, `(9,6,XLOOKUP(99,A1:A5,A1:A5))` #N/A, `(9,6,INDEX(xyz,1))`
+            // #NAME?. The resolver's error was thrown away and the call read
+            // as a value, whose error option 6 then skipped: 0. A #VALUE!
+            // from the resolver also means "this is no reference" (a branch or
+            // a result that is a VALUE), so the call is then read as a value
+            // below: `(9,6,IF(FALSE,A1:A5,5))` #VALUE!,
+            // `(14,6,IF(FALSE,A1:A5,{1,2}),1)` 2, `(9,6,INDEX(A1:A5,-1))`
+            // #VALUE!.
+            let mut resolved_as_value = false;
+            if followable {
+                match self.range_half_reference(arg) {
+                    Ok(reference) => {
+                        reference_args.push(reference);
+                        continue;
+                    }
+                    Err(CellError::Value) => resolved_as_value = true,
+                    Err(e) if self.denotes_reference(arg) => return EvalResult::Error(e),
+                    Err(_) => {}
+                }
+            }
+            // `IF(TRUE,A1:A5)` is a reference too ([LIVE] `=AGGREGATE(9,6,
+            // IF(TRUE,A1:A5))` 15, `=AGGREGATE(9,6,A1:A5*1)` #VALUE!).
+            if !resolved_as_value && self.denotes_reference(arg) {
+                reference_args.push(arg.clone());
+                continue;
+            }
+            match self.evaluate(arg) {
+                e @ EvalResult::Error(_) => return e,
+                _ if !takes_k => return EvalResult::Error(CellError::Value),
+                v => array_values.extend(v.into_flatten()),
+            }
+        }
+
         // Collect values from ranges, skipping invisible rows and nested
         // aggregates per `scope`.
-        let mut values = match self.collect_visible_values(data_args, scope) {
+        let mut values = match self.collect_visible_values(&reference_args, scope) {
             Ok(v) => v,
             Err(e) => return EvalResult::Error(e),
+        };
+        values.extend(array_values);
+
+        // k (14-19) is read BEFORE the data errors: its own error is the answer
+        // even where the data holds one [LIVE, lane form6:
+        // `=AGGREGATE(14,4,{1,#N/A},1/0)` #DIV/0!, `(14,4,{1,#N/A},9)` #N/A].
+        let k_value = if takes_k {
+            match self.aggregate_k_value(&args[args.len() - 1]) {
+                Ok(k) => Some(k),
+                Err(e) => return EvalResult::Error(e),
+            }
+        } else {
+            None
         };
 
         // Optionally skip errors
@@ -8469,113 +8912,128 @@ impl<'a> Evaluator<'a> {
                     .unwrap();
                 EvalResult::Number(f64::from_bits(mode_bits))
             }
-            14 => {
-                // LARGE
-                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
-                let k_val = match self.evaluate(&args[args.len() - 1]).as_number() {
-                    Some(k) => k as usize,
-                    None => return EvalResult::Error(CellError::Value),
-                };
+            14..=19 => {
+                // LARGE / SMALL / PERCENTILE.INC / QUARTILE.INC /
+                // PERCENTILE.EXC / QUARTILE.EXC, each element of an array k
+                // answered on its own (`aggregate_k_pick`).
                 let mut nums = extract_numbers();
-                if k_val < 1 || k_val > nums.len() { return EvalResult::Error(CellError::Value); }
-                nums.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-                EvalResult::Number(nums[k_val - 1])
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let k = k_value.expect("k is evaluated for 14-19");
+                if array_lift::lifts(&k) {
+                    let (rows, cols, ks) = array_lift::cells(&k);
+                    array_lift::pack(rows, cols, ks.iter().map(|k| Self::aggregate_k_pick(func_num, &nums, k)).collect())
+                } else {
+                    Self::aggregate_k_pick(func_num, &nums, &k)
+                }
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// AGGREGATE's k argument (functions 14-19), evaluated ONCE: its error is
+    /// the answer, and so is #VALUE! for a reference to more than one cell; an
+    /// array k (a constant, an operator or a function over a range) lifts
+    /// [LIVE, Excel 16, lane form6 p6v.log: `=AGGREGATE(14,6,A1:A5,1/0)`
+    /// #DIV/0!, `(14,6,A1:A5,INDEX(A1:A5,9))` #REF!, `(15,6,A1:A5,#N/A)`
+    /// #N/A, `(14,6,A1:A5,A1:A2)` and `(14,6,A1:A5,INDEX(A1:A5,0))` #VALUE!,
+    /// `(14,6,A1:A5,{1,2})` 5,4, `(14,6,A1:A5,A1:A2*1)` and
+    /// `(14,6,A1:A5,SEQUENCE(2))` 5;4, `(14,6,A1:A5,A1)` 5]. Every error was
+    /// #VALUE! and every array was #VALUE!.
+    fn aggregate_k_value(&self, expr: &Expression) -> Result<EvalResult, CellError> {
+        let value = self.evaluate(expr);
+        if let EvalResult::Error(e) = value {
+            return Err(e);
+        }
+        if array_lift::lifts(&value) && self.denotes_reference(expr) {
+            let (rows, cols) = array_lift::shape(&value);
+            if rows * cols > 1 {
+                return Err(CellError::Value);
+            }
+        }
+        Ok(value)
+    }
+
+    /// One k of AGGREGATE 14-19 over the numbers `asc` (sorted ascending), as
+    /// LARGE / SMALL / PERCENTILE / QUARTILE answer it [LIVE, Excel 16, lane
+    /// form6 p6v.log, A1:A5 = 1..5]: no numbers at all, or a k out of range,
+    /// is #NUM! (`(14,6,E1:E3,1)`, `(14,6,A1:A5,0)`, `(14,6,A1:A5,9)`,
+    /// `(16,6,A1:A5,2)`, `(17,6,A1:A5,5)`, `(18,6,A1:A5,0.1)`,
+    /// `(19,6,A1:A5,4)`); a blank k is 0, TRUE 1, the text "2" 2 and the text
+    /// "x" #VALUE!; LARGE reads a fractional k UP and SMALL DOWN
+    /// (`(14,6,A1:A5,1.5)` 4, `(15,6,A1:A5,2.9)` 2); a quart truncates
+    /// (`(17,6,A1:A5,2.5)` 3, `(19,6,A1:A5,3.5)` 4.5). Calcula answered
+    /// #VALUE! for every one of those errors and read LARGE's k down.
+    fn aggregate_k_pick(func_num: i32, asc: &[f64], k: &EvalResult) -> EvalResult {
+        let k = match k {
+            EvalResult::Error(e) => return EvalResult::Error(e.clone()),
+            EvalResult::Blank => 0.0,
+            other => match other.as_number() {
+                Some(k) => k,
+                None => return EvalResult::Error(CellError::Value),
+            },
+        };
+        let n = asc.len();
+        if n == 0 {
+            return EvalResult::Error(CellError::Num);
+        }
+        // Linear interpolation at the 0-based `rank` (PERCENTILE.INC /
+        // QUARTILE.INC: k(n-1); the .EXC pair: k(n+1)-1, inside [0, n-1]).
+        let interpolate = |rank: f64| -> EvalResult {
+            if rank < 0.0 || rank > (n - 1) as f64 {
+                return EvalResult::Error(CellError::Num);
+            }
+            let lower = rank.floor() as usize;
+            let frac = rank - lower as f64;
+            if lower >= n - 1 {
+                EvalResult::Number(asc[n - 1])
+            } else {
+                EvalResult::Number(asc[lower] + frac * (asc[lower + 1] - asc[lower]))
+            }
+        };
+        match func_num {
+            14 => {
+                // LARGE: the ceil(k)-th largest.
+                if k < 1.0 || k.ceil() > n as f64 {
+                    return EvalResult::Error(CellError::Num);
+                }
+                EvalResult::Number(asc[n - k.ceil() as usize])
             }
             15 => {
-                // SMALL
-                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
-                let k_val = match self.evaluate(&args[args.len() - 1]).as_number() {
-                    Some(k) => k as usize,
-                    None => return EvalResult::Error(CellError::Value),
-                };
-                let mut nums = extract_numbers();
-                if k_val < 1 || k_val > nums.len() { return EvalResult::Error(CellError::Value); }
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                EvalResult::Number(nums[k_val - 1])
+                // SMALL: the floor(k)-th smallest.
+                if k < 1.0 || k.floor() > n as f64 {
+                    return EvalResult::Error(CellError::Num);
+                }
+                EvalResult::Number(asc[k.floor() as usize - 1])
             }
             16 => {
                 // PERCENTILE.INC
-                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
-                let k_val = match self.evaluate(&args[args.len() - 1]).as_number() {
-                    Some(k) if (0.0..=1.0).contains(&k) => k,
-                    _ => return EvalResult::Error(CellError::Value),
-                };
-                let mut nums = extract_numbers();
-                if nums.is_empty() { return EvalResult::Error(CellError::Value); }
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let n = nums.len() as f64;
-                let rank = k_val * (n - 1.0);
-                let lower = rank.floor() as usize;
-                let frac = rank - lower as f64;
-                if lower >= nums.len() - 1 {
-                    EvalResult::Number(*nums.last().unwrap())
-                } else {
-                    EvalResult::Number(nums[lower] + frac * (nums[lower + 1] - nums[lower]))
+                if !(0.0..=1.0).contains(&k) {
+                    return EvalResult::Error(CellError::Num);
                 }
+                interpolate(k * (n as f64 - 1.0))
             }
             17 => {
                 // QUARTILE.INC
-                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
-                let q = match self.evaluate(&args[args.len() - 1]).as_number() {
-                    Some(q) if (0.0..=4.0).contains(&q) => q as i32,
-                    _ => return EvalResult::Error(CellError::Value),
-                };
-                let k_val = q as f64 / 4.0;
-                let mut nums = extract_numbers();
-                if nums.is_empty() { return EvalResult::Error(CellError::Value); }
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let n = nums.len() as f64;
-                let rank = k_val * (n - 1.0);
-                let lower = rank.floor() as usize;
-                let frac = rank - lower as f64;
-                if lower >= nums.len() - 1 {
-                    EvalResult::Number(*nums.last().unwrap())
-                } else {
-                    EvalResult::Number(nums[lower] + frac * (nums[lower + 1] - nums[lower]))
+                let q = k.trunc();
+                if !(0.0..=4.0).contains(&q) {
+                    return EvalResult::Error(CellError::Num);
                 }
+                interpolate(q / 4.0 * (n as f64 - 1.0))
             }
             18 => {
                 // PERCENTILE.EXC
-                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
-                let k_val = match self.evaluate(&args[args.len() - 1]).as_number() {
-                    Some(k) if k > 0.0 && k < 1.0 => k,
-                    _ => return EvalResult::Error(CellError::Value),
-                };
-                let mut nums = extract_numbers();
-                if nums.is_empty() { return EvalResult::Error(CellError::Value); }
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let n = nums.len() as f64;
-                let rank = k_val * (n + 1.0) - 1.0;
-                if rank < 0.0 || rank > n - 1.0 { return EvalResult::Error(CellError::Num); }
-                let lower = rank.floor() as usize;
-                let frac = rank - lower as f64;
-                if lower >= nums.len() - 1 {
-                    EvalResult::Number(*nums.last().unwrap())
-                } else {
-                    EvalResult::Number(nums[lower] + frac * (nums[lower + 1] - nums[lower]))
+                if k <= 0.0 || k >= 1.0 {
+                    return EvalResult::Error(CellError::Num);
                 }
+                interpolate(k * (n as f64 + 1.0) - 1.0)
             }
             19 => {
                 // QUARTILE.EXC
-                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
-                let q = match self.evaluate(&args[args.len() - 1]).as_number() {
-                    Some(q) if q >= 1.0 && q <= 3.0 => q as i32,
-                    _ => return EvalResult::Error(CellError::Value),
-                };
-                let k_val = q as f64 / 4.0;
-                let mut nums = extract_numbers();
-                if nums.is_empty() { return EvalResult::Error(CellError::Value); }
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let n = nums.len() as f64;
-                let rank = k_val * (n + 1.0) - 1.0;
-                if rank < 0.0 || rank > n - 1.0 { return EvalResult::Error(CellError::Num); }
-                let lower = rank.floor() as usize;
-                let frac = rank - lower as f64;
-                if lower >= nums.len() - 1 {
-                    EvalResult::Number(*nums.last().unwrap())
-                } else {
-                    EvalResult::Number(nums[lower] + frac * (nums[lower + 1] - nums[lower]))
+                let q = k.trunc();
+                if !(1.0..=3.0).contains(&q) {
+                    return EvalResult::Error(CellError::Num);
                 }
+                interpolate(q / 4.0 * (n as f64 + 1.0) - 1.0)
             }
             _ => EvalResult::Error(CellError::Value),
         }
@@ -8879,6 +9337,8 @@ impl<'a> Evaluator<'a> {
         match val {
             EvalResult::Text(_) => val,
             EvalResult::Error(e) => EvalResult::Error(e),
+            // [LIVE, lane formfix p1.json] `=T(LAMBDA(x,x))` is #VALUE!.
+            EvalResult::Lambda { .. } => EvalResult::Error(CellError::Value),
             _ => EvalResult::Text(String::new()),
         }
     }
@@ -9189,7 +9649,9 @@ impl<'a> Evaluator<'a> {
             EvalResult::Array(_) => 64.0,
             EvalResult::List(_) => 128.0,
             EvalResult::Dict(_) => 256.0,
-            EvalResult::Lambda { .. } => 512.0,
+            // Excel's own code [LIVE, Excel 16, lane formula p1.json:
+            // `=TYPE(LAMBDA(x,x))` is 128, "compound data"]; it was 512.
+            EvalResult::Lambda { .. } => 128.0,
         })
     }
 
@@ -9200,6 +9662,8 @@ impl<'a> Evaluator<'a> {
             EvalResult::Number(n) => EvalResult::Number(n),
             EvalResult::Boolean(b) => EvalResult::Number(if b { 1.0 } else { 0.0 }),
             EvalResult::Error(e) => EvalResult::Error(e),
+            // [LIVE, lane formfix p1.json] `=N(LAMBDA(x,x))` is #VALUE!.
+            EvalResult::Lambda { .. } => EvalResult::Error(CellError::Value),
             _ => EvalResult::Number(0.0),
         }
     }
@@ -9245,84 +9709,221 @@ impl<'a> Evaluator<'a> {
         None
     }
 
+    /// INDEX(array, row_num, [col_num]), as Excel 16 answers it.
+    ///
+    /// [LIVE, Excel 16, lane form5 p1.log / p3.log, A1:C5 = 1..5 | 10..50 |
+    /// 100..500] a 0 (or an omitted number) is the WHOLE row or column:
+    /// `=INDEX({1,2;3,4},2,0)` 3,4, `=INDEX(A1:B3,0,2)` and `=INDEX(A1:B3,,2)`
+    /// 10;20;30, `=INDEX(A1:B3,2,)` 2,20, `=INDEX({1,2;3,4},0,0)` the array. A
+    /// number past an axis is #REF! (`=INDEX(A1:B3,1,3)`, `=INDEX(A1:A3,2,2)`,
+    /// `=INDEX({1,2,3},2,1)`, `=INDEX(5,2)`), a negative one #VALUE!, and a
+    /// fraction truncates. ONE number into a single row or column is a
+    /// position along it; into a 2-D ARRAY it is a whole row
+    /// (`=INDEX({1,2;3,4},2)` 3,4), while into a 2-D REFERENCE it is #REF!
+    /// (`=INDEX(A1:B3,2)`, `=INDEX(A1:B3,0)`).
+    ///
+    /// This answered ONE cell for every 0 ("simplified to first"), let a
+    /// column number past the edge WRAP into the next row, and ignored the
+    /// column number of a one-column range, so `=INDEX(A1:B3,0,2)` was 10,
+    /// `=INDEX(A1:B3,1,3)` was A2 and `=INDEX(A1:A3,2,2)` A2.
     fn fn_index(&self, args: &[Expression]) -> EvalResult {
-        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
-
-        // Fast path: INDEX over a literal same-sheet range fetches ONE cell
-        // directly instead of materializing (and double-copying) the whole
-        // range. Replicates the slow path's addressing exactly, INCLUDING its
-        // quirks: flat row-major indexing (a col_num overflow WRAPS into the
-        // next row rather than erroring — do not "fix" this here), the 1-D
-        // branch ignoring col_num entirely, and row/col_num 0 behaving as 1.
-        // Skipping the array evaluation is unobservable (a pure grid read);
-        // args[1]/args[2] evaluate in the same order as the slow path.
-        // ONE INDEX OVER A ONE-DIMENSIONAL ARRAY WALKS IT IN READING ORDER,
-        // whichever way that array happens to lie. `=INDEX(A1:A3,2)` was right
-        // because a single COLUMN takes the `cols <= 1` branch below; the same
-        // formula over the single ROW `A1:C1` computed `row_num * cols` and ran
-        // straight off the end into #REF!. Excel answers B1. Only the
-        // two-argument call is affected — `=INDEX(A1:C1,1,2)` always addressed
-        // correctly — so the arity is part of the test.
-        let one_index = args.len() == 2;
-
-        if let Some((min_row, _, min_col, _, rows, cols)) = self.literal_range_rect(&args[0]) {
-            let row_num = match self.evaluate(&args[1]).as_number() {
-                Some(n) if n >= 1.0 => (n as usize) - 1,
-                Some(n) if n == 0.0 => 0,
-                _ => return EvalResult::Error(CellError::Value),
-            };
-            let col_num = if args.len() == 3 {
-                match self.evaluate(&args[2]).as_number() {
-                    Some(n) if n >= 1.0 => (n as usize) - 1,
-                    Some(n) if n == 0.0 => 0,
-                    _ => return EvalResult::Error(CellError::Value),
-                }
-            } else {
-                0
-            };
-            let flat_idx = if cols <= 1 || (one_index && rows <= 1) {
-                row_num
-            } else {
-                row_num * cols + col_num
-            };
-            if flat_idx >= rows * cols {
-                return EvalResult::Error(CellError::Ref);
-            }
-            let r = min_row + (flat_idx / cols) as u32;
-            let c = min_col + (flat_idx % cols) as u32;
-            let grid = self.get_grid_for_sheet(&None);
-            return match grid.get_cell(r, c) {
-                Some(cell) => self.cell_value_to_result(&cell.value),
-                None => EvalResult::Blank,
-            };
+        if args.len() < 2 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        if args.len() == 4 {
+            return self.index_with_area_number(args);
         }
-
-        let array = self.eval_flat(&args[0]);
-        let row_num = match self.evaluate(&args[1]).as_number() {
-            Some(n) if n >= 1.0 => (n as usize) - 1,
-            Some(n) if n == 0.0 => 0, // Return entire column/row - simplified to first
-            _ => return EvalResult::Error(CellError::Value),
+        let index_number = |e: &Expression| -> Result<f64, CellError> {
+            if is_omitted(e) {
+                return Ok(0.0);
+            }
+            match self.evaluate(e) {
+                EvalResult::Error(err) => Err(err),
+                v => match v.as_number() {
+                    Some(n) if n.trunc() >= 0.0 => Ok(n.trunc()),
+                    _ => Err(CellError::Value),
+                },
+            }
         };
-        // Determine array dimensions from the range expression
-        let (rows, cols) = self.get_range_dimensions(&args[0]);
-        let col_num = if args.len() == 3 {
-            match self.evaluate(&args[2]).as_number() {
-                Some(n) if n >= 1.0 => (n as usize) - 1,
-                Some(n) if n == 0.0 => 0,
-                _ => return EvalResult::Error(CellError::Value),
+        let numbers = || -> Result<(f64, Option<f64>), CellError> {
+            let first = index_number(&args[1])?;
+            let second = match args.get(2) {
+                Some(e) => Some(index_number(e)?),
+                None => None,
+            };
+            Ok((first, second))
+        };
+
+        // Fast path: INDEX over a literal same-sheet range that lands on ONE
+        // cell reads that cell directly instead of materializing the range.
+        if let Some((min_row, _, min_col, _, rows, cols)) = self.literal_range_rect(&args[0]) {
+            let (first, second) = match numbers() {
+                Ok(n) => n,
+                Err(e) => return EvalResult::Error(e),
+            };
+            let (top, bottom, left, right) = match Self::index_window(rows, cols, first, second, true) {
+                Ok(w) => w,
+                Err(e) => return EvalResult::Error(e),
+            };
+            if top == bottom && left == right {
+                let grid = self.get_grid_for_sheet(&None);
+                return match grid.get_cell(min_row + top as u32, min_col + left as u32) {
+                    Some(cell) => self.cell_value_to_result(&cell.value),
+                    None => EvalResult::Blank,
+                };
             }
-        } else { 0 };
-        // Same one-dimensional reading-order rule as the fast path above, and
-        // this is the branch an ARRAY CONSTANT takes: `=INDEX({1,2,3},2)` was
-        // #REF! while `=INDEX({1;2;3},2)` was 2, from the same three values.
-        if cols <= 1 || (one_index && rows <= 1) {
-            // 1D array (single column or row)
-            array.get(row_num).cloned().unwrap_or(EvalResult::Error(CellError::Ref))
-        } else {
-            // 2D array
-            let idx = row_num * cols + col_num;
-            array.get(idx).cloned().unwrap_or(EvalResult::Error(CellError::Ref))
+            return self.evaluate(&Self::rectangle_reference(
+                None,
+                min_row + 1 + top as u32,
+                min_row + 1 + bottom as u32,
+                min_col + left as u32,
+                min_col + right as u32,
+            ));
         }
+
+        // Any other REFERENCE (another sheet, a whole column, a LET name
+        // bound to one, a reference-returning call): the same window over
+        // its rectangle, read as a reference.
+        if self.denotes_reference(&args[0]) {
+            if let Ok((sheet, r1, r2, c1, c2)) = self.reference_rectangle(&args[0]) {
+                let (first, second) = match numbers() {
+                    Ok(n) => n,
+                    Err(e) => return EvalResult::Error(e),
+                };
+                let (rows, cols) = ((r2 - r1 + 1) as usize, (c2 - c1 + 1) as usize);
+                return match Self::index_window(rows, cols, first, second, true) {
+                    Ok((top, bottom, left, right)) => self.evaluate(&Self::rectangle_reference(
+                        sheet,
+                        r1 + top as u32,
+                        r1 + bottom as u32,
+                        c1 + left as u32,
+                        c1 + right as u32,
+                    )),
+                    Err(e) => EvalResult::Error(e),
+                };
+            }
+        }
+
+        // An ARRAY (a constant, a function's result): its real 2-D shape.
+        let value = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = value {
+            return EvalResult::Error(e);
+        }
+        let (first, second) = match numbers() {
+            Ok(n) => n,
+            Err(e) => return EvalResult::Error(e),
+        };
+        let (rows, cols, cells) = array_lift::cells(&value);
+        match Self::index_window(rows, cols, first, second, false) {
+            Ok((top, bottom, left, right)) => {
+                let mut out = Vec::with_capacity((bottom - top + 1) * (right - left + 1));
+                for r in top..=bottom {
+                    for c in left..=right {
+                        out.push(cells[r * cols + c].clone());
+                    }
+                }
+                array_lift::pack(bottom - top + 1, right - left + 1, out)
+            }
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    /// INDEX(reference, row_num, col_num, area_num). Calcula's formulas have
+    /// no multi-area reference (no union operator), so every source is ONE
+    /// area: area_num 1 is that area, a larger number #REF!, and 0, a
+    /// negative, a blank, an omitted one or a non-number #VALUE!; a fraction
+    /// truncates, TRUE and the text "1" are 1, an error is itself, and an
+    /// array area_num lifts. An error of row_num / col_num comes first [LIVE,
+    /// Excel 16, lane form6 p6v.log: `=INDEX(A1:B3,3,2,1)` 30,
+    /// `=INDEX(A1:B3,3,2,2)` #REF!, `=INDEX(A1:B3,3,2,0)` #VALUE!,
+    /// `=INDEX({1,2;3,4},2,2,2)` #REF!, `=INDEX(A1:B3,1,1,)` #VALUE!,
+    /// `=INDEX(A1:B3,2,2,E1)` #VALUE!, `=INDEX(A1:B3,3,2,1/0)` #DIV/0!,
+    /// `=INDEX(A1:B3,1/0,1,2)` #DIV/0!, `=INDEX(A1:B3,2,2,{1,2})` 20,#REF!].
+    /// Four arguments used to be #VALUE! here while `reference_of_call` took
+    /// them and ignored the fourth, so `=SUM(A1:INDEX(A1:B3,2,2,2))` was 33.
+    fn index_with_area_number(&self, args: &[Expression]) -> EvalResult {
+        let area = if is_omitted(&args[3]) { EvalResult::Error(CellError::Value) } else { self.evaluate(&args[3]) };
+        let base = || self.fn_index(&args[..3]);
+        // A number argument's own error (or #VALUE!) outranks the area's.
+        let number_error = || -> Option<CellError> {
+            for e in &args[1..3] {
+                if is_omitted(e) {
+                    continue;
+                }
+                match self.evaluate(e) {
+                    EvalResult::Error(err) => return Some(err),
+                    v => match v.as_number() {
+                        Some(n) if n.trunc() >= 0.0 => {}
+                        _ => return Some(CellError::Value),
+                    },
+                }
+            }
+            None
+        };
+        if array_lift::lifts(&area) {
+            let (rows, cols, areas) = array_lift::cells(&area);
+            let one = base();
+            let one = if array_lift::lifts(&one) { array_lift::at(&one, 0, 0) } else { one };
+            return array_lift::pack(
+                rows,
+                cols,
+                areas.iter().map(|a| match Self::index_area_check(a) {
+                    Ok(()) => one.clone(),
+                    Err(e) => EvalResult::Error(e),
+                }).collect(),
+            );
+        }
+        match Self::index_area_check(&area) {
+            Ok(()) => base(),
+            Err(e) => EvalResult::Error(number_error().unwrap_or(e)),
+        }
+    }
+
+    /// INDEX's area_num against a source of ONE area (`index_with_area_number`).
+    fn index_area_check(area: &EvalResult) -> Result<(), CellError> {
+        match area {
+            EvalResult::Error(e) => Err(e.clone()),
+            v => match v.as_number().map(f64::trunc) {
+                Some(n) if n == 1.0 => Ok(()),
+                Some(n) if n > 1.0 => Err(CellError::Ref),
+                _ => Err(CellError::Value),
+            },
+        }
+    }
+
+    /// The 0-based inclusive window (top, bottom, left, right) INDEX selects
+    /// out of a `rows x cols` source: `first` / `second` are the truncated,
+    /// non-negative row and column numbers (`second` absent when the call
+    /// gave ONE number), 0 meaning the whole axis. One number into a single
+    /// row or column is a position along it; into a 2-D source it is a whole
+    /// row of an array but #REF! for a `reference` ([LIVE, lane form5
+    /// p3.log] `=INDEX({1,2;3,4},2)` 3,4, `=INDEX(A1:B3,2)` #REF!). A number
+    /// past its axis is #REF!. Shared by `fn_index` and the reference INDEX
+    /// returns to the range operator and AGGREGATE (`reference_of_call`).
+    fn index_window(
+        rows: usize,
+        cols: usize,
+        first: f64,
+        second: Option<f64>,
+        reference: bool,
+    ) -> Result<(usize, usize, usize, usize), CellError> {
+        if rows == 0 || cols == 0 {
+            return Err(CellError::Ref);
+        }
+        let (row_num, col_num) = match second {
+            None if rows == 1 => (1.0, first),
+            None if cols == 1 => (first, 1.0),
+            None if reference => return Err(CellError::Ref),
+            None => (first, 0.0),
+            Some(c) => (first, c),
+        };
+        if row_num < 0.0 || col_num < 0.0 {
+            return Err(CellError::Value);
+        }
+        if row_num > rows as f64 || col_num > cols as f64 {
+            return Err(CellError::Ref);
+        }
+        let (top, bottom) = if row_num == 0.0 { (0, rows - 1) } else { (row_num as usize - 1, row_num as usize - 1) };
+        let (left, right) = if col_num == 0.0 { (0, cols - 1) } else { (col_num as usize - 1, col_num as usize - 1) };
+        Ok((top, bottom, left, right))
     }
 
     /// Helper to determine rows/cols dimensions of a range expression.
@@ -9558,7 +10159,14 @@ impl<'a> Evaluator<'a> {
         let width = if args.len() == 5 {
             match self.evaluate(&args[4]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) }
         } else { base_w as i64 };
-        if height <= 0 || width <= 0 { return EvalResult::Error(CellError::Ref); }
+        // A NEGATIVE height or width reaches UP or LEFT from the offset
+        // cell, which stays the bottom / right edge [LIVE, Excel 16, lane
+        // form5 p4.log, A1:A5 = 1..5]: `=OFFSET(A3,0,0,-2)` is A2:A3 (2;3),
+        // `=SUM(OFFSET(C3,0,0,1,-2))` B3:C3 (330), `=OFFSET(A1,0,0,-2)` off
+        // the sheet #REF!. Only zero is #REF! by itself.
+        let (new_row, height) = if height < 0 { (new_row + height + 1, -height) } else { (new_row, height) };
+        let (new_col, width) = if width < 0 { (new_col + width + 1, -width) } else { (new_col, width) };
+        if height == 0 || width == 0 || new_row < 0 || new_col < 0 { return EvalResult::Error(CellError::Ref); }
         let (height, width) = (height as usize, width as usize);
 
         // Off the sheet is #REF!, as it is for the negative case above.
@@ -9667,21 +10275,49 @@ impl<'a> Evaluator<'a> {
         Ok(if array_lift::lifts(&value) { array_lift::shape(&value) } else { (1, 1) })
     }
 
+    /// TRANSPOSE(array): `cols x rows` of its argument, packed through
+    /// `array_lift`. [LIVE, Excel 16, lane form5 p1.log] `=TRANSPOSE(A1:A3)`
+    /// is the ROW 1,2,3, `=TRANSPOSE({1,2;3,4})` 1,3;2,4,
+    /// `=ROWS(TRANSPOSE(A1:A2))` 1 and `=COLUMNS(..)` 2. This returned the
+    /// transposed cells as one FLAT list, which the engine reads as a column,
+    /// so every TRANSPOSE of a column or of a 2-D array came out a column.
     fn fn_transpose(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let array = self.eval_flat(&args[0]);
-        let (rows, cols) = self.get_range_dimensions(&args[0]);
-        if rows <= 1 && cols <= 1 {
-            return array.into_iter().next().unwrap_or(EvalResult::Number(0.0));
+        let value = self.evaluate(&args[0]);
+        if !array_lift::lifts(&value) {
+            return match value {
+                // ONE blank cell transposes to the NUMBER 0, and a LAMBDA to a
+                // 1x1 ARRAY holding it, which a cell shows as #CALC! [LIVE,
+                // Excel 16, lane form6 p6v.log: `=ISBLANK(TRANSPOSE(E1))` and
+                // `=ISBLANK(TRANSPOSE(E1:E1))` FALSE, `=ISNUMBER(TRANSPOSE(E1))`
+                // TRUE, `=TRANSPOSE(E1)=""` FALSE, `=COUNTA(TRANSPOSE(E1),E1)`
+                // 1; `=TYPE(TRANSPOSE(LAMBDA(x,x)))` 64,
+                // `=ISERROR(TRANSPOSE(LAMBDA(x,x)))` FALSE,
+                // `=TRANSPOSE(LAMBDA(x,x))` #CALC!,
+                // `=INDEX(TRANSPOSE(LAMBDA(x,x)),1,1)(3)` 3]. A blank cell
+                // inside a LARGER range stays a blank element (below), as
+                // Excel keeps it: `=ISBLANK(TRANSPOSE(E1:E2))` TRUE,TRUE.
+                EvalResult::Blank => EvalResult::Number(0.0),
+                lambda @ EvalResult::Lambda { .. } => EvalResult::Array(vec![lambda]),
+                other => other,
+            };
         }
-        let mut transposed = Vec::with_capacity(array.len());
+        let (rows, cols, cells) = array_lift::cells(&value);
+        if rows == 0 || cols == 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        // A ONE-CELL range is the one blank cell above: 0 ([LIVE] lane form6
+        // `=ISBLANK(TRANSPOSE(E1:E1))` FALSE).
+        if rows == 1 && cols == 1 {
+            return cells.into_iter().next().map(EvalResult::collapse_blank).unwrap_or(EvalResult::Number(0.0));
+        }
+        let mut transposed = Vec::with_capacity(cells.len());
         for c in 0..cols {
             for r in 0..rows {
-                let idx = r * cols + c;
-                transposed.push(array.get(idx).cloned().unwrap_or(EvalResult::Number(0.0)));
+                transposed.push(cells[r * cols + c].clone());
             }
         }
-        EvalResult::Array(transposed)
+        array_lift::pack(cols, rows, transposed)
     }
 
     // ==================== Statistical Functions (Batch 7) ====================
@@ -10047,14 +10683,24 @@ impl<'a> Evaluator<'a> {
     /// LET(name1, value1, [name2, value2, ...], calculation)
     /// Binds names to values in a local scope, then evaluates the calculation.
     fn fn_let(&self, args: &[Expression]) -> EvalResult {
+        match self.with_let_bindings(args, |calculation| self.evaluate(calculation)) {
+            Ok(result) => result,
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    /// LET's bindings in scope around `finish` over the calculation: its value
+    /// (`fn_let`), or the reference it is (a range half, `range_half_reference`).
+    /// `Err` for a LET of the wrong shape (#VALUE!).
+    fn with_let_bindings<R>(&self, args: &[Expression], finish: impl FnOnce(&Expression) -> R) -> Result<R, CellError> {
         // LET needs at least 3 args: name1, value1, calculation
         // Total must be odd (pairs of name/value + final calculation)
         if args.len() < 3 || args.len() % 2 == 0 {
-            return EvalResult::Error(CellError::Value);
+            return Err(CellError::Value);
         }
         // Max 126 name/value pairs (252 args + 1 calculation = 253)
         if args.len() > 253 {
-            return EvalResult::Error(CellError::Value);
+            return Err(CellError::Value);
         }
 
         // Save previous scope values that might be shadowed
@@ -10062,11 +10708,23 @@ impl<'a> Evaluator<'a> {
         let mut saved: Vec<(String, Option<EvalResult>)> = Vec::new();
         let refs_depth = self.scope_refs.borrow().len();
 
+        let restore = |saved: Vec<(String, Option<EvalResult>)>| {
+            let mut scope = self.scope.borrow_mut();
+            for (k, old) in saved.into_iter().rev() {
+                match old {
+                    Some(v) => { scope.insert(k, v); }
+                    None => { scope.remove(&k); }
+                }
+            }
+        };
+
         for i in 0..pair_count {
             let name = self.extract_param_name(&args[i * 2]);
             if name.is_empty() {
                 self.scope_refs.borrow_mut().truncate(refs_depth);
-                return EvalResult::Error(CellError::Value);
+                // The names bound so far go too.
+                restore(saved);
+                return Err(CellError::Value);
             }
             // AN ERROR IS A VALUE LIKE ANY OTHER, BOUND AND NOT RETURNED.
             // [LIVE, Excel 16, parser lane probe] `=LET(a,1/0,5)` is 5,
@@ -10088,21 +10746,13 @@ impl<'a> Evaluator<'a> {
         }
 
         // Evaluate the calculation expression with bindings in scope
-        let result = self.evaluate(args.last().unwrap());
+        let result = finish(args.last().unwrap());
         self.scope_refs.borrow_mut().truncate(refs_depth);
 
         // Restore previous scope
-        {
-            let mut scope = self.scope.borrow_mut();
-            for (k, old) in saved.into_iter().rev() {
-                match old {
-                    Some(v) => { scope.insert(k, v); }
-                    None => { scope.remove(&k); }
-                }
-            }
-        }
+        restore(saved);
 
-        result
+        Ok(result)
     }
 
     // ==================== Lambda Helper ====================
@@ -10128,14 +10778,43 @@ impl<'a> Evaluator<'a> {
     /// counter incremented on entry and restored on exit bounds the Rust stack
     /// for ALL of them. Placing the guard at the call sites instead would leave
     /// whichever site is added next unguarded.
-    fn invoke_lambda_with_captured(&self, params: &[String], body: &Expression, args: &[EvalResult], captured: &HashMap<String, EvalResult>) -> EvalResult {
+    ///
+    /// `arg_refs` is the REFERENCE each argument is, where it is one (`None`
+    /// for a value, and shorter than `args` when the caller passes none): a
+    /// LAMBDA's parameter keeps the reference it was called with, as a LET
+    /// name does (BUG-0737). [LIVE, Excel 16, lane formula p1.json]
+    /// `=LAMBDA(b,SUM(A1:b))(A3)` is 6, `=LET(f,LAMBDA(b,SUM(A1:b)),f(A3))` 6,
+    /// `=LAMBDA(a,b,SUM(a:b))(A1,A3)` 6, `=LAMBDA(r,ISREF(r))(A1)` TRUE, while
+    /// `=LAMBDA(b,SUM(A1:b))(3)` is #VALUE! and `=LAMBDA(r,ISREF(r))(5)` FALSE.
+    fn invoke_lambda_with_captured(&self, params: &[String], body: &Expression, args: &[EvalResult], captured: &HashMap<String, EvalResult>, arg_refs: &[Option<Expression>]) -> EvalResult {
+        match self.with_lambda_bindings(params, args, captured, arg_refs, |body| self.evaluate(body), body) {
+            Ok(result) => result,
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    /// The lambda's parameters (and its captured names) in scope around
+    /// `finish` over its body: its value (`invoke_lambda_with_captured`), or
+    /// the REFERENCE the body is (`reference_of_lambda_call`, lane form4:
+    /// [LIVE, Excel 16] `=AGGREGATE(9,6,LAMBDA(x,x)(A1:A5))` is 15 and
+    /// `=SUM(A1:LAMBDA(x,x)(A3))` 6). `Err(#LIMIT!)` past the depth ceiling or
+    /// the fuel. This is the one place the recursion guard lives.
+    fn with_lambda_bindings<R>(
+        &self,
+        params: &[String],
+        args: &[EvalResult],
+        captured: &HashMap<String, EvalResult>,
+        arg_refs: &[Option<Expression>],
+        finish: impl FnOnce(&Expression) -> R,
+        body: &Expression,
+    ) -> Result<R, CellError> {
         // Refuse BEFORE any work: a stack overflow is an uncatchable process
         // abort, so the ceiling has to be checked on the way in, not detected
         // on the way out. Nothing has been pushed to `scope` yet, so returning
         // here needs no unwinding.
         let entry_depth = self.lambda_depth.get();
         if entry_depth >= MAX_LAMBDA_DEPTH {
-            return EvalResult::Error(CellError::Limit);
+            return Err(CellError::Limit);
         }
         // COST, alongside DEPTH. An invocation costs materially more than an
         // ordinary node (scope save/restore + captured-binding clones), and
@@ -10143,21 +10822,25 @@ impl<'a> Evaluator<'a> {
         // through — is what bounds the shallow-but-exponential case that the
         // depth counter above is blind to. `fib(35)` is 29.8M invocations
         // deep-3; only the fuel sees it.
-        charge!(self, LAMBDA_CALL_FUEL as u64);
+        if self.budget.charge(fuel_units(LAMBDA_CALL_FUEL as u64)).is_err() {
+            return Err(CellError::Limit);
+        }
         self.lambda_depth.set(entry_depth + 1);
 
         // Collect all keys we need to save/restore: captured keys + param keys
         let mut saved: Vec<(String, Option<EvalResult>)> = Vec::new();
-        // Parameters and captured names are VALUES here: they hide any outer
-        // LET reference of the same name from `b:b` (see `scope_refs`).
+        // Captured names are VALUES here, and so is a parameter called with a
+        // value: they hide any outer LET reference of the same name from `b:b`
+        // (see `scope_refs`). A parameter called with a REFERENCE stands for
+        // it (`arg_refs`).
         let refs_depth = self.scope_refs.borrow().len();
         {
             let mut refs = self.scope_refs.borrow_mut();
             for key in captured.keys() {
                 refs.push((key.clone(), None));
             }
-            for name in params {
-                refs.push((scope_key(name), None));
+            for (i, name) in params.iter().enumerate() {
+                refs.push((scope_key(name), arg_refs.get(i).cloned().flatten()));
             }
         }
         {
@@ -10182,7 +10865,7 @@ impl<'a> Evaluator<'a> {
             }
         }
 
-        let result = self.evaluate(body);
+        let result = finish(body);
 
         // Restore scope
         {
@@ -10203,7 +10886,41 @@ impl<'a> Evaluator<'a> {
         self.lambda_depth.set(entry_depth);
         self.scope_refs.borrow_mut().truncate(refs_depth);
 
-        result
+        Ok(result)
+    }
+
+    /// The reference a LAMBDA CALL returns, when its body is a reference: the
+    /// inline `LAMBDA(x,x)(A3)` (`__INVOKE__`, both shapes) or a call of a
+    /// LET-bound lambda `f(A3)`, its parameters bound as the call binds them
+    /// (lane form4; [LIVE, Excel 16] `=AGGREGATE(9,6,LAMBDA(x,x)(A1:A5))` 15,
+    /// `=SUM(A1:LAMBDA(x,x)(A3))` 6). #VALUE! for anything else, as before.
+    fn reference_of_lambda_call(&self, name: &str, args: &[Expression]) -> Result<Expression, CellError> {
+        let (callee, call_args) = if name == "__INVOKE__" {
+            let callee_idx = match args.first() {
+                Some(Expression::Literal(Value::String(_))) => 1usize,
+                Some(_) => 0usize,
+                None => return Err(CellError::Value),
+            };
+            let Some(callee) = args.get(callee_idx) else { return Err(CellError::Value) };
+            (self.evaluate(callee), &args[callee_idx + 1..])
+        } else {
+            match self.scope.borrow().get(&scope_key(name)).cloned() {
+                Some(bound) => (bound, args),
+                None => return Err(CellError::Value),
+            }
+        };
+        let EvalResult::Lambda { params, body, captured } = callee else {
+            return match callee {
+                EvalResult::Error(e) => Err(e),
+                _ => Err(CellError::Value),
+            };
+        };
+        let eval_args: Vec<EvalResult> = call_args.iter().map(|a| self.evaluate(a)).collect();
+        if eval_args.len() != params.len() {
+            return Err(CellError::Value);
+        }
+        let arg_refs: Vec<Option<Expression>> = call_args.iter().map(|a| self.reference_of_binding(a)).collect();
+        self.with_lambda_bindings(&params, &eval_args, &captured, &arg_refs, |body| self.range_half_reference(body), &body)?
     }
 
     /// The reference a LET value expression IS, if it is one: a cell, a range,
@@ -10305,23 +11022,7 @@ impl<'a> Evaluator<'a> {
     /// (`=LET(a,1,SUM(a:C3))`) [LIVE, Excel 16, parser lane probe]. Any other
     /// half (a resolved structured reference is a range) is its own reference.
     fn eval_reference_span(&self, sheet: &Option<String>, start: &Expression, end: &Expression) -> EvalResult {
-        let half = |e: &Expression| -> Result<Expression, CellError> {
-            match e {
-                Expression::NamedRef { name, .. } => {
-                    let key = scope_key(name);
-                    if let Some(reference) = self.bound_reference(&key) {
-                        return Ok(reference);
-                    }
-                    match self.scope.borrow().get(&key) {
-                        Some(EvalResult::Error(err)) => Err(err.clone()),
-                        Some(_) => Err(CellError::Value),
-                        None => Err(CellError::Name),
-                    }
-                }
-                Expression::CellRef { .. } | Expression::Range { .. } => Ok(e.clone()),
-                _ => Err(CellError::Value),
-            }
-        };
+        let half = |e: &Expression| self.range_half_reference(e);
         let (x, y) = match (half(start), half(end)) {
             (Ok(x), Ok(y)) => (x, y),
             (Err(err), _) | (_, Err(err)) => return EvalResult::Error(err),
@@ -10336,6 +11037,337 @@ impl<'a> Evaluator<'a> {
         match Self::reference_span(&qualify(x), &qualify(y)) {
             Some(span) => self.evaluate(&span),
             None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// The REFERENCE one half of the range operator stands for (BUG-0646,
+    /// BUG-0737): a cell or a range as it is; a LET / LAMBDA name the reference
+    /// it is bound to (unbound #NAME?, bound to a value #VALUE!); a range whose
+    /// own halves are no plain cells (`A1:A3:A4`) the span it is; and a call
+    /// of a function that RETURNS a reference the reference it returns.
+    ///
+    /// [LIVE, Excel 16, lane formula p1.json / p2.json, A1:A5 = 1..5]
+    /// `=SUM(A1:INDEX(A1:A5,3))` 6, `=SUM(INDEX(A1:A5,2):A4)` 9,
+    /// `=SUM(INDEX(A1:A5,2):INDEX(A1:A5,4))` 9, `=SUM(A1:INDEX(A1:C5,3,2))` 66,
+    /// `=ROWS(A1:INDEX(A:A,4))` 4, `=SUM(A1:INDEX(A1:A5,0))` 15,
+    /// `=SUM(A1:OFFSET(A1,2,0))` 6, `=SUM(A1:OFFSET(A1,1,0,2,1))` 6,
+    /// `=SUM(A1:INDIRECT("A3"))` 6, `=SUM(A1:INDIRECT("Sheet2!A3"))` #VALUE!,
+    /// `=SUM(A1:IF(TRUE,A3,A4))`, `(A1:CHOOSE(2,A2,A3))`, `(A1:IFS(TRUE,A3))`,
+    /// `(A1:SWITCH(1,1,A3))`, `(A1:TAKE(A1:A5,3))` 6, `=SUM(A1:DROP(A1:A5,2))`
+    /// 15, `=SUM(A1:(A3))` 6, `=SUM(A1:@A3)` 6, `=SUM(A1:A3:A4)` 10. A function
+    /// that returns VALUES is refused at entry (`parser::excel_arity`'s
+    /// sibling check). LET, XLOOKUP and TRIMRANGE are followed too, and
+    /// `SINGLE(x)` is `@x` (lane formfix); a LAMBDA call whose body is a
+    /// reference (`A1:LAMBDA(x,x)(A3)`, Excel 6) and an intersection
+    /// (`A1:A5 A2:A3`) are followed as well (lane form4).
+    fn range_half_reference(&self, e: &Expression) -> Result<Expression, CellError> {
+        match e {
+            Expression::NamedRef { name, .. } => {
+                let key = scope_key(name);
+                if let Some(reference) = self.bound_reference(&key) {
+                    return Ok(reference);
+                }
+                match self.scope.borrow().get(&key) {
+                    Some(EvalResult::Error(err)) => Err(err.clone()),
+                    Some(_) => Err(CellError::Value),
+                    None => Err(CellError::Name),
+                }
+            }
+            Expression::Range { sheet, start, end, .. }
+                if !matches!((start.as_ref(), end.as_ref()), (Expression::CellRef { .. }, Expression::CellRef { .. })) =>
+            {
+                let (x, y) = (self.range_half_reference(start)?, self.range_half_reference(end)?);
+                let qualify = |e: Expression| match (sheet, e) {
+                    (Some(s), Expression::CellRef { sheet: None, col, row, col_absolute, row_absolute, ref_site_id }) => {
+                        Expression::CellRef { sheet: Some(s.clone()), col, row, col_absolute, row_absolute, ref_site_id }
+                    }
+                    (_, other) => other,
+                };
+                Self::reference_span(&qualify(x), &qualify(y)).ok_or(CellError::Value)
+            }
+            Expression::CellRef { .. } | Expression::Range { .. } => Ok(e.clone()),
+            Expression::ImplicitIntersection { operand } => match operand.as_ref() {
+                Expression::CellRef { .. } => Ok(operand.as_ref().clone()),
+                _ => Err(CellError::Value),
+            },
+            Expression::FunctionCall { func, args, .. } => self.reference_of_call(func, args),
+            Expression::BinaryOp { op: BinaryOperator::Intersect, .. } => self.reference_of_intersection(e),
+            _ => Err(CellError::Value),
+        }
+    }
+
+    /// The reference a call of a reference-returning function returns
+    /// (`range_half_reference`).
+    fn reference_of_call(&self, func: &BuiltinFunction, args: &[Expression]) -> Result<Expression, CellError> {
+        // A count or a selector: its number, its error, or #VALUE!.
+        let number = |e: &Expression| -> Result<f64, CellError> {
+            match self.evaluate(e) {
+                EvalResult::Error(err) => Err(err),
+                v => v.as_number().ok_or(CellError::Value),
+            }
+        };
+        match func {
+            BuiltinFunction::Index if (2..=4).contains(&args.len()) => {
+                let (sheet, r1, r2, c1, c2) = self.reference_rectangle(&args[0])?;
+                let (rows, cols) = ((r2 - r1 + 1) as usize, (c2 - c1 + 1) as usize);
+                // An omitted number is 0, the whole axis (`=INDEX(A1:B3,2,)`
+                // is row 2, lane form5 p3.log).
+                let slot = |e: &Expression| if is_omitted(e) { Ok(0.0) } else { number(e).map(f64::trunc) };
+                let first = slot(&args[1])?;
+                let second = if args.len() >= 3 { Some(slot(&args[2])?) } else { None };
+                // area_num: 1 is the one area a Calcula reference has, more is
+                // #REF!, the rest #VALUE! (`index_with_area_number`; [LIVE,
+                // lane form6] `=SUM(A1:INDEX(A1:B3,2,2,2))` #REF!). It was
+                // accepted and ignored.
+                if args.len() == 4 {
+                    let area = if is_omitted(&args[3]) { EvalResult::Error(CellError::Value) } else { self.evaluate(&args[3]) };
+                    if array_lift::lifts(&area) {
+                        return Err(CellError::Value);
+                    }
+                    Self::index_area_check(&area)?;
+                }
+                // The window `fn_index` reads too: one number into a single
+                // row or column is a position along it, into a 2-D reference
+                // #REF!.
+                let (top, bottom, left, right) = Self::index_window(rows, cols, first, second, true)?;
+                Ok(Self::rectangle_reference(sheet, r1 + top as u32, r1 + bottom as u32, c1 + left as u32, c1 + right as u32))
+            }
+            BuiltinFunction::Offset if (3..=5).contains(&args.len()) => {
+                let (sheet, r1, r2, c1, c2) = self.reference_rectangle(&args[0])?;
+                let top = r1 as i64 + number(&args[1])?.trunc() as i64;
+                let left = c1 as i64 + number(&args[2])?.trunc() as i64;
+                let height = if args.len() >= 4 && !is_omitted(&args[3]) { number(&args[3])?.trunc() as i64 } else { (r2 - r1 + 1) as i64 };
+                let width = if args.len() == 5 && !is_omitted(&args[4]) { number(&args[4])?.trunc() as i64 } else { (c2 - c1 + 1) as i64 };
+                // A negative height / width reaches up / left (`fn_offset`;
+                // [LIVE, lane form5 p4.log] `=AGGREGATE(9,6,OFFSET(A3,0,0,-2))` 5).
+                let (top, height) = if height < 0 { (top + height + 1, -height) } else { (top, height) };
+                let (left, width) = if width < 0 { (left + width + 1, -width) } else { (left, width) };
+                if top < 1 || left < 0 || height < 1 || width < 1
+                    || top + height - 1 > crate::navigation::EXCEL_MAX_ROW_INDEX as i64 + 1
+                    || left + width - 1 > crate::navigation::EXCEL_MAX_COL_INDEX as i64
+                {
+                    return Err(CellError::Ref);
+                }
+                Ok(Self::rectangle_reference(sheet, top as u32, (top + height - 1) as u32, left as u32, (left + width - 1) as u32))
+            }
+            BuiltinFunction::Indirect if (1..=2).contains(&args.len()) => {
+                let text = self.evaluate(&args[0]).text_or_error()?;
+                match parser::parse(&format!("={}", text.trim())) {
+                    Ok(reference @ (Expression::CellRef { .. } | Expression::Range { .. })) => Ok(reference),
+                    _ => Err(CellError::Ref),
+                }
+            }
+            BuiltinFunction::If if (2..=3).contains(&args.len()) => {
+                let condition = match self.evaluate(&args[0]) {
+                    EvalResult::Error(err) => return Err(err),
+                    v => v.as_boolean().ok_or(CellError::Value)?,
+                };
+                match (condition, args.get(2)) {
+                    (true, _) => self.range_half_reference(&args[1]),
+                    (false, Some(otherwise)) => self.range_half_reference(otherwise),
+                    (false, None) => Err(CellError::Value),
+                }
+            }
+            BuiltinFunction::Choose if args.len() >= 2 => {
+                let k = number(&args[0])?.trunc();
+                if k < 1.0 || k as usize >= args.len() {
+                    return Err(CellError::Value);
+                }
+                self.range_half_reference(&args[k as usize])
+            }
+            BuiltinFunction::Ifs if args.len() >= 2 && args.len() % 2 == 0 => {
+                for pair in args.chunks(2) {
+                    match self.evaluate(&pair[0]) {
+                        EvalResult::Error(err) => return Err(err),
+                        v => {
+                            if v.as_boolean().ok_or(CellError::Value)? {
+                                return self.range_half_reference(&pair[1]);
+                            }
+                        }
+                    }
+                }
+                Err(CellError::NA)
+            }
+            BuiltinFunction::Switch if args.len() >= 3 => {
+                let subject = self.evaluate(&args[0]);
+                if let EvalResult::Error(err) = subject {
+                    return Err(err);
+                }
+                let pairs = &args[1..];
+                for pair in pairs.chunks(2) {
+                    if pair.len() == 2 && Self::eval_results_equal(&subject, &self.evaluate(&pair[0])) {
+                        return self.range_half_reference(&pair[1]);
+                    }
+                }
+                match pairs.len() % 2 {
+                    1 => self.range_half_reference(&pairs[pairs.len() - 1]),
+                    _ => Err(CellError::NA),
+                }
+            }
+            BuiltinFunction::Take | BuiltinFunction::Drop if (2..=3).contains(&args.len()) => {
+                let take = matches!(func, BuiltinFunction::Take);
+                let (sheet, r1, r2, c1, c2) = self.reference_rectangle(&args[0])?;
+                let axis = |slot: usize, lo: u32, hi: u32| -> Result<(u32, u32), CellError> {
+                    if args.len() <= slot || is_omitted(&args[slot]) {
+                        return Ok((lo, hi));
+                    }
+                    let n = number(&args[slot])?.trunc();
+                    let size = (hi - lo + 1) as f64;
+                    let k = n.abs().min(size) as u32;
+                    let (a, b) = match (take, n >= 0.0) {
+                        (true, true) => (lo, lo + k),
+                        (true, false) => (hi + 1 - k, hi + 1),
+                        (false, true) => (lo + k, hi + 1),
+                        (false, false) => (lo, hi + 1 - k),
+                    };
+                    if a >= b { Err(CellError::Calc) } else { Ok((a, b - 1)) }
+                };
+                let (top, bottom) = axis(1, r1, r2)?;
+                let (left, right) = axis(2, c1, c2)?;
+                Ok(Self::rectangle_reference(sheet, top, bottom, left, right))
+            }
+            // [LIVE, Excel 16, lane formfix p1.json, A1:A5 = 1..5]
+            // `=SUM(A1:LET(x,A3,x))` 6, `=SUM(LET(x,A2,x):A4)` 9,
+            // `=SUM(A1:LET(x,A3:A4,x))` 10: the reference LET's calculation is,
+            // with its names bound.
+            BuiltinFunction::Let => self.with_let_bindings(args, |calculation| self.range_half_reference(calculation))?,
+            // `=SUM(A1:XLOOKUP(3,A1:A5,A1:A5))` 6, `=SUM(XLOOKUP(2,A1:A5,A1:A5):A4)`
+            // 9: the line of the return array at the match XMATCH finds over
+            // the same lookup, match mode and search mode.
+            BuiltinFunction::XLookup if (3..=6).contains(&args.len()) => {
+                let mut xmatch_args = vec![args[0].clone(), args[1].clone()];
+                xmatch_args.extend(args.iter().skip(4).cloned());
+                let position = self.evaluate(&Expression::FunctionCall {
+                    func: BuiltinFunction::XMatch,
+                    args: xmatch_args,
+                    ref_site_id: Default::default(),
+                });
+                let k = match position {
+                    EvalResult::Number(k) if k >= 1.0 => k as u32,
+                    EvalResult::Error(CellError::NA) if args.len() >= 4 && !is_omitted(&args[3]) => {
+                        return self.range_half_reference(&args[3]);
+                    }
+                    EvalResult::Error(err) => return Err(err),
+                    _ => return Err(CellError::Value),
+                };
+                let (sheet, r1, r2, c1, c2) = self.reference_rectangle(&args[2])?;
+                let vertical = match self.reference_rectangle(&args[1]) {
+                    Ok((_, lr1, lr2, _, _)) => lr2 > lr1,
+                    Err(_) => array_lift::shape(&self.evaluate(&args[1])).0 > 1,
+                };
+                if vertical {
+                    let row = r1 + k - 1;
+                    if row > r2 { return Err(CellError::Value); }
+                    Ok(Self::rectangle_reference(sheet, row, row, c1, c2))
+                } else {
+                    let col = c1 + k - 1;
+                    if col > c2 { return Err(CellError::Value); }
+                    Ok(Self::rectangle_reference(sheet, r1, r2, col, col))
+                }
+            }
+            // `=SUM(A1:TRIMRANGE(A3:A3))` 6: the trimmed part of its range.
+            BuiltinFunction::TrimRange if (1..=3).contains(&args.len()) => {
+                let (sheet, r1, _, c1, _) = self.reference_rectangle(&args[0])?;
+                let (_, top, bottom, left, right) = match self.trim_range_bounds(args) {
+                    Ok(bounds) => bounds,
+                    Err(EvalResult::Error(err)) => return Err(err),
+                    Err(_) => return Err(CellError::Ref),
+                };
+                Ok(Self::rectangle_reference(
+                    sheet,
+                    r1 + top as u32,
+                    r1 + bottom as u32 - 1,
+                    c1 + left as u32,
+                    c1 + right as u32 - 1,
+                ))
+            }
+            // A LAMBDA call whose body is a reference (lane form4).
+            BuiltinFunction::Custom(name) => self.reference_of_lambda_call(name, args),
+            _ => Err(CellError::Value),
+        }
+    }
+
+    /// The reference an INTERSECTION is (`A1:A5 A2:A3` is A2:A3), #NULL! when
+    /// the two have nothing in common -- the same rectangle `eval_intersect`
+    /// reads (lane form4; [LIVE, Excel 16] `=AGGREGATE(9,6,A1:A5 A2:A3)` 5).
+    fn reference_of_intersection(&self, e: &Expression) -> Result<Expression, CellError> {
+        let rect = self.reference_rect(e).ok_or(CellError::Null)?;
+        match (rect.r2 == u32::MAX, rect.c2 == u32::MAX) {
+            (true, true) => Err(CellError::Null),
+            (true, false) => Ok(Expression::ColumnRef {
+                sheet: rect.sheet,
+                start_col: index_to_col(rect.c1),
+                end_col: index_to_col(rect.c2),
+                start_absolute: false,
+                end_absolute: false,
+                ref_site_id: Default::default(),
+            }),
+            (false, true) => Ok(Expression::RowRef {
+                sheet: rect.sheet,
+                start_row: rect.r1,
+                end_row: rect.r2,
+                start_absolute: false,
+                end_absolute: false,
+                ref_site_id: Default::default(),
+            }),
+            (false, false) => Ok(Self::rectangle_reference(rect.sheet, rect.r1, rect.r2, rect.c1, rect.c2)),
+        }
+    }
+
+    /// A reference argument's rectangle: its sheet, rows (1-based) and
+    /// columns (0-based), inclusive -- a cell, a range of cells, a whole
+    /// column or row (to the sheet's edge), or a LET / LAMBDA name bound to
+    /// one of those.
+    fn reference_rectangle(&self, e: &Expression) -> Result<(Option<String>, u32, u32, u32, u32), CellError> {
+        let reference = match e {
+            Expression::NamedRef { .. } | Expression::FunctionCall { .. } => self.range_half_reference(e)?,
+            other => other.clone(),
+        };
+        match &reference {
+            Expression::CellRef { sheet, col, row, .. } => {
+                let c = col_to_index(col);
+                Ok((sheet.clone(), *row, *row, c, c))
+            }
+            Expression::Range { sheet, start, end, .. } => {
+                let (sr, sc) = cell_ref_coords(start).ok_or(CellError::Value)?;
+                let (er, ec) = cell_ref_coords(end).ok_or(CellError::Value)?;
+                let own = match (sheet, start.as_ref()) {
+                    (Some(s), _) => Some(s.clone()),
+                    (None, Expression::CellRef { sheet, .. }) => sheet.clone(),
+                    _ => None,
+                };
+                Ok((own, sr.min(er), sr.max(er), sc.min(ec), sc.max(ec)))
+            }
+            Expression::ColumnRef { sheet, start_col, end_col, .. } => {
+                let (a, b) = (col_to_index(start_col), col_to_index(end_col));
+                Ok((sheet.clone(), 1, crate::navigation::EXCEL_MAX_ROW_INDEX + 1, a.min(b), a.max(b)))
+            }
+            Expression::RowRef { sheet, start_row, end_row, .. } => {
+                Ok((sheet.clone(), (*start_row).min(*end_row), (*start_row).max(*end_row), 0, crate::navigation::EXCEL_MAX_COL_INDEX))
+            }
+            _ => Err(CellError::Value),
+        }
+    }
+
+    /// The reference of an inclusive rectangle (rows 1-based, columns
+    /// 0-based): one cell, or a range.
+    fn rectangle_reference(sheet: Option<String>, top: u32, bottom: u32, left: u32, right: u32) -> Expression {
+        let corner = |row: u32, col: u32, sheet: Option<String>| Expression::CellRef {
+            sheet,
+            col: index_to_col(col),
+            row,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
+        };
+        if top == bottom && left == right {
+            return corner(top, left, sheet);
+        }
+        Expression::Range {
+            sheet,
+            start: Box::new(corner(top, left, None)),
+            end: Box::new(corner(bottom, right, None)),
+            ref_site_id: Default::default(),
         }
     }
 
@@ -10389,9 +11421,9 @@ impl<'a> Evaluator<'a> {
 
     /// Invoke a lambda with the given argument values bound to its parameters.
     /// Temporarily binds params in scope, evaluates body, then restores scope.
-    fn invoke_lambda(&self, params: &[String], body: &Expression, args: &[EvalResult]) -> EvalResult {
+    fn invoke_lambda(&self, params: &[String], body: &Expression, args: &[EvalResult], arg_refs: &[Option<Expression>]) -> EvalResult {
         let empty = HashMap::new();
-        self.invoke_lambda_with_captured(params, body, args, &empty)
+        self.invoke_lambda_with_captured(params, body, args, &empty, arg_refs)
     }
 
     /// Something the LAMBDA helpers can INVOKE with argument values.
@@ -10501,6 +11533,49 @@ impl<'a> Evaluator<'a> {
         Ok((rows, cols, data))
     }
 
+    /// BYROW / BYCOL given their ARRAY alone: Excel takes the formula (its
+    /// function argument is optional at entry) and answers #CALC! [LIVE,
+    /// Excel 16, lane formula p4.json: `=BYROW(A1:A3)` is #CALC!] -- or the
+    /// error the array is (`helper_array_arg`). `None` when a function is
+    /// given (or the call has no argument at all).
+    fn helper_without_function(&self, args: &[Expression]) -> Option<EvalResult> {
+        if args.len() != 1 {
+            return None;
+        }
+        Some(match self.helper_array_arg(&args[0]) {
+            Ok(_) => EvalResult::Error(CellError::Calc),
+            Err(e) => EvalResult::Error(e),
+        })
+    }
+
+    /// One CELL of a LAMBDA helper's result (MAP, BYROW, BYCOL, SCAN,
+    /// MAKEARRAY): what the function returned for it, or `None` when that is
+    /// a NESTED array -- more than one value for one cell, which makes the
+    /// WHOLE result Excel's #CALC! (BUG-0774).
+    ///
+    /// [LIVE, Excel 16, lane formula SCRATCH/formula/p1.json, p2.json]
+    /// `=MAP({1,2},LAMBDA(a,{1,2}))`, `=MAP({1,2},LAMBDA(a,A1:A2))`,
+    /// `=MAP({1,2},LAMBDA(a,IF(a=1,{1,2},3)))`, `=BYROW(A1:B2,LAMBDA(r,r))`,
+    /// `=BYCOL(A1:B2,LAMBDA(c,c))`, `=SCAN(0,{1,2},LAMBDA(a,b,{1,2}))` and
+    /// `=MAKEARRAY(1,1,LAMBDA(r,c,{1,2}))` are ONE #CALC!, while a one-element
+    /// array is its element (`=MAP({1,2},LAMBDA(a,{5}))` is {5,5},
+    /// `=BYROW(A1:A2,LAMBDA(r,r))` {1;2}, `=BYCOL(A1:B1,LAMBDA(c,c))` {1,10}).
+    /// An error is that cell's value (`=MAP({1,2},LAMBDA(a,FILTER(..)))` is
+    /// {#CALC!,#CALC!}) and so is a LAMBDA, which its cell shows as #CALC!
+    /// (`to_cell_value`). REDUCE is not a helper of this kind: its one result
+    /// may be an array, and spills (`=REDUCE(0,{1,2},LAMBDA(a,b,{1,2}))`).
+    /// Calcula used to spill the nested values as if they were a grid.
+    fn helper_cell(result: EvalResult) -> Option<EvalResult> {
+        if !array_lift::lifts(&result) {
+            return Some(result);
+        }
+        match array_lift::shape(&result) {
+            (0, _) | (_, 0) => Some(EvalResult::Error(CellError::Calc)),
+            (1, 1) => Self::helper_cell(array_lift::at(&result, 0, 0)),
+            _ => None,
+        }
+    }
+
     /// Invoke a callable with already-evaluated arguments.
     ///
     /// A built-in goes through `call_with_values`, the same scope-binding
@@ -10508,9 +11583,69 @@ impl<'a> Evaluator<'a> {
     /// a user would have written inside a LAMBDA, rather than a second
     /// implementation of it.
     fn invoke_callable(&self, callable: &Callable, args: &[EvalResult]) -> EvalResult {
+        self.invoke_callable_with_refs(callable, args, &[])
+    }
+
+    /// [`Self::invoke_callable`], each argument with the reference it is
+    /// (`invoke_lambda_with_captured`'s `arg_refs`): MAP / BYROW / BYCOL hand
+    /// a LAMBDA the CELL, ROW or COLUMN of a range they walk, not only its
+    /// value (BUG-0737) [LIVE, lane formula p1.json: `=MAP(A1:A3,LAMBDA(c,
+    /// ISREF(c)))` TRUE x3, `=MAP(A1:A3,LAMBDA(c,SUM(A1:c)))` {1;3;6},
+    /// `=BYROW(A1:B3,LAMBDA(r,ISREF(r)))` TRUE x3]. A built-in sees values.
+    fn invoke_callable_with_refs(&self, callable: &Callable, args: &[EvalResult], arg_refs: &[Option<Expression>]) -> EvalResult {
         match callable {
-            Callable::Lambda { params, body } => self.invoke_lambda(params, body, args),
+            Callable::Lambda { params, body } => self.invoke_lambda(params, body, args, arg_refs),
             Callable::Builtin(f) => self.call_with_values(f, args),
+        }
+    }
+
+    /// The rectangle a LAMBDA helper's ARRAY argument is, when it is a
+    /// reference: its sheet, first row (1-based) and first column (0-based),
+    /// for the per-cell references MAP / BYROW / BYCOL hand their function
+    /// (`invoke_callable_with_refs`). `None` for a value, a whole column or
+    /// row, or anything the rectangle of which is not this simple.
+    fn helper_reference_origin(&self, expr: &Expression) -> Option<(Option<String>, u32, u32)> {
+        let reference = match expr {
+            Expression::NamedRef { name, .. } => self.bound_reference(&scope_key(name))?,
+            other => other.clone(),
+        };
+        match &reference {
+            Expression::CellRef { sheet, col, row, .. } => Some((sheet.clone(), *row, col_to_index(col))),
+            Expression::Range { sheet, start, end, .. } => {
+                let (r1, c1) = cell_ref_coords(start)?;
+                let (r2, c2) = cell_ref_coords(end)?;
+                let own = match (sheet, start.as_ref()) {
+                    (Some(s), _) => Some(s.clone()),
+                    (None, Expression::CellRef { sheet, .. }) => sheet.clone(),
+                    _ => None,
+                };
+                Some((own, r1.min(r2), c1.min(c2)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The reference of the cells `rows` x `cols` at offset (`dr`, `dc`) from a
+    /// helper's origin (`helper_reference_origin`): one cell, or a range.
+    fn helper_cell_reference(origin: &(Option<String>, u32, u32), dr: u32, dc: u32, rows: u32, cols: u32) -> Expression {
+        let (sheet, row, col) = origin;
+        let corner = |r: u32, c: u32, sheet: Option<String>| Expression::CellRef {
+            sheet,
+            col: index_to_col(c),
+            row: r,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
+        };
+        let (top, left) = (row + dr, col + dc);
+        if rows == 1 && cols == 1 {
+            return corner(top, left, sheet.clone());
+        }
+        Expression::Range {
+            sheet: sheet.clone(),
+            start: Box::new(corner(top, left, None)),
+            end: Box::new(corner(top + rows - 1, left + cols - 1, None)),
+            ref_site_id: Default::default(),
         }
     }
 
@@ -10579,11 +11714,20 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        // Apply lambda to each element
+        // Apply lambda to each element -- with the CELL it is, over a range
+        // (`invoke_callable_with_refs`); a NESTED array is #CALC! for the
+        // whole result (`helper_cell`).
+        let origin = self.helper_reference_origin(&args[0]);
         let mut results: Vec<EvalResult> = Vec::with_capacity(rows * cols);
-        for item in &data {
-            let result = self.invoke_callable(&callable, &[item.clone()]);
-            results.push(result);
+        for (i, item) in data.iter().enumerate() {
+            let cell_ref = origin.as_ref().map(|o| {
+                let width = cols.max(1) as u32;
+                Self::helper_cell_reference(o, i as u32 / width, i as u32 % width, 1, 1)
+            });
+            match Self::helper_cell(self.invoke_callable_with_refs(&callable, &[item.clone()], &[cell_ref])) {
+                Some(result) => results.push(result),
+                None => return EvalResult::Error(CellError::Calc),
+            }
         }
 
         // Reshape to match input dimensions
@@ -10684,7 +11828,11 @@ impl<'a> Evaluator<'a> {
                     call.push(data.get(r * g_cols + c).cloned().unwrap_or(EvalResult::Error(CellError::NA)));
                 }
                 out.push(if reached {
-                    self.invoke_callable(&callable, &call)
+                    // [LIVE] `=MAP(A1:A2,B1:B2,LAMBDA(a,b,{1,2}))` is #CALC!.
+                    match Self::helper_cell(self.invoke_callable(&callable, &call)) {
+                        Some(result) => result,
+                        None => return EvalResult::Error(CellError::Calc),
+                    }
                 } else {
                     EvalResult::Error(CellError::NA)
                 });
@@ -10761,7 +11909,12 @@ impl<'a> Evaluator<'a> {
         let mut results: Vec<EvalResult> = Vec::with_capacity(flat.len());
         for item in &flat {
             accumulator = self.invoke_callable(&callable, &[accumulator, item.clone()]);
-            results.push(accumulator.clone());
+            // Every step is one CELL of the result: a nested array is #CALC!
+            // ([LIVE] `=SCAN(0,{1,2},LAMBDA(a,b,{1,2}))`; `{5}` is 5).
+            match Self::helper_cell(accumulator.clone()) {
+                Some(step) => results.push(step),
+                None => return EvalResult::Error(CellError::Calc),
+            }
         }
 
         if cols <= 1 || results.len() != rows * cols {
@@ -10817,39 +11970,37 @@ impl<'a> Evaluator<'a> {
         }
         charge!(self, cells);
 
-        if cols == 1 {
-            // Single column → flat array
-            let mut results = Vec::with_capacity(rows);
-            for r in 0..rows {
+        // A nested array is #CALC! for the whole result ([LIVE]
+        // `=MAKEARRAY(1,1,LAMBDA(r,c,{1,2}))`, `=MAKEARRAY(2,1,LAMBDA(r,c,
+        // IF(r=1,5,{1,2})))`; `{5}` is 5) -- `helper_cell`.
+        let mut cells_out = Vec::with_capacity(cells as usize);
+        for r in 0..rows {
+            for c in 0..cols {
                 let result = self.invoke_callable(&callable, &[
                     EvalResult::Number((r + 1) as f64),
-                    EvalResult::Number(1.0),
+                    EvalResult::Number((c + 1) as f64),
                 ]);
-                results.push(result);
-            }
-            EvalResult::Array(results)
-        } else {
-            // Multi-column → 2D array
-            let mut row_arrays = Vec::with_capacity(rows);
-            for r in 0..rows {
-                let mut row = Vec::with_capacity(cols);
-                for c in 0..cols {
-                    let result = self.invoke_callable(&callable, &[
-                        EvalResult::Number((r + 1) as f64),
-                        EvalResult::Number((c + 1) as f64),
-                    ]);
-                    row.push(result);
+                match Self::helper_cell(result) {
+                    Some(cell) => cells_out.push(cell),
+                    None => return EvalResult::Error(CellError::Calc),
                 }
-                row_arrays.push(EvalResult::Array(row));
             }
-            EvalResult::Array(row_arrays)
         }
+        if rows == 1 && cols == 1 {
+            // One cell stays the one-element ARRAY it always was (a 1x1
+            // MAKEARRAY spills its single value), never a bare scalar.
+            return EvalResult::Array(cells_out);
+        }
+        array_lift::pack(rows, cols, cells_out)
     }
 
     /// BYROW(array, lambda)
     /// Applies lambda to each row of the array. Lambda receives a 1D array (the row).
     /// Returns a single-column array of results.
     fn fn_byrow(&self, args: &[Expression]) -> EvalResult {
+        if let Some(missing) = self.helper_without_function(args) {
+            return missing;
+        }
         if args.len() != 2 {
             return EvalResult::Error(CellError::Value);
         }
@@ -10867,16 +12018,29 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
+        let origin = self.helper_reference_origin(&args[0]);
         let mut results = Vec::with_capacity(rows);
         for r in 0..rows {
-            // Build the row as a List (so the lambda can use aggregate functions on it)
+            // The row is handed over as a ROW (1 x cols), so `COLUMNS(r)` is
+            // its width; it used to be a flat array -- a COLUMN.
             let start = r * cols;
             let row_data: Vec<EvalResult> = (0..cols)
                 .map(|c| data.get(start + c).cloned().unwrap_or(EvalResult::Number(0.0)))
                 .collect();
-            let row_arg = EvalResult::Array(row_data);
-            let result = self.invoke_callable(&callable, &[row_arg]);
-            results.push(result);
+            let row_arg = if cols == 1 {
+                EvalResult::Array(row_data)
+            } else {
+                array_lift::pack(1, cols, row_data)
+            };
+            // A nested array is #CALC! for the whole result ([LIVE]
+            // `=BYROW(A1:B2,LAMBDA(r,r))`, `(..,LAMBDA(r,r*1))`; a one-cell row
+            // is its value, `=BYROW(A1:A2,LAMBDA(r,r))` {1;2}) -- `helper_cell`.
+            // Over a range the function gets the ROW it is.
+            let row_ref = origin.as_ref().map(|o| Self::helper_cell_reference(o, r as u32, 0, 1, cols.max(1) as u32));
+            match Self::helper_cell(self.invoke_callable_with_refs(&callable, &[row_arg], &[row_ref])) {
+                Some(result) => results.push(result),
+                None => return EvalResult::Error(CellError::Calc),
+            }
         }
 
         EvalResult::Array(results)
@@ -10886,6 +12050,9 @@ impl<'a> Evaluator<'a> {
     /// Applies lambda to each column of the array. Lambda receives a 1D array (the column).
     /// Returns a single-row 2D array of results (spills horizontally).
     fn fn_bycol(&self, args: &[Expression]) -> EvalResult {
+        if let Some(missing) = self.helper_without_function(args) {
+            return missing;
+        }
         if args.len() != 2 {
             return EvalResult::Error(CellError::Value);
         }
@@ -10903,6 +12070,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
+        let origin = self.helper_reference_origin(&args[0]);
         let mut results = Vec::with_capacity(cols);
         for c in 0..cols {
             // Build the column as a 1D array
@@ -10910,8 +12078,14 @@ impl<'a> Evaluator<'a> {
                 .map(|r| data.get(r * cols + c).cloned().unwrap_or(EvalResult::Number(0.0)))
                 .collect();
             let col_arg = EvalResult::Array(col_data);
-            let result = self.invoke_callable(&callable, &[col_arg]);
-            results.push(result);
+            // [LIVE] `=BYCOL(A1:B2,LAMBDA(c,c))` and `(..,LAMBDA(c,{1;2}))`
+            // are #CALC!; `=BYCOL(A1:B1,LAMBDA(c,c))` is {1,10}. Over a range
+            // the function gets the COLUMN it is.
+            let col_ref = origin.as_ref().map(|o| Self::helper_cell_reference(o, 0, c as u32, rows.max(1) as u32, 1));
+            match Self::helper_cell(self.invoke_callable_with_refs(&callable, &[col_arg], &[col_ref])) {
+                Some(result) => results.push(result),
+                None => return EvalResult::Error(CellError::Calc),
+            }
         }
 
         // Wrap in a 2D array (1 row x N cols) so it spills horizontally
@@ -11049,11 +12223,13 @@ impl<'a> Evaluator<'a> {
             }
 
             if result_rows.is_empty() {
-                // Return if_empty or #CALC! error
+                // `if_empty`, or Excel's #CALC! [LIVE, lane formula p1.json:
+                // `=FILTER(A1:A5,A1:A5>100)` is #CALC!, ERROR.TYPE 14] -- an
+                // empty array, not an argument of the wrong type (BUG-0774).
                 if args.len() >= 3 {
                     return self.evaluate(&args[2]);
                 }
-                return EvalResult::Error(CellError::Value);
+                return EvalResult::Error(CellError::Calc);
             }
 
             // Build 2D array: Array of row-Arrays
@@ -11079,10 +12255,11 @@ impl<'a> Evaluator<'a> {
             }
 
             if kept_cols.is_empty() {
+                // [LIVE] `=FILTER(A1:B5,{FALSE,FALSE})` is #CALC! too.
                 if args.len() >= 3 {
                     return self.evaluate(&args[2]);
                 }
-                return EvalResult::Error(CellError::Value);
+                return EvalResult::Error(CellError::Calc);
             }
 
             let mut result_rows: Vec<Vec<EvalResult>> = Vec::new();
@@ -11207,11 +12384,9 @@ impl<'a> Evaluator<'a> {
                 result_rows.push(row_data);
             }
 
-            if rows == 1 {
-                EvalResult::Array(result_rows.into_iter().next().unwrap())
-            } else {
-                EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
-            }
+            // One row stays a ROW ([LIVE, lane form5] `=SORT({3,1,2},,,TRUE)`
+            // is 1,2,3 across); unwrapping it by hand made a column.
+            array_lift::from_rows(result_rows)
         }
     }
 
@@ -11260,14 +12435,30 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        // Parse by_array/sort_order pairs
+        // Parse by_array/sort_order pairs. A by_array is a COLUMN as tall as
+        // the array (sort its rows) or a ROW as wide as it (sort its
+        // columns), and every by_array must agree. [LIVE, Excel 16, lane
+        // form5 p1.log/p2.log] `=SORTBY({1,2,3},{3,2,1})` is 3,2,1 and
+        // `=SORTBY({1,2;3,4},{1,2},-1)` 2,1;4,3 (columns), while
+        // `=SORTBY({1,2,3},{1;2;3})` is #VALUE!. Only the row form existed,
+        // checked by a flat length, so a row sort key was #VALUE! or sorted
+        // the wrong axis.
+        let mut by_columns: Option<bool> = None;
         let mut sort_keys: Vec<(Vec<EvalResult>, i32)> = Vec::new();
         let mut i = 1;
         while i < args.len() {
-            let by_vals = self.eval_flat(&args[i]);
-            if by_vals.len() != rows {
+            let (by_rows, by_cols) = self.get_range_dimensions(&args[i]);
+            let this_by_columns = if by_cols == 1 && by_rows == rows {
+                false
+            } else if by_rows == 1 && by_cols == cols {
+                true
+            } else {
+                return EvalResult::Error(CellError::Value);
+            };
+            if *by_columns.get_or_insert(this_by_columns) != this_by_columns {
                 return EvalResult::Error(CellError::Value);
             }
+            let by_vals = self.eval_flat(&args[i]);
             let order = if i + 1 < args.len() {
                 match self.evaluate(&args[i + 1]).as_number() {
                     Some(n) => {
@@ -11287,21 +12478,26 @@ impl<'a> Evaluator<'a> {
             sort_keys.push((by_vals, order));
         }
 
+        // A 1x1 array with a 1x1 key reads as either axis; both are the same.
+        let by_columns = by_columns.unwrap_or(false) && !(rows == 1 && cols == 1);
+        // The lines being sorted: the array's rows, or (by a row key) its
+        // columns, each as a vector of cells.
+        let lines = if by_columns { cols } else { rows };
+        let width = if by_columns { rows } else { cols };
+        let cell = |line: usize, k: usize| {
+            let idx = if by_columns { k * cols + line } else { line * cols + k };
+            data.get(idx).cloned().unwrap_or(EvalResult::Number(0.0))
+        };
+
         // Comparison count x key count, with a String-allocating comparator.
         charge!(
             self,
-            nlogn_units(rows as u64).saturating_mul(sort_keys.len() as u64)
+            nlogn_units(lines as u64).saturating_mul(sort_keys.len() as u64)
         );
 
-        // Build row vectors
-        let mut row_vecs: Vec<(usize, Vec<EvalResult>)> = (0..rows)
-            .map(|r| {
-                let start = r * cols;
-                let row_data: Vec<EvalResult> = (0..cols)
-                    .map(|c| data.get(start + c).cloned().unwrap_or(EvalResult::Number(0.0)))
-                    .collect();
-                (r, row_data)
-            })
+        // Build line vectors
+        let mut row_vecs: Vec<(usize, Vec<EvalResult>)> = (0..lines)
+            .map(|r| (r, (0..width).map(|k| cell(r, k)).collect()))
             .collect();
 
         // Stable sort by all keys (primary first, then secondary, etc.)
@@ -11318,11 +12514,16 @@ impl<'a> Evaluator<'a> {
             std::cmp::Ordering::Equal
         });
 
-        if cols == 1 {
-            EvalResult::Array(row_vecs.into_iter().map(|(_, r)| r.into_iter().next().unwrap()).collect())
-        } else {
-            EvalResult::Array(row_vecs.into_iter().map(|(_, r)| EvalResult::Array(r)).collect())
+        if by_columns {
+            let mut out = Vec::with_capacity(rows * cols);
+            for r in 0..rows {
+                for (_, column) in &row_vecs {
+                    out.push(column[r].clone());
+                }
+            }
+            return array_lift::pack(rows, cols, out);
         }
+        array_lift::from_rows(row_vecs.into_iter().map(|(_, r)| r).collect())
     }
 
     /// UNIQUE(array, [by_col], [exactly_once])
@@ -11361,8 +12562,11 @@ impl<'a> Evaluator<'a> {
 
             let unique_rows = Self::unique_vectors(&row_vecs, exactly_once);
 
+            // Nothing occurs exactly once: an empty array, Excel's #CALC!
+            // [LIVE, lane formula p1.json/p2.json: `=UNIQUE({1;1;2;2},FALSE,
+            // TRUE)` and `=UNIQUE({1;1},FALSE,TRUE)` are #CALC!] (BUG-0774).
             if unique_rows.is_empty() {
-                return EvalResult::Error(CellError::Value);
+                return EvalResult::Error(CellError::Calc);
             }
 
             if cols == 1 {
@@ -11383,24 +12587,19 @@ impl<'a> Evaluator<'a> {
             let unique_cols = Self::unique_vectors(&col_vecs, exactly_once);
 
             if unique_cols.is_empty() {
-                return EvalResult::Error(CellError::Value);
+                return EvalResult::Error(CellError::Calc);
             }
 
             // Rebuild as rows
-            let new_cols = unique_cols.len();
             let mut result_rows: Vec<Vec<EvalResult>> = Vec::new();
             for r in 0..rows {
                 let row_data: Vec<EvalResult> = unique_cols.iter().map(|col| col[r].clone()).collect();
                 result_rows.push(row_data);
             }
 
-            if rows == 1 {
-                EvalResult::Array(result_rows.into_iter().next().unwrap())
-            } else if new_cols == 1 {
-                EvalResult::Array(result_rows.into_iter().map(|r| r.into_iter().next().unwrap()).collect())
-            } else {
-                EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
-            }
+            // One row stays a ROW ([LIVE, lane form5 p2.log]
+            // `=UNIQUE({1,2,1},TRUE)` is 1,2 across; it came out a column).
+            array_lift::from_rows(result_rows)
         }
     }
 
@@ -11455,8 +12654,13 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
+        // A count that truncates to ZERO is an empty array, Excel's #CALC!; a
+        // negative one is #VALUE! [LIVE, lane formula p1.json/p2.json:
+        // `=SEQUENCE(0)`, `(1,0)`, `(0,0)`, `(0.5)` and `(1,0.5)` are #CALC!,
+        // `=SEQUENCE(-1)` #VALUE!] (BUG-0774).
         let seq_rows = match self.evaluate(&args[0]).as_number() {
             Some(n) if n >= 1.0 => n as usize,
+            Some(n) if n.trunc() == 0.0 => return EvalResult::Error(CellError::Calc),
             _ => return EvalResult::Error(CellError::Value),
         };
         // `=SEQUENCE(n,,start,step)` — an omitted slot takes the DEFAULT, see
@@ -11464,6 +12668,7 @@ impl<'a> Evaluator<'a> {
         let seq_cols = if args.len() >= 2 && !is_omitted(&args[1]) {
             match self.evaluate(&args[1]).as_number() {
                 Some(n) if n >= 1.0 => n as usize,
+                Some(n) if n.trunc() == 0.0 => return EvalResult::Error(CellError::Calc),
                 _ => return EvalResult::Error(CellError::Value),
             }
         } else {
@@ -11530,18 +12735,25 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let ra_rows = if !args.is_empty() {
+        // As SEQUENCE: a count truncating to zero is #CALC! [LIVE, lane
+        // formula p1.json/p2.json: `=RANDARRAY(0)`, `(0,1)`, `(1,0)` and
+        // `(0.5)` are #CALC!] (BUG-0774). An omitted slot (`=RANDARRAY(,2)`)
+        // takes the default 1, as SEQUENCE's does -- it evaluates to a blank,
+        // which would otherwise read as a zero count.
+        let ra_rows = if !args.is_empty() && !is_omitted(&args[0]) {
             match self.evaluate(&args[0]).as_number() {
                 Some(n) if n >= 1.0 => n as usize,
+                Some(n) if n.trunc() == 0.0 => return EvalResult::Error(CellError::Calc),
                 Some(_) => return EvalResult::Error(CellError::Value),
                 None => return EvalResult::Error(CellError::Value),
             }
         } else {
             1
         };
-        let ra_cols = if args.len() >= 2 {
+        let ra_cols = if args.len() >= 2 && !is_omitted(&args[1]) {
             match self.evaluate(&args[1]).as_number() {
                 Some(n) if n >= 1.0 => n as usize,
+                Some(n) if n.trunc() == 0.0 => return EvalResult::Error(CellError::Calc),
                 Some(_) => return EvalResult::Error(CellError::Value),
                 None => return EvalResult::Error(CellError::Value),
             }
@@ -11959,8 +13171,10 @@ impl<'a> Evaluator<'a> {
         // pivot) is #NUM!, as the pivot cell itself shows it -- Excel's
         // data-model PivotTable shows #NUM! there and GETPIVOTDATA reads the
         // cell [LIVE, open-ledger round D]. It answered the raw infinity.
+        // A cell holding an error answers THAT error (BUG-0760).
         match pivot_fn(&data_field, pivot_sheet.as_deref(), pivot_row, pivot_col, &pair_refs) {
-            Some(value) => finite_or_num(value),
+            Some(Ok(value)) => finite_or_num(value),
+            Some(Err(error)) => EvalResult::Error(error),
             None => EvalResult::Error(CellError::Ref),
         }
     }
@@ -12342,6 +13556,13 @@ impl<'a> Evaluator<'a> {
 
             pivot_map.entry((row_key, col_key)).or_default().push(r);
         }
+        // EVERY ROW FILTERED OUT is #VALUE!, as GROUPBY already answers
+        // [LIVE, Excel 16, lane formfix p1.json:
+        // `=PIVOTBY(A1:A5,B1:B5,C1:C5,SUM,,,,,,A1:A5>100)` #VALUE!, also with
+        // headers and totals off]. Calcula spilled one empty cell.
+        if pivot_map.is_empty() {
+            return EvalResult::Error(CellError::Value);
+        }
 
         // Sort row keys
         if row_sort_order == 1 || row_sort_order == 2 {
@@ -12462,6 +13683,9 @@ impl<'a> Evaluator<'a> {
             return EvalResult::List(Vec::new());
         };
         let data = gather_fn(&region_id);
+        if data.refused {
+            return EvalResult::Error(CellError::Ref);
+        }
         let values: Vec<EvalResult> = data.submissions.iter()
             .map(|s| s.value.clone())
             .collect();
@@ -12490,6 +13714,9 @@ impl<'a> Evaluator<'a> {
             return EvalResult::List(Vec::new());
         };
         let data = gather_fn(&region_id);
+        if data.refused {
+            return EvalResult::Error(CellError::Ref);
+        }
         let values: Vec<EvalResult> = data
             .submissions
             .iter()
@@ -12528,6 +13755,9 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::NA);
         };
         let data = gather_fn(&region_id);
+        if data.refused {
+            return EvalResult::Error(CellError::Ref);
+        }
         for sub in &data.submissions {
             if sub.submitter_id != submitter_id {
                 continue;
@@ -12561,6 +13791,9 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Number(0.0);
         };
         let data = gather_fn(&region_id);
+        if data.refused {
+            return EvalResult::Error(CellError::Ref);
+        }
         let count = data
             .submissions
             .iter()
@@ -12593,6 +13826,9 @@ impl<'a> Evaluator<'a> {
             return EvalResult::List(Vec::new());
         };
         let data = gather_fn(&region_id);
+        if data.refused {
+            return EvalResult::Error(CellError::Ref);
+        }
         let names: Vec<EvalResult> = data
             .submissions
             .iter()
@@ -12839,53 +14075,128 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// TAKE(list, n) - returns first n elements as a new list
+    /// TAKE(array, rows, [columns]) -- Excel's -- and TAKE(list, n), the
+    /// first n elements of a Calcula list (COLLECT).
     fn fn_take(&self, args: &[Expression]) -> EvalResult {
-        if args.len() != 2 {
-            return EvalResult::Error(CellError::Value);
-        }
-        let collection = self.evaluate(&args[0]);
-        let n_val = self.evaluate(&args[1]);
-
-        if let EvalResult::Error(_) = &collection { return collection; }
-        if let EvalResult::Error(_) = &n_val { return n_val; }
-
-        let n = match n_val.as_number() {
-            Some(n) => n as usize,
-            None => return EvalResult::Error(CellError::Value),
-        };
-
-        match collection {
-            EvalResult::List(items) => {
-                let taken: Vec<EvalResult> = items.into_iter().take(n).collect();
-                EvalResult::List(taken)
-            }
-            _ => EvalResult::Error(CellError::Value),
-        }
+        self.take_or_drop(args, true)
     }
 
-    /// DROP(list, n) - removes first n elements, returns rest as a new list
+    /// DROP(array, rows, [columns]) -- Excel's -- and DROP(list, n), a
+    /// Calcula list without its first n elements.
     fn fn_drop(&self, args: &[Expression]) -> EvalResult {
-        if args.len() != 2 {
+        self.take_or_drop(args, false)
+    }
+
+    /// TAKE / DROP. Over a Calcula LIST (COLLECT) they keep the list forms
+    /// they always had; over anything else they are Excel's, which Calcula
+    /// did not have at all (`=TAKE(A1:C5,2)` was #VALUE!).
+    ///
+    /// [LIVE, Excel 16, lane formula SCRATCH/formula/p1.json, p3.json, A1:C5
+    /// holding 1..5 | 10..50 | 100..500]:
+    /// - rows / columns count from the start, negative from the end, are
+    ///   truncated toward zero (`TAKE(A1:C5,1.9)` one row, `-1.9` the last
+    ///   one, `DROP(A1:C5,1.9)` drops one) and read as numbers (`"2"` 2,
+    ///   `TRUE` 1, `"x"` #VALUE!); an omitted one means all of that axis
+    ///   (`TAKE(A1:C5,,2)` the first two columns); a count past the size is
+    ///   the whole axis for TAKE (`TAKE(A1:C5,9)`) and nothing for DROP.
+    /// - Nothing left is #CALC! (BUG-0774): `TAKE({1;2},0)`, `TAKE(A1:C5,1,0)`,
+    ///   `DROP({1;2},2)`, `DROP({1;2},-2)`, `DROP(A1:C5,9)`, `DROP(A1:C5,0,3)`;
+    ///   `DROP(A1:C5,0,0)` is the whole array.
+    /// - A scalar is a 1x1 array (`TAKE(5,1)` 5, `TAKE("a",1,1)` "a",
+    ///   `DROP(5,0)` 5); an error array or count is that error
+    ///   (`TAKE(1/0,1)`, `TAKE(A1:C5,1/0)` #DIV/0!).
+    /// - An ARRAY count lifts, each element a whole TAKE that is no single
+    ///   value: `TAKE(A1:C5,{1,2})` is {#VALUE!,#VALUE!}.
+    fn take_or_drop(&self, args: &[Expression], take: bool) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 {
             return EvalResult::Error(CellError::Value);
         }
-        let collection = self.evaluate(&args[0]);
-        let n_val = self.evaluate(&args[1]);
-
-        if let EvalResult::Error(_) = &collection { return collection; }
-        if let EvalResult::Error(_) = &n_val { return n_val; }
-
-        let n = match n_val.as_number() {
-            Some(n) => n as usize,
-            None => return EvalResult::Error(CellError::Value),
-        };
-
-        match collection {
-            EvalResult::List(items) => {
-                let dropped: Vec<EvalResult> = items.into_iter().skip(n).collect();
-                EvalResult::List(dropped)
+        let source = self.evaluate(&args[0]);
+        if let EvalResult::List(items) = source {
+            if args.len() != 2 {
+                return EvalResult::Error(CellError::Value);
             }
-            _ => EvalResult::Error(CellError::Value),
+            let n = match self.evaluate(&args[1]) {
+                EvalResult::Error(e) => return EvalResult::Error(e),
+                v => match v.as_number() {
+                    Some(n) => n as usize,
+                    None => return EvalResult::Error(CellError::Value),
+                },
+            };
+            return if take {
+                EvalResult::List(items.into_iter().take(n).collect())
+            } else {
+                EvalResult::List(items.into_iter().skip(n).collect())
+            };
+        }
+        if let EvalResult::Error(e) = source {
+            return EvalResult::Error(e);
+        }
+        let count = |i: usize| -> Result<Option<EvalResult>, CellError> {
+            if args.len() <= i || is_omitted(&args[i]) {
+                return Ok(None);
+            }
+            match self.evaluate(&args[i]) {
+                EvalResult::Error(e) => Err(e),
+                v => Ok(Some(v)),
+            }
+        };
+        let (rows_arg, cols_arg) = match (count(1), count(2)) {
+            (Ok(r), Ok(c)) => (r, c),
+            (Err(e), _) | (_, Err(e)) => return EvalResult::Error(e),
+        };
+        let (rows, cols) = array_lift::shape(&source);
+        if rows == 0 || cols == 0 {
+            return EvalResult::Error(CellError::Calc);
+        }
+        let one = |r: &Option<EvalResult>, c: &Option<EvalResult>| -> EvalResult {
+            let axis = |v: &Option<EvalResult>, size: usize| -> Result<(usize, usize), CellError> {
+                let Some(v) = v else { return Ok((0, size)) };
+                let n = match v {
+                    EvalResult::Error(e) => return Err(e.clone()),
+                    other => match other.as_number() {
+                        Some(n) => n.trunc(),
+                        None => return Err(CellError::Value),
+                    },
+                };
+                let k = n.abs().min(size as f64) as usize;
+                Ok(match (take, n >= 0.0) {
+                    (true, true) => (0, k),
+                    (true, false) => (size - k, size),
+                    (false, true) => (k, size),
+                    (false, false) => (0, size - k),
+                })
+            };
+            let ((r0, r1), (c0, c1)) = match (axis(r, rows), axis(c, cols)) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => return EvalResult::Error(e),
+            };
+            if r0 >= r1 || c0 >= c1 {
+                return EvalResult::Error(CellError::Calc);
+            }
+            let mut cells = Vec::with_capacity((r1 - r0) * (c1 - c0));
+            for i in r0..r1 {
+                for j in c0..c1 {
+                    cells.push(array_lift::at(&source, i, j));
+                }
+            }
+            array_lift::pack(r1 - r0, c1 - c0, cells)
+        };
+        let lifted: Vec<&EvalResult> = rows_arg.iter().chain(cols_arg.iter()).collect();
+        match array_lift::broadcast_shape(&lifted) {
+            None => one(&rows_arg, &cols_arg),
+            Some((0, _)) | Some((_, 0)) => EvalResult::Error(CellError::Value),
+            Some((out_rows, out_cols)) => {
+                let mut out = Vec::with_capacity(out_rows * out_cols);
+                for i in 0..out_rows {
+                    for j in 0..out_cols {
+                        let pick = |v: &Option<EvalResult>| v.as_ref().map(|v| array_lift::at(v, i, j));
+                        let part = one(&pick(&rows_arg), &pick(&cols_arg));
+                        out.push(if array_lift::lifts(&part) { EvalResult::Error(CellError::Value) } else { part });
+                    }
+                }
+                array_lift::pack(out_rows, out_cols, out)
+            }
         }
     }
 
@@ -12935,24 +14246,57 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// HSTACK(list1, list2) - concatenate two lists
+    /// HSTACK(array1, [array2], ...) -- Excel's -- and HSTACK(list1, list2),
+    /// two Calcula lists (COLLECT) joined.
+    ///
+    /// Excel's HSTACK was missing: anything but two lists was #VALUE!.
+    /// [LIVE, Excel 16, lane formula SCRATCH/formula/p1.json, p3.json] the
+    /// arrays side by side, as tall as the tallest, a short one padded with
+    /// #N/A (`=HSTACK(A1:A2,B1:B3)` is 1,10;2,20;#N/A,30, `=HSTACK(A1:B2,C1)`
+    /// 1,10,100;2,20,#N/A); a scalar is a 1x1 array (`=HSTACK(1,2,3)`), and an
+    /// argument that is an error VALUE is the whole result
+    /// (`=HSTACK(1/0,1)` #DIV/0!, `=HSTACK(FILTER(..),1)` #CALC!) -- an uncalled
+    /// LAMBDA is no error and keeps its own cell (`=HSTACK(LAMBDA(x,x),2)` is
+    /// #CALC! | 2).
     fn fn_hstack(&self, args: &[Expression]) -> EvalResult {
-        if args.len() != 2 {
+        if args.is_empty() {
             return EvalResult::Error(CellError::Value);
         }
-        let list1 = self.evaluate(&args[0]);
-        let list2 = self.evaluate(&args[1]);
-
-        if let EvalResult::Error(_) = &list1 { return list1; }
-        if let EvalResult::Error(_) = &list2 { return list2; }
-
-        match (list1, list2) {
-            (EvalResult::List(mut items1), EvalResult::List(items2)) => {
-                items1.extend(items2);
-                EvalResult::List(items1)
+        let values: Vec<EvalResult> = args.iter().map(|a| self.evaluate(a)).collect();
+        if values.len() == 2 {
+            if let (EvalResult::List(a), EvalResult::List(b)) = (&values[0], &values[1]) {
+                let mut items = a.clone();
+                items.extend(b.iter().cloned());
+                return EvalResult::List(items);
             }
-            _ => EvalResult::Error(CellError::Value),
         }
+        for (value, arg) in values.iter().zip(args) {
+            if let EvalResult::Error(e) = value {
+                if !self.denotes_reference(arg) {
+                    return EvalResult::Error(e.clone());
+                }
+            }
+        }
+        let shapes: Vec<(usize, usize)> = values.iter().map(array_lift::shape).collect();
+        if shapes.iter().any(|&(r, c)| r == 0 || c == 0) {
+            return EvalResult::Error(CellError::Calc);
+        }
+        let rows = shapes.iter().map(|s| s.0).max().unwrap_or(1);
+        let cols: usize = shapes.iter().map(|s| s.1).sum();
+        let cells = (rows as u64).saturating_mul(cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
+        let mut out = Vec::with_capacity(cells as usize);
+        for r in 0..rows {
+            for (value, &(v_rows, v_cols)) in values.iter().zip(&shapes) {
+                for c in 0..v_cols {
+                    out.push(if r < v_rows { array_lift::at(value, r, c) } else { EvalResult::Error(CellError::NA) });
+                }
+            }
+        }
+        array_lift::pack(rows, cols, out)
     }
 
     // ========================================================================
@@ -13055,7 +14399,7 @@ impl<'a> Evaluator<'a> {
                                             parts.push(s.clone());
                                         }
                                     }
-                                    CellValue::Number(n) => parts.push(format!("{}", n)),
+                                    CellValue::Number(n) => parts.push(crate::number_text::format(*n, crate::number_text::active())),
                                     CellValue::Boolean(b) => parts.push(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
                                     // PROPAGATE, do not spell. This pushed
                                     // `e.as_literal()`, which glued the string
@@ -13108,7 +14452,11 @@ impl<'a> Evaluator<'a> {
             EvalResult::Blank => {
                 if !ignore_empty { parts.push(String::new()); }
             }
-            EvalResult::Number(n) => parts.push(format!("{}", n)),
+            // The number as `&` spells it (15 digits, the locale's decimal) [LIVE,
+            // lane formfix p3.json, sv-SE: `=TEXTJOIN(",",TRUE,0.1+0.2)` "0,3",
+            // `(..,1/3)` "0,333333333333333", `=CONCAT(0.1+0.2)` "0,3"]; Rust's
+            // `Display` gave "0.30000000000000004".
+            EvalResult::Number(n) => parts.push(crate::number_text::format(n, crate::number_text::active())),
             EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
             // WAS `EvalResult::Error(_) => {}` under the comment "skip errors in
             // TEXTJOIN". Skipping made the error VANISH: `=TEXTJOIN(",",TRUE,1/0)`
@@ -13117,7 +14465,9 @@ impl<'a> Evaluator<'a> {
             EvalResult::Error(e) => return Err(e),
             EvalResult::List(items) => parts.push(format!("[List({})]", items.len())),
             EvalResult::Dict(entries) => parts.push(format!("[Dict({})]", entries.len())),
-            EvalResult::Lambda { .. } => parts.push("#LAMBDA".to_string()),
+            // [LIVE, lane formfix p1.json] `=TEXTJOIN(",",TRUE,LAMBDA(x,x))`
+            // is #VALUE!; it joined the text "#LAMBDA".
+            EvalResult::Lambda { .. } => return Err(CellError::Value),
             EvalResult::Array(arr) => {
                 for val in arr {
                     Self::textjoin_push(val, ignore_empty, parts)?;
@@ -13266,8 +14616,12 @@ impl<'a> Evaluator<'a> {
             }
             rows.retain(|r| !r.is_empty());
             if rows.is_empty() {
-                // Excel's #CALC! (see `fn_textsplit`).
-                return EvalResult::Error(CellError::Value);
+                // Excel's #CALC! (BUG-0774) [LIVE, lane formula p1.json,
+                // p2.json: `=TEXTSPLIT(",",",",,TRUE)`, `(";;",",",";",TRUE)`
+                // and `(",,",",",,TRUE)` are #CALC!, while an EMPTY text
+                // stays #VALUE! -- `=TEXTSPLIT("",",")` with or without
+                // ignore_empty, the check at the top of this function].
+                return EvalResult::Error(CellError::Calc);
             }
         }
         let width = rows.iter().map(Vec::len).max().unwrap_or(1);
@@ -13751,73 +15105,250 @@ impl<'a> Evaluator<'a> {
 
     fn fn_linest(&self, args: &[Expression]) -> EvalResult {
         // LINEST(known_y's, [known_x's], [const], [stats])
-        if args.is_empty() || args.len() > 4 { return EvalResult::Error(CellError::Value); }
-        let known_ys = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
-        let known_xs = if args.len() >= 2 {
-            match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) }
-        } else {
-            (1..=known_ys.len()).map(|i| i as f64).collect()
-        };
-        if known_ys.len() != known_xs.len() || known_ys.is_empty() { return EvalResult::Error(CellError::Value); }
-        let n = known_ys.len() as f64;
-        let sum_x: f64 = known_xs.iter().sum();
-        let sum_y: f64 = known_ys.iter().sum();
-        let sum_xy: f64 = known_xs.iter().zip(known_ys.iter()).map(|(x, y)| x * y).sum();
-        let sum_x2: f64 = known_xs.iter().map(|x| x * x).sum();
-        let denom = n * sum_x2 - sum_x * sum_x;
-        if denom.abs() < 1e-10 { return EvalResult::Error(CellError::Div0); }
-        let slope = (n * sum_xy - sum_x * sum_y) / denom;
-        let intercept = (sum_y - slope * sum_x) / n;
-        // Return [slope, intercept] as array (simplified - full LINEST returns more stats)
-        let stats = if args.len() >= 4 { { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
-        if stats {
-            let mean_y = sum_y / n;
-            let ss_tot: f64 = known_ys.iter().map(|y| (y - mean_y).powi(2)).sum();
-            let ss_res: f64 = known_xs.iter().zip(known_ys.iter()).map(|(x, y)| (y - (slope * x + intercept)).powi(2)).sum();
-            let r_squared = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
-            let df = (n - 2.0).max(1.0);
-            let se_y = (ss_res / df).sqrt();
-            let se_slope = se_y / (sum_x2 - sum_x * sum_x / n).sqrt();
-            let se_intercept = se_y * (sum_x2 / (n * (sum_x2 - sum_x * sum_x / n))).sqrt();
-            // Return 5-row array: [slope, intercept], [se_slope, se_intercept], [r2, se_y], [F, df], [ss_reg, ss_res]
-            let ss_reg = ss_tot - ss_res;
-            let f_stat = if ss_res > 0.0 { (ss_reg / 1.0) / (ss_res / df) } else { f64::INFINITY };
-            EvalResult::Array(vec![
-                EvalResult::Array(vec![EvalResult::Number(slope), EvalResult::Number(intercept)]),
-                EvalResult::Array(vec![EvalResult::Number(se_slope), EvalResult::Number(se_intercept)]),
-                EvalResult::Array(vec![EvalResult::Number(r_squared), EvalResult::Number(se_y)]),
-                EvalResult::Array(vec![EvalResult::Number(f_stat), EvalResult::Number(df)]),
-                EvalResult::Array(vec![EvalResult::Number(ss_reg), EvalResult::Number(ss_res)]),
-            ])
-        } else {
-            EvalResult::Array(vec![EvalResult::Number(slope), EvalResult::Number(intercept)])
-        }
+        self.linest_like(args, false)
     }
 
     fn fn_logest(&self, args: &[Expression]) -> EvalResult {
-        // LOGEST(known_y's, [known_x's], [const], [stats])
-        if args.is_empty() || args.len() > 4 { return EvalResult::Error(CellError::Value); }
-        let known_ys = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
-        let known_xs = if args.len() >= 2 {
-            match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) }
-        } else {
-            (1..=known_ys.len()).map(|i| i as f64).collect()
+        // LOGEST(known_y's, [known_x's], [const], [stats]): LINEST over ln(y),
+        // with the coefficient ROW exponentiated (y = b * m1^x1 * m2^x2 ...)
+        // and the statistics rows left as the ln-regression's, as Excel's.
+        self.linest_like(args, true)
+    }
+
+    /// LINEST and LOGEST, as Excel 16 answers them [LIVE, Excel 16, lane form6
+    /// p6v.log]: an ordinary least-squares fit of y on ONE OR MORE x variables
+    /// (each COLUMN of known_x's when known_y's is a column, each ROW when it
+    /// is a row, the whole array as one variable when known_y's is 2-D),
+    /// `const` FALSE forcing b to 0 (LOGEST: 1) and measuring the sums of
+    /// squares from 0, `stats` TRUE adding Excel's four statistics rows:
+    ///
+    /// ```text
+    ///   mn    ... m1    b
+    ///   se_mn ... se_m1 se_b     (#N/A when const is FALSE)
+    ///   r2    se_y      #N/A ...
+    ///   F     df        #N/A ...
+    ///   ssreg ssresid   #N/A ...
+    /// ```
+    ///
+    /// A column that is a linear combination of the LATER ones (or constant,
+    /// with a constant term) is dropped as Excel drops it: its coefficient and
+    /// its standard error are 0 and df counts only the columns kept
+    /// (`=LINEST({1;2;3;4},{1,2;2,4;3,6;4,8},TRUE,TRUE)` 0.5,0,0 / df 2,
+    /// `=LINEST(5)` 0,5). F is #NUM! when the fit is exact. Sizes that do not
+    /// match are #REF!, a non-number in the data #VALUE!, a y <= 0 for LOGEST
+    /// #NUM!. This was a one-variable fit that ignored `const` (and, for
+    /// LOGEST, `stats` too), and #VALUE! for several x variables.
+    fn linest_like(&self, args: &[Expression], log: bool) -> EvalResult {
+        if args.is_empty() || args.len() > 4 {
+            return EvalResult::Error(CellError::Value);
+        }
+        // Every cell a number: an error is itself, anything else #VALUE!.
+        let numbers = |v: &EvalResult| -> Result<(usize, usize, Vec<f64>), CellError> {
+            if let EvalResult::Error(e) = v {
+                return Err(e.clone());
+            }
+            let (rows, cols, cells) = array_lift::cells(v);
+            let mut out = Vec::with_capacity(cells.len());
+            for cell in cells {
+                match cell {
+                    EvalResult::Number(n) => out.push(n),
+                    EvalResult::Error(e) => return Err(e),
+                    _ => return Err(CellError::Value),
+                }
+            }
+            Ok((rows, cols, out))
         };
-        if known_ys.len() != known_xs.len() || known_ys.is_empty() { return EvalResult::Error(CellError::Value); }
-        // Take ln of y values
-        let ln_ys: Vec<f64> = known_ys.iter().map(|&y| if y > 0.0 { y.ln() } else { return f64::NAN }).collect();
-        if ln_ys.iter().any(|y| y.is_nan()) { return EvalResult::Error(CellError::Num); }
-        let n = ln_ys.len() as f64;
-        let sum_x: f64 = known_xs.iter().sum();
-        let sum_y: f64 = ln_ys.iter().sum();
-        let sum_xy: f64 = known_xs.iter().zip(ln_ys.iter()).map(|(x, y)| x * y).sum();
-        let sum_x2: f64 = known_xs.iter().map(|x| x * x).sum();
-        let denom = n * sum_x2 - sum_x * sum_x;
-        if denom.abs() < 1e-10 { return EvalResult::Error(CellError::Div0); }
-        let slope = (n * sum_xy - sum_x * sum_y) / denom;
-        let intercept = (sum_y - slope * sum_x) / n;
-        // Return [base, coefficient] where y = coefficient * base^x
-        EvalResult::Array(vec![EvalResult::Number(slope.exp()), EvalResult::Number(intercept.exp())])
+        let flag = |i: usize, default: bool| -> Result<bool, CellError> {
+            match args.get(i) {
+                None => Ok(default),
+                Some(e) if is_omitted(e) => Ok(default),
+                Some(e) => match self.evaluate(e) {
+                    EvalResult::Error(err) => Err(err),
+                    v => v.as_boolean().ok_or(CellError::Value),
+                },
+            }
+        };
+        let fit = || -> Result<EvalResult, CellError> {
+            let (y_rows, y_cols, mut ys) = numbers(&self.evaluate(&args[0]))?;
+            let n = ys.len();
+            if n == 0 {
+                return Err(CellError::Value);
+            }
+            // The x variables, one Vec per variable, in input order.
+            let xs: Vec<Vec<f64>> = match args.get(1) {
+                Some(e) if !is_omitted(e) => {
+                    let (x_rows, x_cols, cells) = numbers(&self.evaluate(e))?;
+                    if y_cols == 1 {
+                        if x_rows != y_rows {
+                            return Err(CellError::Ref);
+                        }
+                        (0..x_cols).map(|c| (0..x_rows).map(|r| cells[r * x_cols + c]).collect()).collect()
+                    } else if y_rows == 1 {
+                        if x_cols != y_cols {
+                            return Err(CellError::Ref);
+                        }
+                        (0..x_rows).map(|r| cells[r * x_cols..(r + 1) * x_cols].to_vec()).collect()
+                    } else {
+                        if x_rows != y_rows || x_cols != y_cols {
+                            return Err(CellError::Ref);
+                        }
+                        vec![cells]
+                    }
+                }
+                _ => vec![(1..=n).map(|i| i as f64).collect()],
+            };
+            let with_const = flag(2, true)?;
+            let stats = flag(3, false)?;
+            if log {
+                if ys.iter().any(|&y| y <= 0.0) {
+                    return Err(CellError::Num);
+                }
+                for y in ys.iter_mut() {
+                    *y = y.ln();
+                }
+            }
+            if self.budget.charge_arith(fuel_units((n as u64).saturating_mul(xs.len() as u64 + 1).saturating_mul(xs.len() as u64 + 1))).is_err() {
+                return Err(CellError::Limit);
+            }
+            let f = Self::least_squares(&ys, &xs, with_const);
+            let k = xs.len();
+            let width = k + 1;
+            let shown = |v: f64| if log { v.exp() } else { v };
+            // Row 1: mn .. m1, then b.
+            let mut row1: Vec<EvalResult> = (0..k).rev().map(|j| EvalResult::Number(shown(f.coefs[j]))).collect();
+            row1.push(EvalResult::Number(shown(f.intercept)));
+            if !stats {
+                return Ok(array_lift::pack(1, width, row1));
+            }
+            let na = || EvalResult::Error(CellError::NA);
+            let pair = |a: EvalResult, b: EvalResult| -> Vec<EvalResult> {
+                let mut row = vec![a, b];
+                row.resize_with(width, na);
+                row
+            };
+            let mut row2: Vec<EvalResult> = (0..k).rev().map(|j| EvalResult::Number(f.se_coefs[j])).collect();
+            row2.push(match f.se_intercept {
+                Some(se) => EvalResult::Number(se),
+                None => na(),
+            });
+            let f_stat = match f.f_stat {
+                Some(v) => EvalResult::Number(v),
+                None => EvalResult::Error(CellError::Num),
+            };
+            let mut cells = row1;
+            cells.extend(row2);
+            cells.extend(pair(EvalResult::Number(f.r2), EvalResult::Number(f.se_y)));
+            cells.extend(pair(f_stat, EvalResult::Number(f.df)));
+            cells.extend(pair(EvalResult::Number(f.ss_reg), EvalResult::Number(f.ss_res)));
+            Ok(array_lift::pack(5, width, cells))
+        };
+        match fit() {
+            Ok(v) => v,
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    /// The ordinary least-squares fit behind LINEST / LOGEST (`linest_like`):
+    /// y on the variables `xs` (each a Vec of n values), with or without a
+    /// constant term. Columns are taken LAST FIRST and one that adds nothing
+    /// to the columns already taken (a linear combination of them, or a
+    /// constant when there is a constant term) is DROPPED -- coefficient 0,
+    /// standard error 0, not counted in df -- which is the column Excel drops
+    /// ([LIVE, lane form6] `=LINEST({1;2;3;5},{1,1;2,2;3,3;4,4})` 1.3,0,-0.5:
+    /// the FIRST of two equal columns goes).
+    fn least_squares(ys: &[f64], xs: &[Vec<f64>], with_const: bool) -> LeastSquares {
+        let n = ys.len();
+        let k = xs.len();
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / n as f64;
+        let y_mean = if with_const { mean(ys) } else { 0.0 };
+        let x_means: Vec<f64> = xs.iter().map(|x| if with_const { mean(x) } else { 0.0 }).collect();
+        // Centred (with a constant) or raw (without) columns.
+        let centred: Vec<Vec<f64>> = xs.iter().zip(&x_means).map(|(x, m)| x.iter().map(|v| v - m).collect()).collect();
+        let yc: Vec<f64> = ys.iter().map(|y| y - y_mean).collect();
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
+
+        // Which columns to keep: modified Gram-Schmidt, last column first.
+        let mut basis: Vec<Vec<f64>> = Vec::new();
+        let mut kept = vec![false; k];
+        for j in (0..k).rev() {
+            let original = dot(&centred[j], &centred[j]);
+            let mut v = centred[j].clone();
+            for q in &basis {
+                let p = dot(q, &v);
+                for (vi, qi) in v.iter_mut().zip(q) {
+                    *vi -= p * qi;
+                }
+            }
+            let residual = dot(&v, &v);
+            if original > 0.0 && residual > original * 1e-13 {
+                let norm = residual.sqrt();
+                basis.push(v.into_iter().map(|x| x / norm).collect());
+                kept[j] = true;
+            }
+        }
+        let cols: Vec<usize> = (0..k).filter(|&j| kept[j]).collect();
+        let p = cols.len();
+
+        // Normal equations over the kept columns, inverted by Gauss-Jordan
+        // with partial pivoting (p is small: the number of x variables).
+        let mut a: Vec<Vec<f64>> = cols.iter().map(|&i| cols.iter().map(|&j| dot(&centred[i], &centred[j])).collect()).collect();
+        let mut inv: Vec<Vec<f64>> = (0..p).map(|i| (0..p).map(|j| if i == j { 1.0 } else { 0.0 }).collect()).collect();
+        for c in 0..p {
+            let pivot = (c..p).max_by(|&r, &s| a[r][c].abs().partial_cmp(&a[s][c].abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(c);
+            a.swap(c, pivot);
+            inv.swap(c, pivot);
+            let d = a[c][c];
+            if d != 0.0 {
+                for j in 0..p {
+                    a[c][j] /= d;
+                    inv[c][j] /= d;
+                }
+            }
+            for r in 0..p {
+                if r != c {
+                    let factor = a[r][c];
+                    if factor != 0.0 {
+                        for j in 0..p {
+                            a[r][j] -= factor * a[c][j];
+                            inv[r][j] -= factor * inv[c][j];
+                        }
+                    }
+                }
+            }
+        }
+        let rhs: Vec<f64> = cols.iter().map(|&i| dot(&centred[i], &yc)).collect();
+        let mut coefs = vec![0.0; k];
+        for (a_i, &col) in cols.iter().enumerate() {
+            coefs[col] = (0..p).map(|b_i| inv[a_i][b_i] * rhs[b_i]).sum();
+        }
+        let intercept = if with_const { y_mean - coefs.iter().zip(&x_means).map(|(m, x)| m * x).sum::<f64>() } else { 0.0 };
+
+        let ss_res: f64 = (0..n)
+            .map(|i| {
+                let fitted = intercept + (0..k).map(|j| coefs[j] * xs[j][i]).sum::<f64>();
+                (ys[i] - fitted).powi(2)
+            })
+            .sum();
+        let ss_tot: f64 = if with_const { yc.iter().map(|y| y * y).sum() } else { ys.iter().map(|y| y * y).sum() };
+        let ss_reg = ss_tot - ss_res;
+        let df = n as f64 - p as f64 - if with_const { 1.0 } else { 0.0 };
+        let se_y = if df > 0.0 { (ss_res / df).sqrt() } else { 0.0 };
+        let r2 = if ss_tot > 0.0 { ss_reg / ss_tot } else { 1.0 };
+        let f_stat = if ss_res > 0.0 && df > 0.0 && p > 0 { Some((ss_reg / p as f64) / (ss_res / df)) } else { None };
+        let mut se_coefs = vec![0.0; k];
+        for (a_i, &col) in cols.iter().enumerate() {
+            se_coefs[col] = se_y * inv[a_i][a_i].max(0.0).sqrt();
+        }
+        let se_intercept = if with_const {
+            // Var(b) = se_y^2 (1/n + xbar' (X'X)^-1 xbar) over the kept columns.
+            let quad: f64 = (0..p)
+                .map(|r| (0..p).map(|c| x_means[cols[r]] * inv[r][c] * x_means[cols[c]]).sum::<f64>())
+                .sum();
+            Some(se_y * (1.0 / n as f64 + quad).max(0.0).sqrt())
+        } else {
+            None
+        };
+        LeastSquares { coefs, intercept, se_coefs, se_intercept, r2, se_y, f_stat, df, ss_reg, ss_res }
     }
 
     // ==================== Probability Distribution Functions ====================
@@ -16228,8 +17759,16 @@ impl<'a> Evaluator<'a> {
 
     fn fn_mmult(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        // [LIVE, Excel 16, lane form5 p2.log] an error in either matrix is
+        // the answer, the first one's first (`=MMULT({1,#DIV/0!},{#N/A;1})`
+        // #DIV/0!), and only then is a text, logical or empty cell #VALUE!.
         let a = self.eval_as_matrix(&args[0]);
         let b = self.eval_as_matrix(&args[1]);
+        let (a, b) = match (a, b) {
+            (Err(MatrixFault::Error(e)), _) | (Ok(_), Err(MatrixFault::Error(e))) | (Err(MatrixFault::NotNumber), Err(MatrixFault::Error(e))) => return EvalResult::Error(e),
+            (Ok(a), Ok(b)) => (a, b),
+            _ => return EvalResult::Error(CellError::Value),
+        };
         let a_rows = a.len();
         if a_rows == 0 { return EvalResult::Error(CellError::Value); }
         let a_cols = a[0].len();
@@ -16259,13 +17798,17 @@ impl<'a> Evaluator<'a> {
                 result.push(EvalResult::Number(sum));
             }
         }
-        if a_rows == 1 && b_cols == 1 { return result.into_iter().next().unwrap_or(EvalResult::Error(CellError::Value)); }
-        EvalResult::Array(result)
+        // `a_rows x b_cols`, packed: this was a flat list, read as a column,
+        // so `=MMULT({1;2},{3,4})` (Excel 3,4;6,8) was 3;4;6;8.
+        array_lift::pack(a_rows, b_cols, result)
     }
 
     fn fn_mdeterm(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let m = self.eval_as_matrix(&args[0]);
+        let m = match self.eval_as_matrix(&args[0]) {
+            Ok(m) => m,
+            Err(fault) => return EvalResult::Error(fault.error()),
+        };
         let n = m.len();
         if n == 0 || m.iter().any(|r| r.len() != n) { return EvalResult::Error(CellError::Value); }
         // Gaussian elimination is O(n^3) over a materialized matrix.
@@ -16275,7 +17818,10 @@ impl<'a> Evaluator<'a> {
 
     fn fn_minverse(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let m = self.eval_as_matrix(&args[0]);
+        let m = match self.eval_as_matrix(&args[0]) {
+            Ok(m) => m,
+            Err(fault) => return EvalResult::Error(fault.error()),
+        };
         let n = m.len();
         if n == 0 || m.iter().any(|r| r.len() != n) { return EvalResult::Error(CellError::Value); }
         // Gauss-Jordan over an n x 2n augmented matrix: O(n^3).
@@ -16288,9 +17834,11 @@ impl<'a> Evaluator<'a> {
                         result.push(EvalResult::Number(val));
                     }
                 }
-                EvalResult::Array(result)
+                array_lift::pack(n, n, result)
             }
-            None => EvalResult::Error(CellError::Value),
+            // [LIVE, lane form5 p2.log] a singular matrix is #NUM!
+            // (`=MINVERSE({1,2;2,4})`); a non-square one is #VALUE! above.
+            None => EvalResult::Error(CellError::Num),
         }
     }
 
@@ -16307,27 +17855,37 @@ impl<'a> Evaluator<'a> {
                 result.push(EvalResult::Number(if i == j { 1.0 } else { 0.0 }));
             }
         }
-        EvalResult::Array(result)
+        array_lift::pack(n, n, result)
     }
 
-    fn eval_as_matrix(&self, expr: &Expression) -> Vec<Vec<f64>> {
-        let flat = self.eval_flat(expr);
-        // Try to determine matrix dimensions from the expression
-        let n = (flat.len() as f64).sqrt() as usize;
-        if n * n == flat.len() {
-            let mut matrix = Vec::new();
-            for i in 0..n {
-                let mut row = Vec::new();
-                for j in 0..n {
-                    row.push(flat[i * n + j].as_number().unwrap_or(0.0));
-                }
-                matrix.push(row);
-            }
-            matrix
-        } else {
-            // Single row
-            vec![flat.iter().map(|v| v.as_number().unwrap_or(0.0)).collect()]
+    /// A matrix argument of MMULT / MDETERM / MINVERSE at its REAL shape.
+    ///
+    /// This GUESSED the shape from the cell count -- a perfect square was
+    /// taken as square, anything else as one row -- and read every
+    /// non-number as 0, so `=MMULT({1,2;3,4},{1;1})` (Excel 3;7) was #VALUE!,
+    /// `=MMULT({1,2},{3;4})` (11) #VALUE! and `=MDETERM({1,"a";3,4})`
+    /// (#VALUE!) a number. [LIVE, Excel 16, lane form5 p2.log] the first
+    /// error in the matrix is the answer (`=MDETERM({1,#N/A;3,4})` #N/A), and
+    /// otherwise any text, logical or empty cell is #VALUE!
+    /// (`=MMULT({1,TRUE},{1;1})`, `=MMULT(A1:B1,E1:E2)` over empty cells).
+    fn eval_as_matrix(&self, expr: &Expression) -> Result<Vec<Vec<f64>>, MatrixFault> {
+        let value = self.evaluate(expr);
+        let (rows, cols, cells) = array_lift::cells(&value);
+        if let Some(e) = cells.iter().find_map(|c| match c { EvalResult::Error(e) => Some(e.clone()), _ => None }) {
+            return Err(MatrixFault::Error(e));
         }
+        let mut matrix = Vec::with_capacity(rows);
+        for r in 0..rows {
+            let mut row = Vec::with_capacity(cols);
+            for c in 0..cols {
+                match &cells[r * cols + c] {
+                    EvalResult::Number(n) => row.push(*n),
+                    _ => return Err(MatrixFault::NotNumber),
+                }
+            }
+            matrix.push(row);
+        }
+        Ok(matrix)
     }
 
     // ==================== Modern Lookup Functions ====================
@@ -16444,11 +18002,13 @@ impl<'a> Evaluator<'a> {
                 None => return EvalResult::Error(CellError::Value),
             }
         }
-        let result: Vec<EvalResult> = array.iter().map(|row| {
-            let new_row: Vec<EvalResult> = col_indices.iter().map(|&c| row[c].clone()).collect();
-            if new_row.len() == 1 { new_row.into_iter().next().unwrap() } else { EvalResult::Array(new_row) }
+        // Through `array_lift::from_rows`: one row unwrapped by hand was a
+        // flat list, a COLUMN ([LIVE, lane form5] `=CHOOSECOLS({1,2,3},2,3)`
+        // is 2,3 across).
+        let result: Vec<Vec<EvalResult>> = array.iter().map(|row| {
+            col_indices.iter().map(|&c| row.get(c).cloned().unwrap_or(EvalResult::Error(CellError::NA))).collect()
         }).collect();
-        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+        array_lift::from_rows(result)
     }
 
     fn fn_chooserows(&self, args: &[Expression]) -> EvalResult {
@@ -16469,11 +18029,10 @@ impl<'a> Evaluator<'a> {
                 None => return EvalResult::Error(CellError::Value),
             }
         }
-        let result: Vec<EvalResult> = row_indices.iter().map(|&r| {
-            let row = &array[r];
-            if row.len() == 1 { row[0].clone() } else { EvalResult::Array(row.clone()) }
-        }).collect();
-        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+        // Through `array_lift::from_rows` ([LIVE, lane form5]
+        // `=CHOOSEROWS(A1:B5,2)` is the ROW 2,20; it came out a column).
+        let result: Vec<Vec<EvalResult>> = row_indices.iter().map(|&r| array[r].clone()).collect();
+        array_lift::from_rows(result)
     }
 
     // ==================== Reference & Info Functions ====================
@@ -16515,7 +18074,17 @@ impl<'a> Evaluator<'a> {
     fn fn_expand(&self, args: &[Expression]) -> EvalResult {
         // EXPAND(array, rows, [columns], [pad_with])
         if args.len() < 2 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
-        let source = self.eval_as_2d(&args[0]);
+        // An array argument that is an error VALUE is the whole result, as in
+        // VSTACK / HSTACK [LIVE, Excel 16, lane formfix p1.json:
+        // `=EXPAND(FILTER(A1:A5,A1:A5>100),2)` #CALC!, `=EXPAND(NA(),2)` #N/A,
+        // `=EXPAND(1/0,2,2)` #DIV/0!]; it was padded like a one-cell array.
+        let value = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = &value {
+            if !self.denotes_reference(&args[0]) {
+                return EvalResult::Error(e.clone());
+            }
+        }
+        let source = Self::rows_of(value);
         let target_rows = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
         let source_cols = if source.is_empty() { 0 } else { source[0].len() };
         let target_cols = if args.len() >= 3 { match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => source_cols } } else { source_cols };
@@ -16526,7 +18095,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Limit);
         }
         charge!(self, cells);
-        let mut result: Vec<EvalResult> = Vec::new();
+        let mut result: Vec<Vec<EvalResult>> = Vec::new();
         for r in 0..target_rows {
             let mut row: Vec<EvalResult> = Vec::new();
             for c in 0..target_cols {
@@ -16536,22 +18105,33 @@ impl<'a> Evaluator<'a> {
                     row.push(pad.clone());
                 }
             }
-            result.push(if row.len() == 1 { row.into_iter().next().unwrap() } else { EvalResult::Array(row) });
+            result.push(row);
         }
-        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+        // One row is a ROW ([LIVE, lane form5 p2.log] `=EXPAND(1,1,3)` is
+        // 1,#N/A,#N/A across), so through `array_lift::from_rows`.
+        array_lift::from_rows(result)
     }
 
     fn fn_vstack(&self, args: &[Expression]) -> EvalResult {
         // VSTACK(array1, array2, ...) - stack arrays vertically
         if args.is_empty() { return EvalResult::Error(CellError::Value); }
-        let mut result: Vec<EvalResult> = Vec::new();
+        let mut result: Vec<Vec<EvalResult>> = Vec::new();
         for arg in args {
-            let rows = self.eval_as_2d(arg);
-            for row in rows {
-                result.push(if row.len() == 1 { row.into_iter().next().unwrap() } else { EvalResult::Array(row) });
+            // An argument that is an error VALUE is the whole result, as in
+            // HSTACK ([LIVE, lane formula p1.json/p3.json] `=VSTACK(1/0,1)`
+            // #DIV/0!, `=VSTACK(FILTER(..))` #CALC!; `=VSTACK(LAMBDA(x,x),1)`
+            // keeps the lambda's cell, #CALC! | 1).
+            let value = self.evaluate(arg);
+            if let EvalResult::Error(e) = &value {
+                if !self.denotes_reference(arg) {
+                    return EvalResult::Error(e.clone());
+                }
             }
+            result.extend(Self::rows_of(value));
         }
-        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+        // Ragged rows pad with #N/A, and ONE row stays a row ([LIVE, lane
+        // form5] `=VSTACK({1,2})` is 1,2 across; it came out a column).
+        array_lift::from_rows(result)
     }
 
     fn fn_tocol(&self, args: &[Expression]) -> EvalResult {
@@ -16575,17 +18155,30 @@ impl<'a> Evaluator<'a> {
                 flat.extend(row.iter().cloned());
             }
         }
-        // Filter based on ignore param
-        let filtered: Vec<EvalResult> = flat.into_iter().filter(|v| {
-            match ignore {
-                1 => !matches!(v, EvalResult::Text(s) if s.is_empty()),
-                2 => !matches!(v, EvalResult::Error(_)),
-                3 => !matches!(v, EvalResult::Text(s) if s.is_empty()) && !matches!(v, EvalResult::Error(_)),
-                _ => true,
-            }
-        }).collect();
+        let filtered = Self::to_vector_ignoring(flat, ignore);
+        if filtered.is_empty() {
+            // Everything was ignored: Excel's #CALC! (BUG-0774).
+            return EvalResult::Error(CellError::Calc);
+        }
         // Return as vertical array (each element is a single-value row)
         EvalResult::Array(filtered)
+    }
+
+    /// TOCOL / TOROW's `ignore`: 1 drops the BLANK cells, 2 the errors, 3
+    /// both. Blank is an EMPTY cell -- a formula's `""` is text and stays
+    /// [LIVE, Excel 16, lane formula p3.json, F1 `=""`, F2 empty, F3 7:
+    /// `=TOCOL(F1:F3,1)` is "" | 7, `=TOCOL(F2:F2,1)` #CALC!, `=TOCOL(F1:F1,1)`
+    /// ""]. Calcula had it the other way round, dropping `""` and keeping the
+    /// empty cells (as zeros).
+    fn to_vector_ignoring(flat: Vec<EvalResult>, ignore: i32) -> Vec<EvalResult> {
+        flat.into_iter()
+            .filter(|v| match ignore {
+                1 => !v.is_blank(),
+                2 => !matches!(v, EvalResult::Error(_)),
+                3 => !v.is_blank() && !matches!(v, EvalResult::Error(_)),
+                _ => true,
+            })
+            .collect()
     }
 
     /// `TRIMRANGE(range, [trim_rows], [trim_cols])` -- drop the BLANK rows and
@@ -16601,12 +18194,37 @@ impl<'a> Evaluator<'a> {
     /// genuinely empty: a formula returning `""` is text and holds its row, the
     /// same distinction `is_blank` draws everywhere else in this file.
     ///
-    /// An all-blank input trims away to nothing, which no array shape can
-    /// express; it answers a single blank, so `SUM(TRIMRANGE(A:A))` on an empty
-    /// column is `0` rather than an error.
+    /// An all-blank input trims away to nothing, which Excel answers with
+    /// #REF! [LIVE, Excel 16, lane formfix p1.json, E1:E5 empty:
+    /// `=TRIMRANGE(E1:E5)`, `=E1:.E5`, `=E1.:.E5`, `=SUM(TRIMRANGE(E1:E5))`,
+    /// `=ROWS(..)` and row codes 1-3 are #REF!; with rows untrimmed (code 0)
+    /// the range is kept whole, see `trim_range_bounds`]. Calcula answered a
+    /// single blank (0).
     fn fn_trimrange(&self, args: &[Expression]) -> EvalResult {
+        let (grid, top, bottom, left, right) = match self.trim_range_bounds(args) {
+            Ok(bounds) => bounds,
+            Err(e) => return e,
+        };
+        let at = |r: usize, c: usize| -> &EvalResult {
+            grid[r].get(c).unwrap_or(&EvalResult::Blank)
+        };
+        let (out_rows, out_cols) = (bottom - top, right - left);
+        let mut cells = Vec::with_capacity(out_rows * out_cols);
+        for r in top..bottom {
+            for c in left..right {
+                cells.push(at(r, c).clone());
+            }
+        }
+        array_lift::pack(out_rows, out_cols, cells)
+    }
+
+    /// TRIMRANGE's work: the argument's values and the rows `top..bottom`
+    /// and columns `left..right` that survive the trim -- or the answer when
+    /// nothing does (#REF!) or an argument is wrong.
+    #[allow(clippy::type_complexity)]
+    fn trim_range_bounds(&self, args: &[Expression]) -> Result<(Vec<Vec<EvalResult>>, usize, usize, usize, usize), EvalResult> {
         if args.is_empty() || args.len() > 3 {
-            return EvalResult::Error(CellError::Value);
+            return Err(EvalResult::Error(CellError::Value));
         }
         let trim_code = |slot: usize| -> Result<(bool, bool), EvalResult> {
             if args.len() <= slot {
@@ -16624,20 +18242,14 @@ impl<'a> Evaluator<'a> {
                 _ => Err(EvalResult::Error(CellError::Value)),
             }
         };
-        let (trim_top, trim_bottom) = match trim_code(1) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let (trim_left, trim_right) = match trim_code(2) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
+        let (trim_top, trim_bottom) = trim_code(1)?;
+        let (trim_left, trim_right) = trim_code(2)?;
 
         let grid = self.eval_as_2d(&args[0]);
         let n_rows = grid.len();
         let n_cols = grid.iter().map(|r| r.len()).max().unwrap_or(0);
         if n_rows == 0 || n_cols == 0 {
-            return EvalResult::Blank;
+            return Err(EvalResult::Blank);
         }
         let at = |r: usize, c: usize| -> &EvalResult {
             grid[r].get(c).unwrap_or(&EvalResult::Blank)
@@ -16669,18 +18281,19 @@ impl<'a> Evaluator<'a> {
                 right -= 1;
             }
         }
-        if top >= bottom || left >= right {
-            return EvalResult::Blank;
+        // Rows trimmed away entirely are #REF!; columns that would go only
+        // because the range is all blank stay [LIVE, lane formfix p3.json, E
+        // and G empty, F1 `=""`, F3 7: `=TRIMRANGE(E1:E5,3,0)` and `(E1:E5,1,1)`
+        // #REF!, `(E1:E5,0)`, `(E1:E5,0,1)` the whole E1:E5 (five 0s),
+        // `(E1:G5,0)` F1:F5, `(E1:G5,3,0)` E1:G3].
+        if top >= bottom {
+            return Err(EvalResult::Error(CellError::Ref));
         }
-
-        let (out_rows, out_cols) = (bottom - top, right - left);
-        let mut cells = Vec::with_capacity(out_rows * out_cols);
-        for r in top..bottom {
-            for c in left..right {
-                cells.push(at(r, c).clone());
-            }
+        if left >= right {
+            left = 0;
+            right = n_cols;
         }
-        array_lift::pack(out_rows, out_cols, cells)
+        Ok((grid, top, bottom, left, right))
     }
 
     fn fn_torow(&self, args: &[Expression]) -> EvalResult {
@@ -16704,22 +18317,28 @@ impl<'a> Evaluator<'a> {
                 flat.extend(row.iter().cloned());
             }
         }
-        let filtered: Vec<EvalResult> = flat.into_iter().filter(|v| {
-            match ignore {
-                1 => !matches!(v, EvalResult::Text(s) if s.is_empty()),
-                2 => !matches!(v, EvalResult::Error(_)),
-                3 => !matches!(v, EvalResult::Text(s) if s.is_empty()) && !matches!(v, EvalResult::Error(_)),
-                _ => true,
-            }
-        }).collect();
-        // Return as a single-row array
-        EvalResult::Array(filtered)
+        let filtered = Self::to_vector_ignoring(flat, ignore);
+        if filtered.is_empty() {
+            // [LIVE] `=TOROW(E1:E3,1)` over empty cells is #CALC! (BUG-0774).
+            return EvalResult::Error(CellError::Calc);
+        }
+        // A ROW: `array_lift::pack(1, n, ..)`. A flat array is a COLUMN, so
+        // this spilled DOWN where Excel's TOROW spills across ([LIVE]
+        // `=TOROW(F1:F3,1)` J26:K26).
+        let n = filtered.len();
+        if n == 1 {
+            return EvalResult::Array(filtered);
+        }
+        array_lift::pack(1, n, filtered)
     }
 
     fn fn_wrapcols(&self, args: &[Expression]) -> EvalResult {
         // WRAPCOLS(vector, wrap_count, [pad_with])
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
-        let flat = self.eval_flat(&args[0]);
+        let flat = match self.direct_error_or_flat(&args[0]) {
+            Ok(flat) => flat,
+            Err(e) => return EvalResult::Error(e),
+        };
         let wrap_count = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
         let pad = if args.len() == 3 { self.evaluate(&args[2]) } else { EvalResult::Error(CellError::NA) };
         // wrap_count is an argument: WRAPCOLS(A1:A2, 1e9) builds 1e9 rows of
@@ -16730,7 +18349,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Limit);
         }
         charge!(self, cells);
-        let mut result: Vec<EvalResult> = Vec::new();
+        let mut result: Vec<Vec<EvalResult>> = Vec::new();
         for r in 0..wrap_count {
             let mut row: Vec<EvalResult> = Vec::new();
             for c in 0..num_cols {
@@ -16741,15 +18360,20 @@ impl<'a> Evaluator<'a> {
                     row.push(pad.clone());
                 }
             }
-            result.push(if row.len() == 1 { row.into_iter().next().unwrap() } else { EvalResult::Array(row) });
+            result.push(row);
         }
-        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+        // One row is a ROW ([LIVE, lane form5] `=WRAPROWS(A1:A5,5)` is 1,2,3,4,5
+        // across; one row unwrapped by hand came out a column).
+        array_lift::from_rows(result)
     }
 
     fn fn_wraprows(&self, args: &[Expression]) -> EvalResult {
         // WRAPROWS(vector, wrap_count, [pad_with])
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
-        let flat = self.eval_flat(&args[0]);
+        let flat = match self.direct_error_or_flat(&args[0]) {
+            Ok(flat) => flat,
+            Err(e) => return EvalResult::Error(e),
+        };
         let wrap_count = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
         let pad = if args.len() == 3 { self.evaluate(&args[2]) } else { EvalResult::Error(CellError::NA) };
         // Same argument-driven padding hazard as WRAPCOLS: each output row is
@@ -16760,7 +18384,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Limit);
         }
         charge!(self, cells);
-        let mut result: Vec<EvalResult> = Vec::new();
+        let mut result: Vec<Vec<EvalResult>> = Vec::new();
         let mut i = 0;
         while i < flat.len() {
             let mut row: Vec<EvalResult> = Vec::new();
@@ -16771,15 +18395,35 @@ impl<'a> Evaluator<'a> {
                     row.push(pad.clone());
                 }
             }
-            result.push(if row.len() == 1 { row.into_iter().next().unwrap() } else { EvalResult::Array(row) });
+            result.push(row);
             i += wrap_count;
         }
-        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+        // One row is a ROW ([LIVE, lane form5] `=WRAPROWS(A1:A5,5)` is 1,2,3,4,5
+        // across; one row unwrapped by hand came out a column).
+        array_lift::from_rows(result)
     }
 
     /// Helper: evaluate an expression as a 2D array (vector of rows, each row is a vector of EvalResult)
     fn eval_as_2d(&self, expr: &Expression) -> Vec<Vec<EvalResult>> {
-        let result = self.evaluate(expr);
+        Self::rows_of(self.evaluate(expr))
+    }
+
+    /// The array argument of WRAPROWS / WRAPCOLS, flattened -- or the error it
+    /// is when it is an error VALUE rather than a reference to one ([LIVE,
+    /// lane formula p1.json: `=WRAPROWS(FILTER(A1:A5,A1:A5>100),2)` is #CALC!,
+    /// not #CALC! | #N/A]), as for VSTACK / HSTACK.
+    fn direct_error_or_flat(&self, expr: &Expression) -> Result<Vec<EvalResult>, CellError> {
+        let value = self.evaluate(expr);
+        if let EvalResult::Error(e) = &value {
+            if !self.denotes_reference(expr) {
+                return Err(e.clone());
+            }
+        }
+        Ok(value.into_flatten())
+    }
+
+    /// An evaluated value as rows (see [`Self::eval_as_2d`]).
+    fn rows_of(result: EvalResult) -> Vec<Vec<EvalResult>> {
         match result {
             EvalResult::Array(items) => {
                 items.into_iter().map(|item| {
@@ -17565,6 +19209,23 @@ fn unit_to_base(unit: &str) -> Option<(f64, i32)> {
         "ha" => Some((10000.0, 11)), "ac" | "acre" => Some((4046.8564224, 11)),
         "ar" => Some((100.0, 11)), "Morgen" => Some((2500.0, 11)),
         _ => None,
+    }
+}
+
+/// Why a matrix argument cannot be read as numbers (`eval_as_matrix`): an
+/// error in it, which is the answer, or a text / logical / empty cell, which
+/// is #VALUE!.
+enum MatrixFault {
+    Error(CellError),
+    NotNumber,
+}
+
+impl MatrixFault {
+    fn error(self) -> CellError {
+        match self {
+            MatrixFault::Error(e) => e,
+            MatrixFault::NotNumber => CellError::Value,
+        }
     }
 }
 
@@ -18950,6 +20611,9 @@ impl<'a> Evaluator<'a> {
                     CellError::NA => 7,
                     // 8 is #GETTING_DATA, which this engine has no variant for.
                     CellError::Spill => 9,
+                    // [LIVE] Excel 16 `=ERROR.TYPE(FILTER(A1:A5,A1:A5>100))`
+                    // is 14 (BUG-0774, lane formula p1.json).
+                    CellError::Calc => 14,
 
                     // CALCULA'S OWN ERRORS, which Excel has no code for. Each is
                     // mapped to the Excel error a user would have to deal with
@@ -19006,6 +20670,11 @@ impl<'a> Evaluator<'a> {
             | Expression::Range { sheet, .. }
             | Expression::ColumnRef { sheet, .. }
             | Expression::RowRef { sheet, .. } => !parser::ast::is_ref_error_sheet(sheet),
+            // A LET name or LAMBDA parameter that stands for a reference IS
+            // one (BUG-0737) [LIVE, lane formula p1.json:
+            // `=LAMBDA(r,ISREF(r))(A1)` TRUE, `(5)` FALSE, `=MAP(A1:A3,
+            // LAMBDA(c,ISREF(c)))` TRUE x3].
+            Expression::NamedRef { name, .. } => self.bound_reference(&scope_key(name)).is_some(),
             _ => false,
         };
         EvalResult::Boolean(is_ref)
@@ -19729,6 +21398,7 @@ mod tests {
                 GatherSubmission { submitter_name: "South".into(), submitter_id: "id-south".into(), cell_row: 0, cell_col: 0, value: EvalResult::Number(220.0) },
                 GatherSubmission { submitter_name: "West".into(), submitter_id: "id-west".into(), cell_row: 0, cell_col: 0, value: EvalResult::Number(80.0) },
             ],
+            refused: false,
         }
     }
 
@@ -19748,7 +21418,45 @@ mod tests {
                 GatherSubmission { submitter_name: "South".into(), submitter_id: "id-south".into(), cell_row: 1, cell_col: 1, value: EvalResult::Number(200.0) },
                 GatherSubmission { submitter_name: "South".into(), submitter_id: "id-south".into(), cell_row: 2, cell_col: 1, value: EvalResult::Number(210.0) },
             ],
+            refused: false,
         }
+    }
+
+    /// A REGION ID TWO SUBSCRIBED APPLICATIONS DECLARE IS #REF!, IN EVERY
+    /// GATHER FORM (BUG-0734). It used to be read as an empty region, so
+    /// `=SUM(GATHER(..))` showed a plausible 0 with nothing on the sheet to
+    /// say no answers could be read.
+    ///
+    /// SABOTAGE (rk2-ref): drop the `data.refused` check -- GATHER answers an
+    /// empty list and the first assertion fails.
+    #[test]
+    fn a_gather_of_a_region_two_applications_declare_is_a_ref_error() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| {
+            if r == "shared" {
+                GatherRegionData { refused: true, ..wb_gather_data() }
+            } else {
+                wb_lookup(r)
+            }
+        };
+        eval.set_gather_fn(&f);
+        let refused = EvalResult::Error(CellError::Ref);
+        let sum = wb_call(BuiltinFunction::Sum, vec![wb_call(BuiltinFunction::Gather, vec![wb_str("shared")])]);
+        assert_eq!(eval.evaluate(&sum), refused, "SUM(GATHER(shared)) is #REF!, not a plausible total");
+        assert_eq!(eval.evaluate(&wb_call(BuiltinFunction::GatherCount, vec![wb_str("shared")])), refused);
+        assert_eq!(eval.evaluate(&wb_call(BuiltinFunction::GatherSubmitters, vec![wb_str("shared")])), refused);
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::GatherFrom, vec![wb_str("shared"), wb_str("id-north")])),
+            refused
+        );
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::GatherAt, vec![wb_str("shared"), wb_num(1.0), wb_num(1.0)])),
+            refused
+        );
+        // Positive control: an ordinary region still totals.
+        let ok = wb_call(BuiltinFunction::Sum, vec![wb_call(BuiltinFunction::Gather, vec![wb_str("fc-2026")])]);
+        assert_eq!(eval.evaluate(&ok), EvalResult::Number(405.0));
     }
 
     fn wb_grid_lookup(region: &str) -> GatherRegionData {
@@ -23130,15 +24838,11 @@ mod tests {
             },
         ]);
         let result = eval.evaluate(&expr);
-        // Should return [slope, intercept] = [2, 0]
-        match &result {
-            EvalResult::Array(items) => {
-                assert_eq!(items.len(), 2);
-                assert_num(&items[0], 2.0, 0.01);
-                assert_num(&items[1], 0.0, 0.01);
-            }
-            _ => panic!("Expected Array, got {:?}", result),
-        }
+        // Should return ONE ROW [slope, intercept] = [2, 0] (Excel spills it
+        // across; a flat pair would be a column, lane form5).
+        assert_eq!(crate::array_lift::shape(&result), (1, 2), "LINEST is one row: {result:?}");
+        assert_num(&crate::array_lift::at(&result, 0, 0), 2.0, 0.01);
+        assert_num(&crate::array_lift::at(&result, 0, 1), 0.0, 0.01);
     }
 
     // ==================== Distribution Tests ====================
@@ -23459,10 +25163,10 @@ mod tests {
             },
         ]);
         let result = eval.evaluate(&expr);
-        match &result {
-            EvalResult::Array(items) => assert_eq!(items.len(), 3),
-            _ => panic!("Expected Array, got {:?}", result),
-        }
+        // ONE ROW of three (lane formula, BUG-0774 round): this asserted the
+        // flat three-element array, which the engine's shape convention reads
+        // as a COLUMN, so TOROW spilled down the sheet.
+        assert_eq!(result.spill_dimensions(), (1, 3), "TOROW is a row: {:?}", result);
     }
 
     #[test]
@@ -24740,28 +26444,30 @@ mod lookup_cache_differential_tests {
     }
 
     #[test]
-    fn index_fast_path_replicates_flat_addressing_quirks() {
+    fn index_fast_path_addresses_as_excel_does() {
         let grid = nasty_grid();
         // Plain hit.
         assert_eq!(
             eval_formula(&grid, "=INDEX(A1:C12,2,2)"),
             EvalResult::Number(101.0)
         );
-        // Column-overflow WRAPS into the next row (flat row-major addressing):
-        // A1:B3 flat = [A1,B1,A2,B2,A3,B3]; (1,3) -> idx 0*2+2 = 2 -> A2 = 5.
+        // A column number past the edge is #REF! -- it used to WRAP into the
+        // next row (flat row-major addressing: A2). [LIVE, Excel 16, lane
+        // form5 p3.log] `=INDEX(A1:B3,1,3)` is #REF!.
         assert_eq!(
             eval_formula(&grid, "=INDEX(A1:B3,1,3)"),
-            EvalResult::Number(5.0)
+            EvalResult::Error(CellError::Ref)
         );
         // Past the end -> #REF.
         assert_eq!(
             eval_formula(&grid, "=INDEX(A1:B3,3,3)"),
             EvalResult::Error(CellError::Ref)
         );
-        // 1-D branch ignores col_num entirely.
+        // A one-column range has ONE column: col_num 5 is #REF! (it was
+        // ignored; [LIVE] `=INDEX(A1:A3,2,2)` is #REF!).
         assert_eq!(
             eval_formula(&grid, "=INDEX(B1:B12,3,5)"),
-            EvalResult::Number(102.0)
+            EvalResult::Error(CellError::Ref)
         );
         // AN EMPTY CELL INSIDE THE RANGE STAYS BLANK, because INDEX returns a
         // REFERENCE. That is Excel: `=COUNT(INDEX(A1:A12,6))` is 0 and
@@ -26322,4 +28028,23 @@ mod error_value_parity_tests {
             );
         }
     }
+}
+
+/// One least-squares fit (`Evaluator::least_squares`, behind LINEST / LOGEST):
+/// per x variable in input order, its coefficient and standard error (0 for
+/// a dropped column); the intercept and its standard error (None without a
+/// constant term, shown #N/A); r2, the standard error of y, F (None when the
+/// fit is exact, shown #NUM!), the degrees of freedom and the two sums of
+/// squares.
+struct LeastSquares {
+    coefs: Vec<f64>,
+    intercept: f64,
+    se_coefs: Vec<f64>,
+    se_intercept: Option<f64>,
+    r2: f64,
+    se_y: f64,
+    f_stat: Option<f64>,
+    df: f64,
+    ss_reg: f64,
+    ss_res: f64,
 }

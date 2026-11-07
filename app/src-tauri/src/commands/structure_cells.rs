@@ -1255,7 +1255,8 @@ pub(crate) fn shift_cells_impl(
     shift_auto_filter_in_band(state, &effect, &mut undo_stack, active_sheet, &band, &table_plans);
     shift_cell_maps_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
     shift_misc_stores_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
-    let names_rewritten = shift_named_ranges_in_band(state, &effect, &mut undo_stack, active_sheet, &edited_sheet_name, &band);
+    let names_rewritten =
+        shift_named_ranges_in_band(state, &effect, &mut undo_stack, active_sheet, &edited_sheet_name, &sheet_names_snapshot, &band);
     // Object property BINDING formulas that read the band (WP-D).
     crate::object_bindings::cascade::shift_object_bindings_in_band(state, &effect, &mut undo_stack, &edited_sheet_name, &band);
     shift_range_strings_in_band(state, &effect, &mut undo_stack, active_sheet, &edited_sheet_name, &band);
@@ -1636,6 +1637,9 @@ fn shift_auto_filter_in_band(
             af.end_row = next.end_row;
             af.start_col = next.start_col;
             af.end_col = next.end_col;
+            // The criteria and the remembered sort are keyed relative to the
+            // first column: they follow the shifted cells (Excel does).
+            af.rekey_columns(before.start_col, |abs| follow_column_edit(band.edit, abs));
             drop(filters);
             record_auto_filter_shift(undo_stack, sheet, before);
         }
@@ -1780,8 +1784,10 @@ fn shift_named_ranges_in_band(
     undo_stack: &mut engine::UndoStack,
     sheet: usize,
     sheet_name: &str,
+    sheet_names: &[String],
     band: &BandEdit,
 ) -> Vec<String> {
+    let rows_axis = matches!(band.edit, SE::RowInsert { .. } | SE::RowDelete { .. });
     let Ok(mut store) = state.named_ranges.write(effect) else { return Vec::new() };
     if store.is_empty() {
         return Vec::new();
@@ -1792,6 +1798,8 @@ fn shift_named_ranges_in_band(
     for nr in store.values_mut() {
         let formula_sheet: &str = if nr.sheet_index == Some(sheet) { sheet_name } else { "" };
         let (shifted, reached) = shift_formula_in_band_noting_reach(&nr.refers_to, formula_sheet, sheet_name, band);
+        // A RELATIVE part neither moves nor dies (BUG-0749 [LIVE]).
+        let shifted = crate::named_ranges::keep_relative_name_parts(&nr.refers_to, &shifted, rows_axis, sheet_names);
         if shifted != nr.refers_to {
             nr.refers_to = shifted;
             changed = true;
@@ -2005,8 +2013,11 @@ pub(crate) fn shift_cf_and_validation_ranges(
         if let Some(rules) = store.get_mut(&sheet) {
             let previous = rules.clone();
             let mut changed = false;
-            for rule in rules.iter_mut() {
+            let mut split_any = false;
+            let mut kept: Vec<crate::conditional_formatting::ConditionalFormatDefinition> = Vec::with_capacity(rules.len());
+            for mut rule in std::mem::take(rules) {
                 let mut next: Vec<ConditionalFormatRange> = Vec::with_capacity(rule.ranges.len());
+                let mut cut: Vec<CellRange> = Vec::with_capacity(rule.ranges.len());
                 for r in &rule.ranges {
                     let rect = CellRange { start_row: r.start_row, end_row: r.end_row, start_col: r.start_col, end_col: r.end_col };
                     let pieces = band.rule_range_pieces(rect);
@@ -2015,6 +2026,50 @@ pub(crate) fn shift_cf_and_validation_ranges(
                     }
                     for p in pieces {
                         next.push(ConditionalFormatRange { start_row: p.start_row, start_col: p.start_col, end_row: p.end_row, end_col: p.end_col });
+                        cut.push(p);
+                    }
+                }
+                // BUG-0743: cells the edit leaves meaning different things are
+                // SPLIT into one rule per meaning, as Excel's are
+                // (`conditional_formatting::split_rule_by_meaning`).
+                if let Some(old) = crate::conditional_formatting::rule_anchor(&rule.ranges) {
+                    let mut probe = rule.rule.clone();
+                    let formulas: Vec<String> =
+                        crate::conditional_formatting::rule_formulas_mut(&mut probe).into_iter().map(|f| f.clone()).collect();
+                    if let Some(groups) =
+                        crate::conditional_formatting::split_rule_by_meaning(
+                            &formulas,
+                            old,
+                            crate::conditional_formatting::rule_row_span(&rule.ranges),
+                            crate::conditional_formatting::rule_column_span(&rule.ranges),
+                            &cut,
+                            &sheet_name,
+                            &sheet_name,
+                            true,
+                            band,
+                        )
+                    {
+                        changed = true;
+                        split_any = true;
+                        for (index, (ranges, canonical)) in groups.into_iter().enumerate() {
+                            let mut piece = rule.clone();
+                            if index > 0 {
+                                let mut next_id = state.next_cf_rule_id.lock().unwrap();
+                                piece.id = *next_id;
+                                *next_id += 1;
+                            }
+                            piece.ranges = ranges
+                                .iter()
+                                .map(|p| ConditionalFormatRange { start_row: p.start_row, start_col: p.start_col, end_row: p.end_row, end_col: p.end_col })
+                                .collect();
+                            if let Some(anchor) = crate::conditional_formatting::rule_anchor(&piece.ranges) {
+                                for (slot, text) in crate::conditional_formatting::rule_formulas_mut(&mut piece.rule).into_iter().zip(canonical) {
+                                    *slot = crate::conditional_formatting::move_rule_formula_wrapping(&text, anchor.0 as i64, anchor.1 as i64);
+                                }
+                            }
+                            kept.push(piece);
+                        }
+                        continue;
                     }
                 }
                 // The anchor is the top-left of the rectangle bounding EVERY
@@ -2034,10 +2089,19 @@ pub(crate) fn shift_cf_and_validation_ranges(
                     );
                 }
                 rule.ranges = next;
+                kept.push(rule);
             }
+            *rules = kept;
             let before = rules.len();
             rules.retain(|rule| !rule.ranges.is_empty());
             changed |= rules.len() != before;
+            if split_any {
+                // The pieces of a split rule sit where it sat: priorities are
+                // renumbered in the (priority-sorted) list order.
+                for (index, rule) in rules.iter_mut().enumerate() {
+                    rule.priority = index as u32 + 1;
+                }
+            }
             if changed {
                 undo_stack.record_custom_restore(
                     "obj_conditional_formats".to_string(),
@@ -2059,6 +2123,43 @@ pub(crate) fn shift_cf_and_validation_ranges(
                 if pieces.len() != 1 || pieces[0] != rect {
                     changed = true;
                 }
+                // BUG-0743, [LIVE] cfdvb/probe2.ps1 V1: a validation whose cells
+                // the edit leaves meaning different things splits as a rule
+                // does (`=B12>0` on B2:B10, delete row 12 -> B2 `=#REF!>0`,
+                // B3:B10 `=B12>0`). Each rectangle is its own validated range,
+                // so each states the group's formula for ITS top-left.
+                let formulas = crate::data_validation::validation_formulas(&v.validation, sheet, sheet_names);
+                if let Some(groups) = crate::conditional_formatting::split_rule_by_meaning(
+                    &formulas,
+                    (v.start_row, v.start_col),
+                    (v.start_row, v.end_row),
+                    (v.start_col, v.end_col),
+                    &pieces,
+                    &sheet_name,
+                    &sheet_name,
+                    true,
+                    band,
+                ) {
+                    changed = true;
+                    for (rects, canonical) in groups {
+                        for p in rects {
+                            let mut piece = v.clone();
+                            piece.start_row = p.start_row;
+                            piece.end_row = p.end_row;
+                            piece.start_col = p.start_col;
+                            piece.end_col = p.end_col;
+                            let placed: Vec<String> = canonical
+                                .iter()
+                                .map(|text| {
+                                    crate::conditional_formatting::move_rule_formula_wrapping(text, p.start_row as i64, p.start_col as i64)
+                                })
+                                .collect();
+                            crate::data_validation::set_validation_formulas(&mut piece.validation, &placed);
+                            next.push(piece);
+                        }
+                    }
+                    continue;
+                }
                 for p in pieces {
                     let mut piece = v.clone();
                     piece.start_row = p.start_row;
@@ -2075,6 +2176,7 @@ pub(crate) fn shift_cf_and_validation_ranges(
                         (p.start_row, p.start_col),
                         &sheet_name,
                         &sheet_name,
+                        sheet_names,
                         band,
                     );
                     next.push(piece);

@@ -213,7 +213,7 @@ pub fn eval_ast<'a>(stored: &'a Expression, ctx: &NameEvalCtx<'_>) -> Cow<'a, Ex
         // At the evaluating cell: a relative name means the cell that uses it,
         // so its precedents (`stored_ast_references`, which expands through
         // here) are that cell's own, per using cell.
-        crate::resolve_names_in_ast_at(stored, ctx.named_ranges, ctx.sheet_index, (ctx.row, ctx.col), &mut visited)
+        crate::resolve_names_in_ast_in(stored, ctx.named_ranges, ctx.sheet_names, ctx.sheet_index, (ctx.row, ctx.col), &mut visited)
     } else {
         stored.clone()
     };
@@ -265,7 +265,10 @@ pub fn needs_name_resolution(ast: &Expression, named_ranges: &HashMap<String, Na
 }
 
 fn is_defined(name: &str, named_ranges: &HashMap<String, NamedRange>) -> bool {
-    named_ranges.contains_key(&name_key(name))
+    // In ANY scope: the registry holds a sheet's own name under its
+    // (scope, name) key (BUG-0744), and which scope a cell reads is the
+    // splice's question (`resolve_names_in_ast_at`), not this gate's.
+    crate::named_ranges::defined_in_any_scope(named_ranges, &name_key(name))
 }
 
 fn walk_needs(ast: &Expression, nr: &HashMap<String, NamedRange>) -> bool {
@@ -376,6 +379,13 @@ fn collect_with_shadows(ast: &Expression, shadows: &[String], out: &mut NameSet)
                 }
             }
         },
+        // `Sheet1!Rate` is the name in any LET / LAMBDA (BUG-0744/0749): its
+        // edge is the name's, whatever the formula binds.
+        Expression::Range { .. } if parser::parser::qualified_name_parts(ast).is_some() => {
+            if let Some((_, name)) = parser::parser::qualified_name_parts(ast) {
+                out.insert(name_key(name));
+            }
+        }
         Expression::Range { start, end, .. } => {
             collect_with_shadows(start, shadows, out);
             collect_with_shadows(end, shadows, out);
@@ -488,7 +498,7 @@ pub fn restamp_grid_name_casing(
 /// name STRASSE [LIVE 7] because a binding matches per character, and
 /// respelling it `STRASSE` would hand it to the binding (5).
 fn defined_spelling(name: &str, nr: &HashMap<String, NamedRange>, shadows: &[String]) -> Option<String> {
-    let entry = nr.get(&name_key(name))?;
+    let entry = crate::named_ranges::any_scope_entry(nr, &name_key(name))?;
     (entry.name != name && !shadows.contains(&local_key(&entry.name))).then(|| entry.name.clone())
 }
 
@@ -637,23 +647,69 @@ fn restamp(ast: &mut Expression, nr: &HashMap<String, NamedRange>, shadows: &[St
 /// rename ("total" -> "Total") only touches the cells whose spelling actually
 /// moves.
 pub fn rename_name_in_ast(ast: &Expression, old_name: &str, new_name: &str) -> (Expression, bool) {
+    rename_name_in_ast_scoped(ast, old_name, new_name, true, &|_| false)
+}
+
+/// [`rename_name_in_ast`] for a formula where a PLAIN `old_name` may or may
+/// not denote the name being renamed (`plain`: the formula sits where the
+/// renamed name is the one a bare spelling resolves to), and where a
+/// SHEET-QUALIFIED `Sheet1!old_name` denotes it exactly when
+/// `qualified_denotes(qualifier)` says so -- whatever `plain` is, and never
+/// shadowed by a LET or LAMBDA name.
+///
+/// [LIVE, Excel 16, lane form4 / verify-formfix rename.ps1] With a workbook
+/// Dup and a Sheet1-scoped Dup, renaming the WORKBOOK Dup leaves Sheet2's
+/// `=Sheet1!Dup` alone (it reads Sheet1's own name) and repoints Sheet1's
+/// `=Sheet2!Dup` (Sheet2 has no Dup, so it read the workbook's). Calcula walked
+/// the qualified node's halves as plain names, so the first was rewritten --
+/// silently changing its value -- and the second, on a sheet whose own Dup
+/// shadows the workbook's, was skipped and went #NAME?.
+pub fn rename_name_in_ast_scoped(
+    ast: &Expression,
+    old_name: &str,
+    new_name: &str,
+    plain: bool,
+    qualified_denotes: &dyn Fn(&str) -> bool,
+) -> (Expression, bool) {
     let mut out = ast.clone();
     let mut changed = false;
-    rename_walk(&mut out, &name_key(old_name), new_name, &[], &mut changed);
+    let rename = Rename { old_upper: &name_key(old_name), new_name, plain, qualified_denotes };
+    rename_walk(&mut out, &rename, &[], &mut changed);
     (out, changed)
+}
+
+/// What one rename walk repoints (`rename_name_in_ast_scoped`).
+struct Rename<'a> {
+    old_upper: &'a str,
+    new_name: &'a str,
+    plain: bool,
+    qualified_denotes: &'a dyn Fn(&str) -> bool,
 }
 
 fn rename_walk(
     ast: &mut Expression,
-    old_upper: &str,
-    new_name: &str,
+    rename: &Rename<'_>,
     shadows: &[String],
     changed: &mut bool,
 ) {
+    let (old_upper, new_name) = (rename.old_upper, rename.new_name);
+    if let Some((qualifier, name)) = parser::parser::qualified_name_parts(ast) {
+        if name_key(name) == old_upper && name != new_name && (rename.qualified_denotes)(qualifier) {
+            if let Expression::Range { start, end, .. } = ast {
+                for half in [start.as_mut(), end.as_mut()] {
+                    if let Expression::NamedRef { name, .. } = half {
+                        *name = new_name.to_string();
+                    }
+                }
+                *changed = true;
+            }
+        }
+        return;
+    }
     match ast {
         Expression::NamedRef { name, .. } => {
             let key = name_key(name);
-            if shadows.contains(&local_key(name)) || key != old_upper || name == new_name {
+            if !rename.plain || shadows.contains(&local_key(name)) || key != old_upper || name == new_name {
                 return;
             }
             // The name is written in the USER'S SPELLING, the same thing
@@ -670,11 +726,11 @@ fn rename_walk(
         | Expression::RowRef { .. }
         | Expression::TableRef { .. } => {}
         Expression::BinaryOp { left, right, .. } => {
-            rename_walk(left, old_upper, new_name, shadows, changed);
-            rename_walk(right, old_upper, new_name, shadows, changed);
+            rename_walk(left, rename, shadows, changed);
+            rename_walk(right, rename, shadows, changed);
         }
         Expression::UnaryOp { operand, .. } => {
-            rename_walk(operand, old_upper, new_name, shadows, changed)
+            rename_walk(operand, rename, shadows, changed)
         }
         Expression::FunctionCall { func, args, .. } => {
             // Binding positions first, so the body sees the right shadow set —
@@ -702,7 +758,8 @@ fn rename_walk(
                 _ => {
                     if let Some(name) = func.user_definable_name().map(str::to_string) {
                         let key = name_key(&name);
-                        if key != "__INVOKE__"
+                        if rename.plain
+                            && key != "__INVOKE__"
                             && !shadows.contains(&local_key(&name))
                             && key == old_upper
                             && name != new_name
@@ -732,41 +789,41 @@ fn rename_walk(
                 if is_let && idx % 2 == 0 && idx < arg_count - 1 {
                     continue;
                 }
-                rename_walk(arg, old_upper, new_name, &inner, changed);
+                rename_walk(arg, rename, &inner, changed);
             }
         }
         Expression::Range { start, end, .. } => {
-            rename_walk(start, old_upper, new_name, shadows, changed);
-            rename_walk(end, old_upper, new_name, shadows, changed);
+            rename_walk(start, rename, shadows, changed);
+            rename_walk(end, rename, shadows, changed);
         }
         Expression::Sheet3DRef { reference, .. } => {
-            rename_walk(reference, old_upper, new_name, shadows, changed)
+            rename_walk(reference, rename, shadows, changed)
         }
         Expression::IndexAccess { target, index } => {
-            rename_walk(target, old_upper, new_name, shadows, changed);
-            rename_walk(index, old_upper, new_name, shadows, changed);
+            rename_walk(target, rename, shadows, changed);
+            rename_walk(index, rename, shadows, changed);
         }
         Expression::ArrayLiteral { rows } => {
             for e in rows.iter_mut().flatten() {
-                rename_walk(e, old_upper, new_name, shadows, changed);
+                rename_walk(e, rename, shadows, changed);
             }
         }
         Expression::ListLiteral { elements } => {
             for e in elements {
-                rename_walk(e, old_upper, new_name, shadows, changed);
+                rename_walk(e, rename, shadows, changed);
             }
         }
         Expression::DictLiteral { entries } => {
             for (k, v) in entries {
-                rename_walk(k, old_upper, new_name, shadows, changed);
-                rename_walk(v, old_upper, new_name, shadows, changed);
+                rename_walk(k, rename, shadows, changed);
+                rename_walk(v, rename, shadows, changed);
             }
         }
         Expression::SpillRef { cell, .. } => {
-            rename_walk(cell, old_upper, new_name, shadows, changed)
+            rename_walk(cell, rename, shadows, changed)
         }
         Expression::ImplicitIntersection { operand } => {
-            rename_walk(operand, old_upper, new_name, shadows, changed)
+            rename_walk(operand, rename, shadows, changed)
         }
     }
 }

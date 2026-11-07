@@ -1271,9 +1271,17 @@ fn acquisitions_in(line: &str, tail: &str) -> Vec<Acquisition> {
             // is a temporary that dies at the `;`.
             let deref_copied = head.ends_with('*');
             let rest_of_line = &line[at + method.len()..];
+            let statement_rest = if rest_of_line.contains(';') {
+                rest_of_line.to_string()
+            } else {
+                format!("{rest_of_line}{tail}")
+            };
             let consumed = CONSUMING.iter().any(|c| rest_of_line.contains(c))
                 || (!rest_of_line.contains(';')
                     && CONSUMING.iter().any(|c| tail.contains(c)))
+                || (line.trim_start().starts_with("let ")
+                    && !head.trim_end().ends_with("match")
+                    && guard_is_a_receiver_only_temporary(&statement_rest))
                 || (trailing_ident(head) == "match" && match_arm_consumes_the_guard(&format!("{rest_of_line}{tail}")));
             // Bound to a name that outlives the statement?
             let mut h = head;
@@ -1303,6 +1311,81 @@ fn acquisitions_in(line: &str, tail: &str) -> Vec<Acquisition> {
     }
     out.sort_by_key(|a| a.col);
     out
+}
+
+/// Methods that hand back the GUARD ITSELF (or a wrapper owning it), so a
+/// chain that ends in one of them still binds the guard:
+/// `.lock().unwrap()`, `.write(&effect).expect(..)`, `.lock().ok()`,
+/// `.lock().unwrap_or_else(|e| e.into_inner())`, `.read().map_err(..)?`, and
+/// `.lock_pending().unwrap().authorize(&effect)` -- `PendingGuard::authorize`
+/// consumes the pending guard and hands back the WRITE guard over the same
+/// lock (wave 5, misc5).
+const GUARD_PRESERVING: &[&str] = &["unwrap", "expect", "ok", "unwrap_or_else", "map_err", "into_inner", "authorize"];
+
+/// The text after an acquisition's `(` -- `rest` of `.lock(` in
+/// `let owned_txn = state.undo_stack.lock().unwrap().begin_owned_transaction(..);`
+/// -- to the end of its statement: is the guard only the RECEIVER of a method
+/// that returns something else?
+///
+/// Then what the `let` binds is that method's result, and the guard is a
+/// temporary of the initializer that Rust drops at the statement's `;`
+/// (temporary lifetime extension never applies to a method receiver; a result
+/// that borrowed from the guard would not compile). Read as bound, every
+/// `let owned_txn = state.undo_stack.lock().unwrap().begin_owned_transaction(..)`
+/// held the undo stack for the rest of its function (wave 4: Reapply, Show
+/// Totals Row's insert, the sort, the reader-edge refresh). The caller asks
+/// only for a statement that STARTS with `let` and whose initializer is not a
+/// `match` (a scrutinee's temporaries live through the arms); an `if let` /
+/// `while let` header is never asked, because its scrutinee's temporaries live
+/// through the block. A field access (`.x` with no call) is not judged: `&`
+/// in front of it extends the guard.
+fn guard_is_a_receiver_only_temporary(rest: &str) -> bool {
+    /// The text after the `)` that closes the argument list `text` starts in.
+    fn after_close(text: &str) -> Option<&str> {
+        let mut depth = 1i32;
+        for (i, c) in text.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&text[i + 1..]);
+                    }
+                }
+                ';' => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+    let Some(mut chain) = after_close(rest) else {
+        return false;
+    };
+    loop {
+        chain = chain.trim_start();
+        if let Some(r) = chain.strip_prefix('?') {
+            chain = r;
+            continue;
+        }
+        let Some(r) = chain.strip_prefix('.') else {
+            return false;
+        };
+        let r = r.trim_start();
+        let ident: String = r.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        if ident.is_empty() {
+            return false;
+        }
+        let Some(args) = r[ident.len()..].trim_start().strip_prefix('(') else {
+            return false;
+        };
+        if !GUARD_PRESERVING.contains(&ident.as_str()) {
+            return true;
+        }
+        let Some(r) = after_close(args) else {
+            return false;
+        };
+        chain = r;
+    }
 }
 
 /// After `let x = match state.y.lock()`: does the `Ok` arm do something with the
@@ -2883,6 +2966,38 @@ fn a_guard_consumed_by_remove_holds_nothing() {
     // ...while a guard BOUND and then used for a remove is still held.
     let held = "pub(crate) fn f(state: &AppState) {\n    let mut snaps = state.animation_snapshots.lock().unwrap();\n    let saved = snaps.remove(&params.token);\n    let mut grid = state.grid.write(&effect).unwrap();\n}\n";
     assert_eq!(grid_locks_taken_while_holding("planted.rs", held).len(), 1, "a bound guard must stay held");
+}
+
+#[test]
+fn a_guard_that_is_only_a_method_receiver_in_a_let_holds_nothing_after_it() {
+    // Reapply's shape (wave 4): the `let` binds the OWNED transaction token;
+    // the undo-stack guard is a temporary of the initializer, dead at the `;`.
+    let receiver = "pub(crate) fn f(state: &AppState) {\n    let owned_txn = state.undo_stack.lock().unwrap().begin_owned_transaction(\"Reapply\".to_string());\n    let mut grids = state.grids.write(&effect).unwrap();\n    let after = state.undo_stack.lock().unwrap().current_transaction_mut().map_or(0, |t| t.changes.len());\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", receiver);
+    assert!(found.is_empty(), "a guard used only as a method receiver in a `let` read as held: {:?}", found);
+    // Split over lines, as rustfmt writes it.
+    let split = "pub(crate) fn f(state: &AppState) {\n    let owned_txn = state\n        .undo_stack\n        .lock()\n        .unwrap()\n        .begin_owned_transaction(label);\n    let mut grid = state.grid.write(&effect).unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", split);
+    assert!(found.is_empty(), "a split receiver-only chain read as held: {:?}", found);
+    // TEETH, the shapes that DO hold: the guard itself bound (through a
+    // guard-preserving link), an `if let` scrutinee (its temporaries live
+    // through the block) and a `match` initializer (they live through the arms).
+    // `authorize` hands the guard on (`PendingGuard::authorize`, wave 5 misc5):
+    // SABOTAGE (misc5-auth) -- drop "authorize" from GUARD_PRESERVING; the
+    // pending-then-authorized case is read as dead.
+    for held in [
+        "pub(crate) fn f(state: &AppState) {\n    let mut undo = state.undo_stack.lock().unwrap();\n    let mut grids = state.grids.write(&effect).unwrap();\n}\n",
+        "pub(crate) fn f(state: &AppState) {\n    let mut names = state.sheet_names.lock_pending().unwrap().authorize(&effect);\n    let mut grids = state.grids.write(&effect).unwrap();\n}\n",
+        "pub(crate) fn f(state: &AppState) {\n    let undo = state.undo_stack.lock().map_err(|e| e.to_string())?;\n    let mut grids = state.grids.write(&effect).unwrap();\n}\n",
+        "pub(crate) fn f(state: &AppState) {\n    if let Some(t) = state.undo_stack.lock().unwrap().current_transaction_mut() {\n        let mut grids = state.grids.write(&effect).unwrap();\n    }\n}\n",
+        "pub(crate) fn f(state: &AppState) {\n    let n = match state.undo_stack.lock().unwrap().current_transaction_mut() {\n        Some(t) => { let g = state.grids.read().unwrap(); 1 }\n        None => 0,\n    };\n}\n",
+    ] {
+        assert_eq!(
+            grid_locks_taken_while_holding("planted.rs", held).len(),
+            1,
+            "a guard that IS held across the grid lock was read as dead:\n{held}"
+        );
+    }
 }
 
 /// NON-VACUITY for `blank_literals` over the REAL crate: blanking must keep
@@ -8614,18 +8729,19 @@ fn the_name_rename_takes_the_registry_and_the_undo_stack_under_both_grid_locks()
     let hits: Vec<HeldAcquisition> =
         held_while_acquiring("named_ranges.rs", &text, &["grid"], &["grids", "named_ranges", "undo_stack"], &graph)
             .into_iter()
-            .filter(|h| h.function == "rename_named_range_impl")
+            // The rename's body, with its scope (BUG-0744).
+            .filter(|h| h.function == "rename_named_range_scoped_impl")
             .collect();
     for store in ["grids", "named_ranges", "undo_stack"] {
         assert!(
             hits.iter().any(|h| h.acquiring == store && h.alive.iter().any(|s| s == "grid")),
-            "`rename_named_range_impl` no longer takes `{store}` while it holds `grid`: {hits:?}"
+            "`rename_named_range_scoped_impl` no longer takes `{store}` while it holds `grid`: {hits:?}"
         );
     }
     for store in ["named_ranges", "undo_stack"] {
         assert!(
             hits.iter().any(|h| h.acquiring == store && h.alive.iter().any(|s| s == "grids")),
-            "`rename_named_range_impl` no longer takes `{store}` while it holds `grids`: {hits:?}"
+            "`rename_named_range_scoped_impl` no longer takes `{store}` while it holds `grids`: {hits:?}"
         );
     }
 }
@@ -9167,7 +9283,7 @@ fn gated_name_store_holds(file: &str, text: &str, graph: &CallGraph) -> Vec<Held
 /// `grids`. Every cell writer takes the dependency maps BEFORE the name stores,
 /// so such a hold is the writers' order inside out; the grid lock, which every
 /// writer takes FIRST, is what keeps it from closing a cycle -- no writer can
-/// be past its first lock while it is held. `sort_range` (twice) and
+/// be past its first lock while it is held. `sort_range_core` (twice) and
 /// `undo_commands::rebuild_all_dependencies` hold the three name tables across
 /// `rebuild_all_dependencies_from_grid` today, each under a grid lock; the
 /// remove_duplicates pin above was the only one asked, and only of one
@@ -9207,7 +9323,7 @@ fn no_function_holds_a_name_store_across_the_dependency_maps_without_a_grid_lock
     );
     // NON-VACUITY: the census sees the callers that hold the name tables across
     // the rebuild today, each under a grid lock.
-    for site in ["commands/data.rs::sort_range", "undo_commands.rs::rebuild_all_dependencies"] {
+    for site in ["commands/data.rs::sort_range_core", "undo_commands.rs::rebuild_all_dependencies"] {
         assert!(
             gated.iter().any(|g| g == site),
             "the census no longer sees `{site}` hold a name store across the dependency maps under a grid lock, so \
@@ -9470,6 +9586,16 @@ fn no_function_holds_the_undo_stack_and_a_name_store_in_an_order_that_can_cycle(
         "the transitive call graph no longer sees `record_named_range_undo` take the undo stack: {:?}",
         graph.get("record_named_range_undo")
     );
+    // The rule formulas' name snapshot reads all three name stores, and its
+    // callers (the icon sort among them) must be seen doing so (verify-cfdvb
+    // finding 4: an associated `RuleNames::take` was invisible here).
+    assert!(
+        graph
+            .get("snapshot_rule_names")
+            .is_some_and(|stores| NAME_STORES.iter().all(|n| stores.iter().any(|s| s.as_str() == *n))),
+        "the call graph no longer sees `snapshot_rule_names` take the name stores: {:?}",
+        graph.get("snapshot_rule_names")
+    );
     let mut cycles: Vec<String> = Vec::new();
     let mut under_the_stack: Vec<HeldAcquisition> = Vec::new();
     let mut under_a_name_store: Vec<HeldAcquisition> = Vec::new();
@@ -9494,7 +9620,8 @@ fn no_function_holds_the_undo_stack_and_a_name_store_in_an_order_that_can_cycle(
     // NON-VACUITY, and the writers' half of the fix: each name writer is seen
     // holding the registry while it reaches the undo stack, under BOTH grid
     // locks -- the rename's exact order.
-    for writer in ["create_named_range_impl", "update_named_range_core", "delete_named_range_core", "rename_named_range_impl"] {
+    // The delete's and the rename's bodies take the scope (BUG-0744).
+    for writer in ["create_named_range_impl", "update_named_range_core", "delete_named_range_scoped", "rename_named_range_scoped_impl"] {
         let at: Vec<&HeldAcquisition> =
             under_a_name_store.iter().filter(|h| h.file == "named_ranges.rs" && h.function == writer).collect();
         assert!(

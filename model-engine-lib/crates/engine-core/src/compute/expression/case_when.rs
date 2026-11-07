@@ -25,6 +25,23 @@ impl Expression {
         SqlRenderer::new(DataFusionDialect, &BareQualifier)
             .render_case_when(self, condition, fact_table)
     }
+
+    /// [`Expression::to_case_when_sql`] with the model's column kinds (see
+    /// [`Expression::to_sql_string_with_classes`]).
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Expression::to_case_when_sql`].
+    pub fn to_case_when_sql_with_classes(
+        &self,
+        condition: &str,
+        fact_table: &str,
+        columns: crate::compute::dax_semantics::ColumnClasses,
+    ) -> EngineResult<String> {
+        SqlRenderer::new(DataFusionDialect, &BareQualifier)
+            .with_column_classes(columns)
+            .render_case_when(self, condition, fact_table)
+    }
 }
 
 #[cfg(test)]

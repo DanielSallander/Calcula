@@ -664,7 +664,8 @@ fn every_bulk_cell_rewrite_seeds_the_shared_cascade() {
         // The `clear_range_with_options` command is a one-line delegation to
         // this body (testability split, review A#1).
         ("clear_range_with_options_inner", DATA_RS),
-        ("sort_range", DATA_RS),
+        // The `sort_range` command's body (callable from Reapply, BUG-0740).
+        ("sort_range_core", DATA_RS),
         ("remove_duplicates", DATA_RS),
         ("replace_all", SEARCH_RS),
         ("replace_single", SEARCH_RS),
@@ -783,6 +784,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("mcp/tools.rs", "apply_seeds", "IS NOT A DOCUMENT WRITE: seeds a DETACHED CLONE for a dry run (ai/dryrun.rs). Nothing downstream observes it, so there are no dependents to recalculate."),
         ("ai/preview_eval.rs", "build_grid", "IS NOT A DOCUMENT WRITE: fills a `Grid::new()` built inside the function from the caller's cell list, for the script preview's formula evaluator. The grid is dropped when `evaluate_preview` returns; the workbook is never reached, so there is nothing to recalculate."),
         ("ai/preview_eval.rs", "evaluate_preview", "IT IS AN EVALUATION LOOP, over a detached grid: it iterates its own formulas to a fixed point (PASS_CAP) and returns values. Pure — no Tauri state, no I/O — which is the same class as data_tables/goal_seek below, minus even the document."),
+        ("data_validation.rs", "validate_pending_value_on", "IS NOT A DOCUMENT WRITE: judges a typed entry BEFORE it is stored (Excel calculates, then judges a custom rule). It writes the pending value and its readers' values into SCRATCH clones of the active sheet (`scratch_grid`) and of each other sheet holding a reader (`reader_scratch_grid`), which only the rule's formula reads; they are dropped when the check returns, and the document's grids, dirty flag and undo stack are untouched (`a_pending_check_leaves_the_document_untouched` in cfdvfix_tests.rs). The real write that follows the check (update_cell) recalculates."),
         ("scripting/udf.rs", "collect_udf_calls_impl", "IS NOT A DOCUMENT WRITE: the UDF discovery pass writes the pending edits into a SCRATCH clone of the grids, evaluates there to learn which custom-function calls the edit's cascade needs, and drops it; the real write (update_cell / update_cells_batch) recalculates. It passed this census until 2026-10-29 only because its body spelled `recalc_order_from_seeds(` for its cell set, which it now takes from `active_sheet_write_cascade` -- it never recalculated anything."),
         ("insights/report.rs", "paint", "WRITES ONLY LITERALS, ONTO A SHEET THAT DID NOT EXIST. `insights_create_report_sheet` calls `add_sheet_inner` first — with a name `ensure_sheet_name_is_free` proved was not taken — and paints into a fresh `Grid::new()`. Nothing in the workbook can already depend on cells of a sheet created a moment ago, and `ReportCell` has no formula variant, so nothing painted needs evaluating either. Whether creating a sheet at all should recalculate is `add_sheet_inner`'s question, and it is the same question for every sheet the user adds by hand."),
         // -- It IS recalculation, or an inner step of it -------------------
@@ -989,7 +991,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
     // Non-vacuity: the census must actually be finding the known members.
     for (file, func) in [
         ("commands/data.rs", "clear_range"),
-        ("commands/data.rs", "sort_range"),
+        ("commands/data.rs", "sort_range_core"),
         ("bi/commands.rs", "bi_refresh_connection"),
         ("merge_commands.rs", "merge_cells_off_sheet"),
     ] {

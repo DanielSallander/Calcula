@@ -3,6 +3,7 @@
 // CONTEXT: Used by NameManagerDialog and NewNameDialog components.
 
 import { columnToLetter, letterToColumn } from "@api";
+import { isValidDefinedName } from "@api/definedNameSyntax";
 
 /**
  * Build a refersTo formula string from selection coordinates.
@@ -59,38 +60,14 @@ export function parseRefersTo(
 }
 
 /**
- * Client-side FIRST FILTER for a name. The backend's `NamedRange::is_valid_name`
- * (named_ranges.rs) decides, and refuses more than this does: names that read
- * as R1C1 references (`R`, `C`, `RC`, `R1C1`, `R2x`), Lotus-style
- * `A1.B1` ranges and names over 255 characters, as Excel does -- its refusal
- * reaches the user through the create / rename result.
+ * Whether Excel accepts `name` as a defined name -- the WHOLE rule
+ * (`isValidDefinedName`, @api, the mirror of the backend's
+ * `identity::is_valid_defined_name`), BUG-0741. This used to be a first filter
+ * that let `R1C1`, `RC`, `A1.B1` and 256-character names through to a backend
+ * refusal and refused names Excel takes (`a\b`, `abc?`, `NULL`) [LIVE].
  */
 export function isValidName(name: string): boolean {
-  if (!name || name.length === 0) return false;
-
-  const first = name[0];
-  if (!/[a-zA-Z_\\]/.test(first)) return false;
-
-  for (let i = 1; i < name.length; i++) {
-    const ch = name[i];
-    if (!/[a-zA-Z0-9_.]/.test(ch)) return false;
-  }
-
-  const upper = name.toUpperCase();
-  if (upper === "TRUE" || upper === "FALSE" || upper === "NULL") return false;
-
-  // Cannot be a cell reference
-  const cellMatch = name.match(/^([A-Z]+)(\d+)$/i);
-  if (cellMatch) {
-    const colStr = cellMatch[1].toUpperCase();
-    const rowNum = parseInt(cellMatch[2], 10);
-    const colNum = letterToColumn(colStr) + 1; // letterToColumn is 0-based
-    if (colNum <= 16384 && rowNum >= 1 && rowNum <= 1048576) {
-      return false;
-    }
-  }
-
-  return true;
+  return isValidDefinedName(name);
 }
 
 /**

@@ -545,3 +545,149 @@ fn create_table_reads_the_defined_names_before_the_table_guards() {
          `restamp_workbook_name_casing`)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ledger programme 2, wave 3, lane tabxlsx (BUG-0742, BUG-0750)
+// ---------------------------------------------------------------------------
+
+fn totals_shifting(wb: &Wb, id: identity::EntityId) -> super::TableResult {
+    super::toggle_totals_row_shifting(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, &wb.slicer, &wb.timelines, id, true,
+    )
+}
+
+/// BUG-0742. [LIVE, Excel 16, 2026-11-06, lane tabxlsx probe1 S1a/S1b]
+/// `ShowTotals` on A1:B4 with A5 filled and a table on A6:B7 (D6 filled):
+/// A1:B6, the other table moved to A7:B8, D6 where it was -- Insert Cells
+/// over the table's columns. With the other table WIDER (A6:C7) Excel
+/// refuses. Calcula refused both. One Ctrl+Z takes both back.
+/// SABOTAGE (tabxlsx-shift): `totals_row_blocked_at` answers `None`; the
+/// toggle then refuses as before.
+#[test]
+fn a_totals_row_landing_on_another_table_moves_it_down_as_excel_does() {
+    let wb = Wb::new(1);
+    let id = numbers_table(&wb);
+    wb.set(4, 0, "r5");
+    wb.set(5, 3, "x");
+    wb.set(5, 0, "C1");
+    wb.set(5, 1, "C2");
+    wb.set(6, 0, "7");
+    let other = wb.table("Below", (5, 0, 6, 1));
+    let shown = totals_shifting(&wb, id);
+    assert!(shown.success, "{:?}", shown.error);
+    let t = wb.get(id).unwrap();
+    assert_eq!((t.start_row, t.end_row, t.style_options.total_row), (0, 5, true), "A1:B6 with its totals row");
+    let b = wb.get(other).unwrap();
+    assert_eq!((b.start_row, b.end_row), (6, 7), "the other table moved to A7:B8");
+    assert_eq!(wb.value(0, 6, 0), CellValue::Text("C1".to_string()));
+    assert_eq!(wb.value(0, 5, 3), CellValue::Text("x".to_string()), "D6 beside the tables stays");
+    assert_eq!(wb.value(0, 4, 0), CellValue::Text("r5".to_string()), "A5 is a data row now");
+    assert!(wb.formula(0, 5, 1).contains("SUBTOTAL(109,"), "{}", wb.formula(0, 5, 1));
+
+    wb.undo();
+    assert!(!wb.get(id).unwrap().style_options.total_row, "one Ctrl+Z takes the totals row back");
+    let b = wb.get(other).unwrap();
+    assert_eq!((b.start_row, b.end_row), (5, 6), "...and the move");
+    assert_eq!(wb.value(0, 5, 0), CellValue::Text("C1".to_string()));
+
+    // A WIDER table below: the insert would cut it, Excel refuses.
+    let wb = Wb::new(1);
+    let id = numbers_table(&wb);
+    wb.set(4, 0, "r5");
+    for col in 0..3u32 {
+        wb.set(5, col, &format!("W{}", col));
+    }
+    let wide = wb.table("Wide", (5, 0, 6, 2));
+    let refused = totals_shifting(&wb, id);
+    assert!(!refused.success, "a table wider than this one cannot be shifted");
+    assert!(!wb.get(id).unwrap().style_options.total_row);
+    assert_eq!(wb.get(wide).unwrap().start_row, 5);
+}
+
+/// BUG-0742. [LIVE, lane tabxlsx probe1 S2a/S2b] a totals row whose Sum was
+/// set to None comes back with no Sum after off and on; with its "Total"
+/// label cleared too it comes back EMPTY -- Excel never reapplies the
+/// defaults to a row the user emptied. Calcula put the label and the Sum back.
+/// SABOTAGE (tabxlsx-emptied): the hide branch no longer remembers the empty
+/// row (the `table_totals_all_empty` marker removed).
+#[test]
+fn an_emptied_totals_row_stays_empty_when_shown_again() {
+    let wb = Wb::new(1);
+    let id = numbers_table(&wb);
+    assert!(totals(&wb, id, true).success);
+    assert_eq!(wb.value(0, 4, 0), CellValue::Text("Total".to_string()), "fixture: the default label");
+    wb.with_table(id, |t| t.columns[1].totals_row_function = super::TotalsRowFunction::None);
+    wb.set(4, 1, "");
+    wb.set(4, 0, "");
+    assert!(totals(&wb, id, false).success);
+    assert!(totals(&wb, id, true).success);
+    assert_eq!(wb.value(0, 4, 0), CellValue::Empty, "no default label on an emptied row");
+    assert_eq!(wb.value(0, 4, 1), CellValue::Empty, "no default Sum on an emptied row");
+    assert!(wb.get(id).unwrap().columns.iter().all(|c| c.totals_row_function == super::TotalsRowFunction::None));
+
+    // S2a: only the Sum cleared -- the label comes back, the Sum does not.
+    let wb = Wb::new(1);
+    let id = numbers_table(&wb);
+    assert!(totals(&wb, id, true).success);
+    wb.with_table(id, |t| t.columns[1].totals_row_function = super::TotalsRowFunction::None);
+    wb.set(4, 1, "");
+    assert!(totals(&wb, id, false).success);
+    assert!(totals(&wb, id, true).success);
+    assert_eq!(wb.value(0, 4, 0), CellValue::Text("Total".to_string()));
+    assert_eq!(wb.value(0, 4, 1), CellValue::Empty);
+}
+
+/// BUG-0742. Typing a new header renames the column (and every reference to
+/// it) and is ONE Ctrl+Z, as in Excel: the header text, the column name and
+/// the readers all come back together. It was two steps: the first Ctrl+Z
+/// left the old text in a column already renamed.
+/// SABOTAGE (tabxlsx-onestep): `reopen_header_edit_step` answers `None`.
+#[test]
+fn a_header_edit_that_renames_a_column_is_one_undo_step() {
+    let wb = Wb::new(1);
+    let id = numbers_table(&wb);
+    let name = wb.get(id).unwrap().name;
+    wb.set(0, 4, &format!("=SUM({}[H2])", name));
+    let depth = wb.state.undo_stack.lock().unwrap().undo_depth();
+    wb.set(0, 1, "Amount");
+    let r = super::enforce_table_header_core(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters, id, 1, "Amount".to_string(),
+    );
+    assert!(r.success, "{:?}", r.error);
+    assert_eq!(wb.get(id).unwrap().columns[1].name, "Amount");
+    assert!(wb.formula(0, 0, 4).contains("[AMOUNT]"), "the reader follows: {}", wb.formula(0, 0, 4));
+    assert_eq!(wb.state.undo_stack.lock().unwrap().undo_depth(), depth + 1, "one undo step");
+    wb.undo();
+    assert_eq!(wb.value(0, 0, 1), CellValue::Text("H2".to_string()), "the header text is back");
+    assert_eq!(wb.get(id).unwrap().columns[1].name, "H2", "and the column's name");
+    assert!(wb.formula(0, 0, 4).contains("[H2]"), "and the reader: {}", wb.formula(0, 0, 4));
+}
+
+/// BUG-0750. [LIVE, Excel 16, 2026-11-06, lane tabxlsx probe1 S9] a table on
+/// a sheet that is then deleted: `=SUM(TT[H2])` becomes `=SUM(#REF!)`,
+/// `=IFERROR(SUM(TT[H1]),-1)` `=IFERROR(SUM(#REF!),-1)` (-1), and a
+/// reference to another sheet in the same formula is kept. Calcula kept
+/// `TT[H2]`, naming a table that no longer existed.
+/// SABOTAGE (tabxlsx-deltable): `retire_deleted_sheet_table_refs` answers
+/// `None`.
+#[test]
+fn deleting_a_sheet_turns_references_to_its_tables_into_ref_errors() {
+    let wb = Wb::new(3);
+    wb.switch_to(1);
+    let id = numbers_table(&wb);
+    let name = wb.get(id).unwrap().name;
+    wb.switch_to(0);
+    wb.set(0, 0, &format!("=SUM({}[H2])", name));
+    wb.set(1, 0, &format!("=IFERROR(SUM({}[H1]),-1)", name));
+    wb.set(2, 0, &format!("=SUM({}[H2])+SUM(Sheet3!A1)", name));
+    assert_eq!(wb.value(0, 0, 0), CellValue::Number(90.0), "fixture");
+    crate::sheets::delete_sheet_impl(
+        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer, &wb.timelines, 1, false, None,
+    )
+    .expect("the sheet is deleted");
+    assert_eq!(wb.formula(0, 0, 0), "SUM(#REF!)");
+    assert_eq!(wb.value(0, 0, 0), CellValue::Error(engine::CellError::Ref));
+    assert_eq!(wb.formula(0, 1, 0), "IFERROR(SUM(#REF!),-1)");
+    assert_eq!(wb.value(0, 1, 0), CellValue::Number(-1.0));
+    assert_eq!(wb.formula(0, 2, 0), "SUM(#REF!)+SUM(SHEET3!A1)");
+}

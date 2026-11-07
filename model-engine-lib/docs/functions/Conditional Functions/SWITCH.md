@@ -24,8 +24,8 @@ The result corresponding to the first matching value, or the default if no match
 
 ## Remarks
 
-- SWITCH generates a SQL `CASE expression WHEN value1 THEN result1 WHEN value2 THEN result2 ... ELSE default END` internally.
-- Values are compared using equality (`=`). For range comparisons, use [IF](IF.md) instead.
+- SWITCH generates a SQL `CASE expression WHEN value1 THEN result1 WHEN value2 THEN result2 ... ELSE default END` internally; when a value can itself be BLANK (an aggregate), `CASE WHEN expression IS NOT DISTINCT FROM value1 THEN ...`.
+- Values are compared with STRICT equality, as in DAX: a BLANK expression matches only a BLANK value, never `0` or `""` (unlike `=`, which reads BLANK as `0`). `SWITCH(SUM(t[x]), 0, "zero", "other")` over no rows is `"other"`. For range comparisons, use [IF](IF.md) instead.
 - The expression and all values/results can contain aggregation functions.
 - SWITCH always forces local computation — it is not pushed down to the data source.
 - If the number of remaining arguments after value/result pairs is odd, the last argument is treated as the default value.

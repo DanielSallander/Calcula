@@ -69,6 +69,11 @@
 //! * A formula Excel reads in its R1C1 fallback -- one that declares a
 //!   cell-shaped name or uses a bare `C` / `R` -- spells every other cell as
 //!   that reading means it ([`mark_r1c1_fallback`]).
+//! * A NAME spelled like a cell that Calcula's text quotes (`'D5'`, a formula
+//!   typed in R1C1 only for an R1C1 spelling, `=R[-1]C+D5`) is `_xlnm.D5`,
+//!   behind a sheet too ([`mark_quoted_cell_names`]; [LIVE] Excel saves
+//!   `J297+_xlnm.D5` and `J9+Sheet2!_xlnm.D5`), and the reader reads `_xlnm.D5`
+//!   back as `'D5'` wherever a bare `D5` would be the cell.
 //! * A formula Excel cannot hold at all -- a built-in called with an arity
 //!   Excel refuses, a LET / LAMBDA declaring one name twice ([`Unwritable`])
 //!   -- is written as its cell's value alone, and the loss reported
@@ -95,6 +100,11 @@ mod live_table;
 #[cfg(test)]
 #[path = "xlsx_formula_text_live_arity.rs"]
 mod live_arity;
+
+/// A name spelled like a cell and `@#REF!` through the file text.
+#[cfg(test)]
+#[path = "xlsx_formula_text_names_tests.rs"]
+mod names_tests;
 
 /// The prefix Excel gives a LAMBDA / LET parameter name in a file.
 const PARAMETER_PREFIX: &str = "_xlpm.";
@@ -160,6 +170,7 @@ pub(crate) fn excel_name_formula_text(formula: &str, names: &DefinedNames) -> St
     let mut scan = Scan { anchor: None, r1c1_fallback: false, refused: None };
     mark_parameters(collapsed, &tokens, 0, tokens.len(), &[], &mut scan, &mut edits);
     mark_r1c1_fallback(collapsed, &tokens, &mut scan, &mut edits);
+    mark_quoted_cell_names(collapsed, &tokens, &mut edits);
     mark_function_values(collapsed, &tokens, names, &mut edits);
     qualify_sheetless_references(collapsed, &tokens, &mut edits);
     operator_edits(collapsed, &tokens, &mut edits);
@@ -791,55 +802,18 @@ fn note_declared(declared: &mut Vec<String>, spelling: &str, scan: &mut Scan) {
     declared.push(spelling.to_string());
 }
 
-/// Calcula's own functions, which Excel does not have: [LIVE] Excel 16 types
-/// a call to each with any number of arguments (and shows `#NAME?`), so no
-/// arity of theirs makes a file Excel cannot open, and a bare one is no
+/// Calcula's own functions, which Excel does not have -- ONE list, the
+/// parser's (`parser::CALCULA_ONLY_FUNCTIONS`, which formula entry reads too):
+/// no arity of theirs makes a file Excel cannot open, and a bare one is no
 /// function value to Excel (`LET(f,LPAD,1)` is saved `LPAD`, never `_xleta.`).
-/// (`CHISQDIST` and `POISSONDIST` were built-ins here until lane legacystats,
-/// 2026-11-05: Excel has neither [LIVE: #NAME?], so they are no longer
-/// Calcula's either -- a call to one is an unknown name, as in Excel.)
-/// `AVG`, `CEIL`, `FACTORIAL` and `POW` were hidden aliases stored as
-/// AVERAGE / CEILING / FACT / POWER until lane formc (2026-11-05); they are
-/// Calcula's own functions now, kept under the name typed, and Excel has none
-/// of them ([LIVE] `=AVG(1,2)` #NAME?), so a file carries them as written.
-const CALCULA_ONLY_FUNCTIONS: [&str; 30] = [
-    "APPEND", "AVG", "CEIL", "COLLECT", "CONTAINS", "DICT", "EURO", "FACTORIAL", "FILEEXISTS", "FILELINES",
-    "FILEREAD", "FLATTEN", "GATHER", "GATHER.AT", "GATHER.COUNT", "GATHER.FROM", "GATHER.SUBMITTERS",
-    "GET.CELL.FILLCOLOR", "GET.COLUMN.WIDTH", "GET.CONTROLVALUE", "GET.ROW.HEIGHT", "ISDICT", "ISLIST", "KEYS",
-    "LPAD", "MERGE", "POW", "RPAD", "VALUES", "XLOOKUPS",
-];
+const CALCULA_ONLY_FUNCTIONS: [&str; 30] = parser::CALCULA_ONLY_FUNCTIONS;
 
 /// Whether Excel refuses a call to the built-in `name` with `given`
-/// arguments. [LIVE] Excel 16 (xlsxfmt probes 1-2: every Calcula built-in
-/// typed with A1 arguments at its catalog's fewest - 1, fewest, most and
-/// most + 1, a variadic one up to fewest + 3) refuses exactly what the
-/// catalog's syntax string allows not, except where the syntax string cannot
-/// say Excel's rule: the pair rules (`SUMIFS` takes 3, 5, 7 ..., `COUNTIFS`
-/// and `IFS` 2, 4, 6 ..., `SORTBY` 2, 3, 5, 7 ..., `GETPIVOTDATA` 2, 3, 4, 6,
-/// 8 ...) and catalog entries narrower than Excel (`GCD(4)`, `MAP` over three
-/// arrays, `BYROW(A1:C2)`, `INDEX`'s area number, `GROUPBY`'s 8th and
-/// `PIVOTBY`'s 11th argument). A function Calcula's catalog has no syntax
-/// for, or one Excel does not have, is never refused.
+/// arguments -- ONE rule, the parser's (`parser::excel_refuses_arity`), which
+/// formula ENTRY refuses by as well (BUG-0738). This file's live table
+/// (`xlsx_formula_text_live_arity.rs`) is what pins that rule against Excel.
 fn excel_refuses_arity(name: &str, given: usize) -> bool {
-    let upper = name.to_ascii_uppercase();
-    if CALCULA_ONLY_FUNCTIONS.contains(&upper.as_str()) {
-        return false;
-    }
-    let odd = given % 2 == 1;
-    let accepted = match upper.as_str() {
-        "SUMIFS" | "AVERAGEIFS" | "MINIFS" | "MAXIFS" => given >= 3 && odd,
-        "COUNTIFS" | "IFS" => given >= 2 && !odd,
-        "SORTBY" => given == 2 || (given >= 3 && odd),
-        "GETPIVOTDATA" => given >= 2 && (given == 3 || !odd),
-        "GCD" | "LCM" => given >= 1,
-        "MAP" => given >= 2,
-        "BYROW" | "BYCOL" => (1..=2).contains(&given),
-        "INDEX" => (2..=4).contains(&given),
-        "GROUPBY" => (3..=8).contains(&given),
-        "PIVOTBY" => (4..=11).contains(&given),
-        _ => parser::builtin_arity(&upper).map_or(true, |(fewest, most)| given >= fewest && most.map_or(true, |most| given <= most)),
-    };
-    !accepted
+    parser::excel_refuses_arity(name, given)
 }
 
 /// Whether a bare `name` (no call) is one of Excel's functions used as a
@@ -1293,6 +1267,36 @@ fn mark_r1c1_fallback(formula: &str, tokens: &[Token], scan: &mut Scan, edits: &
     }
 }
 
+/// Every NAME spelled like a cell that Calcula's text quotes (`'D5'`, the
+/// renderer's spelling of a name no cell-shaped LET / LAMBDA binds,
+/// `engine::ast_render::render_cell_shaped_name`) written as Excel's file
+/// spells it, `_xlnm.D5`, behind a sheet too. [LIVE, Excel 16, 2026-11-06,
+/// lane xlsx probe3] `=R[-1]C+D5` in J298 is saved `J297+_xlnm.D5` and
+/// `=R[-1]C+Sheet2!D5` in J10 `J9+Sheet2!_xlnm.D5`; Excel REFUSES to type
+/// the quoted spelling itself (`=R[-1]C+'D5'`, `='D5'+1`), so the quote can
+/// never stand in a file. A quoted run before `!` (or before `:` and a
+/// second sheet's `!`) is a sheet, and is left alone.
+fn mark_quoted_cell_names(formula: &str, tokens: &[Token], edits: &mut [Edit]) {
+    let kind = |i: usize| tokens.get(i).map(|t| t.kind);
+    for at in 0..tokens.len() {
+        if tokens[at].kind != Kind::QuotedSheet || edits[at].replace.is_some() {
+            continue;
+        }
+        let sheet = kind(at + 1) == Some(Kind::Punct('!'))
+            || (kind(at + 1) == Some(Kind::Punct(':'))
+                && matches!(kind(at + 2), Some(Kind::Name) | Some(Kind::QuotedSheet))
+                && kind(at + 3) == Some(Kind::Punct('!')));
+        if sheet {
+            continue;
+        }
+        let spelled = text(formula, &tokens[at]);
+        let inner = spelled.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')).unwrap_or(spelled);
+        if is_cell_spelling(inner) {
+            edits[at].replace = Some(format!("{}{}", CELL_NAME_PREFIX, inner));
+        }
+    }
+}
+
 /// Every bare name that is one of Excel's functions used as a value -- an
 /// argument (`MAP(A1:A3,ABS)`), a LET value, an operand -- written
 /// `_xleta.NAME` ([`is_excel_function_value`]). A parameter (already
@@ -1364,6 +1368,27 @@ fn intersection_operand(formula: &str, tokens: &[Token], at: usize) -> Option<(u
     }
     if kind(k) == Some(Kind::Bracket) {
         return Some((k, false));
+    }
+    // A reference whose sheet was deleted: `#REF!` alone in a file, Calcula's
+    // `#REF!A1:A3` in memory (`deleted_sheet_references`). [LIVE, Excel 16,
+    // 2026-11-06, lane xlsx probe3] `=SUM(@Gone!A1:A3)+1` after Gone is
+    // deleted shows `=SUM(@#REF!A1:A3)+1` and is saved
+    // `SUM(_xlfn.SINGLE(#REF!))+1`; `=@Gone!A1` `_xlfn.SINGLE(#REF!)`.
+    if kind(k) == Some(Kind::ErrorLiteral) && text(formula, &tokens[k]).eq_ignore_ascii_case("#REF!") {
+        let mut end = k;
+        while let Some(next) = tokens.get(end + 1) {
+            let part = next.start == tokens[end].end
+                && match next.kind {
+                    Kind::Reference | Kind::Number | Kind::Punct(':') => true,
+                    Kind::Other => text(formula, next) == "$",
+                    _ => false,
+                };
+            if !part {
+                break;
+            }
+            end += 1;
+        }
+        return Some((end, false));
     }
     if !is_range_half(tokens, k) {
         return None;
@@ -1658,6 +1683,7 @@ fn file_text(formula: &str, anchor: Option<(u32, u32)>, names: &DefinedNames) ->
     let mut scan = Scan { anchor, r1c1_fallback: false, refused: None };
     mark_parameters(formula, &tokens, 0, tokens.len(), &[], &mut scan, &mut edits);
     mark_r1c1_fallback(formula, &tokens, &mut scan, &mut edits);
+    mark_quoted_cell_names(formula, &tokens, &mut edits);
     mark_function_values(formula, &tokens, names, &mut edits);
     operator_edits(formula, &tokens, &mut edits);
     deleted_sheet_references(formula, &tokens, &mut edits);
@@ -1850,6 +1876,9 @@ pub(crate) fn calcula_cell_formula_text(file: &str, anchor: Option<(u32, u32)>) 
     let tokens = tokenize(file);
     let mut edits = vec![Edit::default(); tokens.len()];
     let kind = |i: usize| tokens.get(i).map(|t| t.kind);
+    // Every `_xlnm.` NAME spelled like a cell, by token, with its spelling:
+    // written quoted, and bare at the end where the bare text means the same.
+    let mut cell_names: Vec<(usize, String)> = Vec::new();
     for at in 0..tokens.len() {
         let token = tokens[at];
         let spelled = text(file, &token);
@@ -1860,9 +1889,21 @@ pub(crate) fn calcula_cell_formula_text(file: &str, anchor: Option<(u32, u32)>) 
                     continue;
                 }
                 if let Some(rest) = strip_prefix_ci(spelled, CELL_NAME_PREFIX) {
+                    // A spill anchor's name (`ANCHORARRAY(_xlnm.A1)`) is
+                    // already written, below.
+                    if edits[at].replace.is_some() {
+                        continue;
+                    }
                     let inner = tokenize(rest);
                     if inner.len() == 1 && inner[0].kind == Kind::Reference && is_cell_shaped(rest) {
-                        edits[at].replace = Some(rest.to_string());
+                        // A NAME spelled like a cell: quoted, as Excel shows it,
+                        // where a bare `D5` would be the CELL. [LIVE, Excel 16]
+                        // Excel writes `=R[-1]C+D5` as `J297+_xlnm.D5` and
+                        // shows `=J297+'D5'` (#NAME?); read bare it was a live
+                        // sum. Bare where Calcula reads the formula in R1C1
+                        // anyway (below).
+                        edits[at].replace = Some(format!("'{}'", rest));
+                        cell_names.push((at, rest.to_string()));
                     }
                     continue;
                 }
@@ -1922,6 +1963,10 @@ pub(crate) fn calcula_cell_formula_text(file: &str, anchor: Option<(u32, u32)>) 
                     // `=LET(A1,SEQUENCE(3),SUM(A1#))` as
                     // `.._xlfn.ANCHORARRAY(_xlpm.A1)..` and
                     // `=LET(x,SEQUENCE(3),SUM(x#))` as `..ANCHORARRAY(_xlpm.x)..`).
+                    // A DEFINED NAME's sheetless reference is `!A1` in the file
+                    // (`excel_name_formula_text`): the `!` (dropped by its own
+                    // arm below) is part of the reference.
+                    let first = open + 1 + usize::from(kind(open + 1) == Some(Kind::Punct('!')));
                     let last = close - 1;
                     let cell_name = close == open + 2
                         && kind(last) == Some(Kind::Name)
@@ -1933,7 +1978,7 @@ pub(crate) fn calcula_cell_formula_text(file: &str, anchor: Option<(u32, u32)>) 
                         edits[open].replace = Some(String::new());
                         edits[last].replace = Some(name[PARAMETER_PREFIX.len()..].to_string());
                         edits[close].replace = Some("#".to_string());
-                    } else if close > open + 1 && kind(last) == Some(Kind::Reference) && reference_start(&tokens, last) == open + 1 {
+                    } else if close > first && kind(last) == Some(Kind::Reference) && reference_start(&tokens, last) == first {
                         edits[at].replace = Some(String::new());
                         edits[open].replace = Some(String::new());
                         edits[close].replace = Some("#".to_string());
@@ -1942,9 +1987,11 @@ pub(crate) fn calcula_cell_formula_text(file: &str, anchor: Option<(u32, u32)>) 
                     edits[at].replace = Some("@".to_string());
                     // An operand `@` holds as it is (a reference, a range, a
                     // name, a call, a table reference) loses the parentheses;
-                    // anything else keeps them as its group.
-                    let atom = close > open + 1
-                        && intersection_operand(file, &tokens, open + 1).is_some_and(|(end, group)| !group && end == close - 1);
+                    // anything else keeps them as its group. A defined name's
+                    // sheetless `!A1:A3` is such an operand (see ANCHORARRAY).
+                    let first = open + 1 + usize::from(kind(open + 1) == Some(Kind::Punct('!')));
+                    let atom = close > first
+                        && intersection_operand(file, &tokens, first).is_some_and(|(end, group)| !group && end == close - 1);
                     if atom {
                         edits[open].replace = Some(String::new());
                         edits[close].replace = Some(String::new());
@@ -2000,7 +2047,34 @@ pub(crate) fn calcula_cell_formula_text(file: &str, anchor: Option<(u32, u32)>) 
             _ => {}
         }
     }
-    crate::xlsx_reader::strip_future_function_prefixes(&apply_edits(file, &tokens, &edits))
+    let quoted = crate::xlsx_reader::strip_future_function_prefixes(&apply_edits(file, &tokens, &edits));
+    if cell_names.is_empty() {
+        return quoted;
+    }
+    // A formula Calcula reads in R1C1 -- one declaring a cell-shaped LET /
+    // LAMBDA name, or holding a bare `C` / `R` (`parser::apply_r1c1_fallback`)
+    // -- reads a bare `D5` as the name too, and keeps the bare spelling it
+    // stores (`engine::ast_render::render_formula_raw`).
+    for (at, rest) in &cell_names {
+        edits[*at].replace = Some(rest.clone());
+    }
+    let bare = crate::xlsx_reader::strip_future_function_prefixes(&apply_edits(file, &tokens, &edits));
+    // A file's own cell-shaped parameter (`_xlpm.A1`, `_xlop.A1`) declares
+    // one, whatever the parser makes of an optional `[A1]`.
+    let declares_cell_parameter = tokens.iter().any(|t| {
+        t.kind == Kind::Name
+            && [PARAMETER_PREFIX, OPTIONAL_PREFIX]
+                .iter()
+                .any(|prefix| strip_prefix_ci(text(file, t), prefix).is_some_and(is_cell_spelling))
+    });
+    if declares_cell_parameter {
+        return bare;
+    }
+    match parser::parse(&format!("={}", bare)) {
+        Ok(ast) if parser::parser::declares_cell_shaped_name(&ast) || parser::parser::holds_unbound_r1c1_name(&ast) => bare,
+        Ok(_) => quoted,
+        Err(_) => bare,
+    }
 }
 
 /// A file's long-form this-row reference in Calcula's spelling (the inverse

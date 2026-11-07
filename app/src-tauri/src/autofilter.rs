@@ -316,6 +316,52 @@ pub struct AutoFilter {
     pub hidden_rows: HashSet<u32>,
     /// Whether the AutoFilter is enabled (showing filter dropdowns)
     pub enabled: bool,
+    /// The SORT the filter's data was last sorted by, Excel's
+    /// `AutoFilter.Sort` / `ListObject.Sort` (BUG-0740): Data > Reapply
+    /// re-filters AND re-sorts by it. `None` until a sort inside the filter's
+    /// range. Saved with the filter (`autofilters.json`; the manifest feature
+    /// id `autofilter_sort_state`) and as `<sortState>` in an .xlsx.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_state: Option<FilterSortState>,
+}
+
+/// A filter's remembered sort: its levels, with each `key` the column offset
+/// from the FILTER's first column (not the sorted range's), and its case rule.
+///
+/// [LIVE, Excel 16, 2026-11-06, lane tabxlsx probe1] A sheet filter on A1:B7
+/// ("V > 1") sorted descending by V, then V edited in two rows, then
+/// `AutoFilter.ApplyFilter` (Data > Reapply): the rows are filtered again and
+/// the VISIBLE rows sorted again, descending; the rows the filter hides keep
+/// their places. A table sorted ascending, edited and reapplied sorts again
+/// too, with or without a criterion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterSortState {
+    pub fields: Vec<crate::api_types::SortField>,
+    #[serde(default)]
+    pub match_case: bool,
+}
+
+/// The sort a row sort of `min_row..=max_row` x `min_col..=max_col` records on
+/// `af`, or `None` when it is not the filter's: Excel's `AutoFilter.Sort`
+/// sorts the filter's data rows across all its columns (the filter dropdown's
+/// Sort A to Z, Data > Sort over the filtered range), so only a sort of that
+/// whole range -- its header row the sort's header -- is remembered. Each
+/// level's key is the column offset from the sorted range's first column,
+/// which is the filter's first column here.
+pub(crate) fn sort_state_for(
+    af: &AutoFilter,
+    min_row: u32,
+    max_row: u32,
+    min_col: u32,
+    max_col: u32,
+    has_headers: bool,
+    fields: &[crate::api_types::SortField],
+    match_case: bool,
+) -> Option<FilterSortState> {
+    let data_start = if has_headers { min_row + 1 } else { min_row };
+    let whole = data_start == af.start_row + 1 && max_row == af.end_row && min_col == af.start_col && max_col == af.end_col;
+    (whole && !fields.is_empty()).then(|| FilterSortState { fields: fields.to_vec(), match_case })
 }
 
 /// Mint a fresh AutoFilter identity. Also the serde default, so a workbook
@@ -336,7 +382,57 @@ impl AutoFilter {
             column_filters: HashMap::new(),
             hidden_rows: HashSet::new(),
             enabled: true,
+            sort_state: None,
         }
+    }
+
+    /// Re-key everything keyed RELATIVE to the filter's first column -- its
+    /// column criteria AND its remembered sort's levels -- after a column edit
+    /// moved the filter from `old_start_col` (`start_col` / `end_col` already
+    /// hold the new range). `follow` maps a column's OLD absolute index to its
+    /// new one, `None` when the edit deleted it. A key that is gone or has left
+    /// the filter is dropped; a sort with no level left is forgotten.
+    ///
+    /// [LIVE, Excel 16, 2026-11-06, lane tab4 probe1] A filter on A1:C7 sorted
+    /// by B then C: deleting column B leaves ONE level, keyed on the old C (now
+    /// B); deleting column A moves both keys left; a table sorted on C with a
+    /// column inserted to its left keys on D, and on E after a column is added
+    /// inside it. Left alone, Reapply sorted by whatever column now sat at the
+    /// stale offset.
+    pub(crate) fn rekey_columns(&mut self, old_start_col: u32, follow: impl Fn(u32) -> Option<u32>) {
+        let (start, end) = (self.start_col, self.end_col);
+        let map = |rel: u32| -> Option<u32> {
+            let abs = follow(old_start_col.checked_add(rel)?)?;
+            (abs >= start && abs <= end).then(|| abs - start)
+        };
+        self.column_filters = std::mem::take(&mut self.column_filters)
+            .into_iter()
+            .filter_map(|(rel, mut cf)| {
+                let new_rel = map(rel)?;
+                cf.column_index = new_rel;
+                Some((new_rel, cf))
+            })
+            .collect();
+        if let Some(sort) = self.sort_state.as_mut() {
+            sort.fields.retain_mut(|f| match map(f.key) {
+                Some(new_rel) => {
+                    f.key = new_rel;
+                    true
+                }
+                None => false,
+            });
+            if sort.fields.is_empty() {
+                self.sort_state = None;
+            }
+        }
+    }
+
+    /// The keys [`AutoFilter::rekey_columns`] moves, for a "did anything
+    /// change?" test: the criteria's columns (sorted) and the sort's levels.
+    pub(crate) fn column_keys(&self) -> (Vec<u32>, Option<Vec<u32>>) {
+        let mut criteria: Vec<u32> = self.column_filters.keys().copied().collect();
+        criteria.sort_unstable();
+        (criteria, self.sort_state.as_ref().map(|s| s.fields.iter().map(|f| f.key).collect()))
     }
 
     /// Check if the AutoFilter has any active filter criteria.
@@ -1055,6 +1151,7 @@ pub(crate) fn validate_icon_criteria(criteria: &FilterCriteria) -> Result<(), St
 /// NOT the same as a missing one, which is why the predicate takes this by
 /// reference rather than as an `Option`.
 pub(crate) fn resolve_filter_icons(
+    state: &crate::AppState,
     grid: &Grid,
     grids: &[Grid],
     sheet_names: &[String],
@@ -1063,6 +1160,12 @@ pub(crate) fn resolve_filter_icons(
     auto_filter: &AutoFilter,
 ) -> IconResolution {
     let mut out: IconResolution = std::collections::HashMap::new();
+    if !auto_filter.column_filters.values().any(|f| f.criteria.filter_on == FilterOn::Icon) {
+        return out;
+    }
+    // The rule formulas resolve names, tables and spill references as the
+    // painter does (BUG-0748); snapshotted only when an icon filter needs them.
+    let names = crate::conditional_formatting::snapshot_rule_names(state);
     for (rel_col, col_filter) in &auto_filter.column_filters {
         if col_filter.criteria.filter_on != FilterOn::Icon {
             continue;
@@ -1085,6 +1188,7 @@ pub(crate) fn resolve_filter_icons(
             // uses. On a repaint a tripped budget costs a highlight; here it would
             // cost the wrong ROWS.
             crate::eval_budget::EvalSurface::Interactive,
+            Some(names.tables(sheet_names)),
         );
         let per_row = resolved.into_iter().map(|((r, _), v)| (r, v)).collect();
         out.insert(abs_col, per_row);
@@ -1237,6 +1341,7 @@ pub(crate) fn apply_auto_filter_inner(
     if active_sheet < grids.len() {
         // Resolve icons ONCE for this pass, only for icon-filtered columns.
         let filter_icons = resolve_filter_icons(
+            state,
             &grids[active_sheet],
             &grids,
             &cf_sheet_names_for_filter,
@@ -1332,6 +1437,7 @@ pub(crate) fn clear_column_criteria_on_sheet(
         let locale = state.locale.lock().ok()?;
         let theme = state.theme.read().ok()?;
         let filter_icons = resolve_filter_icons(
+            state,
             &grids[sheet],
             &grids,
             &cf_sheet_names_for_filter,
@@ -1466,6 +1572,7 @@ fn write_column_on_sheet(
         let locale = state.locale.lock().map_err(|e| e.to_string())?;
         let theme = state.theme.read().map_err(|e| e.to_string())?;
         let filter_icons = resolve_filter_icons(
+            state,
             &grids[sheet],
             &grids,
             &cf_sheet_names_for_filter,
@@ -1543,6 +1650,7 @@ fn clear_column_criteria_inner(
         if active_sheet < grids.len() {
             // Resolve icons ONCE for this pass, only for icon-filtered columns.
             let filter_icons = resolve_filter_icons(
+                state,
                 &grids[active_sheet],
                 &grids,
                 &cf_sheet_names_for_filter,
@@ -1596,6 +1704,13 @@ fn clear_auto_filter_criteria_inner(
     file_state: &FileState,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The filters the sheet's TABLES own, copied and released before the
+    // filter store is taken: a table's filter keeps its sort through Clear.
+    let table_filter_ids: Vec<identity::EntityId> = state
+        .tables
+        .read()
+        .map(|t| t.get(&active_sheet).map(|m| m.values().filter_map(|t| t.auto_filter_id).collect()).unwrap_or_default())
+        .unwrap_or_default();
     // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
     // this sheet") and must leave the document clean, so the dirty decision
     // belongs INSIDE the branch -- which is exactly what this guard postpones.
@@ -1611,6 +1726,13 @@ fn clear_auto_filter_criteria_inner(
             .expect("presence checked immediately above, under the same lock");
         auto_filter.column_filters.clear();
         auto_filter.hidden_rows.clear();
+        // [LIVE, Excel 16, 2026-11-06, lane tabxlsx verify probe1 P1/P3]
+        // `ShowAllData` (Data > Clear) on a SHEET filter forgets its sort --
+        // `AutoFilter.Sort.SortFields.Count` is 0 and a later Reapply moves
+        // nothing -- while a TABLE's filter keeps it and Reapply re-sorts.
+        if !table_filter_ids.contains(&auto_filter.id) {
+            auto_filter.sort_state = None;
+        }
 
         let all_rows: Vec<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
 
@@ -1642,8 +1764,76 @@ pub fn reapply_auto_filter(
     state: State<AppState>,
     file_state: State<FileState>,
 ) -> AutoFilterResult {
-    let result = reapply_auto_filter_inner(&state, &file_state);
+    use tauri::Manager;
+    let result = reapply_auto_filter_with_sort(
+        &state,
+        &file_state,
+        &app.state::<crate::persistence::UserFilesState>(),
+        &app.state::<crate::pivot::PivotState>(),
+        &app.state::<crate::pane_control::PaneControlState>(),
+        &app.state::<crate::ribbon_filter::RibbonFilterState>(),
+    );
     crate::calculation::recalc_visibility_after_row_change_from_handle(&app);
+    result
+}
+
+/// Data > Reapply as Excel does it (BUG-0740): the filter is applied again
+/// to the current data, then its remembered SORT (`AutoFilter::sort_state`)
+/// is applied again to the rows it shows -- ONE undo step. [LIVE, Excel 16,
+/// 2026-11-06, lane tabxlsx probe1] after a sort and two edits that broke its
+/// order, `AutoFilter.ApplyFilter` hid the rows the edits made fail and put
+/// the visible rows back in descending order, the hidden rows in place.
+pub(crate) fn reapply_auto_filter_with_sort(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+) -> AutoFilterResult {
+    let owned_txn = state.undo_stack.lock().unwrap().begin_owned_transaction("Reapply".to_string());
+    let mut result = reapply_auto_filter_inner(state, file_state);
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let sort = result
+        .success
+        .then(|| state.auto_filters.read().unwrap().get(&active_sheet).and_then(|af| {
+            af.sort_state.clone().map(|s| (af.start_row, af.start_col, af.end_row, af.end_col, s))
+        }))
+        .flatten();
+    if let Some((start_row, start_col, end_row, end_col, sort)) = sort {
+        let params = crate::api_types::SortRangeParams {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            fields: sort.fields,
+            match_case: sort.match_case,
+            has_headers: true,
+            orientation: crate::api_types::SortOrientation::Rows,
+            sheet_index: None,
+            target: None,
+        };
+        // The filter is reapplied; the sort could not be (a protected range,
+        // an array, a merge that entered the range since): said, never dropped
+        // in silence. `sort_range_core` refuses both ways -- an `Err`, and an
+        // `Ok` that is not a success (the merge and empty-fields refusals).
+        match crate::commands::data::sort_range_core(
+            state,
+            file_state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            params,
+        ) {
+            Err(e) => result.error = Some(e),
+            Ok(r) if !r.success => {
+                result.error = Some(r.error.unwrap_or_else(|| "The filter's sort could not be applied again.".to_string()))
+            }
+            Ok(_) => {}
+        }
+    }
+    state.undo_stack.lock().unwrap().commit_owned(owned_txn);
     result
 }
 
@@ -1697,6 +1887,7 @@ pub(crate) fn reapply_auto_filter_inner(
         if active_sheet < grids.len() {
             // Resolve icons ONCE for this pass, only for icon-filtered columns.
             let filter_icons = resolve_filter_icons(
+                state,
                 &grids[active_sheet],
                 &grids,
                 &cf_sheet_names_for_filter,
@@ -1787,10 +1978,13 @@ pub(crate) fn remove_auto_filter_inner(
         // and the reopened document differed from the one that was saved.
         //
         // Clearing the owner's flag makes the two agree and leaves the seed
-        // doing only the job it exists for: giving an IMPORTED workbook its
-        // table filters, since `load_xlsx` returns no `autofilters.json` at all
-        // (it hard-codes `user_files: HashMap::new()`), so `show_filter_button`
-        // carried in the table metadata is the only record there is.
+        // doing only the job it exists for: giving an IMPORTED workbook a
+        // filter for each table that shows filter buttons but carries no saved
+        // filter. `load_xlsx` writes `autofilters.json` for the table (and
+        // sheet) filters it can hold (`persistence::xlsx_autofilter`), a table
+        // whose part has a bare `<autoFilter ref>` included (its dropdowns);
+        // a table that lost the sheet's one slot to another filter is
+        // reported, and its `show_filter_button` is then the only record.
         let mut cleared_buttons: Vec<(identity::EntityId, bool)> = Vec::new();
         if let Ok(mut tables) = state.tables.write(&effect) {
             if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
@@ -2115,6 +2309,7 @@ fn set_column_filter_values_inner(
         if active_sheet < grids.len() {
             // Resolve icons ONCE for this pass, only for icon-filtered columns.
             let filter_icons = resolve_filter_icons(
+                state,
                 &grids[active_sheet],
                 &grids,
                 &cf_sheet_names_for_filter,
@@ -2235,6 +2430,7 @@ fn set_column_custom_filter_inner(
         if active_sheet < grids.len() {
             // Resolve icons ONCE for this pass, only for icon-filtered columns.
             let filter_icons = resolve_filter_icons(
+                state,
                 &grids[active_sheet],
                 &grids,
                 &cf_sheet_names_for_filter,
@@ -2366,6 +2562,7 @@ fn set_column_top_bottom_filter_inner(
         if active_sheet < grids.len() {
             // Resolve icons ONCE for this pass, only for icon-filtered columns.
             let filter_icons = resolve_filter_icons(
+                state,
                 &grids[active_sheet],
                 &grids,
                 &cf_sheet_names_for_filter,
@@ -3055,6 +3252,7 @@ fn set_column_dynamic_filter_inner(
         if active_sheet < grids.len() {
             // Resolve icons ONCE for this pass, only for icon-filtered columns.
             let filter_icons = resolve_filter_icons(
+                state,
                 &grids[active_sheet],
                 &grids,
                 &cf_sheet_names_for_filter,
@@ -3220,3 +3418,7 @@ mod autofilter_lock_order_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "autofilter_sort_state_tests.rs"]
+mod sort_state_tests;

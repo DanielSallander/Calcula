@@ -298,6 +298,9 @@ pub async fn bi_script_source(
     window: tauri::Window,
 ) -> Result<serde_json::Value, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state);
 
     // Authoritative grant re-check for the OWNING script.
     if !cap_store.is_granted(&script_id, "bi.connector") {
@@ -308,7 +311,7 @@ pub async fn bi_script_source(
             op
         );
         crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            &audit,
             "bi.connector",
             &script_id,
             false,
@@ -363,7 +366,7 @@ pub async fn bi_script_source(
     // Always-on audit, success + failure.
     match &result {
         Ok(_) => crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            &audit,
             "bi.connector",
             &script_id,
             true,
@@ -371,7 +374,7 @@ pub async fn bi_script_source(
             None,
         ),
         Err(e) => crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            &audit,
             "bi.connector",
             &script_id,
             false,

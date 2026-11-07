@@ -106,10 +106,14 @@ pub fn build_app_info(state: &AppState) -> script_engine::types::AppInfo {
         path_separator: std::path::MAIN_SEPARATOR.to_string(),
         decimal_separator,
         thousands_separator,
+        // The mode's NAME, as the object-script host reports it: "automatic",
+        // "manual", or "automaticExceptTables" (Excel's
+        // xlCalculationSemiautomatic) -- the stored mode is "automatic" plus a
+        // flag for the third, so reading the bare string hid it.
         calculation_mode: state
             .calculation_mode
             .lock()
-            .map(|m| m.clone())
+            .map(|m| crate::calculation::calculation_mode_name(state, &m))
             .unwrap_or(defaults.calculation_mode),
     }
 }

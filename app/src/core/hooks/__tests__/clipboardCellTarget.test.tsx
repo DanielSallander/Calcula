@@ -67,7 +67,7 @@ vi.mock("../../lib/dialogs", () => ({
 
 import { useClipboard, getInternalClipboard, type UseClipboardReturn } from "../useClipboard";
 import { GridProvider, useGridContext } from "../../state/GridContext";
-import { setSelection } from "../../state/gridActions";
+import { setSelection, setSheetContext } from "../../state/gridActions";
 import type { CellTargetRef, Selection } from "../../types";
 import type { CellTarget } from "../../lib/selectionOwner";
 
@@ -174,6 +174,27 @@ describe("Copy from a floating grid's cells", () => {
     expect(clip.sourceSheetName).toBe("Float1");
     expect(clip.sourceSheetIndex, "an object source is never a sheet index").toBe(-1);
     expect(clip.cells[0].map((c) => c?.display)).toEqual(["B2", "3"]);
+  });
+
+  it("BUG-0776 records the HOST sheet's stable id for a copy and a cut of an object's cells", async () => {
+    await act(async () => {
+      dispatchOut(setSheetContext(2, "Report", undefined, "S-report"));
+    });
+    await settle();
+    await act(async () => {
+      await hook.copy(undefined, grid(range(1, 1, 1, 2)));
+    });
+    let clip = getInternalClipboard()!;
+    expect(clip.sourceTarget).toEqual(REF);
+    expect(clip.sourceSheetId, "an object copy named no source sheet").toBe("S-report");
+    expect(clip.sourceSheetIndex, "still never a sheet index").toBe(-1);
+    await act(async () => {
+      await hook.cut(undefined, grid(range(1, 1, 1, 1)));
+    });
+    clip = getInternalClipboard()!;
+    expect(clip.isCut).toBe(true);
+    expect(clip.sourceSheetId, "an object cut named no source sheet").toBe("S-report");
+    expect(clip.sourceSheetIndex).toBe(-1);
   });
 });
 

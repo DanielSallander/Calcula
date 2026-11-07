@@ -125,16 +125,16 @@ fn a_chart_data_sheet_is_read_from_the_spec_data_source() {
     let w = world();
     let by_name = r#"{"chartId":"c","sheetIndex":2,"spec":{"data":"inputs!A1:B5","layers":[{"data":"Sheet1!A1:A2"}]}}"#;
     let n = &w.named_ranges;
-    assert_eq!(chart_data_sheet(by_name, &w.sheet_names, &w.sheet_ids, n), Some(INPUTS), "case-insensitive, spec.data only");
+    assert_eq!(chart_data_sheet(by_name, 2, &w.sheet_names, &w.sheet_ids, n), Some(INPUTS), "case-insensitive, spec.data only");
     let by_id = format!(
         r#"{{"spec":{{"data":{{"sheetId":"{}","sheetIndex":0,"startRow":0,"startCol":0,"endRow":4,"endCol":1}}}}}}"#,
         w.sheet_ids[INPUTS]
     );
-    assert_eq!(chart_data_sheet(&by_id, &w.sheet_names, &w.sheet_ids, n), Some(INPUTS), "the sheetId wins over the index");
+    assert_eq!(chart_data_sheet(&by_id, 2, &w.sheet_names, &w.sheet_ids, n), Some(INPUTS), "the sheetId wins over the index");
     let design_query = r#"{"spec":{"data":{"type":"designQuery","connectionId":"x"}}}"#;
-    assert_eq!(chart_data_sheet(design_query, &w.sheet_names, &w.sheet_ids, n), None);
+    assert_eq!(chart_data_sheet(design_query, 2, &w.sheet_names, &w.sheet_ids, n), None);
     let unqualified = r#"{"spec":{"data":"A1:B5"}}"#;
-    assert_eq!(chart_data_sheet(unqualified, &w.sheet_names, &w.sheet_ids, n), None);
+    assert_eq!(chart_data_sheet(unqualified, 2, &w.sheet_names, &w.sheet_ids, n), None);
 }
 
 /// A canvas chart whose data is a DEFINED NAME reads an unqualified bound
@@ -152,7 +152,7 @@ fn a_canvas_chart_over_a_defined_name_reads_on_the_names_sheet() {
     add_name(&mut w, "SalesData", "=Inputs!$A$1:$C$5");
     // An unqualified definition on a name scoped to Inputs: its scope sheet.
     w.named_ranges.insert(
-        "LOCALDATA".to_string(),
+        crate::named_ranges::registry_key(Some(INPUTS), "LocalData"),
         NamedRange {
             name: "LocalData".to_string(),
             sheet_index: Some(INPUTS),
@@ -167,12 +167,24 @@ fn a_canvas_chart_over_a_defined_name_reads_on_the_names_sheet() {
     add_name(&mut w, "Rate", "=0.25");
     let data_sheet = |data: &str| {
         let spec = format!(r#"{{"chartId":"c","sheetIndex":2,"spec":{{"data":"{data}"}}}}"#);
-        chart_data_sheet(&spec, &w.sheet_names, &w.sheet_ids, &w.named_ranges)
+        chart_data_sheet(&spec, 2, &w.sheet_names, &w.sheet_ids, &w.named_ranges)
     };
 
     assert_eq!(data_sheet("SalesData"), Some(INPUTS), "a name's data sheet is its definition's qualifier");
     assert_eq!(data_sheet(" salesdata "), Some(INPUTS), "trimmed, case-insensitive, as resolveDataSource looks it up");
-    assert_eq!(data_sheet("LocalData"), Some(INPUTS), "an unqualified definition reads the name's scope sheet");
+    // A name scoped to ANOTHER sheet is not reached unqualified (wave 4, lane
+    // obj4): asked from the chart's sheet it is not that sheet's, there is no
+    // workbook one, and Excel's Names() reads the FIRST sheet's own only
+    // [LIVE n1/n2]. It used to be found as "the lowest sheet index's".
+    assert_eq!(data_sheet("LocalData"), None, "another sheet's name, unqualified: not reached");
+    // On ITS sheet it is that sheet's own, and its unqualified definition
+    // reads the name's scope sheet.
+    let local = r#"{"chartId":"c","sheetIndex":1,"spec":{"data":"LocalData"}}"#;
+    assert_eq!(
+        chart_data_sheet(local, INPUTS, &w.sheet_names, &w.sheet_ids, &w.named_ranges),
+        Some(INPUTS),
+        "an unqualified definition reads the name's scope sheet"
+    );
     assert_eq!(data_sheet("Floating"), None, "a workbook-scoped unqualified name has no data sheet");
     assert_eq!(data_sheet("Rate"), None, "a constant is no range");
     assert_eq!(data_sheet("Missing"), None, "an unknown name is no source");
@@ -182,6 +194,43 @@ fn a_canvas_chart_over_a_defined_name_reads_on_the_names_sheet() {
     let n = norm(&w, REPORT, data_sheet("SalesData"), "=B1").unwrap();
     assert_eq!(n.text, "=Inputs!B1", "the bound title reads the sheet the chart's data is on");
     assert_eq!(n.analysis.warning, None, "the name's sheet is no fallback");
+
+    // TWO scopes of one spelling (a Copy Sheet makes them): the chart asks
+    // from ITS sheet -- that sheet's own name -- else the no-scope answer:
+    // the first sheet's own (Excel's Names(), [LIVE] lane obj4 n1/n2).
+    for (scope, refers_to) in [(SHEET1, "=Sheet1!$A$1:$B$4"), (REPORT, "=$A$1:$B$4")] {
+        w.named_ranges.insert(
+            crate::named_ranges::registry_key(Some(scope), "Twice"),
+            NamedRange {
+                name: "Twice".to_string(),
+                sheet_index: Some(scope),
+                refers_to: refers_to.to_string(),
+                comment: None,
+                folder: None,
+            },
+        );
+    }
+    let twice_from = |chart_sheet: usize| {
+        let spec = format!(r#"{{"chartId":"c","sheetIndex":{chart_sheet},"spec":{{"data":"Twice"}}}}"#);
+        chart_data_sheet(&spec, chart_sheet, &w.sheet_names, &w.sheet_ids, &w.named_ranges)
+    };
+    assert_eq!(twice_from(REPORT), Some(REPORT), "A SHEET-SCOPED NAME: the chart's own sheet's");
+    assert_eq!(twice_from(INPUTS), Some(SHEET1), "no name of its own: the first sheet's own");
+
+    // THE PLACEMENT ASKS (wave-3 verifier, namescalp): the spec JSON's own
+    // `sheetIndex` is a copy the backend never rewrites, so after a sheet move
+    // it names the sheet the chart USED to be on. Placed on Inputs now, with
+    // the stale copy still saying Report: Inputs has no Twice, so the first
+    // sheet's -- never Report's.
+    //
+    // SABOTAGE (obj4-cds): read the chart's sheet from the JSON copy again --
+    // fails here with Some(REPORT).
+    let stale = format!(r#"{{"chartId":"c","sheetIndex":{REPORT},"spec":{{"data":"Twice"}}}}"#);
+    assert_eq!(
+        chart_data_sheet(&stale, INPUTS, &w.sheet_names, &w.sheet_ids, &w.named_ranges),
+        Some(SHEET1),
+        "THE PLACEMENT ASKS: never the stale sheetIndex copy in the spec JSON"
+    );
 }
 
 #[test]

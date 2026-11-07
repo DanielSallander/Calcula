@@ -183,24 +183,156 @@ impl ResolvedFilter {
     }
 }
 
-/// Format a filter value for SQL based on the target column's data type.
+/// Format a filter value for SQL as the target COLUMN's type: a
+/// [`FilterPredicate`]'s literal is stored as text (`"9"`), and its type is
+/// the column's ([`filter_column_type`], rendered by [`typed_filter_literal`]),
+/// so `t[amount] > 9` compares numbers as numbers and `t[code] < "9"` on a
+/// text column compares text as text. A column the model does not know is
+/// quoted (the comparison then fails or compares as text; it never inlines an
+/// unvalidated value).
 ///
-/// Looks up the column type in the model. Numeric/boolean values are bare;
-/// string/date/timestamp values are single-quoted. Falls back to quoting if
-/// the column type cannot be determined.
+/// It used to look only among the table's PHYSICAL columns, by exact name:
+/// a KEEP on a numeric CALCULATED column (`t[double_amount] > 9`) or one
+/// spelling the table in another case quoted its number, and DataFusion
+/// compared the column as TEXT (`'20' > '9'` is FALSE; BUG-0758). It also
+/// inlined ANY value bare for a numeric column, so a value that is not a
+/// number reached the SQL unquoted.
+///
+/// BLANK stays strict here: a BLANK column value never satisfies the
+/// comparison (SQL's `NULL op x`), even `= 0`. DAX reads BLANK as 0 / "" /
+/// FALSE in a comparison ([`crate::compute::dax_semantics::comparison_operand`]);
+/// a KEEP's simple predicate does not take that rule yet, an open DAX-parity
+/// item for KEEP alone. Row-level security never reaches this renderer: it
+/// shares the [`FilterPredicate`] type, but every role predicate is converted
+/// by `engine_query::security_filter`, strict on BLANK by owner decision
+/// (BUG-0759, 2026-11-06), so a later DAX rule for KEEP cannot widen it.
 pub fn format_filter_value(table: &str, column: &str, value: &str, model: &DataModel) -> String {
-    let needs_quoting = model
-        .table(table)
-        .ok()
-        .and_then(|t| t.column(column).ok())
-        .map(|c| c.data_type().needs_sql_quoting())
-        .unwrap_or(true);
-
-    if needs_quoting {
-        sql_quote_literal(value)
-    } else {
-        value.to_string()
+    match filter_column_type(table, column, model) {
+        Some(data_type) => typed_filter_literal(&data_type, value),
+        None => sql_quote_literal(value),
     }
+}
+
+/// The model type of a filter predicate's column `table[column]`: a physical
+/// column, a calculated column or a context-driven calculated column of the
+/// table, matched as the engine matches identifiers -- exactly first, then
+/// ASCII case-insensitively (DAX names are case-insensitive). `None` when the
+/// model has no such column.
+pub fn filter_column_type(
+    table: &str,
+    column: &str,
+    model: &DataModel,
+) -> Option<crate::types::DataType> {
+    fn pick<'a, T>(items: &'a [T], name: &str, name_of: impl Fn(&T) -> &str) -> Option<&'a T> {
+        items
+            .iter()
+            .find(|i| name_of(i) == name)
+            .or_else(|| items.iter().find(|i| name_of(i).eq_ignore_ascii_case(name)))
+    }
+    let host = pick(model.tables(), table, |t| t.name());
+    if let Some(found) = host.and_then(|t| pick(t.columns(), column, |c| c.name())) {
+        return Some(found.data_type().clone());
+    }
+    let host_name = host.map_or(table, |t| t.name());
+    let calculated: Vec<_> = model
+        .calculated_columns()
+        .iter()
+        .filter(|c| c.table().eq_ignore_ascii_case(host_name))
+        .collect();
+    if let Some(found) = pick(&calculated, column, |c| c.name()) {
+        return Some(found.data_type().clone());
+    }
+    let contextual: Vec<_> = model
+        .context_columns()
+        .iter()
+        .filter(|c| c.table().eq_ignore_ascii_case(host_name))
+        .collect();
+    pick(&contextual, column, |c| c.name()).map(|c| c.data_type().clone())
+}
+
+/// A filter predicate's text literal `value` as a SQL literal of the model
+/// type `data_type`: a number bare for a numeric column (only when `value` IS
+/// a plain number -- [`is_plain_number_literal`] -- otherwise quoted, so no
+/// unvalidated text is ever inlined), `TRUE` / `FALSE` for a boolean column,
+/// and a quoted string for text, date and timestamp columns (DataFusion and
+/// the sources cast an ISO date string to the column's date type).
+pub fn typed_filter_literal(data_type: &crate::types::DataType, value: &str) -> String {
+    use crate::types::DataType;
+    match data_type {
+        DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Decimal(_, _)
+            if is_plain_number_literal(value) =>
+        {
+            value.to_string()
+        }
+        DataType::Boolean if value.eq_ignore_ascii_case("true") => "TRUE".to_string(),
+        DataType::Boolean if value.eq_ignore_ascii_case("false") => "FALSE".to_string(),
+        _ => sql_quote_literal(value),
+    }
+}
+
+/// [`typed_filter_literal`] for a column known by its ARROW type (a
+/// materialized intermediate table): integers, floats and decimals take a
+/// plain number bare, booleans `TRUE` / `FALSE`, a dictionary-encoded column
+/// its VALUE type, anything else a quoted string.
+pub fn typed_filter_literal_for_arrow(
+    data_type: &arrow::datatypes::DataType,
+    value: &str,
+) -> String {
+    use arrow::datatypes::DataType as A;
+    use crate::types::DataType;
+    let model_type = match data_type {
+        A::Dictionary(_, value_type) => return typed_filter_literal_for_arrow(value_type, value),
+        A::Int8 | A::Int16 | A::Int32 | A::Int64 | A::UInt8 | A::UInt16 | A::UInt32 | A::UInt64 => {
+            DataType::Int64
+        }
+        A::Float16 | A::Float32 | A::Float64 => DataType::Float64,
+        A::Decimal128(p, s) | A::Decimal256(p, s) => DataType::Decimal(*p, *s),
+        A::Boolean => DataType::Boolean,
+        _ => DataType::String,
+    };
+    typed_filter_literal(&model_type, value)
+}
+
+/// Is `value` a plain SQL number literal: an optional `-`, digits with an
+/// optional fraction (`9`, `9.5`, `.5`), and an optional exponent (`1e5`)?
+/// Nothing else (`inf`, `NaN`, whitespace, an expression) is ever rendered
+/// bare.
+pub fn is_plain_number_literal(value: &str) -> bool {
+    let b = value.as_bytes();
+    let mut i = usize::from(b.first() == Some(&b'-'));
+    let int_start = i;
+    while b.get(i).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+    }
+    let mut digits = i - int_start;
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        let frac_start = i;
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        if i == frac_start {
+            return false;
+        }
+        digits += i - frac_start;
+    }
+    if digits == 0 {
+        return false;
+    }
+    if matches!(b.get(i), Some(b'e') | Some(b'E')) {
+        i += 1;
+        if matches!(b.get(i), Some(b'+') | Some(b'-')) {
+            i += 1;
+        }
+        let exp_start = i;
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        if i == exp_start {
+            return false;
+        }
+    }
+    i == b.len()
 }
 
 /// A resolved IN-membership filter.
@@ -2356,6 +2488,89 @@ mod tests {
         let model = test_model();
         let result = format_filter_value("Unknown", "col", "val", &model);
         assert_eq!(result, "'val'");
+    }
+
+    #[test]
+    fn a_filter_literal_takes_the_type_of_a_calculated_or_differently_cased_column() {
+        // BUG-0758: a KEEP on a numeric CALCULATED column (or spelling the
+        // table in another case) quoted its number, so DataFusion compared
+        // the column as TEXT ('20' > '9' is FALSE).
+        let model = test_model()
+            .with_calculated_columns(vec![
+                crate::model::CalculatedColumn::new(
+                    "double_amount",
+                    "Sales",
+                    expr::col("amount"),
+                    DataType::Float64,
+                ),
+                crate::model::CalculatedColumn::new(
+                    "code",
+                    "Sales",
+                    expr::col("region"),
+                    DataType::String,
+                ),
+                crate::model::CalculatedColumn::new(
+                    "day",
+                    "Sales",
+                    Expression::LiteralDate(19_723),
+                    DataType::Date,
+                ),
+            ]);
+        assert_eq!(format_filter_value("Sales", "double_amount", "9", &model), "9");
+        assert_eq!(format_filter_value("Sales", "Double_Amount", "9.5", &model), "9.5");
+        assert_eq!(format_filter_value("sales", "amount", "9", &model), "9");
+        assert_eq!(format_filter_value("SALES", "ID", "-12", &model), "-12");
+        // A text calculated column that holds digits keeps comparing as text.
+        assert_eq!(format_filter_value("Sales", "code", "9", &model), "'9'");
+        assert_eq!(format_filter_value("Sales", "day", "2024-01-09", &model), "'2024-01-09'");
+        assert_eq!(
+            filter_column_type("sales", "DOUBLE_AMOUNT", &model),
+            Some(DataType::Float64)
+        );
+        assert_eq!(filter_column_type("Sales", "nothing", &model), None);
+    }
+
+    #[test]
+    fn a_numeric_column_never_inlines_a_value_that_is_not_a_number() {
+        let model = test_model();
+        // The literal was inlined bare for any numeric column.
+        assert_eq!(
+            format_filter_value("Sales", "amount", "1 OR 1=1", &model),
+            "'1 OR 1=1'"
+        );
+        assert_eq!(format_filter_value("Sales", "amount", "inf", &model), "'inf'");
+        assert_eq!(format_filter_value("Sales", "amount", "", &model), "''");
+        assert_eq!(format_filter_value("Sales", "amount", "1e3", &model), "1e3");
+        assert_eq!(format_filter_value("Sales", "amount", ".5", &model), ".5");
+        for bad in ["-", "1.", "1e", "1e+", "--1", "1 ", "0x10", "1_000", "NaN"] {
+            assert!(!is_plain_number_literal(bad), "{bad:?} is not a plain number");
+        }
+        for good in ["0", "-7", "12.25", "-0.5", "6.02e23", "1E-3", ".5"] {
+            assert!(is_plain_number_literal(good), "{good:?} is a plain number");
+        }
+        let booleans = DataModel::builder()
+            .add_table(Table::new("T", vec![Column::new("flag", DataType::Boolean)]).unwrap())
+            .build()
+            .unwrap();
+        assert_eq!(format_filter_value("T", "flag", "true", &booleans), "TRUE");
+        assert_eq!(format_filter_value("T", "flag", "FALSE", &booleans), "FALSE");
+        assert_eq!(format_filter_value("T", "flag", "yes", &booleans), "'yes'");
+    }
+
+    #[test]
+    fn an_arrow_typed_filter_literal_follows_the_value_type_of_a_dictionary() {
+        use arrow::datatypes::DataType as A;
+        let dict = A::Dictionary(Box::new(A::Int32), Box::new(A::Utf8));
+        // A dictionary-encoded text column was inlined UNQUOTED.
+        assert_eq!(typed_filter_literal_for_arrow(&dict, "Bikes"), "'Bikes'");
+        assert_eq!(typed_filter_literal_for_arrow(&A::Utf8View, "x"), "'x'");
+        let int_dict = A::Dictionary(Box::new(A::Int32), Box::new(A::Int64));
+        assert_eq!(typed_filter_literal_for_arrow(&int_dict, "100"), "100");
+        assert_eq!(typed_filter_literal_for_arrow(&A::Int32, "9"), "9");
+        assert_eq!(typed_filter_literal_for_arrow(&A::Int32, "9 OR 1=1"), "'9 OR 1=1'");
+        assert_eq!(typed_filter_literal_for_arrow(&A::Decimal128(10, 2), "9.5"), "9.5");
+        assert_eq!(typed_filter_literal_for_arrow(&A::Boolean, "true"), "TRUE");
+        assert_eq!(typed_filter_literal_for_arrow(&A::Date32, "2024-01-09"), "'2024-01-09'");
     }
 
     #[test]

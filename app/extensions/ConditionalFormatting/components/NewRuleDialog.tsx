@@ -15,9 +15,25 @@
 //          written here and the same preset picked from a gallery are the same
 //          rule. A refusal keeps the dialog open with the reason in an alert
 //          line (it used to escape as an unhandled promise rejection).
+//
+//          The data-bar page offers every option the painter honours
+//          (BUG-0728, DataBarRuleOptions.tsx), the icon-set page Reverse Icon
+//          Order and Show Icon Only; a formula typed on any page is relative to
+//          the selection's ACTIVE cell and is stored for the rule's first cell
+//          (BUG-0748, ../lib/ruleFormulaAnchor.ts) -- Excel's rule.
+//
+//          EDIT RULE (the Rules Manager's door, data.editRule): the same
+//          dialog shows a STORED rule (../lib/editRuleState.ts) and OK
+//          writes it back over the rule -- its formula as typed, for the
+//          rule's first cell, as Excel's Edit Rule stores it [LIVE].
+//
+//          Opened from the Rules Manager with `data.onBuilt`, OK writes NOTHING:
+//          it hands the rule to the Manager, which keeps it until its own OK or
+//          Apply (Excel's Manager buffers New Rule and Edit Rule with the rest;
+//          its Cancel drops them -- lane cfdvfix).
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps, TimePeriod } from "@api";
+import type { DialogProps, TimePeriod, ConditionalFormatDefinition } from "@api";
 import { restoreFocusToGrid } from "@api";
 import type {
   ConditionalFormatRule,
@@ -29,15 +45,17 @@ import type {
   AverageRuleType,
   IconSetType,
 } from "@api";
-import { tryAddRule } from "../lib/ruleWrites";
+import { tryAddRule, tryUpdateRule, reasonOf } from "../lib/ruleWrites";
+import { editStateOf, mergeEditedRule, OWN_PRESET, type RuleEditState } from "../lib/editRuleState";
+import { ruleForAnchor, UNMOVABLE_FORMULA_REFUSAL, type CellPos } from "../lib/ruleFormulaAnchor";
 import { DIALOG_THEME as DT } from "../../_shared/lib/dialogTheme";
 import type { CellTargetRef } from "@api/cellTarget";
-import { colorScaleRule, dataBarRule, iconSetRule } from "../lib/presetRules";
+import { colorScaleRule, iconSetRule } from "../lib/presetRules";
+import { DEFAULT_DATA_BAR_UI, dataBarRuleFromUi, type DataBarUi } from "../lib/dataBarOptions";
+import { DataBarRuleOptions, DataBarPreview } from "./DataBarRuleOptions";
 import {
   PRESET_STYLES,
   PRESET_COLOR_SCALES,
-  PRESET_DATA_BARS,
-  PRESET_DATA_BAR_COLORS,
   DATE_OCCURRING_PERIODS,
   ICON_SET_CATEGORIES,
   colorScaleName,
@@ -259,80 +277,110 @@ function initialFormatStyleOf(data: Record<string, unknown> | undefined): NewRul
   return FORMAT_STYLES.includes(asked as NewRuleFormatStyle) ? (asked as NewRuleFormatStyle) : "colorScale";
 }
 
+/** What OK hands the Rules Manager in its buffered mode (`data.onBuilt`). */
+export interface BuiltCfRule {
+  rule: ConditionalFormatRule;
+  format: ConditionalFormat;
+  /** A NEW rule's Applies To; absent for an edited rule (its ranges stay). */
+  ranges?: ConditionalFormatRange[];
+}
+
 export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) => {
   const selection = data?.selection as ConditionalFormatRange | null;
   // A floating grid's cells (P3): the rule is written with the object's target.
   const target = data?.target as CellTargetRef | undefined;
+  // The selection's ACTIVE cell: a formula typed here is relative to it.
+  const activeCell = (data?.activeCell as CellPos | null | undefined) ?? null;
+  // EDIT RULE: the stored rule this dialog shows and writes back (the Rules
+  // Manager's Edit Rule...). Opened from inside the Manager (`nested`), it
+  // hands the focus back to the Manager, not the grid.
+  const editRule = data?.editRule as ConditionalFormatDefinition | undefined;
+  const nested = data?.nested === true;
+  // The Rules Manager's buffer (see the header): OK hands the rule over.
+  const onBuilt = data?.onBuilt as ((built: BuiltCfRule) => void) | undefined;
+  const [init] = useState<RuleEditState | null>(() => (editRule ? editStateOf(editRule) : null));
 
   // Category selection: the page the door asked for (the dialog mounts per
   // opening, so the data is read once, here).
-  const [selectedCategory, setSelectedCategory] = useState<RuleCategory>(() => initialCategoryOf(data));
+  const [selectedCategory, setSelectedCategory] = useState<RuleCategory>(() => init?.category ?? initialCategoryOf(data));
 
-  // Format preset
-  const [formatIndex, setFormatIndex] = useState(0);
+  // Format preset (OWN_PRESET: an edited rule's own format, matching no preset)
+  const [formatIndex, setFormatIndex] = useState(init?.formatIndex ?? 0);
 
   // --- formatByValues state ---
-  const [formatByValuesType, setFormatByValuesType] = useState<NewRuleFormatStyle>(() => initialFormatStyleOf(data));
-  const [colorScalePresetIndex, setColorScalePresetIndex] = useState(0);
-  const [dataBarColorIndex, setDataBarColorIndex] = useState(0);
-  const [iconSetType, setIconSetType] = useState<IconSetType>("threeTrafficLights1");
+  const [formatByValuesType, setFormatByValuesType] = useState<NewRuleFormatStyle>(() => init?.formatByValuesType ?? initialFormatStyleOf(data));
+  const [colorScalePresetIndex, setColorScalePresetIndex] = useState(init?.colorScalePresetIndex ?? 0);
+  // Every data-bar option Excel's page offers (BUG-0728, lib/dataBarOptions.ts).
+  const [dataBar, setDataBar] = useState<DataBarUi>(init?.dataBar ?? DEFAULT_DATA_BAR_UI);
+  const [iconSetType, setIconSetType] = useState<IconSetType>(init?.iconSetType ?? "threeTrafficLights1");
+  // Excel's Reverse Icon Order and Show Icon Only.
+  const [iconReverse, setIconReverse] = useState(init?.iconReverse ?? false);
+  const [iconOnly, setIconOnly] = useState(init?.iconOnly ?? false);
 
   // --- formatContaining state ---
-  const [containingType, setContainingType] = useState<"cellValue" | "text" | "dates" | "blanks" | "noBlanks" | "errors" | "noErrors">("cellValue");
-  const [cellValueOperator, setCellValueOperator] = useState<CellValueOperator>("greaterThan");
-  const [cellValue1, setCellValue1] = useState("");
-  const [cellValue2, setCellValue2] = useState("");
-  const [textRuleType, setTextRuleType] = useState<TextRuleType>("contains");
-  const [textValue, setTextValue] = useState("");
-  const [datePeriod, setDatePeriod] = useState<TimePeriod>(DATE_OCCURRING_PERIODS[0].value);
+  const [containingType, setContainingType] = useState<"cellValue" | "text" | "dates" | "blanks" | "noBlanks" | "errors" | "noErrors">(init?.containingType ?? "cellValue");
+  const [cellValueOperator, setCellValueOperator] = useState<CellValueOperator>(init?.cellValueOperator ?? "greaterThan");
+  const [cellValue1, setCellValue1] = useState(init?.cellValue1 ?? "");
+  const [cellValue2, setCellValue2] = useState(init?.cellValue2 ?? "");
+  const [textRuleType, setTextRuleType] = useState<TextRuleType>(init?.textRuleType ?? "contains");
+  const [textValue, setTextValue] = useState(init?.textValue ?? "");
+  const [datePeriod, setDatePeriod] = useState<TimePeriod>(init?.datePeriod ?? DATE_OCCURRING_PERIODS[0].value);
 
   // A refusal stays on screen; OK is inert while a write is in flight.
   const [refusal, setRefusal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   // --- topBottom state ---
-  const [topBottomType, setTopBottomType] = useState<TopBottomType>("topItems");
-  const [topBottomRank, setTopBottomRank] = useState("10");
+  const [topBottomType, setTopBottomType] = useState<TopBottomType>(init?.topBottomType ?? "topItems");
+  const [topBottomRank, setTopBottomRank] = useState(init?.topBottomRank ?? "10");
 
   // --- aboveBelow state ---
-  const [averageType, setAverageType] = useState<AverageRuleType>("aboveAverage");
+  const [averageType, setAverageType] = useState<AverageRuleType>(init?.averageType ?? "aboveAverage");
 
   // --- uniqueDuplicate state ---
-  const [dupUniqueType, setDupUniqueType] = useState<"duplicateValues" | "uniqueValues">("duplicateValues");
+  const [dupUniqueType, setDupUniqueType] = useState<"duplicateValues" | "uniqueValues">(init?.dupUniqueType ?? "duplicateValues");
 
   // --- formula state ---
-  const [formulaExpression, setFormulaExpression] = useState("");
+  const [formulaExpression, setFormulaExpression] = useState(init?.formulaExpression ?? "");
 
   // Whether this category uses the format preset selector
   const usesFormatPreset = selectedCategory !== "formatByValues";
 
   const handleOk = useCallback(async () => {
-    if (!selection) {
+    if (!selection && !editRule) {
       onClose();
       return;
     }
 
     let rule: ConditionalFormatRule;
     let format: ConditionalFormat = {};
+    // The chosen preset's look, or an edited rule's own format kept whole.
+    const presetFormat = (): ConditionalFormat => {
+      if (formatIndex === OWN_PRESET && editRule) return { ...editRule.format };
+      const preset = PRESET_STYLES[Math.max(0, formatIndex)];
+      return { backgroundColor: preset.backgroundColor || undefined, textColor: preset.textColor || undefined };
+    };
 
     switch (selectedCategory) {
       case "formatByValues":
         // The galleries' own builders: one preset, one rule, whichever door.
         if (formatByValuesType === "colorScale") {
-          rule = colorScaleRule(PRESET_COLOR_SCALES[colorScalePresetIndex]);
+          rule =
+            colorScalePresetIndex === OWN_PRESET && editRule?.rule.type === "colorScale"
+              ? editRule.rule
+              : colorScaleRule(PRESET_COLOR_SCALES[Math.max(0, colorScalePresetIndex)]);
         } else if (formatByValuesType === "dataBar") {
-          rule = dataBarRule(PRESET_DATA_BAR_COLORS[dataBarColorIndex], true);
+          rule = dataBarRuleFromUi(dataBar);
         } else {
           const iconCount = iconSetType.startsWith("five") ? 5
             : iconSetType.startsWith("four") ? 4
             : 3;
-          rule = iconSetRule(iconSetType, iconCount);
+          rule = { ...iconSetRule(iconSetType, iconCount), reverseIcons: iconReverse, showIconOnly: iconOnly } as ConditionalFormatRule;
         }
         break;
 
       case "formatContaining": {
-        const preset = PRESET_STYLES[formatIndex];
-        format = { backgroundColor: preset.backgroundColor || undefined, textColor: preset.textColor || undefined };
+        format = presetFormat();
         if (containingType === "cellValue") {
           rule = { type: "cellValue", operator: cellValueOperator, value1: cellValue1, value2: cellValue2 || undefined };
         } else if (containingType === "text") {
@@ -352,29 +400,25 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
       }
 
       case "topBottom": {
-        const preset = PRESET_STYLES[formatIndex];
-        format = { backgroundColor: preset.backgroundColor || undefined, textColor: preset.textColor || undefined };
+        format = presetFormat();
         rule = { type: "topBottom", ruleType: topBottomType, rank: parseInt(topBottomRank) || 10 };
         break;
       }
 
       case "aboveBelow": {
-        const preset = PRESET_STYLES[formatIndex];
-        format = { backgroundColor: preset.backgroundColor || undefined, textColor: preset.textColor || undefined };
+        format = presetFormat();
         rule = { type: "aboveAverage", ruleType: averageType };
         break;
       }
 
       case "uniqueDuplicate": {
-        const preset = PRESET_STYLES[formatIndex];
-        format = { backgroundColor: preset.backgroundColor || undefined, textColor: preset.textColor || undefined };
+        format = presetFormat();
         rule = { type: dupUniqueType };
         break;
       }
 
       case "formula": {
-        const preset = PRESET_STYLES[formatIndex];
-        format = { backgroundColor: preset.backgroundColor || undefined, textColor: preset.textColor || undefined };
+        format = presetFormat();
         rule = { type: "expression", formula: formulaExpression };
         break;
       }
@@ -385,11 +429,61 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
     }
 
     if (busy) return;
+    if (editRule && onBuilt) {
+      onBuilt({ rule: mergeEditedRule(editRule.rule, rule, colorScalePresetIndex === OWN_PRESET), format });
+      onClose();
+      return;
+    }
+    if (editRule) {
+      // EDIT RULE: written over the stored rule, its formula as typed (for the
+      // rule's first cell -- Excel's Edit Rule does not convert it [LIVE]),
+      // with what the dialog cannot show kept (lib/editRuleState.ts).
+      setBusy(true);
+      setRefusal(null);
+      const refusedEdit = await tryUpdateRule(
+        {
+          ruleId: editRule.id,
+          rule: mergeEditedRule(editRule.rule, rule, colorScalePresetIndex === OWN_PRESET),
+          format,
+        },
+        target,
+      );
+      setBusy(false);
+      if (refusedEdit !== null) {
+        setRefusal(refusedEdit);
+        return;
+      }
+      onClose();
+      if (!nested) restoreFocusToGrid();
+      return;
+    }
+    if (!selection) return;
     setBusy(true);
     setRefusal(null);
+    // What was typed is relative to the ACTIVE cell; the rule stores it for its
+    // first cell (BUG-0748, Excel's rule: lib/ruleFormulaAnchor.ts).
+    let stated: ConditionalFormatRule | null;
+    try {
+      stated = await ruleForAnchor(rule, [selection], activeCell);
+    } catch (err) {
+      setBusy(false);
+      setRefusal(reasonOf(err));
+      return;
+    }
+    if (stated === null) {
+      setBusy(false);
+      setRefusal(UNMOVABLE_FORMULA_REFUSAL);
+      return;
+    }
+    if (onBuilt) {
+      setBusy(false);
+      onBuilt({ rule: stated, format, ranges: [selection] });
+      onClose();
+      return;
+    }
     const refused = await tryAddRule(
       {
-        rule,
+        rule: stated,
         format,
         ranges: [selection],
         stopIfTrue: false,
@@ -403,18 +497,18 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
       return;
     }
     onClose();
-    restoreFocusToGrid();
+    if (!nested) restoreFocusToGrid();
   }, [
-    selectedCategory, selection, target, onClose, formatIndex, busy,
-    formatByValuesType, colorScalePresetIndex, dataBarColorIndex, iconSetType,
+    selectedCategory, selection, target, activeCell, onClose, formatIndex, busy, editRule, nested, onBuilt,
+    formatByValuesType, colorScalePresetIndex, dataBar, iconSetType, iconReverse, iconOnly,
     containingType, cellValueOperator, cellValue1, cellValue2, textRuleType, textValue, datePeriod,
     topBottomType, topBottomRank, averageType, dupUniqueType, formulaExpression,
   ]);
 
   const handleCancel = useCallback(() => {
     onClose();
-    restoreFocusToGrid();
-  }, [onClose]);
+    if (!nested) restoreFocusToGrid();
+  }, [onClose, nested]);
 
   if (!isOpen) return null;
 
@@ -431,7 +525,7 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
           if (e.key === "Enter" && !(e.target instanceof HTMLSelectElement)) handleOk();
         }}
       >
-        <h3 style={titleStyle}>New Formatting Rule</h3>
+        <h3 style={titleStyle}>{editRule ? "Edit Formatting Rule" : "New Formatting Rule"}</h3>
 
         {/* Rule type selector */}
         <p style={sectionLabelStyle}>Select a Rule Type:</p>
@@ -478,6 +572,9 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                     value={colorScalePresetIndex}
                     onChange={(e) => setColorScalePresetIndex(Number(e.target.value))}
                   >
+                    {init?.colorScalePresetIndex === OWN_PRESET && (
+                      <option value={OWN_PRESET}>The rule's own colours</option>
+                    )}
                     {PRESET_COLOR_SCALES.map((p, i) => (
                       <option key={i} value={i}>{colorScaleName(p)}</option>
                     ))}
@@ -486,38 +583,44 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
               )}
 
               {formatByValuesType === "dataBar" && (
-                <div style={rowStyle}>
-                  <span style={{ fontSize: 13 }}>Bar color:</span>
-                  <select
-                    style={{ ...selectStyle, flex: 1 }}
-                    value={dataBarColorIndex}
-                    onChange={(e) => setDataBarColorIndex(Number(e.target.value))}
-                  >
-                    {PRESET_DATA_BARS.map((bar, i) => (
-                      <option key={i} value={i}>{bar.name}</option>
-                    ))}
-                  </select>
-                  <div data-colour-data style={{
-                    width: 24, height: 16, borderRadius: 2,
-                    border: `1px solid ${DT.border}`,
-                    backgroundColor: PRESET_DATA_BAR_COLORS[dataBarColorIndex],
-                  }} />
-                </div>
+                <DataBarRuleOptions value={dataBar} onChange={setDataBar} />
               )}
 
               {formatByValuesType === "iconSet" && (
-                <div style={rowStyle}>
-                  <span style={{ fontSize: 13 }}>Icon set:</span>
-                  <select
-                    style={{ ...selectStyle, flex: 1 }}
-                    value={iconSetType}
-                    onChange={(e) => setIconSetType(e.target.value as IconSetType)}
-                  >
-                    {ICON_SET_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
-                </div>
+                <>
+                  <div style={rowStyle}>
+                    <span style={{ fontSize: 13 }}>Icon set:</span>
+                    <select
+                      style={{ ...selectStyle, flex: 1 }}
+                      value={iconSetType}
+                      onChange={(e) => setIconSetType(e.target.value as IconSetType)}
+                    >
+                      {ICON_SET_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={rowStyle}>
+                    <label style={rowStyle}>
+                      <input
+                        type="checkbox"
+                        checked={iconReverse}
+                        onChange={(e) => setIconReverse(e.target.checked)}
+                        data-testid="cf-iconset-reverse"
+                      />
+                      <span style={{ fontSize: 13 }}>Reverse Icon Order</span>
+                    </label>
+                    <label style={rowStyle}>
+                      <input
+                        type="checkbox"
+                        checked={iconOnly}
+                        onChange={(e) => setIconOnly(e.target.checked)}
+                        data-testid="cf-iconset-icon-only"
+                      />
+                      <span style={{ fontSize: 13 }}>Show Icon Only</span>
+                    </label>
+                  </div>
+                </>
               )}
             </>
           )}
@@ -699,6 +802,7 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                 value={formatIndex}
                 onChange={(e) => setFormatIndex(Number(e.target.value))}
               >
+                {init?.formatIndex === OWN_PRESET && <option value={OWN_PRESET}>The rule's own format</option>}
                 {PRESET_STYLES.map((preset, idx) => (
                   <option key={idx} value={idx}>{preset.label}</option>
                 ))}
@@ -713,8 +817,9 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                 borderRadius: 3,
                 border: `1px solid ${DT.border}`,
                 fontSize: 13,
-                backgroundColor: PRESET_STYLES[formatIndex].backgroundColor || "#fff",
-                color: PRESET_STYLES[formatIndex].textColor || "#000",
+                backgroundColor:
+                  (formatIndex === OWN_PRESET ? editRule?.format.backgroundColor : PRESET_STYLES[formatIndex]?.backgroundColor) || "#fff",
+                color: (formatIndex === OWN_PRESET ? editRule?.format.textColor : PRESET_STYLES[formatIndex]?.textColor) || "#000",
               }}
             >
               AaBbCcYyZz
@@ -729,7 +834,10 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
             borderRadius: 3,
             border: `1px solid ${DT.border}`,
             background: (() => {
-              const p = PRESET_COLOR_SCALES[colorScalePresetIndex];
+              const own = colorScalePresetIndex === OWN_PRESET && editRule?.rule.type === "colorScale" ? editRule.rule : null;
+              const p = own
+                ? { minColor: own.minPoint.color, midColor: own.midPoint?.color, maxColor: own.maxPoint.color }
+                : PRESET_COLOR_SCALES[Math.max(0, colorScalePresetIndex)];
               if (p.midColor) {
                 return `linear-gradient(to right, ${p.minColor}, ${p.midColor}, ${p.maxColor})`;
               }
@@ -738,19 +846,14 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
           }} />
         )}
 
-        {/* Data bar preview for formatByValues */}
+        {/* Data bar preview for formatByValues: the bar as its options paint it */}
         {selectedCategory === "formatByValues" && formatByValuesType === "dataBar" && (
-          <div data-colour-data style={{
-            height: 20,
-            borderRadius: 3,
-            border: `1px solid ${DT.border}`,
-            background: `linear-gradient(to right, ${PRESET_DATA_BAR_COLORS[dataBarColorIndex]}, ${PRESET_DATA_BAR_COLORS[dataBarColorIndex]}40)`,
-          }} />
+          <DataBarPreview value={dataBar} />
         )}
 
         {refusal !== null && (
           <div role="alert" style={errorStyle}>
-            The rule was not added: {refusal}
+            {editRule ? "The rule was not changed" : "The rule was not added"}: {refusal}
           </div>
         )}
 

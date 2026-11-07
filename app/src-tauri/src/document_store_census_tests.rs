@@ -340,6 +340,10 @@ const SESSION_SCOPED: &[(&str, &str)] = &[
         "the Ctrl+Break flag, an `Arc<AtomicBool>` deliberately outside any Mutex so `cancel_calculation` cannot block on a lock the recalculation holds. It cannot carry a stale cancel across documents: `eval_budget::PassToken::claim` resets it at the start of every governed pass that owns one",
     ),
     (
+        "AppState.calculation_except_tables",
+        "the 'Automatic except for data tables' half of the calculation mode (BUG-0754, Excel's xlCalculationSemiautomatic): an `AtomicBool` qualifying an automatic `calculation_mode`, and an APPLICATION value for exactly the reason `AppState.calculation_mode` is -- every save records it (.xlsx calcMode=autoNoTable, .cala calc_mode.json) and every open adopts the file's mode through `calculation::store_calculation_mode`, which writes both together",
+    ),
+    (
         "AppState.whatif_run",
         "the what-if single-flight (`whatif_recalc::begin_whatif_run`): an `AtomicBool` claimed by a running Data Table, Goal Seek or Solver run and released by its guard on every exit path. It describes a run in progress in this process, not the document, and a reset could only release a run that is still writing",
     ),
@@ -1086,6 +1090,7 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("refresh_all_pivot_tables", "re-queries every pivot's source; the definitions are unchanged"),
     ("apply_pivot_filter", "sets one pivot's filter"),
     ("clear_pivot_filter", "clears one pivot's filter"),
+    ("set_pivot_item_visibility", "shows or hides ONE item of one pivot's field (a script's PivotItem.Visible); holds BiState only to plan and evaluate a BI pivot's mask overlay for that one pivot (rerender_with_mask_overlay). The document stays"),
     ("get_slicer_items", "reads a slicer's item list; holds BiState only to fetch the full \
       value domain of a PINNED slicer or a MODEL slicer from the model (the pivot cache is pin-filtered)"),
     ("delete_slicer", "deletes one slicer and, owner decision 3, clears the filter it set on its \

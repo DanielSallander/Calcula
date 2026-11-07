@@ -663,11 +663,20 @@ pub struct XlsxExportLosses {
     /// reused name, an overlap, a column list that does not fit the range.
     /// Their cells are written; the table is not.
     pub tables: Vec<String>,
+    /// Tables (by name) and sheet filters (`Sheet1!A1:B7`) whose filter
+    /// criterion or sort level Excel's part cannot be given from Calcula (a
+    /// colour or icon filter or sort, `xlsx_autofilter`), or a sheet filter
+    /// over a table: the rows it hid stay hidden, the criterion is left out.
+    pub filters: Vec<String>,
+    /// Custom named cell styles the file's style list could not be given
+    /// (`xlsx_named_styles`: no `cellXfs` record found for it -- a style no
+    /// cell uses now gets one of its own): left out of the file's style list.
+    pub named_styles: Vec<String>,
 }
 
 impl XlsxExportLosses {
     pub fn is_empty(&self) -> bool {
-        self.hyperlinks.is_empty() && self.defined_names.is_empty() && self.formulas.is_empty() && self.tables.is_empty()
+        self.hyperlinks.is_empty() && self.defined_names.is_empty() && self.formulas.is_empty() && self.tables.is_empty() && self.filters.is_empty() && self.named_styles.is_empty()
     }
 
     /// The sentence the user reads, or `None` when nothing was left out.
@@ -703,10 +712,20 @@ impl XlsxExportLosses {
             1 => parts.push(format!("the table {}", list(&self.tables))),
             n => parts.push(format!("{} tables ({})", n, list(&self.tables))),
         }
+        match self.filters.len() {
+            0 => {}
+            1 => parts.push(format!("the filter or sort of {}", list(&self.filters))),
+            n => parts.push(format!("the filters or sorts of {} tables or ranges ({})", n, list(&self.filters))),
+        }
+        match self.named_styles.len() {
+            0 => {}
+            1 => parts.push(format!("the cell style {}, which no cell uses,", list(&self.named_styles))),
+            n => parts.push(format!("{} cell styles no cell uses ({})", n, list(&self.named_styles))),
+        }
         Some(format!(
             "The workbook was saved as .xlsx, but {} could not be written to that format and {} left out of the file.",
             parts.join(" and "),
-            if self.hyperlinks.len() + self.defined_names.len() + self.formulas.len() + self.tables.len() == 1 { "was" } else { "were" }
+            if self.hyperlinks.len() + self.defined_names.len() + self.formulas.len() + self.tables.len() + self.filters.len() + self.named_styles.len() == 1 { "was" } else { "were" }
         ))
     }
 }
@@ -733,6 +752,15 @@ pub fn save_xlsx_reporting_losses(
         workbook.named_ranges.iter().any(|nr| identity::defined_names_equal(&nr.name, target))
     };
     let mut xlsx = XlsxWorkbook::new();
+    // The custom named styles NO cell uses get a `cellXfs` record of their
+    // own, registered FIRST so its index is known (W2 xlsx: such a style was
+    // left out). `xlsx_named_styles::finish_with_named_styles` copies the
+    // record into the style's `cellStyleXfs` entry, as Excel keeps one.
+    let unused_style_records = crate::xlsx_named_styles::register_unused_styles(workbook, &mut |style| {
+        let format = convert_style_to_format(style, theme_fonts);
+        xlsx.register_format(&format);
+        format
+    });
     // Chart ids that were successfully emitted as native OOXML charts — the
     // meta carry records this per chart so the reader can detect Excel-side
     // chart edits (see MetaChart::native_emitted).
@@ -946,7 +974,10 @@ pub fn save_xlsx_reporting_losses(
         // BEFORE every other writer of cells: the library writes table
         // captions and formulas into the cells, which the merges, links and
         // the cell loop below then overwrite (`TableParts::add_to_sheet`).
-        table_parts.add_to_sheet(worksheet, sheet, &mut losses);
+        let column_format = |style_index: usize| sheet.styles.get(style_index).map(|style| convert_style_to_format(style, theme_fonts));
+        table_parts.add_to_sheet(worksheet, sheet, &mut losses, &column_format);
+        // The sheet's own AutoFilter (one no table owns), W2 xlsx.
+        table_parts.add_sheet_filter(worksheet, sheet_position, &mut losses);
 
         // ---- Merged regions ----
         // MUST run BEFORE the cell loop: merge_range writes a blank string into
@@ -1514,6 +1545,7 @@ pub fn save_xlsx_reporting_losses(
             &bytes,
             workbook.calculation_incomplete,
             manual_calculation,
+            !manual_calculation && workbook.calculation_except_tables,
             &cached_results,
             &standard_widths,
             &static_errors,
@@ -1526,6 +1558,15 @@ pub fn save_xlsx_reporting_losses(
         // A calculated column whose formula holds an `@` (a column NAME's):
         // the library garbles it in the table part (`TableParts::finish_archive`).
         let bytes = table_parts.finish_archive(&bytes)?.unwrap_or(bytes);
+        // The custom named cell styles, which the library cannot write
+        // (`xlsx_named_styles`, BUG-0771).
+        let bytes = match crate::xlsx_named_styles::finish_with_named_styles(&bytes, workbook, &unused_style_records)? {
+            Some((finished, lost)) => {
+                losses.named_styles.extend(lost);
+                finished
+            }
+            None => bytes,
+        };
         std::fs::write(path, bytes)?;
     }
 
@@ -1722,6 +1763,7 @@ fn finish_archive(
     xlsx_bytes: &[u8],
     incomplete: bool,
     manual: bool,
+    except_tables: bool,
     cached_results: &CachedResults,
     standard_widths: &std::collections::HashMap<String, f64>,
     static_errors: &std::collections::HashMap<String, std::collections::HashMap<(u32, u32), (String, Option<usize>)>>,
@@ -1731,7 +1773,7 @@ fn finish_archive(
     let invalid = |e: zip::result::ZipError| PersistenceError::InvalidFormat(format!("xlsx calcPr rewrite: {}", e));
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(xlsx_bytes)).map_err(invalid)?;
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let state_calculation = incomplete || manual;
+    let state_calculation = incomplete || manual || except_tables;
     let rich_types = &cached_results.rich.types;
     let has_rich = !rich_types.is_empty();
     let had_metadata = archive.file_names().any(|n| n == XLSX_METADATA_PART);
@@ -1787,6 +1829,10 @@ fn finish_archive(
             }
             if manual {
                 rewritten = with_calc_pr_attribute(&rewritten, "calcMode", "manual").ok_or_else(no_calc_pr)?;
+            } else if except_tables {
+                // Automatic except for data tables (BUG-0754), as Excel 16
+                // writes it [LIVE, dtable/probe2.ps1].
+                rewritten = with_calc_pr_attribute(&rewritten, "calcMode", "autoNoTable").ok_or_else(no_calc_pr)?;
             }
             rewritten = with_local_defined_names(&rewritten, local_names)?;
             rewritten = with_calc_features(&rewritten)?;
@@ -4429,6 +4475,32 @@ mod tests {
         assert!(crate::xlsx_reader::load_xlsx(&both).unwrap().calculation_incomplete);
     }
 
+    /// BUG-0754: Automatic except for data tables exports Excel's
+    /// `calcMode="autoNoTable"` ([LIVE] Excel 16, dtable/probe2.ps1, wrote
+    /// `<calcPr calcId="191029" calcMode="autoNoTable"/>`) and reads back as
+    /// that mode -- never as manual; manual wins when both are asked.
+    ///
+    /// SABOTAGE: drop the `except_tables` arm in `finish_archive`.
+    #[test]
+    fn automatic_except_tables_exports_excels_auto_no_table_and_reads_it_back() {
+        let mut workbook = one_sheet(vec![((0, 1), formula_cell("A1*2"))]);
+        workbook.calculation_except_tables = true;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("semi.xlsx");
+        save_xlsx_with_calculation_mode(&workbook, &path, false).unwrap();
+        let calc_pr = calc_pr_of(&path);
+        assert!(calc_pr.contains("calcMode=\"autoNoTable\""), "AUTO NO TABLE LOST: {}", calc_pr);
+        assert_eq!(crate::xlsx_reader::read_xlsx_calculation_mode(&path).unwrap(), "automaticExceptTables");
+        assert!(!crate::xlsx_reader::read_xlsx_manual_calculation(&path).unwrap());
+        let manual = dir.path().join("manual.xlsx");
+        save_xlsx_with_calculation_mode(&workbook, &manual, true).unwrap();
+        assert_eq!(crate::xlsx_reader::read_xlsx_calculation_mode(&manual).unwrap(), "manual");
+        workbook.calculation_except_tables = false;
+        let auto = dir.path().join("auto.xlsx");
+        save_xlsx_with_calculation_mode(&workbook, &auto, false).unwrap();
+        assert_eq!(crate::xlsx_reader::read_xlsx_calculation_mode(&auto).unwrap(), "automatic");
+    }
+
     /// Excel's own `<calcPr>` text and the forms `calcMode` can take.
     #[test]
     fn the_reader_reads_excels_own_calc_mode() {
@@ -4604,7 +4676,7 @@ mod tests {
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#).unwrap();
             zw.start_file("xl/worksheets/sheet1.xml", o).unwrap();
             zw.write_all(br##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="e"><f>_xlfn.SEQUENCE(2)</f><v>#SPILL!</v></c><c r="B1" t="e"><f>_xlfn.LAMBDA(1)</f><v>#CALC!</v></c><c r="C1" t="str"><f>"0123"</f><v>0123</v></c><c r="D1" t="b"><f>TRUE()</f><v>1</v></c><c r="E1" t="e"><f>1/0</f><v>#DIV/0!</v></c><c r="F1" t="str"><f>"#SPILL!"</f><v>#SPILL!</v></c></row></sheetData></worksheet>"##).unwrap();
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="e" cm="1"><f t="array" ref="A1">_xlfn.SEQUENCE(2)</f><v>#SPILL!</v></c><c r="B1" t="e"><f>_xlfn.LAMBDA(1)</f><v>#CALC!</v></c><c r="C1" t="str"><f>"0123"</f><v>0123</v></c><c r="D1" t="b"><f>TRUE()</f><v>1</v></c><c r="E1" t="e"><f>1/0</f><v>#DIV/0!</v></c><c r="F1" t="str"><f>"#SPILL!"</f><v>#SPILL!</v></c></row></sheetData></worksheet>"##).unwrap();
             zw.finish().unwrap();
         }
         let loaded = crate::xlsx_reader::load_xlsx(&path).expect("a cached #SPILL! must not fail the import");
@@ -4615,6 +4687,9 @@ mod tests {
         assert_eq!(value(3), Some(format!("{:?}", SavedCellValue::Boolean(true))));
         assert_eq!(value(4), Some(format!("{:?}", SavedCellValue::Error("#DIV/0!".to_string()))));
         assert_eq!(value(5), Some(format!("{:?}", SavedCellValue::Text("#SPILL!".to_string()))), "a TEXT result is not an error");
+        // A1 is DYNAMIC (`cm="1"`, as Excel 16 saves a spilling SEQUENCE);
+        // written plain it would be a legacy formula, which Excel -- and so
+        // Calcula -- reads as `=@SEQUENCE(2)` ([LIVE] lane xlsx probe1).
         assert_eq!(loaded.sheets[0].cells.get(&(0, 0)).and_then(|c| c.formula.clone()).as_deref(), Some("=SEQUENCE(2)"));
     }
 
@@ -4882,6 +4957,21 @@ mod tests {
                 assert_eq!(value(0, 0), error("#SPILL!"), "RICH VALUE LOST: a cached #SPILL! came back as another error");
                 assert_eq!(value(0, 1), error("#CALC!"));
                 assert_eq!(value(0, 2), error("#CALC!"), "a static #CALC! comes back too");
+                // ...as the ENGINE's own #CALC! (BUG-0774): until the variant
+                // existed the literal survived the file and became #VALUE! in
+                // the cell (`CellError::from_literal`'s fallback).
+                for at in [(0, 1), (0, 2)] {
+                    assert_eq!(
+                        loaded.sheets[0].cells[&at].value.to_value(),
+                        engine::CellValue::Error(engine::CellError::Calc),
+                        "{at:?}: the file's #CALC! is the engine's #CALC!"
+                    );
+                }
+                // And the engine's #CALC! is what a save writes.
+                assert_eq!(
+                    format!("{:?}", SavedCellValue::from_value(&engine::CellValue::Error(engine::CellError::Calc))),
+                    format!("{:?}", SavedCellValue::Error("#CALC!".to_string()))
+                );
                 assert_eq!(
                     value(0, 3),
                     Some(format!("{:?}", SavedCellValue::Number(0.0))),
@@ -4933,6 +5023,7 @@ mod tests {
         widths.insert("xl/worksheets/sheet1.xml".to_string(), 20.0);
         let out = finish_archive(
             &bytes,
+            false,
             false,
             false,
             &CachedResults::default(),
@@ -6129,7 +6220,7 @@ mod tests {
         // Nothing left out, nothing to say.
         let clean = save_xlsx_reporting_losses(&one_sheet(vec![]), &dir.path().join("clean.xlsx"), false).unwrap();
         assert!(clean.is_empty() && clean.message().is_none());
-        let many = XlsxExportLosses { hyperlinks: (1..=7).map(|i| format!("S!A{}", i)).collect(), defined_names: vec![], formulas: vec![], tables: vec![] };
+        let many = XlsxExportLosses { hyperlinks: (1..=7).map(|i| format!("S!A{}", i)).collect(), defined_names: vec![], formulas: vec![], tables: vec![], filters: vec![], named_styles: vec![] };
         assert_eq!(
             many.message().as_deref(),
             Some("The workbook was saved as .xlsx, but 7 hyperlinks (S!A1, S!A2, S!A3, S!A4, S!A5 and 2 more) could not be written to that format and were left out of the file.")

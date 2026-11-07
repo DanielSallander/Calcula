@@ -17,7 +17,7 @@
 //   (Shift+F9) refreshes the sheet's tables, Calculate Now (F9) every one;
 // - every body cell is part of ONE array: editing, clearing, pasting onto or
 //   sorting part of it, inserting a row or column inside it, or deleting part
-//   of it is refused ("Cannot change part of a data table."); replacing or
+//   of it is refused ("Can't change part of a data table."); replacing or
 //   clearing the WHOLE body removes the table;
 // - `=TABLE(..)` cannot be typed ("That function isn't valid.");
 // - `.xlsx` stores it as `<f t="dataTable" ref=.. dt2D dtr r1 [r2]/>` on the
@@ -242,6 +242,13 @@ thread_local! {
     /// sheet as an entry would land between two trials (rev-dt2-3).
     pub(crate) static ENTRY_AFTER_TRIAL_FOR_TEST: std::cell::Cell<Option<(usize, (u32, u32), f64)>> =
         const { std::cell::Cell::new(None) };
+    /// Test stand-in for ANY gesture landing between two trials (BUG-0778: a
+    /// tab moved by a second thread made `a_data_table_follows_its_sheet_when_a_tab_moves_mid_run`
+    /// depend on timing): after the trial with this index, `compute_body` calls
+    /// the function, holding no lock, exactly where another thread's command
+    /// can run.
+    pub(crate) static AFTER_TRIAL_FOR_TEST: std::cell::Cell<Option<(usize, fn(&AppState))>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// THE VALUES OF A TABLE'S BODY: every trial written and read back, then the
@@ -303,6 +310,12 @@ fn compute_body(
                     let mut sink = Vec::new();
                     write_cells_and_recalc_in(state, states, effect, sheet, &entry, RecalcMode::AsAnEdit, &mut sink)
                         .expect("the stand-in entry");
+                }
+            }
+            if let Some((after, gesture)) = AFTER_TRIAL_FOR_TEST.with(|h| h.get()) {
+                if after + 1 == _index {
+                    AFTER_TRIAL_FOR_TEST.with(|h| h.set(None));
+                    gesture(state);
                 }
             }
         }
@@ -421,6 +434,9 @@ fn write_body(
     write_cells_and_recalc_in(state, states, effect, sheet, &writes, mode, updated_cells).map(|_| true)
 }
 
+/// The undo step a Data Table creation leaves (BUG-0753).
+pub(crate) const DATA_TABLE_STEP: &str = "Data Table";
+
 /// Why the Data Table command refuses a body inside a table (Insert > Table).
 pub(crate) const DATA_TABLE_IN_TABLE: &str = "Multi-cell array formulas aren't allowed in tables.";
 
@@ -431,9 +447,23 @@ fn as_input(pos: Option<(u32, u32)>) -> TableInput {
     }
 }
 
-/// Whether calculation is AUTOMATIC now.
+/// Whether the live data tables recalculate by themselves now: AUTOMATIC
+/// calculation, and not "Automatic except for data tables" (BUG-0754), which
+/// leaves them for F9 exactly as manual calculation does
+/// (`calculation::data_tables_recalculate_automatically`).
 fn automatic(state: &AppState) -> bool {
-    state.calculation_mode.lock().map(|m| *m == "automatic").unwrap_or(true)
+    crate::calculation::data_tables_recalculate_automatically(state)
+}
+
+/// A recalculation that leaves the live data tables for F9 (manual
+/// calculation, Automatic except for data tables): when the workbook holds a
+/// table its values may now be stale, so the workbook is marked pending
+/// (Excel's xlPending) until a completed Calculate Now. Over-reporting is the
+/// safe direction: a save must not vouch for a body. The caller holds no lock.
+pub(crate) fn note_tables_left_for_f9(state: &AppState) {
+    if !tables_in_scope_is_empty(state, TableScope::Workbook) {
+        crate::calculation::note_stored_values_may_be_stale(state);
+    }
 }
 
 /// The shared body of both commands, past the single-flight and the shape
@@ -473,7 +503,7 @@ fn create_data_table(
 
     // The table's shape and its gates, read under the grid locks; every guard
     // dropped before a substitution writes (the cascade takes them itself).
-    let (effect, run_sheet) = {
+    let (effect, run_sheet, previous) = {
         let grid = state.grid.lock_pending().unwrap();
         let grids = state.grids.lock_pending().unwrap();
         let Some(sheet) = grids.get(sheet_idx) else {
@@ -531,11 +561,17 @@ fn create_data_table(
         }
         // The run's sheet by stable id, under the same guards as its cells.
         let run_sheet = RunSheet::at(state, sheet_idx);
+        // What the body's cells hold now, for the creation's undo step
+        // (BUG-0753), read under the same guards as every gate above.
+        let previous: Vec<((u32, u32), Option<Cell>)> = (body.start_row..=body.end_row)
+            .flat_map(|r| (body.start_col..=body.end_col).map(move |c| (r, c)))
+            .map(|(r, c)| ((r, c), judged.get_cell(r, c).cloned()))
+            .collect();
         // Past every gate: the body is written below.
         let effect = DocumentEffect::mutates(file_state);
         let _grid = grid.authorize(&effect);
         let _grids = grids.authorize(&effect);
-        (effect, run_sheet)
+        (effect, run_sheet, previous)
     };
 
     let marker = engine::data_table::table_call_anchored(row_input, col_input, body.inputs.anchor);
@@ -574,6 +610,23 @@ fn create_data_table(
     // read 50 after, the body 0, xlPending] (rev-dt-11).
     let body_mode = if automatic(state) { RecalcMode::Always } else { RecalcMode::AsAnEdit };
     let error = write_body(state, states, &effect, run_sheet, &marker, values, body_mode, &mut written).err();
+    // ONE UNDO STEP for the creation (BUG-0753): the body's cells put back as
+    // they were before the table, through the restore Ctrl+Z uses (which
+    // recalculates their readers); the borrowed input cells were restored by
+    // the run itself and need none. Excel's Data Table command is undoable
+    // (PLAUSIBLE: Ctrl+Z after What-If > Data Table removes the table; the COM
+    // probe could not drive the dialog, dtable/probe3.ps1). Pushed as a step of
+    // its OWN, never joined to a stranger's open transaction, once every guard
+    // is released, with the sheet where it is NOW (a tab may have moved).
+    if error.is_none() {
+        if let Some(sheet) = run_sheet.index(state) {
+            let mut step = engine::Transaction::new(DATA_TABLE_STEP);
+            for ((row, col), cell) in previous {
+                step.add_change(engine::CellChange::SetCell { sheet, row, col, previous: cell });
+            }
+            state.undo_stack.lock().unwrap().push_own_step(step);
+        }
+    }
     if !automatic(state) {
         // The body is uncalculated: the workbook's values may be stale until a
         // completed Calculate Now (Excel's xlPending). Every sheet is marked
@@ -814,11 +867,31 @@ fn current_marker(state: &AppState, sheet: RunSheet, body: &DataTableBody) -> Op
 pub(crate) fn refresh_live_tables_held(
     state: &AppState,
     states: &WhatIfStates<'_>,
-    _run: &WhatIfRun<'_>,
+    run: &WhatIfRun<'_>,
     scope: TableScope,
     updated_cells: &mut Vec<CellData>,
 ) -> usize {
-    let tables = tables_in_scope(state, scope);
+    refresh_tables_held_where(state, states, run, scope, None, updated_cells)
+}
+
+/// [`refresh_live_tables_held`] over only the tables `keep` names, by sheet
+/// INDEX and body (`None`: every table in `scope`).
+fn refresh_tables_held_where(
+    state: &AppState,
+    states: &WhatIfStates<'_>,
+    _run: &WhatIfRun<'_>,
+    scope: TableScope,
+    keep: Option<&ReachedTables>,
+    updated_cells: &mut Vec<CellData>,
+) -> usize {
+    let mut tables = tables_in_scope(state, scope);
+    if let Some(keep) = keep {
+        for (sheet, bodies) in tables.iter_mut() {
+            let index = sheet.index(state);
+            bodies.retain(|body| index.is_some_and(|i| keep.contains(&(i, body.start_row, body.start_col))));
+        }
+        tables.retain(|(_, bodies)| !bodies.is_empty());
+    }
     if tables.is_empty() {
         return 0;
     }
@@ -1022,10 +1095,281 @@ pub(crate) fn refresh_after_edit(
     updated_cells: &mut Vec<CellData>,
 ) {
     if !automatic(state) {
+        // Automatic except for data tables: every other formula followed the
+        // edit, the tables wait for F9 and the workbook is pending [LIVE,
+        // dtable/probe2.ps1: xlPending after an input value changed] (BUG-0754).
+        // (Manual calculation marks its edits itself.) Either way, a route
+        // that LAID a version's table body under the marker claim -- a .calp
+        // merge, a push's hold-back -- installed values nothing has computed:
+        // the workbook is pending until F9, as Excel's is after a table is
+        // made under manual (it left the workbook claiming to be calculated).
+        let laid = CLAIMED_MARKER_LAID.with(|laid| laid.replace(false));
+        if laid {
+            crate::calculation::note_stored_values_may_be_stale(state);
+        } else if crate::calculation::still_automatic(state) {
+            note_tables_left_for_f9(state);
+        }
+        return;
+    }
+    CLAIMED_MARKER_LAID.with(|laid| laid.set(false));
+    let states = WhatIfStates { user_files, pivots, pane_control, ribbon_filter };
+    refresh_live_tables(state, &states, TableScope::Workbook, updated_cells);
+}
+
+thread_local! {
+    /// Set when the batch gate let a claimed `TABLE(..)` marker through on
+    /// this thread (a version's table laid), taken by the next
+    /// [`refresh_after_edit`] and cleared when the [`VersionTablesClaim`]
+    /// opens and closes (a batch a later gate refused laid nothing).
+    static CLAIMED_MARKER_LAID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The tables an edit REACHES, by (sheet index, body top-left).
+type ReachedTables = std::collections::HashSet<(usize, u32, u32)>;
+
+/// THE END OF AN EDIT THAT WROTE KNOWN CELLS (typing, a batch of entries):
+/// only the tables the edit REACHES are refreshed -- or, when the tables wait
+/// for F9, mark the workbook pending. Excel recomputes a data table only when
+/// one of its precedents changes [LIVE, Excel 16 over COM, 2026-11-06,
+/// dtable/probe1.ps1: a self-reading table K1:L4 (`L1 = B1+L4`) stayed 10 / 30
+/// after edits of the unrelated Z1, Z2 and A5, and stepped to 30 / 36 when its
+/// input value K2 changed], and under "Automatic except for data tables" an
+/// edit nothing in a table reads leaves the workbook calculated. A table is
+/// reached when a written cell (`written`: sheet index, row, col) -- or a cell
+/// the edit's recalculation reported in `updated_cells` -- is one of its
+/// body cells, one of its reads -- the formula row or column, the input
+/// values, the input cells -- or anything those read, transitively, on its
+/// sheet ([`table_reach`]). A table whose reach cannot be known statically
+/// (another sheet, a name, a structured reference, a volatile or user-defined
+/// function, ...) is always reached: over-refreshing is the safe direction,
+/// never a stale table shown as current. The caller holds no lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refresh_after_cell_writes(
+    state: &AppState,
+    user_files: &crate::persistence::UserFilesState,
+    pivots: &crate::pivot::types::PivotState,
+    pane_control: &crate::pane_control::PaneControlState,
+    ribbon_filter: &crate::ribbon_filter::RibbonFilterState,
+    written: &[(usize, u32, u32)],
+    updated_cells: &mut Vec<CellData>,
+) {
+    if tables_in_scope_is_empty(state, TableScope::Workbook) {
+        return;
+    }
+    // The edit's footprint is every cell whose value it changed, not only the
+    // cells it typed: a value that reaches a table through a dynamic-array
+    // spill moves cells nobody typed -- a spill that shrinks empties its old
+    // members, one that is blocked turns its anchor into #SPILL! and empties
+    // the rest, one unblocked fills them again [LIVE, Excel 16 over COM,
+    // 2026-11-06, verify-dtui/p1.ps1: `C4 = SEQUENCE(B9)` read through C5 by a
+    // table; B9 = 1, typing in C6, clearing C6 and reading C4 itself each
+    // recomputed the table]. The spill map after the write no longer names a
+    // member the spill gave up, so the reach alone cannot see it; the
+    // recalculation's own report (`updated_cells`, every cell it repainted,
+    // emptied spill members included) can.
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(0);
+    let mut footprint: Vec<(usize, u32, u32)> = written.to_vec();
+    footprint.extend(updated_cells.iter().map(|c| (c.sheet_index.unwrap_or(active), c.row, c.col)));
+    let reached = tables_reached_by(state, &footprint);
+    if reached.is_empty() {
+        return;
+    }
+    if !automatic(state) {
+        // Automatic except for data tables, or manual: a reached table waits
+        // for F9 and the workbook says so (a header input value no formula
+        // reads is not marked by the manual write's own check).
+        crate::calculation::note_stored_values_may_be_stale(state);
+        return;
+    }
+    if RUN_END_PASS.with(|flag| flag.get()) {
         return;
     }
     let states = WhatIfStates { user_files, pivots, pane_control, ribbon_filter };
-    refresh_live_tables(state, &states, TableScope::Workbook, updated_cells);
+    match begin_whatif_run(state) {
+        Ok(run) => {
+            refresh_tables_held_where(state, &states, &run, TableScope::Workbook, Some(&reached), updated_cells);
+        }
+        Err(e) => {
+            crate::log_info!("DATATABLE", "data tables not refreshed: {}", e);
+            crate::calculation::note_stored_values_may_be_stale(state);
+        }
+    }
+}
+
+/// The tables of the workbook `written` reaches (see
+/// [`refresh_after_cell_writes`]). Takes `grid`, `grids`, `active_sheet`, then
+/// `spill_ranges` (reads, canonical order), and holds none on return.
+pub(crate) fn tables_reached_by(state: &AppState, written: &[(usize, u32, u32)]) -> ReachedTables {
+    let mut reached = ReachedTables::new();
+    let Ok(grid) = state.grid.read() else { return reached };
+    let Ok(grids) = state.grids.read() else { return reached };
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(0);
+    let spills = state.spill_ranges.read().ok();
+    for i in 0..grids.len() {
+        let g: &engine::Grid = if i == active { &grid } else { &grids[i] };
+        if !engine::data_table::has_data_tables(g) {
+            continue;
+        }
+        let bodies = engine::data_table::data_tables_in(g);
+        // Spill members on this sheet -> their anchor: a member's value is its
+        // anchor's formula's.
+        let mut members: std::collections::HashMap<(u32, u32), (u32, u32)> = std::collections::HashMap::new();
+        if let Some(spills) = spills.as_ref() {
+            for (&(sheet, ar, ac), cells) in spills.iter() {
+                if sheet == i {
+                    for &(r, c) in cells {
+                        if (r, c) != (ar, ac) {
+                            members.insert((r, c), (ar, ac));
+                        }
+                    }
+                }
+            }
+        }
+        let on_sheet: Vec<(u32, u32)> = written.iter().filter(|w| w.0 == i).map(|w| (w.1, w.2)).collect();
+        for body in &bodies {
+            let hit = match table_reach(g, body, &bodies, &members) {
+                None => true,
+                Some(reach) => on_sheet.iter().any(|&(r, c)| body.contains(r, c) || reach.contains(r, c)),
+            };
+            if hit {
+                reached.insert((i, body.start_row, body.start_col));
+            }
+        }
+    }
+    reached
+}
+
+/// What a data table reads, transitively, on its own sheet.
+struct TableReach {
+    /// Named `points`, never `cells`: the spill census reads an insert into a
+    /// `cells` set as a grid write.
+    points: std::collections::HashSet<(u32, u32)>,
+    columns: std::collections::HashSet<u32>,
+    rows: std::collections::HashSet<u32>,
+}
+
+impl TableReach {
+    fn contains(&self, row: u32, col: u32) -> bool {
+        self.points.contains(&(row, col)) || self.columns.contains(&col) || self.rows.contains(&row)
+    }
+}
+
+/// Past this many cells walked, a table's reach is not worth knowing: it is
+/// treated as reached by every edit.
+const REACH_WALK_LIMIT: usize = 100_000;
+
+/// The cells `body` reads -- its formula row or column and corner, its input
+/// values, its input cells -- and, transitively, every cell their formulas
+/// read on the table's sheet (`grid`); another table's body it reads stands
+/// for that table's own reads. `None` when the reach is not static
+/// ([`statically_reaches`]) or too large to walk.
+fn table_reach(
+    grid: &engine::Grid,
+    body: &DataTableBody,
+    bodies: &[DataTableBody],
+    members: &std::collections::HashMap<(u32, u32), (u32, u32)>,
+) -> Option<TableReach> {
+    fn roots(body: &DataTableBody) -> Vec<(u32, u32)> {
+        let (hr, hc) = (body.start_row.saturating_sub(1), body.start_col.saturating_sub(1));
+        let mut cells: Vec<(u32, u32)> = vec![(hr, hc)];
+        cells.extend((body.start_col..=body.end_col).map(|c| (hr, c)));
+        cells.extend((body.start_row..=body.end_row).map(|r| (r, hc)));
+        for input in [body.inputs.row_input, body.inputs.col_input] {
+            if let TableInput::Cell(r, c) = input {
+                cells.push((r, c));
+            }
+        }
+        cells
+    }
+    let mut reach = TableReach {
+        points: std::collections::HashSet::new(),
+        columns: std::collections::HashSet::new(),
+        rows: std::collections::HashSet::new(),
+    };
+    let mut queue: Vec<(u32, u32)> = roots(body);
+    let mut tables_seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    tables_seen.insert((body.start_row, body.start_col));
+    let mut walked = 0usize;
+    while let Some((r, c)) = queue.pop() {
+        if !reach.points.insert((r, c)) {
+            continue;
+        }
+        walked += 1;
+        if walked > REACH_WALK_LIMIT {
+            return None;
+        }
+        if let Some(&anchor) = members.get(&(r, c)) {
+            queue.push(anchor);
+        }
+        let Some(cell) = grid.get_cell(r, c) else { continue };
+        let Some(ast) = cell.ast.as_deref() else { continue };
+        if engine::data_table::is_table_call(ast) {
+            // Another table's body (or this one's own, which a self-reading
+            // table reads): it stands for that table's reads.
+            if let Some(other) = bodies.iter().find(|b| b.contains(r, c)) {
+                if tables_seen.insert((other.start_row, other.start_col)) {
+                    queue.extend(roots(other));
+                }
+            }
+            continue;
+        }
+        if !statically_reaches(ast) {
+            return None;
+        }
+        let refs = crate::extract_all_references(ast, grid);
+        if !refs.cross_sheet_cells.is_empty() {
+            return None;
+        }
+        queue.extend(refs.cells.iter().copied());
+        for col in refs.columns {
+            if reach.columns.insert(col) {
+                queue.extend(grid.cells.keys().filter(|&&(_, cc)| cc == col).copied());
+            }
+        }
+        for row in refs.rows {
+            if reach.rows.insert(row) {
+                queue.extend(grid.cells.keys().filter(|&&(rr, _)| rr == row).copied());
+            }
+        }
+    }
+    Some(reach)
+}
+
+/// Whether every cell `expr` can read is named by its own references on its
+/// own sheet: no name, structured or 3D reference, spill reference, sheet
+/// qualifier, volatile call (OFFSET / INDIRECT decide their cells as they
+/// evaluate), user-definable or user-defined function, or a call whose value
+/// comes from outside the cells (a control, a pivot, a cube, a GET.* property).
+fn statically_reaches(expr: &Expression) -> bool {
+    use parser::ast::BuiltinFunction as F;
+    match expr {
+        Expression::Literal(_) => true,
+        Expression::CellRef { sheet, .. } => sheet.is_none(),
+        Expression::Range { sheet, start, end, .. } => {
+            sheet.is_none()
+                && matches!(start.as_ref(), Expression::CellRef { sheet: None, .. })
+                && matches!(end.as_ref(), Expression::CellRef { sheet: None, .. })
+        }
+        Expression::ColumnRef { sheet, .. } | Expression::RowRef { sheet, .. } => sheet.is_none(),
+        Expression::BinaryOp { left, right, .. } => statically_reaches(left) && statically_reaches(right),
+        Expression::UnaryOp { operand, .. } => statically_reaches(operand),
+        Expression::ImplicitIntersection { operand } => statically_reaches(operand),
+        Expression::ArrayLiteral { rows } => rows.iter().flatten().all(statically_reaches),
+        Expression::FunctionCall { func, args, .. } => {
+            let outside = engine::volatility::is_volatile_builtin(func)
+                || func.user_definable_name().is_some()
+                || matches!(
+                    func,
+                    F::Lambda | F::GetControlValue | F::GetPivotData | F::CubeValue | F::CubeMember | F::CubeSet
+                )
+                || {
+                    let name = func.to_canonical_name();
+                    name.starts_with("CUBE") || name.starts_with("GET.") || name == "INFO" || name == "RTD"
+                };
+            !outside && args.iter().all(statically_reaches)
+        }
+        _ => false,
+    }
 }
 
 /// THE END OF A FULL CALCULATION PASS (F9 = workbook, Shift+F9 = the active
@@ -1330,8 +1674,16 @@ pub(crate) fn refresh_after_recalc(
 /// enter [LIVE: both refused]. `sheet` is the grid the edit lands on; `typed`
 /// the entry as typed. The caller holds that grid.
 pub(crate) fn check_cell_edit(sheet: &engine::Grid, row: u32, col: u32, typed: &str) -> Result<(), String> {
-    // The body first: re-entering a body cell's own `=TABLE(,A1)` (F2, Enter)
-    // is a change to part of the table, as Excel words it.
+    // A typed `TABLE(..)` first: re-entering a body cell's own `=TABLE(,A1)`
+    // (F2, Enter), or anything typed over it that calls TABLE, is refused as
+    // the function it is, as Excel words it [LIVE, Excel 16, 2026-11-06,
+    // dtui/probe2.ps1: F2 on L2 shows `=TABLE(;A1)`, Enter answers "That
+    // function isn't valid.", and so does F2, x, Enter]; any other entry
+    // over the body (Delete on it) changes part of the table ("Can't change
+    // part of a data table.").
+    if typed_formula_calls_table(typed) {
+        return Err(engine::data_table::TABLE_NOT_VALID.to_string());
+    }
     if let Some(cell) = sheet.get_cell(row, col) {
         if engine::data_table::is_data_table_cell(cell)
             && engine::data_table::partly_written_table(sheet, &[(row, col)]).is_some()
@@ -1339,36 +1691,34 @@ pub(crate) fn check_cell_edit(sheet: &engine::Grid, row: u32, col: u32, typed: &
             return Err(engine::data_table::PART_OF_DATA_TABLE.to_string());
         }
     }
-    if typed_formula_calls_table(typed) {
-        return Err(engine::data_table::TABLE_NOT_VALID.to_string());
-    }
     Ok(())
 }
 
-/// THE MANY-CELL WRITE GATE (a paste, a batch of edits, a fill): refused when it
-/// writes SOME but not all of a table's body, or enters a `=TABLE(..)` formula.
-/// Writing every body cell replaces the table, as Excel allows.
-pub(crate) fn check_cells_write<'a>(
-    sheet: &engine::Grid,
-    writes: impl Iterator<Item = (u32, u32, &'a str)>,
-) -> Result<(), String> {
-    check_cells_write_moving(sheet, writes, &[])
-}
-
-/// [`check_cells_write`] for a batch that MOVES the tables `moving` (bodies on
-/// `sheet`, see [`whole_table_moves`]): a write over part of a table being
-/// moved is not a change to part of it -- the move clears whatever of it the
-/// batch does not overwrite (a table moved one column right lands on its own
-/// body). Every other table is judged as before.
-pub(crate) fn check_cells_write_moving<'a>(
+/// THE MANY-CELL WRITE GATE (a paste, a batch of edits, a fill, a script's
+/// diff), for the batch on the sheet at `sheet_index` (`sheet` its grid):
+/// refused when it writes SOME but not all of a table's body, or enters a
+/// `=TABLE(..)` formula. Writing every body cell replaces the table, as Excel
+/// allows. For a batch that MOVES the tables `moving` (bodies on `sheet`, see
+/// [`whole_table_moves`]), a write over part of a table being moved is not a
+/// change to part of it -- the move clears whatever of it the batch does not
+/// overwrite (a table moved one column right lands on its own body); every
+/// other table is judged as before. A `TABLE(..)` marker write the open
+/// [`VersionTablesClaim`] holds at `sheet_index` (a `.calp` version's own
+/// table, laid by a merge) is not a typed formula.
+pub(crate) fn check_cells_write_on_sheet<'a>(
+    sheet_index: Option<usize>,
     sheet: &engine::Grid,
     writes: impl Iterator<Item = (u32, u32, &'a str)>,
     moving: &[DataTableBody],
 ) -> Result<(), String> {
     let mut cells = Vec::new();
+    let mut lays_claimed_marker = false;
     for (r, c, typed) in writes {
         if typed_formula_calls_table(typed) {
-            return Err(engine::data_table::TABLE_NOT_VALID.to_string());
+            if !sheet_index.is_some_and(|s| version_claims_marker(s, r, c)) {
+                return Err(engine::data_table::TABLE_NOT_VALID.to_string());
+            }
+            lays_claimed_marker = true;
         }
         cells.push((r, c));
     }
@@ -1386,7 +1736,81 @@ pub(crate) fn check_cells_write_moving<'a>(
     if partly {
         return Err(engine::data_table::PART_OF_DATA_TABLE.to_string());
     }
+    if lays_claimed_marker {
+        // A version's table body is being laid: its values are computed by a
+        // refresh, which waits for F9 when tables do not refresh by themselves
+        // ([`refresh_after_edit`] marks the workbook pending). Set only once
+        // this gate has passed; a gate the caller asks AFTER this one can
+        // still refuse the batch, and the claim's close
+        // ([`VersionTablesClaim`]'s drop) clears what such a refusal left.
+        CLAIMED_MARKER_LAID.with(|laid| laid.set(true));
+    }
     Ok(())
+}
+
+// ============================================================================
+// A .calp version's own tables (BUG-0757)
+// ============================================================================
+
+thread_local! {
+    /// The `TABLE(..)` marker cells a [`VersionTablesClaim`] open on this thread
+    /// lets a write install, by (sheet, row, column).
+    static VERSION_TABLES: std::cell::RefCell<Option<std::collections::HashSet<(usize, u32, u32)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// THE MARKER CLAIM OF A VERSION OVERLAY. Only the Data Table command may write
+/// a `TABLE(..)` marker ("That function isn't valid." for a typed one, as in
+/// Excel) -- so a `.calp` merge that brought a NEW data table from the version
+/// it merges was refused whole: its writes go through the script pipeline,
+/// whose gates read the version's marker as a typed formula. The table is not
+/// typed: it is the version's own, signed and computed by Rust like every other
+/// table. The merge opens this claim over the grids it lays the version's
+/// cells into (`calp_merge::calp_push_merge_apply`), naming EXACTLY the marker
+/// cells those grids hold; while it is open on this thread, the data-table
+/// gates ([`check_cells_write_on_sheet`]) let a marker write at one of those
+/// cells through. Nothing else changes: a write over PART of an existing table
+/// is still refused, a marker anywhere the version does not hold one is still
+/// a typed formula, and a script or a paste never holds a claim (it is opened
+/// only by the merge, and closes on every exit path; not `Send`).
+pub(crate) struct VersionTablesClaim {
+    previous: Option<std::collections::HashSet<(usize, u32, u32)>>,
+    _thread_bound: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for VersionTablesClaim {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        VERSION_TABLES.with(|claim| *claim.borrow_mut() = previous);
+        // A marker can be laid only while a claim is open, and the claim's one
+        // write ends in its own `refresh_after_edit`, inside this scope, which
+        // takes the flag. Whatever is still set here was set by a batch that a
+        // LATER gate refused (protection, a pivot region, a writeback claim, a
+        // spilled value -- each asked after the data-table gate): it laid
+        // nothing, so it must not reach the next edit on this thread.
+        CLAIMED_MARKER_LAID.with(|laid| laid.set(false));
+    }
+}
+
+/// Open the [`VersionTablesClaim`] for every `TABLE(..)` marker cell `grids`
+/// (by sheet index) hold.
+pub(crate) fn claim_version_tables(grids: &[engine::Grid]) -> VersionTablesClaim {
+    let mut cells = std::collections::HashSet::new();
+    for (sheet, grid) in grids.iter().enumerate() {
+        for (&(r, c), cell) in &grid.cells {
+            if engine::data_table::is_data_table_cell(cell) {
+                cells.insert((sheet, r, c));
+            }
+        }
+    }
+    let previous = VERSION_TABLES.with(|claim| claim.borrow_mut().replace(cells));
+    CLAIMED_MARKER_LAID.with(|laid| laid.set(false));
+    VersionTablesClaim { previous, _thread_bound: std::marker::PhantomData }
+}
+
+/// Whether an open [`VersionTablesClaim`] holds the marker cell (sheet, row, col).
+fn version_claims_marker(sheet: usize, row: u32, col: u32) -> bool {
+    VERSION_TABLES.with(|claim| claim.borrow().as_ref().is_some_and(|cells| cells.contains(&(sheet, row, col))))
 }
 
 /// One MOVE claim of a batch, as [`whole_table_moves`] reads it: the claimed

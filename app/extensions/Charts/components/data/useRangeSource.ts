@@ -117,9 +117,14 @@ export interface NameResolution {
  * chart read uses). A name over a CANVAS sheet is refused like a typed canvas
  * range: a canvas has no cells. The sheet's stable id is stamped when known.
  */
-export async function resolveRangeName(name: string, sheets: readonly SheetInfo[]): Promise<NameResolution> {
+export async function resolveRangeName(
+  name: string,
+  sheets: readonly SheetInfo[],
+  askingSheet?: number,
+): Promise<NameResolution> {
   try {
-    const ref = await resolveDataSource(name);
+    // Asked from the CHART'S sheet, as every chart read asks it.
+    const ref = await resolveDataSource(name, askingSheet);
     const sheet = sheets.find((sh) => sh.index === ref.sheetIndex);
     if (sheet && sheet.kind === "canvas") {
       return { name, ref: null, error: canvasSourceMessage(sheet.name) };
@@ -311,13 +316,13 @@ export function useRangeSource(opts: UseRangeSourceOptions): RangeSourceState {
   useEffect(() => {
     if (nameCandidate === null) return;
     let live = true;
-    void resolveRangeName(nameCandidate, sheets).then((answer) => {
+    void resolveRangeName(nameCandidate, sheets, currentSheetIndex).then((answer) => {
       if (live) setNameResolution(answer);
     });
     return () => {
       live = false;
     };
-  }, [nameCandidate, sheets]);
+  }, [nameCandidate, sheets, currentSheetIndex]);
 
   // The caller's setters, read through a ref so their identity never re-runs
   // detection (only the range, the header flag and the orientation do).

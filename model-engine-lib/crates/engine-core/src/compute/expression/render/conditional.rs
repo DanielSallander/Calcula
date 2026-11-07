@@ -142,8 +142,8 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 // DAX compares a BLANK as 0 / "" / FALSE against a literal of
                 // that type (mirrors the plain renderer).
                 if self.semantics == Semantics::Dax {
-                    l = dax_semantics::comparison_operand(l, left, right);
-                    r = dax_semantics::comparison_operand(r, right, left);
+                    l = dax_semantics::comparison_operand_in(l, left, right, self.column_classes());
+                    r = dax_semantics::comparison_operand_in(r, right, left, self.column_classes());
                 }
                 format!("({l} {} {r})", op.as_sql())
             }
@@ -162,36 +162,24 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 cases,
                 default,
             } => {
-                let mut s = self.render_conditional(subject, condition, fact_table)?;
-                // SWITCH compares with `=` (mirrors the plain renderer).
-                if self.semantics == Semantics::Dax {
-                    if let Some((first, _)) = cases.first() {
-                        let zero = dax_semantics::blank_compares_as(first);
-                        if zero.is_some()
-                            && cases
-                                .iter()
-                                .all(|(v, _)| dax_semantics::blank_compares_as(v) == zero)
-                        {
-                            s = dax_semantics::comparison_operand(s, subject, first);
-                        }
-                    }
-                }
-                let mut sql = format!("CASE {s}");
-                for (val, result) in cases {
-                    sql.push_str(&format!(
-                        " WHEN {} THEN {}",
-                        self.render_conditional(val, condition, fact_table)?,
-                        self.render_conditional(result, condition, fact_table)?
-                    ));
-                }
-                if let Some(d) = default {
-                    sql.push_str(&format!(
-                        " ELSE {}",
-                        self.render_conditional(d, condition, fact_table)?
-                    ));
-                }
-                sql.push_str(" END");
-                sql
+                // Strict equality, BLANK matching only BLANK (mirrors the
+                // plain renderer; `dax_semantics::switch_sql`).
+                let s = self.render_conditional(subject, condition, fact_table)?;
+                let rendered = cases
+                    .iter()
+                    .map(|(val, result)| {
+                        Ok((
+                            self.render_conditional(val, condition, fact_table)?,
+                            self.switch_value_may_be_blank(val),
+                            self.render_conditional(result, condition, fact_table)?,
+                        ))
+                    })
+                    .collect::<EngineResult<Vec<_>>>()?;
+                let default = default
+                    .as_ref()
+                    .map(|d| self.render_conditional(d, condition, fact_table))
+                    .transpose()?;
+                dax_semantics::switch_sql(&s, &rendered, default.as_deref())
             }
             Expression::InList {
                 expr: subject,

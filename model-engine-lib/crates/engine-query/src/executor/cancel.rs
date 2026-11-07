@@ -184,6 +184,7 @@ mod tests {
             None,
             None,
             &[],
+            false,
             &token,
         )
         .await
@@ -200,6 +201,7 @@ mod tests {
             None,
             None,
             &[],
+            false,
             &CancellationToken::new(),
         )
         .await

@@ -300,3 +300,29 @@ describe("a ref the publisher stamped UNRESOLVABLE", () => {
     await expect(p).rejects.toBeInstanceOf(SourceSheetMissingError);
   });
 });
+
+// A named data source is asked FROM THE CHART'S SHEET (Excel's Range("Sales")
+// is the asking sheet's own Sales [LIVE, lane namescalp p1.ps1]); a sheet that
+// has no Sales of its own falls back to Excel's Names("Sales") (the backend's
+// no-scope rule). After Copy Sheet two sheet-scoped Sales exist, and the
+// no-scope ask alone used to answer nothing.
+describe("a named data source is asked from the chart's sheet", () => {
+  it("asks the backend from the caller's sheet, else the active one, then with no scope", async () => {
+    h.gridState = { sheetContext: { activeSheetIndex: 1, activeSheetName: "Sheet2" } };
+    h.getNamedRange.mockImplementation(async (_name: string, from?: number | null) =>
+      from === 1 ? { name: "Sales", sheetIndex: 1, refersTo: "=Sheet2!$B$2:$C$4" } : null,
+    );
+    const fromActive = await resolveDataSource("Sales");
+    expect(h.getNamedRange).toHaveBeenNthCalledWith(1, "Sales", 1);
+    expect(fromActive).toMatchObject({ sheetIndex: 1, startRow: 1, startCol: 1, endRow: 3, endCol: 2 });
+
+    h.getNamedRange.mockReset();
+    h.getNamedRange.mockImplementation(async (_name: string, from?: number | null) =>
+      from == null ? { name: "Sales", sheetIndex: 0, refersTo: "=Sheet1!$A$1:$A$3" } : null,
+    );
+    const fallback = await resolveDataSource("Sales", 0);
+    expect(h.getNamedRange).toHaveBeenNthCalledWith(1, "Sales", 0);
+    expect(h.getNamedRange).toHaveBeenNthCalledWith(2, "Sales");
+    expect(fallback).toMatchObject({ sheetIndex: 0, startRow: 0, endRow: 2 });
+  });
+});

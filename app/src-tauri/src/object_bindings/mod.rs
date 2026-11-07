@@ -334,6 +334,12 @@ pub async fn handle_request_async(
 ) -> Result<Handled, String> {
     match request {
         ObjectBindingsRequest::Set { object, path, formula, model, invariant, source } => {
+            // The workbook this binding is set in, fixed BEFORE the models are
+            // awaited: a File > Open / New during that await replaced it, and
+            // the binding and its script / AI audit row must not land in the
+            // workbook now on screen (wave-3 verifier, backmisc; BUG-0735's
+            // rule for rows written after an await).
+            let epoch = cx.file_state.settled_document_epoch();
             let models = models_for(cx, bi, &object).await;
             let request = SetRequest {
                 object,
@@ -343,7 +349,7 @@ pub async fn handle_request_async(
                 invariant: invariant.unwrap_or(false),
                 source: source.unwrap_or(BindingEditSource::User),
             };
-            let binding = set_core(cx, &models, request)?;
+            let binding = set_pinned_to(cx, epoch, &models, request)?;
             let binding = Box::pin(fetch_for_binding(cx, bi, binding)).await;
             Ok(plain(ObjectBindingsResponse::Binding { binding }))
         }
@@ -392,6 +398,25 @@ pub async fn set_interactions_literal_async(
     value: serde_json::Value,
     source: &BindingEditSource,
 ) -> Result<Handled, String> {
+    // The workbook this edit is made in, fixed at ENTRY: the write's pivot
+    // re-fold is awaited, and a File > Open / New during it replaced the
+    // workbook -- its script / AI audit row must not land in the one now on
+    // screen (wave 5, misc5; the `Set` arm's rule, BUG-0735).
+    let epoch = cx.file_state.settled_document_epoch();
+    Box::pin(set_interactions_literal_in(cx, bi, epoch, object, value, source)).await
+}
+
+/// [`set_interactions_literal_async`] made in the workbook of `epoch`, read at
+/// the request's entry: the audit row is recorded with that workbook PINNED,
+/// and dropped once a File > Open / New replaced it.
+pub(crate) async fn set_interactions_literal_in(
+    cx: &BindingCx<'_>,
+    bi: &crate::bi::types::BiState,
+    epoch: u64,
+    object: &ObjectBindingRef,
+    value: serde_json::Value,
+    source: &BindingEditSource,
+) -> Result<Handled, String> {
     let shown = value.to_string();
     let result = match literal::plan_interactions_write(&cx.literal_ctx(), object, value) {
         Err(e) => Err(e),
@@ -402,15 +427,19 @@ pub async fn set_interactions_literal_async(
         }
     };
     if *source != BindingEditSource::User {
-        audit::record_binding_edit(
-            cx.state,
-            source,
-            audit::ACTION_LITERAL_SET,
-            object,
-            catalog::CANVAS_INTERACTIONS_PATH,
-            &shown,
-            result.as_ref().err().map(String::as_str),
-        );
+        // Recorded with the entry's workbook PINNED; dropped once it is gone
+        // (its edit went with it).
+        let _ = cx.file_state.with_document_pinned(epoch, || {
+            audit::record_binding_edit(
+                cx.state,
+                source,
+                audit::ACTION_LITERAL_SET,
+                object,
+                catalog::CANVAS_INTERACTIONS_PATH,
+                &shown,
+                result.as_ref().err().map(String::as_str),
+            )
+        });
     }
     let (before, done) = result?;
     if before.as_ref() == Some(&done.changed.layout) {
@@ -614,9 +643,10 @@ fn ensure_unsubscribed(state: &AppState, sheet_index: usize) -> Result<(), Strin
 }
 
 /// The definition text of chart `id` (the IPC `spec_json`), if it exists.
-fn chart_definition(state: &AppState, id: &str) -> Option<String> {
+/// The chart's definition JSON and its PLACEMENT sheet (`ChartEntry.sheet_index`).
+fn chart_definition(state: &AppState, id: &str) -> Option<(String, usize)> {
     let charts = state.charts.read().ok()?;
-    charts.iter().find(|c| c.id.to_string() == id).map(|c| c.spec_json.clone())
+    charts.iter().find(|c| c.id.to_string() == id).map(|c| (c.spec_json.clone(), c.sheet_index))
 }
 
 /// D §3.6: normalise `formula` for a binding on `object` at `location`.
@@ -633,7 +663,9 @@ fn normalize_for(
 ) -> Result<NormalizedFormula, String> {
     let chart_sheet = match object.kind {
         ObjectBindingKind::Chart => chart_definition(cx.state, &object.id)
-            .and_then(|spec| formula::chart_data_sheet(&spec, &world.sheet_names, &world.sheet_ids, &world.named_ranges)),
+            .and_then(|(spec, sheet)| {
+                formula::chart_data_sheet(&spec, sheet, &world.sheet_names, &world.sheet_ids, &world.named_ranges)
+            }),
         _ => None,
     };
     let model_measures: Vec<(String, Vec<String>)> =
@@ -715,6 +747,22 @@ pub struct SetRequest {
     pub model: Option<String>,
     pub invariant: bool,
     pub source: BindingEditSource,
+}
+
+/// [`set_core`] in the workbook of `epoch` (read at the request's entry, before
+/// an await): run with the document PINNED, so the binding, its undo step and
+/// its script / AI audit row reach that workbook or nothing does. Refused,
+/// with nothing written or recorded, when a File > Open / New replaced it.
+pub(crate) fn set_pinned_to(
+    cx: &BindingCx<'_>,
+    epoch: u64,
+    models: &[BindingModelMeasures],
+    request: SetRequest,
+) -> Result<ObjectBindingInfo, String> {
+    cx.file_state.with_document_pinned(epoch, || set_core(cx, models, request)).unwrap_or_else(|| {
+        Err("The workbook was replaced (File > Open / New) before this binding could be set. Nothing was written."
+            .to_string())
+    })
 }
 
 /// Bind `path` of `object` to `formula` (D §3.9). A script or AI source leaves

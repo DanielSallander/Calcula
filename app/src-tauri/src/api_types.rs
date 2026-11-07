@@ -1223,8 +1223,9 @@ impl Default for SortOrientation {
 }
 
 /// A single sort field/condition.
-/// Matches Excel's SortField interface.
-#[derive(Debug, Clone, Deserialize)]
+/// Matches Excel's SortField interface. Also SERIALIZED: an AutoFilter keeps the
+/// sort it was last sorted by (`autofilter::FilterSortState`, Data > Reapply).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SortField {
     /// Column (or row) offset from the first column (or row) being sorted (0-based).
@@ -2888,6 +2889,12 @@ pub struct NamedCellStyle {
     /// Category for grouping: "Good, Bad and Neutral", "Data and Model",
     /// "Titles and Headings", "Number Format", "Themed Cell Styles", "Custom"
     pub category: String,
+    /// Excel's `Style.IncludeProtection` where the style states it -- a style
+    /// read from an .xlsx (`cellStyleXfs` `applyProtection`, BUG-0771).
+    /// `None`: Excel's default for the style
+    /// (`named_styles_cmd::named_style_includes_protection`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_protection: Option<bool>,
 }
 
 /// Bounding box of all non-empty cells in the active sheet.

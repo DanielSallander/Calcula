@@ -597,6 +597,14 @@ fn totals_label_of(cell: Option<&engine::Cell>) -> Option<String> {
     }
 }
 
+/// Whether no column has a totals function and none remembers a non-empty
+/// label: the totals row shows nothing (an emptied one, or one never shown).
+fn table_totals_all_empty(columns: &[TableColumn]) -> bool {
+    columns
+        .iter()
+        .all(|c| c.totals_row_function == TotalsRowFunction::None && c.totals_row_label.as_deref().map_or(true, str::is_empty))
+}
+
 /// The cell a remembered totals label is written back as: a number when the
 /// label is exactly a number's own spelling (what [`totals_label_of`] wrote),
 /// text otherwise.
@@ -897,14 +905,16 @@ pub(crate) fn require_table_sheet_unprotected(state: &AppState, sheet_index: usi
         .map_err(|_| TABLE_PROTECTED_MESSAGE.to_string())
 }
 
-/// A table name is valid exactly when a DEFINED NAME of that spelling would
-/// be: the two share one namespace in Excel and one naming rule
-/// (rev-xlsx-4). This used to be a looser copy that let `R`, `C` and
-/// cell-shaped names (`Q1`) through, and [LIVE] Excel 16 refused the
-/// exported file whose table part was named so. Delegated rather than
-/// copied, so the two rules cannot drift.
-fn is_valid_table_name(name: &str) -> bool {
-    crate::named_ranges::NamedRange::is_valid_name(name)
+/// A table name is valid exactly when Excel's table rule takes it
+/// (`identity::is_valid_table_name`): the DEFINED NAME's rule -- the two share
+/// one namespace in Excel (rev-xlsx-4) -- less its refusal of a two-character
+/// name that begins with a backslash, which a table may have [LIVE, Excel 16,
+/// 2026-11-06, lane names q4.ps1: `ListObject.Name = "\a"` stands]. This used
+/// to be a looser copy that let `R`, `C` and cell-shaped names (`Q1`) through,
+/// and [LIVE] Excel 16 refused the exported file whose table part was named
+/// so. Delegated rather than copied, so the rules cannot drift.
+pub(crate) fn is_valid_table_name(name: &str) -> bool {
+    identity::is_valid_table_name(name)
 }
 
 // ============================================================================
@@ -992,10 +1002,18 @@ pub(crate) fn recalc_after_table_change(
                 let mut reads = crate::table_deps::TableSet::default();
                 crate::table_deps::collect_table_names(&ast, &mut reads);
                 if reads.iter().any(|t| changed_keys.contains(t)) {
-                    out.insert(key.clone());
+                    // The NAME key the edges are filed by (a sheet's own
+                    // name is held under `"{sheet}!{key}"`, BUG-0744).
+                    out.insert(crate::named_ranges::name_part_of_registry_key(key).to_string());
                 }
             }
         }
+        // NOT a mediating key: a bare table name typed BEFORE its table
+        // existed. Excel leaves that cell `#NAME?` when the table is made --
+        // after Calculate and CalculateFull too [LIVE, Excel 16, 2026-11-06,
+        // lane names q6.ps1 / q7.ps1: `=ROWS(Tbl)` in J1, then
+        // `ListObjects.Add` named `Tbl` -> J1 `#NAME?`, on another sheet too]
+        // -- so the table's creation is no value change for it (BUG-0749).
         out
     };
 
@@ -2574,19 +2592,156 @@ pub fn toggle_totals_row(
     pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     table_id: identity::EntityId,
     show: bool,
 ) -> TableResult {
-    toggle_totals_row_core(
+    toggle_totals_row_shifting(
         &state,
         &file_state,
         &user_files_state,
         &pivot_state,
         &pane_control_state,
         &ribbon_filter_state,
+        &slicer_state,
+        &timeline_state,
         table_id,
         show,
     )
+}
+
+/// [`toggle_totals_row_core`], making room first where the totals row would
+/// land on ANOTHER table: [LIVE, Excel 16, 2026-11-06, lane tabxlsx probe1]
+/// `ShowTotals` on A1:B4 with A5 filled and a table on A6:B7 (D6 filled)
+/// gives A1:B6 and moves the other table to A7:B8 -- Insert Cells, shift
+/// down, over the table's columns at the row it met (D6 stays); with the
+/// other table directly below (A5:B6) it moves to A6:B7. Where that insert
+/// would cut a table (one wider than this one, or offset from it) Excel
+/// refuses, and so does Insert Cells here (`shift_cells_impl`). The insert
+/// and the totals row are ONE undo step. Calcula refused every such case.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn toggle_totals_row_shifting(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    table_id: identity::EntityId,
+    show: bool,
+) -> TableResult {
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let blocked = if show { totals_row_blocked_at(state, active_sheet, table_id) } else { None };
+    let Some((row, start_col, end_col)) = blocked else {
+        return toggle_totals_row_core(
+            state, file_state, user_files_state, pivot_state, pane_control_state, ribbon_filter_state, table_id, show,
+        );
+    };
+    if let Err(e) = require_table_sheet_unprotected(state, active_sheet) {
+        return TableResult::err(&e);
+    }
+    let owned_txn = state.undo_stack.lock().unwrap().begin_owned_transaction("Show totals row".to_string());
+    let shifted = crate::commands::structure::structure_cells::shift_cells_impl(
+        state,
+        file_state,
+        pivot_state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        slicer_state,
+        timeline_state,
+        row,
+        start_col,
+        row,
+        end_col,
+        crate::commands::structure::structure_cells::CellShift::Down,
+        false,
+    );
+    let refusal = match shifted {
+        Err(e) => Some(e),
+        Ok(r) if !r.applied => Some(r.confirm.unwrap_or_else(|| TOTALS_ROW_OVER_TABLE_MESSAGE.to_string())),
+        Ok(_) => None,
+    };
+    if let Some(e) = refusal {
+        state.undo_stack.lock().unwrap().cancel_owned(owned_txn);
+        return TableResult::err(e);
+    }
+    let after_shift = state.undo_stack.lock().unwrap().current_transaction_mut().map_or(0, |t| t.changes.len());
+    let result = toggle_totals_row_core(
+        state, file_state, user_files_state, pivot_state, pane_control_state, ribbon_filter_state, table_id, show,
+    );
+    // The insert landed: the step is committed whatever the toggle said.
+    let mut undo = state.undo_stack.lock().unwrap();
+    if let Some(open) = undo.current_transaction_mut() {
+        // The toggle's cell snapshot is a DEFERRED restore, which runs after
+        // the insert's inline ones are undone and would put the inserted
+        // (empty) row back over what the insert's undo restored. Recorded as
+        // inline cell changes in its own place, the step undoes in order.
+        inline_grid_cell_snapshots(open, after_shift);
+    }
+    undo.commit_owned(owned_txn);
+    result
+}
+
+/// Every `script_grid_cells` snapshot recorded in `transaction` from change
+/// `from` on, replaced in place by the equivalent inline `SetCell` changes
+/// (the snapshot carries each cell's full prior state, as `SetCell` does).
+fn inline_grid_cell_snapshots(transaction: &mut engine::Transaction, from: usize) {
+    let mut out: Vec<engine::CellChange> = Vec::with_capacity(transaction.changes.len());
+    for (i, change) in std::mem::take(&mut transaction.changes).into_iter().enumerate() {
+        match change {
+            engine::CellChange::CustomRestore { kind, data } if i >= from && kind == "script_grid_cells" => {
+                match serde_json::from_slice::<crate::undo_commands::ScriptGridCellsSnapshot>(&data) {
+                    Ok(snapshot) => out.extend(snapshot.cells.into_iter().map(|(row, col, previous)| engine::CellChange::SetCell {
+                        sheet: snapshot.sheet_index,
+                        row,
+                        col,
+                        previous,
+                    })),
+                    Err(_) => out.push(engine::CellChange::CustomRestore { kind, data }),
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    transaction.changes = out;
+}
+
+/// The row where turning the totals row on would meet ANOTHER table (see
+/// [`totals_row_landing`]), with the table's columns; `None` when it lands
+/// without meeting one. Read and released.
+fn totals_row_blocked_at(state: &AppState, sheet: usize, table_id: identity::EntityId) -> Option<(u32, u32, u32)> {
+    let grid = state.grid.read().ok()?;
+    let tables = state.tables.read().ok()?;
+    let table = tables.get(&sheet)?.get(&table_id)?;
+    if table.style_options.total_row {
+        return None;
+    }
+    let mut row = table.end_row + 1;
+    while row <= engine::EXCEL_MAX_ROW_INDEX {
+        let blocked_by_table = tables.get(&sheet).is_some_and(|st| {
+            st.values().any(|t| {
+                t.id != table.id
+                    && ranges_overlap(row, table.start_col, row, table.end_col, t.start_row, t.start_col, t.end_row, t.end_col)
+            })
+        });
+        if blocked_by_table {
+            return Some((row, table.start_col, table.end_col));
+        }
+        let occupied = (table.start_col..=table.end_col).any(|col| {
+            grid.get_cell(row, col).is_some_and(|cell| {
+                cell.ast.is_some() || !matches!(cell.value, engine::CellValue::Empty) || cell.style_index != 0
+            })
+        });
+        if !occupied || overlaps_data_table(&grid, row, table.start_col, row, table.end_col) {
+            return None;
+        }
+        row += 1;
+    }
+    None
 }
 
 /// The body of [`toggle_totals_row`] over borrowed state, so it is testable
@@ -2673,10 +2828,10 @@ pub(crate) fn toggle_totals_row_core(
         // a `7` typed over the total sets the column to None, and [LIVE,
         // cfdv/probe2.ps1 P1/P4] Excel shows the `7` again after off and on --
         // never the default Sum the "no column has a function" test gave it.
-        let first_show = table
-            .columns
-            .iter()
-            .all(|c| c.totals_row_function == TotalsRowFunction::None && c.totals_row_label.is_none());
+        // (An EMPTY remembered label is a totals row the user emptied: not a
+        // first show, BUG-0742.)
+        let first_show = table_totals_all_empty(&table.columns)
+            && table.columns.iter().all(|c| c.totals_row_label.is_none());
         if first_show {
             if let Some(last) = table.columns.len().checked_sub(1) {
                 let last_col = table.start_col + last as u32;
@@ -2706,7 +2861,7 @@ pub(crate) fn toggle_totals_row_core(
                 if let Some(formula_str) = formula {
                     written.push((totals_row, cell_col, Some(formula_str)));
                 }
-            } else if let Some(label) = &col.totals_row_label {
+            } else if let Some(label) = col.totals_row_label.as_ref().filter(|l| !l.is_empty()) {
                 labels.push((totals_row, cell_col, label.clone()));
             }
         }
@@ -2724,6 +2879,18 @@ pub(crate) fn toggle_totals_row_core(
                 None
             };
             written.push((totals_row, cell_col, None));
+        }
+        // A totals row the user EMPTIED -- every function None, every label
+        // cleared -- is remembered as empty, never as "not yet shown": [LIVE,
+        // Excel 16, 2026-11-06, lane tabxlsx probe1 S2b/S2c] with the Sum set
+        // to None and the "Total" label cleared, `ShowTotals` off and on
+        // shows an empty row, no default Sum or label (BUG-0742). The memory
+        // is an EMPTY remembered label on the first column, which shows as
+        // nothing and rides `totals_row_label` like any other.
+        if table_totals_all_empty(&table.columns) {
+            if let Some(first) = table.columns.first_mut() {
+                first.totals_row_label = Some(String::new());
+            }
         }
         table.end_row -= 1;
         table.style_options.total_row = false;
@@ -2851,9 +3018,11 @@ pub(crate) fn toggle_totals_row_core(
     TableResult::ok(result)
 }
 
-/// Excel's own refusal shape for a totals row that would land on another
-/// table. [LIVE, Excel 16, tablec/probe3.ps1] Excel SHIFTS the table below
-/// down to make room; Calcula refuses instead (recorded as remaining work).
+/// The refusal for a totals row that would land on another table when no
+/// room was made for it. [LIVE, Excel 16, tablec/probe3.ps1] Excel SHIFTS
+/// the table below down to make room, and so does the command
+/// ([`toggle_totals_row_shifting`], BUG-0742); the bare
+/// [`toggle_totals_row_core`] still refuses.
 pub(crate) const TOTALS_ROW_OVER_TABLE_MESSAGE: &str =
     "The totals row would land on another table. Move that table down first.";
 
@@ -3045,38 +3214,20 @@ pub fn resize_table(
                 if is_ours {
                     filter_undo = Some(af.clone());
 
-                    // `column_filters` is keyed RELATIVE to start_col. Moving
-                    // start_col without re-keying would leave every existing
-                    // criterion pointing at a different physical column —
-                    // filtering the wrong data with no visible change.
-                    if af.start_col != updated.start_col {
-                        let old_start = af.start_col;
-                        let remapped: std::collections::HashMap<u32, crate::autofilter::ColumnFilter> =
-                            af.column_filters
-                                .iter()
-                                .filter_map(|(rel, cf)| {
-                                    let abs = old_start + rel;
-                                    if abs < updated.start_col || abs > updated.end_col {
-                                        return None; // Column left the table.
-                                    }
-                                    let new_rel = abs - updated.start_col;
-                                    let mut moved = cf.clone();
-                                    moved.column_index = new_rel;
-                                    Some((new_rel, moved))
-                                })
-                                .collect();
-                        af.column_filters = remapped;
-                    } else {
-                        // Same origin: drop criteria for columns the resize cut.
-                        let max_rel = updated.end_col - updated.start_col;
-                        af.column_filters.retain(|rel, _| *rel <= max_rel);
-                    }
-
+                    let old_start = af.start_col;
                     af.start_row = updated.start_row;
                     // The filter stops above the totals row (`filter_end_row`).
                     af.end_row = updated.filter_end_row();
                     af.start_col = updated.start_col;
                     af.end_col = updated.end_col;
+                    // `column_filters` and the remembered sort are keyed
+                    // RELATIVE to start_col. Moving start_col without re-keying
+                    // would leave every criterion and sort level pointing at a
+                    // different physical column -- filtering (and Reapply
+                    // sorting) the wrong data with no visible change. A resize
+                    // moves no cells, so each column stays where it is; keys for
+                    // columns the resize cut are dropped.
+                    af.rekey_columns(old_start, Some);
                 }
             }
         }
@@ -3255,6 +3406,40 @@ fn retire_table_refs_in_ast(
         })
     });
     changed.then_some(out)
+}
+
+/// `formula` with every structured reference NAMING one of `table_keys`
+/// (`table_name_key`) -- the tables of a sheet being DELETED -- rewritten to
+/// `#REF!`, or `None` when it names none of them (or does not parse).
+///
+/// [LIVE, Excel 16, 2026-11-06, lane tabxlsx probe1] with a table `TT` on a
+/// sheet that is then deleted, `=SUM(TT[H2])` becomes `=SUM(#REF!)`,
+/// `=SUM(TT[[#Headers],[H1]:[H2]])` `=SUM(#REF!)`, `=TT[[#This Row],[H1]]`
+/// `=#REF!`, `=COUNTA(TT[#All])` `=COUNTA(#REF!)` and
+/// `=IFERROR(SUM(TT[H1]),-1)` `=IFERROR(SUM(#REF!),-1)` (shows -1) -- the
+/// rule Delete Table already follows (`RetiredTableRefs::ToRefError`). Before
+/// (BUG-0750) the reference kept `TT[H2]`, naming a table that no longer
+/// existed. A bare reference (`[@H1]`) is the formula's OWN table, never one
+/// on the deleted sheet, and is kept.
+pub(crate) fn retire_deleted_sheet_table_refs(formula: &str, table_keys: &[String]) -> Option<String> {
+    if table_keys.is_empty() {
+        return None;
+    }
+    let folded = table_name_key(formula);
+    if !table_keys.iter().any(|k| folded.contains(k.as_str())) {
+        return None;
+    }
+    let parsed = parser::parse(formula).ok()?;
+    let mut changed = false;
+    let out = map_table_refs(&parsed, &mut |node| {
+        let parser::ast::Expression::TableRef { table_name, .. } = node else { return None };
+        if table_name.is_empty() || !table_keys.iter().any(|k| *k == table_name_key(table_name)) {
+            return None;
+        }
+        changed = true;
+        Some(parser::ast::Expression::Literal(parser::ast::Value::Error("#REF!".to_string())))
+    });
+    changed.then(|| format!("={}", engine::ast_render::render_formula_raw(&out)))
 }
 
 /// [`retire_table_refs_in_ast`] over a formula held as TEXT (another table's
@@ -4214,6 +4399,32 @@ pub fn enforce_table_header(
     column_index: u32,
     new_value: String,
 ) -> TableResult {
+    enforce_table_header_core(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        table_id,
+        column_index,
+        new_value,
+    )
+}
+
+/// The body of [`enforce_table_header`] over borrowed state (testable).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enforce_table_header_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    table_id: identity::EntityId,
+    column_index: u32,
+    new_value: String,
+) -> TableResult {
     let active_sheet = *state.active_sheet.read().unwrap();
     // CONDITIONAL MUTATION. This is the tail of a cell edit the user just made:
     // `update_cell` has already marked the document dirty, so the token here adds no
@@ -4258,6 +4469,12 @@ pub fn enforce_table_header(
     // readers over would turn every one of them into `#NAME?`. Excel renames
     // them; so does this, through the same helper the dialog uses.
     if previous_name != final_name {
+        // ONE UNDO STEP with the typing that renamed the column (BUG-0742):
+        // Excel's Ctrl+Z takes the header text AND the rename back together.
+        // The edit was committed as its own step a moment ago; it is reopened
+        // here so the rename joins it.
+        let header = (active_sheet, result.start_row, result.start_col + column_index);
+        let reopened = reopen_header_edit_step(&state, header);
         carry_column_rename(
             &state,
             &effect,
@@ -4267,6 +4484,9 @@ pub fn enforce_table_header(
             &final_name,
             "Rename table column",
         );
+        if let Some(token) = reopened {
+            state.undo_stack.lock().unwrap().commit_owned(token);
+        }
         recalc_after_table_change(
             &state,
             &user_files_state,
@@ -4279,6 +4499,32 @@ pub fn enforce_table_header(
     }
 
     TableResult::ok(result)
+}
+
+/// The undo step of the cell edit that typed a table HEADER at `header`
+/// (sheet, row, col), reopened as the open transaction so the column rename
+/// that follows joins it; `None` when the newest step is not that edit or a
+/// step is already open (the rename then joins the open one by itself). A
+/// step that is not the edit is put back as it was, id included.
+pub(crate) fn reopen_header_edit_step(state: &AppState, header: (usize, u32, u32)) -> Option<engine::undo::OwnedTransaction> {
+    let mut undo = state.undo_stack.lock().unwrap();
+    if undo.has_open_transaction() {
+        return None;
+    }
+    let top = undo.pop_undo()?;
+    let is_the_edit = top.changes.iter().any(|c| {
+        matches!(c, engine::undo::CellChange::SetCell { sheet, row, col, .. } if (*sheet, *row, *col) == header)
+    });
+    if !is_the_edit {
+        undo.push_undo_for_redo(top);
+        return None;
+    }
+    let token = undo.begin_owned_transaction(top.description.clone());
+    if let Some(open) = undo.current_transaction_mut() {
+        open.changes = top.changes;
+        open.seq = top.seq;
+    }
+    Some(token)
 }
 
 /// Get a table by ID
@@ -5320,27 +5566,27 @@ mod tests {
 
     // --- Resize: AutoFilter criteria re-key with a moved start_col ---
 
-    /// Mirrors the `column_filters` remap in `resize_table`. Keys are RELATIVE
-    /// to the filter's start_col, so a moved origin must re-key them or every
-    /// criterion silently filters a different physical column.
+    /// The `column_filters` re-key `resize_table` runs (`AutoFilter::rekey_columns`
+    /// with every column staying put). Keys are RELATIVE to the filter's
+    /// start_col, so a moved origin must re-key them or every criterion
+    /// silently filters a different physical column.
     fn remap_filter_keys(
         old_start: u32,
         keys: &[u32],
         new_start: u32,
         new_end: u32,
     ) -> Vec<u32> {
-        let mut out: Vec<u32> = keys
-            .iter()
-            .filter_map(|rel| {
-                let abs = old_start + rel;
-                if abs < new_start || abs > new_end {
-                    return None;
-                }
-                Some(abs - new_start)
-            })
-            .collect();
-        out.sort_unstable();
-        out
+        let mut af = crate::autofilter::AutoFilter::new(0, old_start, 5, old_start + 20);
+        for &rel in keys {
+            af.column_filters.insert(
+                rel,
+                crate::autofilter::ColumnFilter { column_index: rel, criteria: Default::default() },
+            );
+        }
+        af.start_col = new_start;
+        af.end_col = new_end;
+        af.rekey_columns(old_start, Some);
+        af.column_keys().0
     }
 
     #[test]

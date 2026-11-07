@@ -466,9 +466,16 @@ fn an_approximate_lookup_walks_past_a_blank_instead_of_stopping_at_it() {
     assert_eq!(num(&g, "=MATCH(3,A1:A3,1)"), 3.0, "MATCH type 1");
 }
 
-/// LOOKUP and XLOOKUP return VALUES, so a blank result cell is the number 0 —
-/// and the CACHED and SCANNED paths must agree about that, or the same formula
-/// answers differently depending on whether a recalc pass is active.
+/// LOOKUP collapses a blank result cell to the number 0 -- and the CACHED and
+/// SCANNED paths must agree about that, or the same formula answers
+/// differently depending on whether a recalc pass is active.
+///
+/// XLOOKUP is NOT in this list any more: it returns the REFERENCE it found,
+/// so its blank stays blank (`=ISBLANK(XLOOKUP(..))` TRUE [LIVE, Excel 16,
+/// lane form6 p6v.log]); `xlookup_keeps_a_blank_result_blank_on_both_paths`
+/// below pins that, cache included. (Excel 16 answers ISBLANK TRUE through
+/// LOOKUP and VLOOKUP too [LIVE, lane form6 f7.txt]; that is filed, not
+/// changed here.)
 #[test]
 fn every_value_returning_lookup_collapses_a_blank_result() {
     let mut g = Grid::new();
@@ -477,7 +484,7 @@ fn every_value_returning_lookup_collapses_a_blank_result() {
     g.set_cell(0, 1, Cell::new_number(10.0));
     // B2 deliberately empty — the blank result cell.
 
-    for inner in ["LOOKUP(\"b\",A1:A2,B1:B2)", "XLOOKUP(\"b\",A1:A2,B1:B2)"] {
+    for inner in ["LOOKUP(\"b\",A1:A2,B1:B2)"] {
         let f = format!("={}", inner);
         assert_eq!(eval(&g, &f), EvalResult::Number(0.0), "{}", f);
         assert!(!boolean(&g, &format!("=ISBLANK({})", inner)), "ISBLANK of {}", inner);
@@ -489,6 +496,28 @@ fn every_value_returning_lookup_collapses_a_blank_result() {
         };
         assert_eq!(scanned, cached, "cache diverged from scan for {}", f);
     }
+}
+
+/// XLOOKUP returns a reference: a blank result cell is BLANK on the scan AND
+/// on the lookup-cache path (which once collapsed it to keep the two equal).
+#[test]
+fn xlookup_keeps_a_blank_result_blank_on_both_paths() {
+    let mut g = Grid::new();
+    g.set_cell(0, 0, Cell::new_text("a".to_string()));
+    g.set_cell(1, 0, Cell::new_text("b".to_string()));
+    g.set_cell(0, 1, Cell::new_number(10.0));
+    // B2 deliberately empty — the blank result cell.
+
+    let inner = "XLOOKUP(\"b\",A1:A2,B1:B2)";
+    let f = format!("={}", inner);
+    let scanned = eval(&g, &f);
+    assert_eq!(scanned, EvalResult::Blank, "{}", f);
+    assert!(boolean(&g, &format!("=ISBLANK({})", inner)), "ISBLANK of {}", inner);
+    let cached = {
+        let _pass = crate::lookup_cache::begin_pass();
+        eval(&g, &f)
+    };
+    assert_eq!(scanned, cached, "cache diverged from scan for {}", f);
 }
 
 /// SUBTOTAL's two spellings must agree. The bare-cell-reference branch of

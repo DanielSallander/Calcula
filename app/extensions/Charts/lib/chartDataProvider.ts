@@ -168,8 +168,10 @@ function isTraceableToCells(spec: ChartSpec): boolean {
 async function readTypedSeries(
   spec: ChartSpec,
   data: ParsedChartData,
+  askingSheet: number,
 ): Promise<{ values: (number | null)[][]; evidence: SeriesEvidence[] } | null> {
-  const ref = await resolveDataSource(spec.data);
+  // The chart's own sheet asks for a name, as the paint did.
+  const ref = await resolveDataSource(spec.data, askingSheet);
   const cells = await getRangeCellsTyped(
     ref.startRow,
     ref.startCol,
@@ -340,7 +342,7 @@ async function resolveSeries(
 
   if (isTraceableToCells(spec)) {
     try {
-      const typed = await readTypedSeries(spec, data);
+      const typed = await readTypedSeries(spec, data, chart.sheetIndex);
       if (typed) {
         values = typed.values;
         evidence = typed.evidence;

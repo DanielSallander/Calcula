@@ -404,36 +404,49 @@ fn build_intermediate_where(
     parts.join(" AND ")
 }
 
-/// Format a filter value for an intermediate table column.
-///
-/// Looks up the column's Arrow data type in the materialized schema to decide
-/// whether the value needs SQL quoting. Falls back to quoting if the column
-/// cannot be found (defensive).
+/// Format a filter value for an intermediate table column, as the column's
+/// materialized Arrow type
+/// ([`typed_filter_literal_for_arrow`](crate::compute::context::typed_filter_literal_for_arrow)):
+/// a plain number bare for a numeric column, a quoted string for text --
+/// including a dictionary-encoded or `Utf8View` text column, which this used
+/// to inline UNQUOTED along with any value at all for every type it did not
+/// list. Falls back to quoting if the column cannot be found (defensive).
 fn format_intermediate_value(
     table: &str,
     column: &str,
     value: &str,
     schemas: &std::collections::HashMap<String, arrow::datatypes::SchemaRef>,
 ) -> String {
-    let needs_quoting = schemas
+    match schemas
         .get(table)
         .and_then(|schema| schema.field_with_name(column).ok())
-        .map(|field| {
-            use arrow::datatypes::DataType as ArrowDT;
-            matches!(
-                field.data_type(),
-                ArrowDT::Utf8
-                    | ArrowDT::LargeUtf8
-                    | ArrowDT::Date32
-                    | ArrowDT::Date64
-                    | ArrowDT::Timestamp(_, _)
-            )
-        })
-        .unwrap_or(true); // fallback: quote if unsure
+    {
+        Some(field) => {
+            crate::compute::context::typed_filter_literal_for_arrow(field.data_type(), value)
+        }
+        None => sql_quote_literal(value),
+    }
+}
 
-    if needs_quoting {
-        sql_quote_literal(value)
-    } else {
-        value.to_string()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType as A, Field, Schema};
+
+    #[test]
+    fn an_intermediate_filter_value_takes_its_columns_arrow_type() {
+        // A dictionary-encoded text column was inlined UNQUOTED (`cat = Bikes`)
+        // and a numeric one took any value bare.
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("cat", A::Dictionary(Box::new(A::Int32), Box::new(A::Utf8)), true),
+            Field::new("n", A::Int64, true),
+            Field::new("s", A::Utf8View, true),
+        ]));
+        let schemas = std::collections::HashMap::from([("q".to_string(), schema)]);
+        assert_eq!(format_intermediate_value("q", "cat", "Bikes", &schemas), "'Bikes'");
+        assert_eq!(format_intermediate_value("q", "s", "x", &schemas), "'x'");
+        assert_eq!(format_intermediate_value("q", "n", "10", &schemas), "10");
+        assert_eq!(format_intermediate_value("q", "n", "1 OR 1=1", &schemas), "'1 OR 1=1'");
+        assert_eq!(format_intermediate_value("q", "missing", "10", &schemas), "'10'");
     }
 }

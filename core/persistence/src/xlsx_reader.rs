@@ -475,6 +475,10 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
 
     // ---------- First pass: calamine reads cell values ----------
     let mut sheets = Vec::new();
+    // The cells whose formula is a LEGACY one (`SheetMeta::legacy_formula_cells`),
+    // by (index in `sheets`, cell), for `read_legacy_formulas` once the
+    // defined names are known.
+    let mut legacy_formulas: Vec<(usize, (u32, u32))> = Vec::new();
     let mut meta_charts: Vec<crate::MetaChart> = Vec::new();
     let mut meta_sparklines: Vec<crate::MetaSparkline> = Vec::new();
 
@@ -606,6 +610,9 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
                 // dropped entirely and the formula was lost with it.
                 if is_empty && style_index == 0 && formula.is_none() {
                     continue;
+                }
+                if formula.is_some() && sheet_meta.is_some_and(|m| m.legacy_formula_cells.contains(&(actual_row, actual_col))) {
+                    legacy_formulas.push((sheets.len(), (actual_row, actual_col)));
                 }
 
                 // A rich shared string's runs (calamine reads only its text),
@@ -871,6 +878,7 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
         pending_recalc: None,
         calculation_incomplete: false,
         calculation_manual: false,
+        calculation_except_tables: false,
         // `.xlsx` carries no `.cala` format_version, and this reader does not
         // read xlsx's own array-formula `ref` attributes either (calamine's
         // formula range gives the text, not the `t="array"`/`ref` pair), so an
@@ -882,6 +890,12 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
         // xlsx has no object bindings (the meta carry does not hold them).
         object_bindings: Vec::new(),
     };
+
+    // The file's own NAMED cell styles, in the app's `named_styles.json`
+    // shape (BUG-0771).
+    if let Some(bytes) = style_data.as_ref().and_then(named_styles_of) {
+        wb.user_files.insert("named_styles.json".to_string(), bytes);
+    }
 
     // Sparklines have no native xlsx form — the meta carry is the only source.
     for ms in &meta_sparklines {
@@ -1006,14 +1020,14 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
             // workbook.xml sheet order (calamine's sheet_names order, which
             // includes _calcula_meta), so resolve through sheet_names first.
             //
-            // Calcula's runtime name map is keyed by NAME ONLY (its defined-name
-            // key), so
-            // Excel's same-name-different-scope pattern (a "Total" per sheet)
-            // cannot be represented: keep ONE entry per name, preferring the
-            // workbook-scoped one (usable from every sheet), else the first
-            // seen — and warn instead of letting a later insert silently win.
+            // Calcula's runtime name map is keyed by SCOPE AND NAME (BUG-0744,
+            // `named_ranges::registry_key`), as Excel holds names: a workbook
+            // "Total" beside a "Total" per sheet all arrive. Only a second name
+            // of one spelling IN ONE SCOPE (which Excel never writes) is
+            // dropped -- the first seen kept, with a warning instead of a later
+            // insert silently winning.
             let defined = crate::xlsx_style_reader::parse_defined_names(&mut archive);
-            let mut by_name: HashMap<String, usize> = HashMap::new();
+            let mut by_name: HashMap<(String, Option<identity::SheetId>), usize> = HashMap::new();
             for (name, refers_to, local_idx) in defined {
                 // Excel built-ins: Print_Area / Print_Titles feed the sheet's
                 // page setup (they are sheet-scoped); the rest are internal.
@@ -1061,28 +1075,12 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
                 // key the runtime map uses: `Pæresalg` / `PAERESALG` is ONE
                 // name and `qµ` / `qμ` are two, where `to_uppercase` said the
                 // opposite of each.
-                let key = identity::defined_name_key(name.trim());
-                if let Some(&existing_idx) = by_name.get(&key) {
-                    let existing_is_global = wb.named_ranges[existing_idx].sheet_id.is_none();
-                    if !existing_is_global && sheet_id.is_none() {
-                        // Workbook scope supersedes a sheet-scoped duplicate.
-                        eprintln!(
-                            "[WARN] xlsx open: defined name '{}' exists in multiple scopes; keeping the workbook-scoped one",
-                            name
-                        );
-                        wb.named_ranges[existing_idx] = crate::SavedNamedRange {
-                            name,
-                            refers_to,
-                            sheet_id,
-                            comment: None,
-                            folder: None,
-                        };
-                    } else {
-                        eprintln!(
-                            "[WARN] xlsx open: defined name '{}' exists in multiple scopes; keeping the first imported",
-                            name
-                        );
-                    }
+                let key = (identity::defined_name_key(name.trim()), sheet_id);
+                if by_name.contains_key(&key) {
+                    eprintln!(
+                        "[WARN] xlsx open: defined name '{}' appears twice in one scope; keeping the first imported",
+                        name
+                    );
                     continue;
                 }
                 by_name.insert(key, wb.named_ranges.len());
@@ -1097,7 +1095,336 @@ fn load_xlsx_from<RS: std::io::Read + std::io::Seek>(
         }
     }
 
+    read_workbook_qualified_names(&mut wb);
+    read_legacy_formulas(&mut wb, &legacy_formulas);
+    note_unreadable_formulas(&mut wb);
+
     Ok(wb)
+}
+
+/// What an .xlsx import could not carry into Calcula, for the user
+/// (`XlsxImportLosses::message`): cells whose formula Calcula cannot read --
+/// they open as their cached values, as they always did, but now said --
+/// and tables whose filter criterion is lost (`xlsx_autofilter`). It rides
+/// the loaded workbook as `user_files[IMPORT_LOSSES_FILE]` until the caller
+/// takes it ([`take_xlsx_import_losses`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct XlsxImportLosses {
+    pub formulas: Vec<String>,
+    pub filters: Vec<String>,
+}
+
+/// The `user_files` entry that carries [`XlsxImportLosses`] out of
+/// [`load_xlsx`]; no `.cala` ever holds it (the caller takes it at once).
+const IMPORT_LOSSES_FILE: &str = "xlsx_import_losses.json";
+
+impl XlsxImportLosses {
+    pub fn is_empty(&self) -> bool {
+        self.formulas.is_empty() && self.filters.is_empty()
+    }
+
+    /// The sentence the user reads, or `None` when nothing was lost.
+    pub fn message(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let list = |items: &[String]| {
+            let shown: Vec<&str> = items.iter().take(5).map(String::as_str).collect();
+            match items.len() {
+                n if n > 5 => format!("{} and {} more", shown.join(", "), n - 5),
+                _ => shown.join(", "),
+            }
+        };
+        let mut parts = Vec::new();
+        match self.formulas.len() {
+            0 => {}
+            1 => parts.push(format!("the formula in {} could not be read and the cell holds its value only", list(&self.formulas))),
+            n => parts.push(format!("the formulas in {} cells ({}) could not be read and those cells hold their values only", n, list(&self.formulas))),
+        }
+        match self.filters.len() {
+            0 => {}
+            1 => parts.push(format!("the filter or sort of {} could not be kept in full (its hidden rows stay hidden)", list(&self.filters))),
+            n => parts.push(format!("the filters or sorts of {} tables or ranges ({}) could not be kept in full (their hidden rows stay hidden)", n, list(&self.filters))),
+        }
+        Some(format!("The workbook was opened, but {}.", parts.join(", and ")))
+    }
+}
+
+/// Add to the import losses the workbook carries.
+pub(crate) fn note_import_losses(wb: &mut Workbook, add: impl FnOnce(&mut XlsxImportLosses)) {
+    let mut losses = wb
+        .user_files
+        .get(IMPORT_LOSSES_FILE)
+        .and_then(|b| serde_json::from_slice::<XlsxImportLosses>(b).ok())
+        .unwrap_or_default();
+    add(&mut losses);
+    if losses.is_empty() {
+        wb.user_files.remove(IMPORT_LOSSES_FILE);
+    } else if let Ok(bytes) = serde_json::to_vec(&losses) {
+        wb.user_files.insert(IMPORT_LOSSES_FILE.to_string(), bytes);
+    }
+}
+
+/// Take what [`load_xlsx`] could not carry ([`XlsxImportLosses`]) out of
+/// the workbook it loaded, so the caller can tell the user.
+pub fn take_xlsx_import_losses(wb: &mut Workbook) -> XlsxImportLosses {
+    wb.user_files
+        .remove(IMPORT_LOSSES_FILE)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Every cell whose formula Calcula's parser cannot read, reported: such a
+/// cell opens holding its cached value only. [LIVE, Excel 16, lane xlsx
+/// open-rich] Excel itself saves `=RATE(10,-100,800)+SUM(Rate[Q])`, typed
+/// beside a table named Rate, as `Rate[](10,-100,800)+SUM(Rate[Q])` -- the
+/// table called -- and shows `=Rate(10,-100,800)+SUM(Rate[Q])`, #REF!; it
+/// was read value-only without a word (BUG-0740).
+fn note_unreadable_formulas(wb: &mut Workbook) {
+    let mut lost: Vec<String> = Vec::new();
+    for sheet in &wb.sheets {
+        let mut cells: Vec<(&(u32, u32), &SavedCell)> = sheet.cells.iter().filter(|(_, c)| c.formula.is_some()).collect();
+        cells.sort_by_key(|(at, _)| **at);
+        for (&(row, col), cell) in cells {
+            let Some(formula) = cell.formula.as_deref() else { continue };
+            if parser::parse(formula).is_err() {
+                lost.push(format!("{}!{}", sheet.name, crate::xlsx_autofilter::a1_address(row, col)));
+            }
+        }
+    }
+    if !lost.is_empty() {
+        note_import_losses(wb, |losses| losses.formulas.extend(lost));
+    }
+}
+
+/// The file's CUSTOM named cell styles (`<cellStyles>` without `builtinId`,
+/// Excel's built-ins are Calcula's own) as the app's `named_styles.json`
+/// (`named_styles_cmd::SavedNamedStyle`: name, category, the resolved
+/// `CellStyle`, `includeProtection`), or `None` when there are none.
+///
+/// IncludeProtection is the style record's `applyProtection` [LIVE, Excel 16,
+/// 2026-11-06, lane xlsx probe3]: a style made with `IncludeProtection =
+/// False` is saved `<xf .. applyProtection="0"><protection locked="0"/></xf>`
+/// in `<cellStyleXfs>`, one made with it True (Excel's default for a user's
+/// style) has no `applyProtection` at all, and the built-in "Good" (False to
+/// Excel's COM) carries `applyProtection="0"` too. Absent means True.
+fn named_styles_of(sd: &crate::xlsx_style_reader::XlsxStyleData) -> Option<Vec<u8>> {
+    let mut styles: Vec<serde_json::Value> = Vec::new();
+    for (name, xf_id, builtin) in &sd.cell_styles {
+        if *builtin || name.is_empty() {
+            continue;
+        }
+        let Some(record) = sd.cell_style_xfs.get(*xf_id) else { continue };
+        let mut record = record.clone();
+        // A style's record states its protection by its child alone.
+        record.apply_protection = record.has_protection;
+        let style = xf_to_cell_style(&record, &sd.fonts, &sd.fills, &sd.borders, &sd.number_formats);
+        let Ok(style) = serde_json::to_value(&style) else { continue };
+        styles.push(serde_json::json!({
+            "name": name,
+            "category": "Custom",
+            "style": style,
+            "includeProtection": record.apply_protection_attr.unwrap_or(true),
+        }));
+    }
+    if styles.is_empty() {
+        return None;
+    }
+    styles.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    serde_json::to_vec_pretty(&styles).ok()
+}
+
+#[cfg(test)]
+pub(crate) fn named_styles_of_for_tests(sd: &crate::xlsx_style_reader::XlsxStyleData) -> Option<Vec<u8>> {
+    named_styles_of(sd)
+}
+
+/// Excel's `[0]!Name` -- the WORKBOOK's name, spelled so a sheet's own name of
+/// that spelling cannot take it -- in Calcula's spelling (lane form4).
+///
+/// [LIVE, Excel 16, lane form4 SCRATCH/form4/probe2.ps1 -> p2.xlsx] with a
+/// workbook Dup = 1, a Sheet1 Dup = 2 and a workbook Glob = 7, Excel shows
+/// `=Sheet2!Dup` (Sheet2 has no Dup) as `=Book1!Dup` and saves it
+/// `<f>[0]!Dup</f>`, `=Sheet2!Dup+1` as `[0]!Dup+1`, `=SUM(Sheet2!Glob,1)` as
+/// `SUM([0]!Glob,1)`, while `=Sheet1!Dup` stays `Sheet1!Dup`. Calcula's parser
+/// has no `[0]!`, so each such formula failed to parse on import. Calcula reads
+/// a qualified name in its qualifier's scope (falling back to the workbook),
+/// so `[0]!Name` is the bare `Name` where the formula's own sheet has no name
+/// of that spelling and the formula does not bind that spelling itself, and
+/// `Sheet!Name` qualified by the first sheet that has none where it does --
+/// or where the formula's own LET name or LAMBDA parameter of that spelling
+/// would capture a bare `Name` (`binds_locally`, lane form5). When every
+/// sheet has its own, the text is left as it
+/// is, and the formula is reported as not read (`note_unreadable_formulas`).
+/// A sheet's own name's definition is read the same way, from its sheet; a
+/// workbook name's definition is qualified whenever any sheet shadows it.
+fn read_workbook_qualified_names(wb: &mut Workbook) {
+    let mut shadowing: HashMap<String, HashSet<usize>> = HashMap::new();
+    for nr in &wb.named_ranges {
+        if let Some(id) = nr.sheet_id {
+            if let Some(index) = wb.sheets.iter().position(|s| s.id == id) {
+                shadowing.entry(identity::defined_name_key(nr.name.trim())).or_default().insert(index);
+            }
+        }
+    }
+    let sheet_names: Vec<String> = wb.sheets.iter().map(|s| s.name.clone()).collect();
+    // `local`: the formula binds this spelling itself (a LET name or a
+    // LAMBDA parameter), so a bare name would be captured by the local and
+    // must be qualified even where no sheet shadows it.
+    let spell = |name: &str, own: Option<usize>, local: bool| -> Option<String> {
+        let shadows = shadowing.get(&identity::defined_name_key(name));
+        let shadowed = |i: usize| shadows.is_some_and(|s| s.contains(&i));
+        let needs_qualifier = local
+            || match own {
+                Some(sheet) => shadowed(sheet),
+                None => shadows.is_some_and(|s| !s.is_empty()),
+            };
+        if !needs_qualifier {
+            return Some(name.to_string());
+        }
+        let free = (0..sheet_names.len()).find(|&i| !shadowed(i))?;
+        Some(format!("{}!{}", engine::ast_render::quote_sheet_name(&sheet_names[free]), name))
+    };
+    for (index, sheet) in wb.sheets.iter_mut().enumerate() {
+        for cell in sheet.cells.values_mut() {
+            if let Some(formula) = cell.formula.as_mut() {
+                let text = formula.clone();
+                if let Some(read) = workbook_qualified_names_text(&text, |name| spell(name, Some(index), binds_locally(&text, name))) {
+                    *formula = read;
+                }
+            }
+        }
+    }
+    let scopes: Vec<Option<usize>> = wb
+        .named_ranges
+        .iter()
+        .map(|nr| nr.sheet_id.and_then(|id| wb.sheets.iter().position(|s| s.id == id)))
+        .collect();
+    for (nr, own) in wb.named_ranges.iter_mut().zip(scopes) {
+        let text = nr.refers_to.clone();
+        if let Some(read) = workbook_qualified_names_text(&text, |name| spell(name, own, binds_locally(&text, name))) {
+            nr.refers_to = read;
+        }
+    }
+}
+
+/// Whether `text` has a LET or LAMBDA call and spells `name` as a BARE
+/// identifier somewhere -- not after `!` (a qualified name, `[0]!Name`
+/// included), not as a function or sheet name, not inside a string, a
+/// quoted sheet name or brackets. Over-approximates "a LET name or LAMBDA
+/// parameter of that spelling", which is harmless: the workbook's name read
+/// through a sheet that has none of its own is the same name.
+///
+/// [LIVE, Excel 16, verify-form4 SCRATCH/verify-form4/probe.ps1 -> v1.xlsx,
+/// workbook Dup = 1, Sheet1's own Dup = 2] Sheet2's `=LET(Dup,5,Sheet2!Dup+Dup)`
+/// shows 6 and is saved `_xlfn.LET(_xlpm.Dup,5,[0]!Dup+_xlpm.Dup)`;
+/// `=LAMBDA(Dup,Sheet2!Dup+Dup)(10)` shows 11. Read as the bare `Dup`, the
+/// local captured the workbook's name: 10 and 20, silently.
+fn binds_locally(text: &str, name: &str) -> bool {
+    let key = identity::defined_name_key(name);
+    let chars: Vec<char> = text.chars().collect();
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '.' || c == '\\';
+    let (mut has_scope, mut bare) = (false, false);
+    let (mut in_string, mut in_quote, mut brackets) = (false, false, 0usize);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            in_string = c != '"';
+            i += 1;
+            continue;
+        }
+        if in_quote {
+            in_quote = c != '\'';
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '\'' => in_quote = true,
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            _ if brackets == 0 && (c.is_alphabetic() || c == '_' || c == '\\') && (i == 0 || !ident(chars[i - 1])) => {
+                let start = i;
+                while i < chars.len() && ident(chars[i]) {
+                    i += 1;
+                }
+                let run: String = chars[start..i].iter().collect();
+                let after = chars.get(i).copied();
+                let qualified = start > 0 && chars[start - 1] == '!';
+                if after == Some('(') {
+                    let call = run.to_ascii_uppercase();
+                    let call = call.strip_prefix("_XLFN.").unwrap_or(&call);
+                    has_scope |= call == "LET" || call == "LAMBDA";
+                } else if after != Some('!') && !qualified && identity::defined_name_key(&run) == key {
+                    bare = true;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    has_scope && bare
+}
+
+/// `text` with every `[0]!Name` outside a string literal replaced by what
+/// `spell(Name)` answers; `None` when nothing changed. A `spell` that answers
+/// `None` leaves that one as it is.
+fn workbook_qualified_names_text(text: &str, spell: impl Fn(&str) -> Option<String>) -> Option<String> {
+    const MARK: &str = "[0]!";
+    if !text.contains(MARK) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut changed = false;
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if c == '"' {
+            in_string = !in_string;
+        } else if !in_string && rest.starts_with(MARK) {
+            let after = &rest[MARK.len()..];
+            let len = after
+                .char_indices()
+                .find(|&(_, ch)| !(ch.is_alphanumeric() || ch == '_' || ch == '.' || ch == '\\'))
+                .map_or(after.len(), |(i, _)| i);
+            if len > 0 {
+                if let Some(spelled) = spell(&after[..len]) {
+                    out.push_str(&spelled);
+                    rest = &after[len..];
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    changed.then_some(out)
+}
+
+/// Every LEGACY formula (`SheetMeta::legacy_formula_cells`) read as Excel reads
+/// it: with its implicit intersection written out (`=A1:A5` is `=@A1:A5`,
+/// `=SUM(LEN(C1:C3))` `=SUM(LEN(@C1:C3))`; see
+/// `xlsx_writer::dynamic_formula::legacy_formula_text`). Calcula's formulas
+/// mean what a dynamic-array Excel means, so without the `@` a legacy
+/// `=A1:A5` SPILLED five values where Excel shows one (BUG-0645 item 4). Runs
+/// after the defined names are read: a name's shape decides whether it is
+/// multi-cell.
+fn read_legacy_formulas(wb: &mut Workbook, cells: &[(usize, (u32, u32))]) {
+    if cells.is_empty() {
+        return;
+    }
+    let shapes = crate::xlsx_writer::dynamic_formula::NameShapes::of(wb);
+    for &(sheet, at) in cells {
+        let Some(cell) = wb.sheets.get_mut(sheet).and_then(|s| s.cells.get_mut(&at)) else { continue };
+        let Some(formula) = cell.formula.as_deref() else { continue };
+        let text = formula.strip_prefix('=').unwrap_or(formula);
+        if let Some(read) = crate::xlsx_writer::dynamic_formula::legacy_formula_text(text, &shapes) {
+            cell.formula = Some(format!("={}", read));
+        }
+    }
 }
 
 /// Whether the archive's `xl/workbook.xml` says calculation was not completed
@@ -1118,9 +1445,10 @@ fn read_calculation_incomplete<R: std::io::Read + std::io::Seek>(archive: &mut z
 }
 
 /// The calculation mode an .xlsx was saved under: `true` for Excel's
-/// `<calcPr calcMode="manual"/>`. `"auto"`, `"autoNoTable"` (Calcula has no
-/// automatic-except-tables mode; it calculates them), an absent attribute,
-/// element or part all answer `false` -- the attribute's default is `auto`.
+/// `<calcPr calcMode="manual"/>`. `"auto"`, `"autoNoTable"` (Automatic except
+/// for data tables, which [`read_xlsx_calculation_mode`] tells apart), an
+/// absent attribute, element or part all answer `false` -- the attribute's
+/// default is `auto`.
 ///
 /// Read apart from [`load_xlsx`] because the mode is not the workbook's: in
 /// Excel it is an APPLICATION setting that a save records and an open of the
@@ -1141,8 +1469,41 @@ pub fn read_xlsx_manual_calculation(path: &Path) -> Result<bool, PersistenceErro
     Ok(calc_pr_says_manual(&xml))
 }
 
+/// The calculation mode an .xlsx was saved under, by the mode names the host
+/// speaks: `"manual"` for `calcMode="manual"`, `"automaticExceptTables"` for
+/// Excel's `calcMode="autoNoTable"` (Automatic except for data tables, BUG-0754
+/// [LIVE, Excel 16, dtable/probe2.ps1: a workbook saved under
+/// xlCalculationSemiautomatic wrote `<calcPr calcId="191029"
+/// calcMode="autoNoTable"/>`]), `"automatic"` otherwise -- an absent attribute,
+/// element or part included.
+pub fn read_xlsx_calculation_mode(path: &Path) -> Result<&'static str, PersistenceError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| PersistenceError::InvalidFormat(format!("xlsx calcPr read: {}", e)))?;
+    let mut xml = String::new();
+    match archive.by_name(crate::xlsx_writer::XLSX_WORKBOOK_PART) {
+        Ok(mut part) => {
+            part.read_to_string(&mut xml)?;
+        }
+        Err(_) => return Ok("automatic"),
+    }
+    Ok(if calc_pr_says_manual(&xml) {
+        "manual"
+    } else if calc_pr_says_mode(&xml, b"autoNoTable") {
+        "automaticExceptTables"
+    } else {
+        "automatic"
+    })
+}
+
 /// [`read_xlsx_manual_calculation`] over the workbook part's text.
 pub(crate) fn calc_pr_says_manual(workbook_xml: &str) -> bool {
+    calc_pr_says_mode(workbook_xml, b"manual")
+}
+
+/// Whether the workbook part's `<calcPr>` says `calcMode` = `mode`.
+pub(crate) fn calc_pr_says_mode(workbook_xml: &str, mode: &[u8]) -> bool {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(workbook_xml);
     let mut buf = Vec::new();
@@ -1150,7 +1511,7 @@ pub(crate) fn calc_pr_says_manual(workbook_xml: &str) -> bool {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) if e.local_name().as_ref() == b"calcPr" => {
                 return e.attributes().flatten().any(|attr| {
-                    attr.key.local_name().as_ref() == b"calcMode" && attr.value.as_ref() == b"manual"
+                    attr.key.local_name().as_ref() == b"calcMode" && attr.value.as_ref() == mode
                 });
             }
             Ok(Event::Eof) | Err(_) => return false,
@@ -1252,9 +1613,12 @@ mod defined_name_key_tests {
         let mut wb = Workbook::default();
         wb.sheets = vec![Sheet::new("Data".to_string())];
         let data = wb.sheets[0].id;
+        // Two workbook names of one Excel spelling are one; a sheet's own name
+        // of that spelling is another name, and arrives too (BUG-0744).
         wb.named_ranges = vec![
-            name("PAERESALG", Some(data)),
+            name("PAERESALG", None),
             name("Pæresalg", None),
+            name("Pæresalg", Some(data)),
             name("q\u{B5}", None),
             name("q\u{3BC}", None),
         ];
@@ -1268,11 +1632,234 @@ mod defined_name_key_tests {
         assert_eq!(
             got,
             vec![
-                ("Pæresalg".to_string(), true),
+                ("PAERESALG".to_string(), true),
+                ("Pæresalg".to_string(), false),
                 ("q\u{B5}".to_string(), true),
                 ("q\u{3BC}".to_string(), true),
             ],
-            "one name per Excel name, the workbook-scoped one kept"
+            "one name per Excel name and scope, the first kept"
         );
+    }
+}
+
+#[cfg(test)]
+mod workbook_qualified_name_tests {
+    use crate::{SavedCell, SavedNamedRange, Sheet, Workbook};
+
+    fn name(name: &str, refers_to: &str, sheet_id: Option<identity::SheetId>) -> SavedNamedRange {
+        SavedNamedRange { name: name.to_string(), refers_to: refers_to.to_string(), sheet_id, comment: None, folder: None }
+    }
+
+    /// Every worksheet part of an .xlsx rewritten by `edit`, the rest copied.
+    fn rewrite_sheets(path: &std::path::Path, edit: impl Fn(&str) -> String) {
+        use std::io::{Read, Write};
+        let bytes = std::fs::read(path).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") {
+                let mut xml = String::new();
+                entry.read_to_string(&mut xml).unwrap();
+                drop(entry);
+                out.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                out.write_all(edit(&xml).as_bytes()).unwrap();
+            } else {
+                out.raw_copy_file(entry).unwrap();
+            }
+        }
+        std::fs::write(path, out.finish().unwrap().into_inner()).unwrap();
+    }
+
+    /// Excel's `[0]!Name` is the WORKBOOK's name. [LIVE, Excel 16, lane form4
+    /// SCRATCH/form4/probe2.ps1 -> p2.xlsx, workbook Dup = 1, Sheet1's own
+    /// Dup = 2, workbook Glob = 7] Sheet1's `=Sheet2!Dup` is saved
+    /// `<f>[0]!Dup</f>` (value 1), `=Sheet2!Dup+1` `[0]!Dup+1` (2),
+    /// `=SUM(Sheet2!Glob,1)` `SUM([0]!Glob,1)` (8), Sheet2's `=Sheet2!Dup`
+    /// `[0]!Dup` (1), while `=Sheet1!Dup` stays `Sheet1!Dup`. The file below
+    /// carries exactly those `<f>` texts. Calcula's parser has no `[0]!`, so
+    /// every one was an unreadable formula on import.
+    ///
+    /// SABOTAGE (form4-zero): `read_workbook_qualified_names` returns at once
+    /// -- fails at "[0]! READ".
+    #[test]
+    fn excels_workbook_qualified_name_is_read_as_the_workbook_name() {
+        let mut wb = Workbook::default();
+        wb.sheets = vec![Sheet::new("Sheet1".to_string()), Sheet::new("Sheet2".to_string())];
+        let one = wb.sheets[0].id;
+        wb.named_ranges = vec![
+            name("Dup", "=1", None),
+            name("Dup", "=2", Some(one)),
+            name("Glob", "=7", None),
+            name("Same", "=Sheet2!Dup*10", Some(one)),
+        ];
+        let formulas: [(usize, u32, &str); 5] = [
+            (0, 1, "=Sheet2!Dup"),
+            (0, 2, "=Sheet1!Dup"),
+            (0, 3, "=Sheet2!Dup+1"),
+            (0, 4, "=SUM(Sheet2!Glob,1)"),
+            (1, 1, "=Sheet2!Dup"),
+        ];
+        for (sheet, row, formula) in formulas {
+            let mut cell = SavedCell::from_cell(&engine::Cell::new_formula(formula.to_string()));
+            cell.value = crate::SavedCellValue::Number(1.0);
+            wb.sheets[sheet].cells.insert((row, 0), cell);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-bang.xlsx");
+        crate::xlsx_writer::save_xlsx(&wb, &path).unwrap();
+        // Calcula's writer files a qualified name over a single value as Excel
+        // does: a plain `<f>`, no dynamic-array flag (p2.xlsx `<c r="A3"><f>
+        // Sheet1!Dup</f>`, `<c r="A4"><f>[0]!Dup+1</f>`).
+        {
+            use std::io::Read;
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let mut xml = String::new();
+            archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut xml).unwrap();
+            for cell in ["A2", "A3", "A4"] {
+                let at = xml.find(&format!("<c r=\"{}\"", cell)).unwrap();
+                let end = at + xml[at..].find("</c>").unwrap();
+                assert!(!xml[at..end].contains("cm=\"1\""), "QUALIFIED NAME FILED PLAIN: {}", &xml[at..end]);
+            }
+        }
+        // The texts Excel files them under.
+        // (Calcula's writer spells them in capitals and flags some dynamic;
+        // Excel's own <f> is plain and keeps the typed case.)
+        rewrite_sheets(&path, |xml| {
+            let mut out = String::new();
+            let mut rest = xml;
+            while let Some(at) = rest.find("<f ").or_else(|| rest.find("<f>")) {
+                out.push_str(&rest[..at]);
+                let close = at + rest[at..].find('>').unwrap();
+                out.push_str("<f>");
+                rest = &rest[close + 1..];
+            }
+            out.push_str(rest);
+            out.replace(" cm=\"1\"", "")
+                .replace("SHEET2!DUP", "[0]!Dup")
+                .replace("SHEET2!GLOB", "[0]!Glob")
+                .replace("SHEET1!DUP", "Sheet1!Dup")
+        });
+        // The edit really is in the file.
+        {
+            use std::io::Read;
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let mut xml = String::new();
+            archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut xml).unwrap();
+            assert!(xml.contains("[0]!Dup+1"), "the fixture carries Excel's text: {xml}");
+        }
+        let back = super::load_xlsx(&path).unwrap();
+        let formula = |sheet: usize, row: u32| back.sheets[sheet].cells.get(&(row, 0)).and_then(|c| c.formula.clone());
+        // Sheet1 has its own Dup: the workbook's is reached through a sheet
+        // that has none. Sheet1 has no Glob, and Sheet2 no Dup: bare.
+        assert_eq!(formula(0, 1).as_deref(), Some("=Sheet2!Dup"), "[0]! READ");
+        assert_eq!(formula(0, 2).as_deref(), Some("=Sheet1!Dup"));
+        assert_eq!(formula(0, 3).as_deref(), Some("=Sheet2!Dup+1"));
+        assert_eq!(formula(0, 4).as_deref(), Some("=SUM(Glob,1)"));
+        assert_eq!(formula(1, 1).as_deref(), Some("=Dup"));
+        for (sheet, row, _) in formulas {
+            let text = formula(sheet, row).unwrap();
+            assert!(parser::parse(&text).is_ok(), "{text} parses");
+        }
+        assert!(
+            crate::take_xlsx_import_losses(&mut back.clone()).formulas.is_empty(),
+            "no formula reported as not read"
+        );
+    }
+
+    /// `[0]!Name` inside a LET or LAMBDA that binds the same spelling is
+    /// qualified, so the local cannot capture it. [LIVE, Excel 16,
+    /// verify-form4 SCRATCH/verify-form4/probe.ps1 -> v1.xlsx, workbook Dup =
+    /// 1, Sheet1's own Dup = 2] Sheet2's `=LET(Dup,5,Sheet2!Dup+Dup)` (6) is
+    /// saved `_xlfn.LET(_xlpm.Dup,5,[0]!Dup+_xlpm.Dup)`, and
+    /// `=LAMBDA(Dup,Sheet2!Dup+Dup)(10)` (11)
+    /// `_xlfn.LAMBDA(_xlpm.Dup,[0]!Dup+_xlpm.Dup)(10)`. Sheet2 has no Dup of its
+    /// own, so they were read as the bare `Dup` -- `=LET(Dup,5,Dup+Dup)`, 10,
+    /// and 20 -- where the formula used to be reported as not read.
+    ///
+    /// SABOTAGE (form5-xlsx): `binds_locally` answers false -- fails at
+    /// "LOCAL CAPTURED".
+    #[test]
+    fn a_zero_bang_name_a_let_or_lambda_binds_is_qualified() {
+        let mut wb = Workbook::default();
+        wb.sheets = vec![Sheet::new("Sheet1".to_string()), Sheet::new("Sheet2".to_string())];
+        let one = wb.sheets[0].id;
+        wb.named_ranges = vec![name("Dup", "=1", None), name("Dup", "=2", Some(one))];
+        // Placeholders the rewrite below swaps for Excel's own <f> texts.
+        let excel: [(usize, u32, &str, &str); 4] = [
+            (1, 1, "=1001", "_xlfn.LET(_xlpm.Dup,5,[0]!Dup+_xlpm.Dup)"),
+            (1, 2, "=1002", "_xlfn.LAMBDA(_xlpm.Dup,[0]!Dup+_xlpm.Dup)(10)"),
+            (1, 3, "=1003", "_xlfn.LET(_xlpm.x,5,[0]!Dup+_xlpm.x)"),
+            (0, 1, "=1004", "_xlfn.LET(_xlpm.Dup,5,[0]!Dup+_xlpm.Dup)"),
+        ];
+        for (sheet, row, placeholder, _) in excel {
+            let mut cell = SavedCell::from_cell(&engine::Cell::new_formula(placeholder.to_string()));
+            cell.value = crate::SavedCellValue::Number(1.0);
+            wb.sheets[sheet].cells.insert((row, 0), cell);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-bang-local.xlsx");
+        crate::xlsx_writer::save_xlsx(&wb, &path).unwrap();
+        rewrite_sheets(&path, |xml| {
+            let mut out = String::new();
+            let mut rest = xml;
+            while let Some(at) = rest.find("<f ").or_else(|| rest.find("<f>")) {
+                out.push_str(&rest[..at]);
+                let close = at + rest[at..].find('>').unwrap();
+                out.push_str("<f>");
+                rest = &rest[close + 1..];
+            }
+            out.push_str(rest);
+            let mut out = out.replace(" cm=\"1\"", "");
+            for (_, _, placeholder, text) in excel {
+                out = out.replace(&format!("<f>{}</f>", &placeholder[1..]), &format!("<f>{text}</f>"));
+            }
+            // v1.xlsx files the LAMBDA call (Sheet2!A3 here) as a dynamic
+            // array: `<c r="D2" cm="1"><f t="array" ref="D2">`.
+            if out.contains("_xlfn.LAMBDA(") {
+                out = out
+                    .replace("<c r=\"A3\"", "<c r=\"A3\" cm=\"1\"")
+                    .replace("<f>_xlfn.LAMBDA(", "<f t=\"array\" ref=\"A3\">_xlfn.LAMBDA(");
+            }
+            out
+        });
+        {
+            use std::io::Read;
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let mut xml = String::new();
+            archive.by_name("xl/worksheets/sheet2.xml").unwrap().read_to_string(&mut xml).unwrap();
+            assert!(xml.contains("[0]!Dup+_xlpm.Dup)(10)"), "the fixture carries Excel's text: {xml}");
+        }
+        let back = super::load_xlsx(&path).unwrap();
+        let formula = |sheet: usize, row: u32| back.sheets[sheet].cells.get(&(row, 0)).and_then(|c| c.formula.clone());
+        assert_eq!(formula(1, 1).as_deref(), Some("=LET(Dup,5,Sheet2!Dup+Dup)"), "LOCAL CAPTURED (LET)");
+        assert_eq!(formula(1, 2).as_deref(), Some("=LAMBDA(Dup,Sheet2!Dup+Dup)(10)"), "LOCAL CAPTURED (LAMBDA)");
+        // No local of that spelling: the bare name, as before.
+        assert_eq!(formula(1, 3).as_deref(), Some("=LET(x,5,Dup+x)"));
+        // A sheet that shadows the name was qualified already.
+        assert_eq!(formula(0, 1).as_deref(), Some("=LET(Dup,5,Sheet2!Dup+Dup)"));
+        assert!(
+            crate::take_xlsx_import_losses(&mut back.clone()).formulas.is_empty(),
+            "no formula reported as not read"
+        );
+    }
+
+    #[test]
+    fn binds_locally_reads_only_bare_spellings_under_a_let_or_lambda() {
+        assert!(super::binds_locally("=LET(Dup,5,[0]!Dup+Dup)", "Dup"));
+        assert!(super::binds_locally("=lambda(dup,[0]!Dup+dup)(1)", "DUP"));
+        assert!(!super::binds_locally("=LET(x,5,[0]!Dup+x)", "Dup"), "only qualified");
+        assert!(!super::binds_locally("=[0]!Dup+Dup", "Dup"), "no LET / LAMBDA");
+        assert!(!super::binds_locally("=LET(x,\"Dup\",[0]!Dup+x)", "Dup"), "inside a string");
+        assert!(!super::binds_locally("=LET(x,'Dup'!A1,[0]!Dup+x)", "Dup"), "a quoted sheet name");
+        assert!(!super::binds_locally("=LET(x,Dup!A1,[0]!Dup+x)", "Dup"), "a sheet name");
+        assert!(!super::binds_locally("=LET(x,T[Dup],[0]!Dup+x)", "Dup"), "a table column");
+    }
+
+    #[test]
+    fn a_zero_bang_inside_a_string_is_text() {
+        assert_eq!(super::workbook_qualified_names_text("\"[0]!Dup\"&[0]!Dup", |n| Some(n.to_string())).as_deref(), Some("\"[0]!Dup\"&Dup"));
+        assert_eq!(super::workbook_qualified_names_text("A1+1", |n| Some(n.to_string())), None);
     }
 }

@@ -78,6 +78,7 @@ import { registerFloatingChromeHitProbe, type FloatingChromeHitProbe } from "./f
 import { getPrimaryObjectRegion, isObjectInSelection } from "../../api/objectSelection";
 import { getLayoutSurface, isRegionLocked, type LayoutSurface } from "./layoutSurface";
 import { getGridStateSnapshot } from "../state/GridContext";
+import { touchTarget } from "./pointerPrecision";
 import { isPointModeOnForeignSheet } from "./pointModeView";
 import {
   floatingCanvasRect,
@@ -252,7 +253,8 @@ export function floatingGripGeometry(
  * side, so a grip never takes a point of its own object.
  */
 export function floatingGripHits(grip: FloatingGripGeometry, px: number, py: number): boolean {
-  const h = grip.hit;
+  // A finger or a pen grabs it within a 44 px touch target (BUG-0729).
+  const h = touchTarget(grip.hit);
   if (px < h.x || px > h.x + h.width || py < h.y || py > h.y + h.height) return false;
   const o = grip.object;
   const onObject = px >= o.x && px <= o.x + o.width && py >= o.y && py <= o.y + o.height;

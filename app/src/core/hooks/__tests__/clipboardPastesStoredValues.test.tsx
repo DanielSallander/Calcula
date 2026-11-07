@@ -108,6 +108,10 @@ vi.mock("../../lib/tauri-api", async (importOriginal) => ({
   updateCell: (row: number, col: number, value: string) => api.updateCell(row, col, value),
   clearCell: () => api.clearCell(),
   setCellStyle: vi.fn(async () => null),
+  setRowHeights: vi.fn(async () => {}),
+  setColumnWidths: vi.fn(async () => {}),
+  setRowsHidden: vi.fn(async (rows: number[]) => rows),
+  getUserHiddenRows: vi.fn(async () => []),
   shiftFormulasBatch: vi.fn(async (inputs: { formula: string; rowDelta: number; colDelta: number }[]) =>
     // A shifted formula says by how much, so a test sees that it was shifted.
     inputs.map((i) => (i.rowDelta || i.colDelta ? i.formula + "@" + i.rowDelta + "," + i.colDelta : i.formula)),
@@ -133,8 +137,9 @@ vi.mock("../../lib/dialogs", () => ({
 }));
 
 import { useClipboard, getInternalClipboard, type UseClipboardReturn } from "../useClipboard";
+import * as tauriApi from "../../lib/tauri-api";
 import { GridProvider, useGridContext } from "../../state/GridContext";
-import { setSelection } from "../../state/gridActions";
+import { setSelection, setRowHeight, setColumnWidth, setHiddenRows, setGroupHiddenRows } from "../../state/gridActions";
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
@@ -522,9 +527,12 @@ describe("a MOVE or a Ctrl+drag COPY writes a constant's stored value too (same 
   // write lands, so a drag onto its own block names EVERY source -- the one
   // inside the destination too (it was per-cell, and named only those no
   // earlier write had replaced).
+  // A LINE move onto part of itself no longer clears its own lines before the
+  // batch (BUG-0756, `lineMoveVacated.ts`): only the target lines outside
+  // the source are cleared, so every source still stands and is named.
   // SABOTAGE: drop the source of a write whose source lies in the destination
-  // in `moveCells` -- fails at "UNNAMED"; name every source in `moveRows`
-  // (drop its target-rows test) -- fails at "CLEARED".
+  // in `moveCells` -- fails at "UNNAMED"; clear the whole target in
+  // `moveRows` again -- fails at "CLEARED".
   it("a drag onto its own block names every source in one batch; a line move none it cleared", async () => {
     model.cells.set("0,0", { display: "1", formula: null, styleIndex: 0, type: "number", value: 1 });
     model.cells.set("1,0", { display: "2", formula: null, styleIndex: 0, type: "number", value: 2 });
@@ -545,14 +553,15 @@ describe("a MOVE or a Ctrl+drag COPY writes a constant's stored value too (same 
     model.cells.set("1,0", { display: "1", formula: null, styleIndex: 0, type: "number", value: 1 });
     model.cells.set("2,0", { display: "2", formula: null, styleIndex: 0, type: "number", value: 2 });
     await act(async () => {
-      // Rows 2:3 onto rows 1:2 -- row 2 is cleared before the batch.
+      // Rows 2:3 onto rows 1:2 -- row 2 is the block's own and is NOT cleared
+      // before the batch (BUG-0756), so its write names it too.
       await hook.moveRows(1, 2, 0);
     });
     expect(
       (api.updateCellsBatch.mock.calls[0]?.[0] as Array<{ row: number; source?: unknown }>).map((u) => [u.row, u.source]),
-      "CLEARED: the batch named a source row the gesture cleared first",
+      "CLEARED: the move cleared a row of its own block before the batch read it",
     ).toEqual([
-      [0, undefined],
+      [0, { sheetIndex: 0, row: 1, col: 0, unshifted: true }],
       [1, { sheetIndex: 0, row: 2, col: 0, unshifted: true }],
     ]);
   });
@@ -663,10 +672,45 @@ describe("a move of a whole data table claims every cell and empties the old bod
       await hook.moveRows(0, 2, 6);
     });
     const writes = batched();
-    expect(writes.length).toBeGreaterThan(0);
-    for (const w of writes) {
+    const dest = writes.filter((w) => w.row >= 6);
+    expect(dest.length).toBeGreaterThan(0);
+    for (const w of dest) {
       expect(w.moved, `ROW MOVE UNCLAIMED: the write at (${w.row}, ${w.col})`).toEqual({ sheetIndex: 0, row: w.row - 6, col: w.col });
     }
+    // The old body is emptied in the same batch (BUG-0756), as a drag does.
+    expect(writes.filter((w) => w.row < 6).map((w) => [w.row, w.col, w.value])).toEqual([
+      [1, 1, ""],
+      [2, 1, ""],
+    ]);
+  });
+
+  // BUG-0756, Excel [LIVE, dtable/probe1.ps1: Range("1:4").Cut Range("A2")
+  // moved the table K1:L4, live]: a row move of a whole table onto PART OF
+  // ITSELF clears only the target row outside the block, claims every moved
+  // cell, and empties the old body's tail in the batch -- it cleared the
+  // target rows first, which cut through the table's own body and was refused.
+  // SABOTAGE: clear the whole target in `moveRows` -- fails at "CUT ITS OWN BODY".
+  it("a row move of a whole table onto part of itself is one claimed batch", async () => {
+    table();
+    // Rows 1..3 (the table's rows 0..2 shifted down one) moved up one.
+    model.cells.clear();
+    model.cells.set("1,1", { display: "2", formula: "=B1", styleIndex: 0, type: "number", value: 2 });
+    model.cells.set("2,0", { display: "5", formula: null, styleIndex: 0, type: "number", value: 5 });
+    model.cells.set("3,0", { display: "7", formula: null, styleIndex: 0, type: "number", value: 7 });
+    model.cells.set("2,1", { display: "10", formula: "=TABLE(,Z1)", styleIndex: 0, type: "number", value: 10 });
+    model.cells.set("3,1", { display: "14", formula: "=TABLE(,Z1)", styleIndex: 0, type: "number", value: 14 });
+    vi.mocked(tauriApi.clearRange).mockClear();
+    api.updateCellsBatch.mockClear();
+    await act(async () => {
+      await hook.moveRows(1, 3, 0);
+    });
+    const cleared = vi.mocked(tauriApi.clearRange).mock.calls.map((c) => [c[0], c[2]]);
+    expect(cleared[0], "CUT ITS OWN BODY: the move cleared rows of its own block first").toEqual([0, 0]);
+    const writes = batched();
+    for (const w of writes.filter((w) => w.value !== "")) {
+      expect(w.moved, `UNCLAIMED (${w.row}, ${w.col})`).toEqual({ sheetIndex: 0, row: w.row + 1, col: w.col });
+    }
+    expect(writes.filter((w) => w.value === "").map((w) => [w.row, w.col])).toEqual([[3, 1]]);
   });
 
   it("a Cut + Paste on one sheet empties the vacated body in its batch", async () => {
@@ -691,5 +735,189 @@ describe("a move of a whole data table claims every cell and empties the old bod
       [1, 1, ""],
       [2, 1, ""],
     ]);
+  });
+});
+
+// Ledger programme 2, wave 3 (W2 verifier finding + BUG-0756 remainder).
+// Excel [LIVE, Excel 16 over COM, 2026-11-06, dtui/probe1.ps1]: rows 1:4 with
+// A2 bold and yellow -- `Range("2:3").Cut Range("A1")` leaves A1 "two" bold and
+// yellow, A2 "three" PLAIN; `Range("1:2").Cut Range("A2")` leaves A1 empty, A2
+// "one" plain, A3 "two" bold; `Range("A:B").Cut Range("B1")` and
+// `Range("B:C").Cut Range("A1")` likewise. A line move onto part of itself goes
+// either way, and every cell it lands on takes its source's look.
+// SABOTAGE: make `overlapStyleResets` (core/lib/lineMoveVacated.ts) answer []
+// -- fails at "KEPT ITS OLD LOOK"; restore the `targetRow >= minRow &&
+// targetRow <= maxRow` no-op in moveRows -- fails at "DOWNWARD MOVE IS A NO-OP".
+describe("a line move onto part of itself moves either way and carries the source's look", () => {
+  /** The LAST style each cell was given by the move, "row,col" -> style. */
+  function finalStyles(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const call of vi.mocked(tauriApi.setCellStyle).mock.calls) {
+      out.set(`${call[0]},${call[1]}`, call[2] as number);
+    }
+    return out;
+  }
+
+  it("rows moved UP one: the plain cell landing on the bold one takes Normal", async () => {
+    model.cells.set("0,0", { display: "one", formula: null, styleIndex: 0, type: "text", value: "one" });
+    model.cells.set("1,0", { display: "two", formula: null, styleIndex: 5, type: "text", value: "two" });
+    model.cells.set("2,0", { display: "three", formula: null, styleIndex: 0, type: "text", value: "three" });
+    vi.mocked(tauriApi.setCellStyle).mockClear();
+    await act(async () => {
+      await hook.moveRows(1, 2, 0);
+    });
+    const styles = finalStyles();
+    expect(styles.get("0,0"), "A1 must take A2's bold look").toBe(5);
+    expect(styles.get("1,0"), "KEPT ITS OLD LOOK: A2 must take plain A3's Normal look").toBe(0);
+  });
+
+  it("rows moved DOWN one: the block moves, and the bold cell's look travels with it", async () => {
+    model.cells.set("0,0", { display: "one", formula: null, styleIndex: 0, type: "text", value: "one" });
+    model.cells.set("1,0", { display: "two", formula: null, styleIndex: 5, type: "text", value: "two" });
+    vi.mocked(tauriApi.setCellStyle).mockClear();
+    vi.mocked(tauriApi.clearRange).mockClear();
+    await act(async () => {
+      await hook.moveRows(0, 1, 1);
+    });
+    expect(api.updateCellsBatch, "DOWNWARD MOVE IS A NO-OP").toHaveBeenCalledTimes(1);
+    expect((api.updateCellsBatch.mock.calls[0]?.[0] as Array<{ row: number; value: string; moved?: unknown }>).map((u) => [u.row, u.value, u.moved])).toEqual([
+      [1, "'one", { sheetIndex: 0, row: 0, col: 0 }],
+      [2, "'two", { sheetIndex: 0, row: 1, col: 0 }],
+    ]);
+    const styles = finalStyles();
+    expect(styles.get("2,0"), "A3 must take A2's bold look").toBe(5);
+    expect(styles.get("1,0"), "KEPT ITS OLD LOOK: A2 must take plain A1's Normal look").toBe(0);
+    // Only the target row outside the block is cleared first; row 1 (the
+    // block's first row, which nothing lands on) is cleared after.
+    const cleared = vi.mocked(tauriApi.clearRange).mock.calls.map((c) => [c[0], c[2]]);
+    expect(cleared).toEqual([[2, 2], [0, 0]]);
+  });
+
+  it("columns moved RIGHT one and LEFT one", async () => {
+    model.cells.set("0,0", { display: "a", formula: null, styleIndex: 0, type: "text", value: "a" });
+    model.cells.set("0,1", { display: "b", formula: null, styleIndex: 5, type: "text", value: "b" });
+    vi.mocked(tauriApi.setCellStyle).mockClear();
+    await act(async () => {
+      await hook.moveColumns(0, 1, 1);
+    });
+    expect(api.updateCellsBatch, "DOWNWARD MOVE IS A NO-OP (columns, rightward)").toHaveBeenCalledTimes(1);
+    let styles = finalStyles();
+    expect(styles.get("0,2")).toBe(5);
+    expect(styles.get("0,1"), "KEPT ITS OLD LOOK (columns right)").toBe(0);
+
+    api.updateCellsBatch.mockClear();
+    vi.mocked(tauriApi.setCellStyle).mockClear();
+    model.cells.clear();
+    model.cells.set("0,1", { display: "b", formula: null, styleIndex: 5, type: "text", value: "b" });
+    model.cells.set("0,2", { display: "c", formula: null, styleIndex: 0, type: "text", value: "c" });
+    await act(async () => {
+      await hook.moveColumns(1, 2, 0);
+    });
+    styles = finalStyles();
+    expect(styles.get("0,0")).toBe(5);
+    expect(styles.get("0,1"), "KEPT ITS OLD LOOK (columns left)").toBe(0);
+  });
+
+  it("positive control: a drop on the block's own place moves nothing", async () => {
+    model.cells.set("0,0", { display: "one", formula: null, styleIndex: 0, type: "text", value: "one" });
+    await act(async () => {
+      await hook.moveRows(0, 1, 0);
+      await hook.moveColumns(0, 1, 0);
+    });
+    expect(api.updateCellsBatch).not.toHaveBeenCalled();
+  });
+});
+
+// Ledger programme 2 wave 4 (dtcf4): a whole-line move carries the lines'
+// sizes, and the lines it leaves go back to the standard size. Excel [LIVE,
+// Excel 16 over COM, 2026-11-06, dtcf4/probe1.ps1]: row 2 at 30 pt,
+// `Range("2:2").Cut Range("A5")` -> row 5 is 30 (it was 40), row 2 standard;
+// rows 2:3 at 30 / 20 `.Cut Range("A3")` -> rows 3 / 4 30 / 20, row 2
+// standard; `Range("B:B").Cut Range("D1")` the same for widths. A cell drag
+// (moveCells) moves no size (`Range("A2:B2").Cut`), and gives every cell it
+// lands on its source's look, plain included (M1, M4, M5).
+// SABOTAGE: make `movedLineSizes` (core/lib/lineMoveVacated.ts) plan nothing
+// -- fails at "SIZES STAYED BEHIND".
+describe("a line move carries the lines' sizes; a cell drag carries the look", () => {
+  function sizeWrites(fn: unknown): Array<[Array<[number, number]>, number]> {
+    return vi.mocked(fn as (r: Array<[number, number]>, s: number) => Promise<void>).mock.calls.map((c) => [c[0], c[1]]);
+  }
+
+  it("rows: the moved rows take their heights, the left row the standard height", async () => {
+    model.cells.set("1,0", { display: "two", formula: null, styleIndex: 0, type: "text", value: "two" });
+    await act(async () => {
+      dispatchOut(setRowHeight(1, 40));
+      dispatchOut(setRowHeight(4, 53));
+    });
+    vi.mocked(tauriApi.setRowHeights).mockClear();
+    await act(async () => {
+      await hook.moveRows(1, 1, 4);
+    });
+    const writes = sizeWrites(tauriApi.setRowHeights);
+    expect(writes, "SIZES STAYED BEHIND: row 5 must take row 2's height").toContainEqual([[[4, 4]], 40]);
+    expect(writes.some(([runs, size]) => size === 20 && runs.some(([a, b]) => a <= 1 && b >= 1)), "row 2 goes back to the standard height").toBe(true);
+  });
+
+  it("columns moved LEFT one onto part of themselves", async () => {
+    model.cells.set("0,1", { display: "b", formula: null, styleIndex: 0, type: "text", value: "b" });
+    await act(async () => {
+      dispatchOut(setColumnWidth(1, 140));
+      dispatchOut(setColumnWidth(2, 90));
+    });
+    vi.mocked(tauriApi.setColumnWidths).mockClear();
+    await act(async () => {
+      await hook.moveColumns(1, 2, 0);
+    });
+    const writes = sizeWrites(tauriApi.setColumnWidths);
+    expect(writes, "SIZES STAYED BEHIND (columns)").toContainEqual([[[0, 0]], 140]);
+    expect(writes).toContainEqual([[[1, 1]], 90]);
+    expect(writes.some(([runs]) => runs.some(([a, b]) => a <= 2 && b >= 2)), "column C goes back to the standard width").toBe(true);
+  });
+
+  // Ledger programme 2 wave 5 (misc5), Excel [LIVE, misc5/probe1.ps1]: a row
+  // an AutoFilter hides, or a collapsed outline group, moves HIDDEN, and the
+  // place it leaves is shown -- Excel's one hidden flag per row. A size write
+  // that shows a hidden row goes apart from the visible rows' (under filter
+  // mode a mixed batch passes the hidden rows over). SABOTAGE: give
+  // `movedLineSizes` the hand-hidden rows only in `moveRows` -- fails at
+  // "FILTER-HIDDEN ROW MOVED VISIBLE".
+  it("rows: a filtered-out row and a collapsed group's rows move hidden; their old places are shown", async () => {
+    const setRowsHidden = vi.mocked(tauriApi.setRowsHidden);
+    model.cells.set("2,0", { display: "three", formula: null, styleIndex: 0, type: "text", value: "three" });
+    await act(async () => {
+      dispatchOut(setRowHeight(2, 40)); // row 3, visible, its own height
+      dispatchOut(setHiddenRows([3])); // row 4, filtered out
+      dispatchOut(setGroupHiddenRows([4])); // row 5, in a collapsed group
+    });
+    vi.mocked(tauriApi.setRowHeights).mockClear();
+    setRowsHidden.mockClear();
+    await act(async () => {
+      await hook.moveRows(2, 4, 19); // rows 3:5 to row 20
+    });
+    const hides = setRowsHidden.mock.calls.filter((c) => c[1] === true).flatMap((c) => c[0] as number[]);
+    expect(hides, "FILTER-HIDDEN ROW MOVED VISIBLE: row 21 must be hidden").toContain(20);
+    expect(hides, "a collapsed group's row moves hidden").toContain(21);
+    const writes = sizeWrites(tauriApi.setRowHeights);
+    expect(writes, "rows 4 and 5 are SHOWN at the standard height, in a write of their own").toContainEqual([[[3, 4]], 20]);
+    expect(writes, "row 3 is reset apart from the rows the move shows").toContainEqual([[[2, 2]], 20]);
+    expect(writes, "row 20 takes row 3's height").toContainEqual([[[19, 19]], 40]);
+  });
+
+  it("a cell drag moves no size, and a plain cell landing on a bold one takes Normal", async () => {
+    model.cells.set("0,0", { display: "x", formula: null, styleIndex: 0, type: "text", value: "x" });
+    model.cells.set("0,1", { display: "y", formula: null, styleIndex: 5, type: "text", value: "y" });
+    await act(async () => {
+      dispatchOut(setRowHeight(0, 40));
+    });
+    vi.mocked(tauriApi.setRowHeights).mockClear();
+    vi.mocked(tauriApi.setCellStyle).mockClear();
+    await act(async () => {
+      await hook.moveCells({ startRow: 0, startCol: 0, endRow: 0, endCol: 1, type: "cells" }, 0, 1);
+    });
+    expect(tauriApi.setRowHeights).not.toHaveBeenCalled();
+    const last = new Map<string, number>();
+    for (const call of vi.mocked(tauriApi.setCellStyle).mock.calls) last.set(`${call[0]},${call[1]}`, call[2] as number);
+    expect(last.get("0,1"), "B1 takes plain A1's Normal look").toBe(0);
+    expect(last.get("0,2"), "C1 takes B1's bold look").toBe(5);
   });
 });

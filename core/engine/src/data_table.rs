@@ -58,9 +58,10 @@ pub const TABLE_FUNCTION: &str = "TABLE";
 
 /// What Excel says when a gesture would change some but not all of a data
 /// table's body (an edit, a paste, a clear, a sort, a row inserted through it)
-/// [LIVE: "Can't change part of a data table." over COM; the desktop dialog
-/// reads "Cannot change part of a data table."].
-pub const PART_OF_DATA_TABLE: &str = "Cannot change part of a data table.";
+/// [LIVE: "Can't change part of a data table." over COM, and the desktop
+/// dialog reads the same: Excel 16, 2026-11-06, dtui/probe2.ps1, Delete on a
+/// body cell].
+pub const PART_OF_DATA_TABLE: &str = "Can't change part of a data table.";
 
 /// What Excel says when `=TABLE(..)` is typed: only the Data Table command can
 /// write one [LIVE: entering `=TABLE(,A1)` is refused, by `Range.Formula` and

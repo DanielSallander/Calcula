@@ -488,33 +488,27 @@ fn build_intermediate_where(
     parts.join(" AND ")
 }
 
-/// Format a filter value for an intermediate table, using the Arrow schema
-/// to determine whether quoting is needed.
+/// Format a filter value for an intermediate table, as the column's Arrow
+/// type (`engine_core::compute::context::typed_filter_literal_for_arrow`,
+/// shared with the measure engine's own intermediate tables): a number bare
+/// only when it IS a plain number, a dictionary-encoded or `Utf8View` text
+/// column quoted (both used to be inlined unquoted). Quoted when the column
+/// cannot be found.
 fn format_intermediate_value(
     table: &str,
     column: &str,
     value: &str,
     schemas: &std::collections::HashMap<String, arrow::datatypes::SchemaRef>,
 ) -> String {
-    let needs_quoting = schemas
+    match schemas
         .get(table)
         .and_then(|schema| schema.field_with_name(column).ok())
-        .map(|field| {
-            use arrow::datatypes::DataType as ArrowDT;
-            matches!(
-                field.data_type(),
-                ArrowDT::Utf8
-                    | ArrowDT::LargeUtf8
-                    | ArrowDT::Date32
-                    | ArrowDT::Date64
-                    | ArrowDT::Timestamp(_, _)
-            )
-        })
-        .unwrap_or(true);
-    if needs_quoting {
-        sql_quote_literal(value)
-    } else {
-        value.to_string()
+    {
+        Some(field) => engine_core::compute::context::typed_filter_literal_for_arrow(
+            field.data_type(),
+            value,
+        ),
+        None => sql_quote_literal(value),
     }
 }
 

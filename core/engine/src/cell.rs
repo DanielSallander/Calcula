@@ -112,6 +112,29 @@ pub enum CellError {
     /// records the first blocking cell and is what the error-checking
     /// explanation names.
     Spill,
+    /// Excel's `#CALC!` (BUG-0774): the calculation engine met a result it
+    /// cannot hold in a cell -- an EMPTY array (`FILTER` with no match and no
+    /// `if_empty`, `SEQUENCE(0)`, `UNIQUE(..,,TRUE)` with nothing unique,
+    /// `TAKE(..,0)`, `TOCOL(..,1)` over blanks only, a `TEXTSPLIT` with
+    /// nothing left after `ignore_empty`), a NESTED array (`MAP` / `BYROW` /
+    /// `BYCOL` / `SCAN` / `MAKEARRAY` whose function returns an array), or an
+    /// uncalled `LAMBDA` reaching a cell (`=LAMBDA(x,x)`).
+    ///
+    /// WHY NOT `#VALUE!`, which is what all of these used to answer: nothing
+    /// is the wrong TYPE. Every argument of `=FILTER(A1:A5,A1:A5>100)` is
+    /// fine; the data simply has no match, and the remedy is `if_empty` or the
+    /// data, not the arguments. [LIVE, Excel 16, lane formula
+    /// SCRATCH/formula/p1.json, p2.json] each of the above is `#CALC!`, with
+    /// `ERROR.TYPE` 14, `ISERR` TRUE and `ISNA` FALSE.
+    ///
+    /// NOT TYPEABLE, which sets it apart from every other Excel error here:
+    /// [LIVE] Excel refuses `=#CALC!` and `=ISERROR(#CALC!)` (0x800A03EC) and
+    /// stores a typed `#CALC!` as TEXT, so the literal is not in the lexer's
+    /// `ERROR_LITERALS` (see `typed_entry::typed_error_literal`, which still
+    /// reads a PASTED one back as the error it was copied from). An `.xlsx`
+    /// carries it as Excel does, `#VALUE!` plus rich-value metadata
+    /// `errorType` 13 (`xlsx_writer::RICH_ERROR_TYPES`).
+    Calc,
 }
 
 impl CellError {
@@ -173,6 +196,7 @@ impl CellError {
             CellError::Null => "#NULL!",
             CellError::Num => "#NUM!",
             CellError::Spill => "#SPILL!",
+            CellError::Calc => "#CALC!",
             // ---- Calcula-only states, following Excel's punctuation ---------
             // None of these three has an Excel counterpart, so Excel cannot
             // settle their spelling — but it does settle their SHAPE: an error
@@ -198,6 +222,7 @@ impl CellError {
             "#NULL!" => CellError::Null,
             "#NUM!" => CellError::Num,
             "#SPILL!" => CellError::Spill,
+            "#CALC!" => CellError::Calc,
             "#CIRCULAR!" => CellError::Circular,
             "#CONFLICT!" => CellError::Conflict,
             "#BLOCKED!" => CellError::Blocked,

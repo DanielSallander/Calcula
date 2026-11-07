@@ -28,6 +28,9 @@ impl super::QueryExecutor {
     ///
     /// `role_filters` are the active security role's predicates (empty when no
     /// role is active); see [`QueryExecutor::execute`](super::QueryExecutor::execute).
+    /// `role_union` marks the plan's OR groups as the multi-role union; see
+    /// [`QueryExecutor::execute_with_cancellation`](super::QueryExecutor::execute_with_cancellation).
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_explained(
         plan: &QueryPlan,
         model: &DataModel,
@@ -36,6 +39,7 @@ impl super::QueryExecutor {
         max_inline_in_values: Option<usize>,
         udfs: Option<&engine_core::compute::udf::UdfRegistry>,
         role_filters: &[FilterPredicate],
+        role_union: bool,
     ) -> QueryResult<(Vec<RecordBatch>, PlanNode)> {
         // Defense in depth (release-active): an unsubstituted dynamic RLS
         // predicate (USERNAME()/CUSTOMDATA()) must never reach the executor; fail
@@ -166,6 +170,7 @@ impl super::QueryExecutor {
                     max_inline_in_values,
                     udfs,
                     role_filters,
+                    role_union,
                     Some(&mut node),
                     // Explained execution has no cancellation entry point;
                     // a fresh token is never cancelled.

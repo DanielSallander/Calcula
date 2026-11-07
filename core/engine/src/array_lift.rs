@@ -143,6 +143,52 @@ pub fn pack(rows: usize, cols: usize, mut cells: Vec<EvalResult>) -> EvalResult 
     EvalResult::Array(out)
 }
 
+/// Build a result array from ROWS, through [`pack`]: a ragged row is padded
+/// with #N/A to the widest one (as VSTACK / HSTACK pad), and no rows at all
+/// is the empty array every caller answers as #VALUE! / #CALC!.
+///
+/// This is what a function that assembles its answer row by row must call.
+/// The hand-rolled spelling it replaces -- each row a bare scalar when one
+/// wide, else `Array(row)`, and the whole thing unwrapped when there is ONE
+/// row -- unwraps a single row to `Array([a, b, c])`, which is a COLUMN
+/// (lane form5: `=CHOOSEROWS(A1:B5,2)` spilled 2;20 down the sheet, Excel
+/// 2,20 across).
+pub fn from_rows(rows: Vec<Vec<EvalResult>>) -> EvalResult {
+    if rows.is_empty() {
+        return EvalResult::Array(Vec::new());
+    }
+    let n_rows = rows.len();
+    let n_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if n_cols == 0 {
+        return EvalResult::Array(Vec::new());
+    }
+    let mut cells = Vec::with_capacity(n_rows * n_cols);
+    for mut row in rows {
+        row.resize(n_cols, EvalResult::Error(CellError::NA));
+        cells.extend(row);
+    }
+    pack(n_rows, n_cols, cells)
+}
+
+/// A value as `(rows, cols, cells)` in row-major order -- a scalar is 1x1,
+/// and a ragged row's missing cells are #N/A (as [`at`] reads them). The one
+/// reader for a function that needs its argument's real 2-D shape (TRANSPOSE,
+/// MMULT, MINVERSE, MDETERM): a flat list loses whether it was a row or a
+/// column.
+pub fn cells(v: &EvalResult) -> (usize, usize, Vec<EvalResult>) {
+    if !lifts(v) {
+        return (1, 1, vec![v.clone()]);
+    }
+    let (rows, cols) = shape(v);
+    let mut out = Vec::with_capacity(rows * cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            out.push(at(v, r, c));
+        }
+    }
+    (rows, cols, out)
+}
+
 /// The broadcast shape of several operands, or `None` if none of them is an
 /// array (the scalar fast path — nothing to lift, so the caller runs unchanged).
 ///

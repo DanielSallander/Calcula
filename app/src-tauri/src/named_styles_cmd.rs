@@ -66,6 +66,7 @@ pub(crate) fn create_named_style_impl(
         built_in: false,
         style_index,
         category,
+        include_protection: None,
     };
 
     named.insert(name, style.clone());
@@ -195,9 +196,11 @@ pub(crate) fn apply_named_style_on_sheet(
 /// FormulaHidden=True -- while a style the user creates (`Styles.Add`, with
 /// or without a cell to base it on) is True, so applying it writes the
 /// protection it was made with. Calcula has no door that creates a style with
-/// Protection unticked, so the flag is DERIVED rather than stored.
-fn named_style_includes_protection(ns: &NamedCellStyle) -> bool {
-    !ns.built_in || ns.name == "Normal"
+/// Protection unticked, so the flag is DERIVED -- except for a style read from
+/// an .xlsx, which states it (`cellStyleXfs` `applyProtection="0"` is
+/// IncludeProtection off, [LIVE] lane xlsx probe3; BUG-0771).
+pub(crate) fn named_style_includes_protection(ns: &NamedCellStyle) -> bool {
+    ns.include_protection.unwrap_or(!ns.built_in || ns.name == "Normal")
 }
 
 /// The OWN style index to write at `(row, col)` so the cell keeps BOTH halves
@@ -585,6 +588,10 @@ struct SavedNamedStyle {
     name: String,
     category: String,
     style: CellStyle,
+    /// `NamedCellStyle::include_protection` (an .xlsx import's
+    /// `persistence` writes the same shape, `xlsx_reader::named_styles_of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_protection: Option<bool>,
 }
 
 /// Serialize the workbook's CUSTOM named styles for user_files, or None when
@@ -599,6 +606,7 @@ pub fn collect_named_styles_for_save(state: &AppState) -> Option<Vec<u8>> {
             name: ns.name.clone(),
             category: ns.category.clone(),
             style: styles.get(ns.style_index).clone(),
+            include_protection: ns.include_protection,
         })
         .collect();
     if customs.is_empty() {
@@ -634,6 +642,7 @@ pub fn restore_named_styles(state: &AppState, bytes: Option<&[u8]>) {
                 built_in: false,
                 style_index: index,
                 category: c.category,
+                include_protection: c.include_protection,
             },
         );
     }
@@ -663,6 +672,7 @@ pub fn init_builtin_named_styles(state: &AppState) {
                 built_in: true,
                 style_index: index,
                 category: category.to_string(),
+                include_protection: None,
             },
         );
     };
@@ -1069,5 +1079,54 @@ pub fn init_builtin_named_styles(state: &AppState) {
                 .with_text_color(ThemeColor::Absolute(Color::white()))
                 .with_background(ThemeColor::Absolute(accent.base)),
         );
+    }
+}
+
+// ============================================================================
+// Tests -- a named style's STATED IncludeProtection (BUG-0771)
+// ============================================================================
+
+#[cfg(test)]
+mod include_protection_tests {
+    use super::{apply_named_style_impl, restore_named_styles};
+    use crate::persistence::FileState;
+    use engine::{Cell, CellStyle, CellValue};
+
+    /// A style read from an .xlsx with IncludeProtection off
+    /// (`cellStyleXfs` `applyProtection="0"`, [LIVE] lane xlsx probe3) keeps
+    /// the cell's Locked and Formula Hidden when applied, as in Excel; the
+    /// same style without the flag -- a style the user made -- writes its own.
+    ///
+    /// SABOTAGE (xlsx-styleflag): `named_style_includes_protection` ignores
+    /// `include_protection`; "Imported" then locks A1.
+    #[test]
+    fn a_stated_include_protection_decides_what_applying_writes() {
+        let state = crate::create_app_state();
+        let file_state = FileState::default();
+        let mut bold = CellStyle::new();
+        bold.font.bold = true;
+        let saved = serde_json::json!([
+            { "name": "Imported", "category": "Custom", "style": bold.clone(), "includeProtection": false },
+            { "name": "Mine", "category": "Custom", "style": bold },
+        ]);
+        restore_named_styles(&state, Some(&serde_json::to_vec(&saved).unwrap()));
+        assert_eq!(state.named_styles.read().unwrap()["Imported"].include_protection, Some(false));
+        let seed = crate::document_effect::test_seed_effect();
+        let mut unlocked = CellStyle::new();
+        unlocked.locked = false;
+        unlocked.formula_hidden = true;
+        let index = state.style_registry.write(&seed).unwrap().get_or_create(unlocked);
+        for row in 0..2u32 {
+            let cell = Cell { value: CellValue::Number(1.0), ast: None, style_index: index, rich_text: None };
+            state.grid.write(&seed).unwrap().set_cell(row, 0, cell.clone());
+            state.grids.write(&seed).unwrap()[0].set_cell(row, 0, cell);
+        }
+        apply_named_style_impl(&state, &file_state, "Imported", &[0], &[0], None).expect("apply Imported");
+        apply_named_style_impl(&state, &file_state, "Mine", &[1], &[0], None).expect("apply Mine");
+        let grid = state.grid.read().unwrap();
+        let styles = state.style_registry.read().unwrap();
+        let at = |row: u32| styles.get(grid.get_cell(row, 0).unwrap().style_index).clone();
+        assert!(at(0).font.bold && !at(0).locked && at(0).formula_hidden, "Imported kept the cell's protection: {:?}", at(0));
+        assert!(at(1).font.bold && at(1).locked && !at(1).formula_hidden, "Mine writes its own: {:?}", at(1));
     }
 }

@@ -45,9 +45,10 @@
 //          selection that is a multiple of the copy) or not (BUG-0345): every
 //          cell's content in one `updateCellsBatch`, every tile's formulas in
 //          one shift, every style-only write in one `setCellStyles`, the number
-//          formats grouped -- a bounded number of calls whatever the area. Only
-//          comments and validation remain one call per cell: the backend has no
-//          batch door for them. Paste Link writes its links in one batch too.
+//          formats grouped, the comments in one `pasteComments` and the validation
+//          in one call per rectangle of one rule (BUG-0725) -- a bounded
+//          number of calls whatever the area. Paste Link writes its links in
+//          one batch too.
 //
 //          AFTER A PASTE the pasted range is SELECTED (BUG-0349), as plain
 //          Paste does and Excel does [LIVE]: Core's selection on the sheet, the
@@ -104,8 +105,10 @@ import {
   cancelUndoTransaction,
   shiftFormulasBatch,
   indexToCol,
-  addComment,
+  pasteComments as pasteCommentsBatch,
   setDataValidation,
+  clearDataValidation,
+  getAllDataValidations,
   clipboardSourceRow,
   pasteRowDeltas,
   updateCellsBatch,
@@ -137,6 +140,7 @@ import { getGridStateSnapshot } from "@api/state";
 import { quoteSheetNameForFormula } from "@api/externalEdit";
 import { ownUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
 import { pasteRefusal, pasteRefusalSentence, type PasteArea } from "./pasteRefusals";
+import { moveValidationRule } from "../../_shared/lib/moveValidationRule";
 
 // The closes this module's gestures make, bound to each begin's answer by
 // ownUndoTransaction: a gesture closes ONLY the undo transaction its own begin
@@ -1175,8 +1179,14 @@ async function pasteCells(
   }
   // A formatting-only paste the sheet's Format Cells option refuses over
   // unlocked cells: nothing to paste, and -- as in Excel -- nothing said and
-  // no undo step.
-  if (gate.nothingToPaste) return true;
+  // no undo step. The destination is still SELECTED, as after every Paste
+  // Special: Excel [LIVE, Excel 16 COM, 2026-11-06, backmisc/probe1.ps1]
+  // selects C1:C3 after PasteSpecial(xlPasteFormats) onto unlocked C1:C3 of a
+  // protected sheet with Format Cells off, which changes nothing (BUG-0725).
+  if (gate.nothingToPaste) {
+    selectPastedSheetArea({ row: targetRow, col: targetCol, height: actualPasteHeight, width: actualPasteWidth });
+    return true;
+  }
 
   // What each content write pastes FROM (BUG-0657, `pasteSourcePlan`).
   const sources = await pasteSourcePlan(clipboard, options);
@@ -1203,8 +1213,8 @@ async function pasteCells(
     UNDO_CLOSES,
   );
 
-  // A cell whose write was refused is SKIPPED (comments and validation, still
-  // one call per cell); a cell whose content landed and whose formatting then
+  // A cell whose write was refused is SKIPPED (comments, one call for the
+  // paste; validation, one call per rectangle of one rule); a cell whose content landed and whose formatting then
   // failed is not -- its value changed -- and is reported as such. The content
   // itself goes out in ONE batch, refused whole (Excel refuses a paste whole;
   // the gate above has already asked every written cell). (After the gate,
@@ -1245,6 +1255,11 @@ async function pasteCells(
     // The paste's collected writes, sent together (`flushTileBatch`) -- naming
     // their sources only while the copy still stands where it was copied.
     keepSourcesOnlyWhereTheyStand(clipboard, ctx.batch.updates);
+    if (ctx.batch.validations.length > 0 && !clipboard.sourceTarget) {
+      // The source sheet as it stands now, for the rules' anchors.
+      const sheet = await sourceSheetNow(clipboard);
+      ctx.batch.validationSourceSheet = sheet === null ? null : (sheet?.index ?? clipboard.sourceSheetIndex);
+    }
     const flushed = await flushTileBatch(ctx.batch);
     failedCells += flushed.failedCells;
     firstFailure = firstFailure ?? flushed.firstFailure;
@@ -1602,10 +1617,158 @@ interface TileBatch {
   styleWrites: Array<{ row: number; col: number; styleIndex: number; announce: boolean; keepBorders?: boolean }>;
   /** A number format per destination cell, grouped when sent (`numberFormatGroups`). */
   numberFormats: Array<{ row: number; col: number; numberFormat: string }>;
+  /**
+   * Paste Validation's rule per destination cell, sent as ONE rectangle per
+   * block of cells that take the same rule (`validationGroups`, BUG-0725) --
+   * it was one backend call per cell. `source` is the copied cell on the
+   * source sheet, whose rule's ANCHOR (its range's top-left) the flush finds.
+   */
+  validations: Array<{ row: number; col: number; validation: PastedValidation; source?: { row: number; col: number } }>;
+  /**
+   * Paste Validation's cells whose COPIED cell has no rule: Excel's paste
+   * REMOVES the destination's rule there [LIVE, lane obj4 v1.ps1: Z1 pasted
+   * over A3 of a validated A1:A10 leaves A3 with none]. Calcula kept it.
+   */
+  validationClears: Array<{ row: number; col: number }>;
+  /** The source sheet's index NOW, for the anchors (`validationAnchorsFor`). */
+  validationSourceSheet?: number | null;
+  /**
+   * Paste Comments' copied comments at their destinations, and the
+   * destinations whose copied cell has none: ONE `pasteComments` call
+   * (BUG-0725 -- it was one `addComment` per cell, which also refused a
+   * destination that already had a comment, where Excel replaces it [LIVE]).
+   */
+  comments: AddCommentParams[];
+  commentClears: Array<[number, number]>;
 }
 
+/** The rule a copied cell carries for Paste Validation. */
+type PastedValidation = NonNullable<ClipboardData["validations"]> extends Map<string, infer V> ? V : never;
+
 function newTileBatch(): TileBatch {
-  return { updates: [], byCell: new Map(), styleWrites: [], numberFormats: [] };
+  return {
+    updates: [],
+    byCell: new Map(),
+    styleWrites: [],
+    numberFormats: [],
+    validations: [],
+    validationClears: [],
+    comments: [],
+    commentClears: [],
+  };
+}
+
+/** The rule anchor of a pasted validation: its source range's top-left. */
+export type ValidationAnchor = { row: number; col: number };
+
+/**
+ * The ANCHOR of each copied rule -- the top-left of the source range that
+ * holds it, on the source sheet as it stands now (the clipboard keeps the
+ * rule's text, written for that cell, but not the cell). A cell whose range
+ * cannot be found (the sheet is gone, an object's cells, a rule changed since
+ * the copy) has none: its rule is pasted as written for the block's top-left,
+ * the old behaviour.
+ */
+async function validationAnchorsFor(batch: TileBatch): Promise<Map<string, ValidationAnchor>> {
+  const out = new Map<string, ValidationAnchor>();
+  const sheet = batch.validationSourceSheet;
+  if (batch.validations.length === 0 || typeof sheet !== "number" || sheet < 0) return out;
+  let ranges: Awaited<ReturnType<typeof getAllDataValidations>>;
+  try {
+    ranges = await getAllDataValidations(sheet);
+  } catch (err) {
+    console.warn("[PasteSpecial] The copied cells' validation ranges could not be read:", err);
+    return out;
+  }
+  for (const { source, validation } of batch.validations) {
+    if (!source) continue;
+    const key = `${source.row},${source.col}`;
+    if (out.has(key)) continue;
+    // The FIRST range that holds the cell answers for it, as the copy read it.
+    const hit = ranges.find(
+      (vr) => source.row >= vr.startRow && source.row <= vr.endRow && source.col >= vr.startCol && source.col <= vr.endCol,
+    );
+    if (hit && JSON.stringify(hit.validation) === JSON.stringify(validation)) {
+      out.set(key, { row: hit.startRow, col: hit.startCol });
+    }
+  }
+  return out;
+}
+
+/**
+ * Paste Validation's cells grouped into as few RECTANGLES as they allow
+ * (BUG-0725): per column, the runs of consecutive rows that take the same rule
+ * (compared by its JSON), then the runs of consecutive columns whose run is
+ * the same (rows and rule) merged. A copied block under one rule is ONE
+ * `set_data_validation` over the pasted block -- which also anchors the rule
+ * at the block's top-left, as the source range's was, where a per-cell write
+ * anchored every copy at its own cell.
+ */
+export function validationGroups(
+  cells: ReadonlyArray<{ row: number; col: number; validation: PastedValidation; anchor?: ValidationAnchor }>,
+): Array<{
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  validation: PastedValidation;
+  anchor?: ValidationAnchor;
+}> {
+  type Entry = { row: number; key: string; validation: PastedValidation; anchor?: ValidationAnchor };
+  const byColumn = new Map<number, Entry[]>();
+  for (const { row, col, validation, anchor } of cells) {
+    let list = byColumn.get(col);
+    if (!list) {
+      list = [];
+      byColumn.set(col, list);
+    }
+    // One rule from two source ranges is two rules: each is restated from
+    // its own anchor.
+    const at = anchor ? `@${anchor.row},${anchor.col}` : "@";
+    list.push({ row, key: JSON.stringify(validation) + at, validation, ...(anchor ? { anchor } : {}) });
+  }
+  // Vertical runs, keyed by "startRow|endRow|rule".
+  type Run = { startRow: number; endRow: number; key: string; validation: PastedValidation; anchor?: ValidationAnchor };
+  const runsByColumn = new Map<number, Run[]>();
+  for (const [col, list] of byColumn) {
+    list.sort((a, b) => a.row - b.row);
+    const runs: Run[] = [];
+    for (const { row, key, validation, anchor } of list) {
+      const last = runs[runs.length - 1];
+      if (last && last.key === key && last.endRow === row - 1) last.endRow = row;
+      else if (!(last && last.key === key && last.endRow === row)) {
+        runs.push({ startRow: row, endRow: row, key, validation, ...(anchor ? { anchor } : {}) });
+      }
+    }
+    runsByColumn.set(col, runs);
+  }
+  const out: ReturnType<typeof validationGroups> = [];
+  const open = new Map<string, (typeof out)[number]>();
+  for (const col of [...runsByColumn.keys()].sort((a, b) => a - b)) {
+    const next = new Map<string, (typeof out)[number]>();
+    for (const run of runsByColumn.get(col)!) {
+      const id = `${run.startRow}|${run.endRow}|${run.key}`;
+      const rect = open.get(id);
+      if (rect && rect.endCol === col - 1) {
+        rect.endCol = col;
+        next.set(id, rect);
+      } else {
+        const fresh = {
+          startRow: run.startRow,
+          startCol: col,
+          endRow: run.endRow,
+          endCol: col,
+          validation: run.validation,
+          ...(run.anchor ? { anchor: run.anchor } : {}),
+        };
+        out.push(fresh);
+        next.set(id, fresh);
+      }
+    }
+    open.clear();
+    for (const [k, v] of next) open.set(k, v);
+  }
+  return out;
 }
 
 /**
@@ -1664,6 +1827,67 @@ async function flushTileBatch(batch: TileBatch): Promise<{
       console.error("[PasteSpecial] A number format could not be pasted:", err);
       out.unformattedCells += rows.length * cols.length;
       out.firstUnformatted = out.firstUnformatted ?? why;
+    }
+  }
+  // Paste Validation: one call per rectangle of one rule (BUG-0725). A refused
+  // rectangle skips its cells, and is told -- a `success: false` answer used
+  // to be dropped unread. Each rule is RESTATED for its rectangle's top-left:
+  // stored for its source range's top-left, a relative reference reads
+  // (destination - that anchor) away, as Excel's pasted cell reads it [LIVE,
+  // lane obj4 v1.ps1]. It used to be pasted as written, so a copy that began
+  // inside the source range validated against the wrong cells.
+  const anchors = await validationAnchorsFor(batch);
+  const anchored = batch.validations.map((v) => {
+    const anchor = v.source ? anchors.get(`${v.source.row},${v.source.col}`) : undefined;
+    return { row: v.row, col: v.col, validation: v.validation, ...(anchor ? { anchor } : {}) };
+  });
+  for (const group of validationGroups(anchored)) {
+    const cellsOf = (group.endRow - group.startRow + 1) * (group.endCol - group.startCol + 1);
+    try {
+      const rule = group.anchor
+        ? await moveValidationRule(group.validation, group.startRow - group.anchor.row, group.startCol - group.anchor.col)
+        : group.validation;
+      if (rule === null) {
+        throw new Error("The validation's formula refers to a range that would wrap around the edge of the sheet here.");
+      }
+      const result = await setDataValidation(group.startRow, group.startCol, group.endRow, group.endCol, rule);
+      if (result && result.success === false) throw new Error(result.error || "The validation could not be pasted.");
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      console.error("[PasteSpecial] A validation could not be pasted:", err);
+      out.failedCells += cellsOf;
+      out.firstFailure = out.firstFailure ?? why;
+    }
+  }
+  // Paste Comments: ONE call for the whole paste (BUG-0725); a destination
+  // holding a Note is skipped and counted.
+  if (batch.comments.length > 0 || batch.commentClears.length > 0) {
+    try {
+      const result = await pasteCommentsBatch(batch.comments, batch.commentClears);
+      if (result.skipped > 0) {
+        out.failedCells += result.skipped;
+        out.firstFailure = out.firstFailure ?? result.firstSkip ?? "A comment could not be pasted.";
+      }
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      console.error("[PasteSpecial] The comments could not be pasted:", err);
+      out.failedCells += batch.comments.length;
+      out.firstFailure = out.firstFailure ?? why;
+    }
+  }
+  // ...and a copied cell with NO rule removes the destination's, one call per
+  // rectangle (the same grouping, under one marker rule).
+  const NO_RULE = { rule: { none: true } } as unknown as PastedValidation;
+  for (const group of validationGroups(batch.validationClears.map((c) => ({ ...c, validation: NO_RULE })))) {
+    const cellsOf = (group.endRow - group.startRow + 1) * (group.endCol - group.startCol + 1);
+    try {
+      const result = await clearDataValidation(group.startRow, group.startCol, group.endRow, group.endCol);
+      if (result && result.success === false) throw new Error(result.error || "The validation could not be removed.");
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      console.error("[PasteSpecial] A validation could not be removed:", err);
+      out.failedCells += cellsOf;
+      out.firstFailure = out.firstFailure ?? why;
     }
   }
   return out;
@@ -1847,10 +2071,10 @@ async function pasteSingleCell(
         await pasteFormats(sourceCell, destRow, destCol, ctx);
         break;
       case "comments":
-        await pasteComments(clipboard, destRow, destCol, srcR, srcC);
+        pasteComments(clipboard, destRow, destCol, srcR, srcC, ctx);
         break;
       case "validation":
-        await pasteValidation(clipboard, destRow, destCol, srcR, srcC);
+        pasteValidation(clipboard, destRow, destCol, srcR, srcC, ctx);
         break;
       case "allExceptBorders":
         await pasteAllExceptBorders(sourceCell, destRow, destCol, srcR, srcC, operation, ctx);
@@ -2144,23 +2368,27 @@ async function pasteValuesAndNumberFormats(
 }
 
 /**
- * Paste Comments: copy comment from source cell to target cell.
- *
- * A refusal THROWS to pasteSingleCell, which counts it and names it in the
- * paste's one alert -- it used to be caught here and logged, so a protected
- * destination finished as a silent no-op.
+ * Paste Comments: COLLECT the copied cell's comment for the target cell -- or,
+ * where the copied cell has none, the target as one whose comment goes, as
+ * Excel's Paste Special > Comments and Notes removes it [LIVE, lane obj4
+ * c1.ps1]. The paste's batch sends them in ONE `pasteComments` call
+ * (BUG-0725), in the paste's one undo step; a destination comment is
+ * REPLACED, as Excel's is.
  */
-async function pasteComments(
+function pasteComments(
   clipboard: ClipboardData,
   destRow: number,
   destCol: number,
   srcR: number,
   srcC: number,
-): Promise<void> {
+  ctx: PasteContext,
+): void {
   const comment = clipboard.comments?.get(`${srcR},${srcC}`);
-  if (!comment) return;
-
-  const params: AddCommentParams = {
+  if (!comment) {
+    ctx.batch.commentClears.push([destRow, destCol]);
+    return;
+  }
+  ctx.batch.comments.push({
     row: destRow,
     col: destCol,
     authorEmail: comment.authorEmail,
@@ -2168,25 +2396,38 @@ async function pasteComments(
     content: comment.content,
     richContent: comment.richContent,
     mentions: comment.mentions,
-  };
-  await addComment(params);
+  });
 }
 
 /**
- * Paste Validation: copy data validation rule from source cell to target cell.
- * A refusal throws to pasteSingleCell (see pasteComments).
+ * Paste Validation: COLLECT the source cell's data validation rule for the
+ * target cell; the paste's batch sends the rules as rectangles of one rule
+ * (`validationGroups`, BUG-0725) -- one call per block, never per cell -- in
+ * the paste's one undo step, counting a refused rectangle's cells as skipped.
  */
-async function pasteValidation(
+function pasteValidation(
   clipboard: ClipboardData,
   destRow: number,
   destCol: number,
   srcR: number,
   srcC: number,
-): Promise<void> {
+  ctx: PasteContext,
+): void {
   const validation = clipboard.validations?.get(`${srcR},${srcC}`);
-  if (!validation) return;
-
-  await setDataValidation(destRow, destCol, destRow, destCol, validation);
+  if (!validation) {
+    // Excel's Paste Validation REMOVES the destination's rule where the
+    // copied cell has none [LIVE, lane obj4 v1.ps1].
+    ctx.batch.validationClears.push({ row: destRow, col: destCol });
+    return;
+  }
+  // The copied cell on its sheet (a sheet copy only: an object's cells carry
+  // no validation ranges), so the flush can find the rule's anchor.
+  const minRow = Math.min(clipboard.sourceSelection.startRow, clipboard.sourceSelection.endRow);
+  const minCol = Math.min(clipboard.sourceSelection.startCol, clipboard.sourceSelection.endCol);
+  const source = clipboard.sourceTarget
+    ? undefined
+    : { row: clipboardSourceRow(clipboard.sourceRows, minRow, srcR), col: minCol + srcC };
+  ctx.batch.validations.push({ row: destRow, col: destCol, validation, ...(source ? { source } : {}) });
 }
 
 /**
@@ -2309,6 +2550,7 @@ async function writeTargetBatch(
   description: string,
   target: CellTargetRef,
   styleWrites: readonly CellStyleWrite[] = [],
+  clipboard: ClipboardData | null = null,
 ): Promise<boolean> {
   const styledUpdates = updates.filter((u) => u.styleIndex !== undefined);
   const checkArea = boundsOfCells([...styleWrites, ...numberFormats, ...styledUpdates]);
@@ -2338,8 +2580,10 @@ async function writeTargetBatch(
           void alertAsync(refusal);
           throw new Error(refusal);
         }
-        // Nothing to paste, nothing said, no undo step (Excel).
-        return false;
+        // Nothing to paste, nothing said, no undo step (Excel) -- and, as in
+        // Excel, the destination is selected all the same (BUG-0725 [LIVE]:
+        // see the sheet route's `nothingToPaste`), so the answer is "done".
+        return true;
       }
       formattingRefused = reason;
     }
@@ -2354,6 +2598,13 @@ async function writeTargetBatch(
   let landed = false;
   try {
     if (updates.length > 0) {
+      // The source re-check (BUG-0777) sits HERE, with no await between it and
+      // the write, as on a sheet (`flushTileBatch` right after
+      // `keepSourcesOnlyWhereTheyStand`): it used to run before this
+      // function, so the format check and the undo step's begin above were
+      // awaited between it and the write, and a copy that followed a shift in
+      // that window still named cells it no longer stands on.
+      if (clipboard !== null) keepSourcesOnlyWhereTheyStand(clipboard, updates);
       await updateCellsBatch(updates, { target });
       landed = true;
     }
@@ -2624,13 +2875,15 @@ async function pasteCellsOnTarget(
     }
   }
   if (updates.length === 0 && numberFormats.length === 0 && styleWrites.length === 0) return;
-  keepSourcesOnlyWhereTheyStand(clipboard, updates);
+  // The batch re-checks that the copy still stands where it was copied right
+  // before its write (BUG-0777), after its own awaits.
   const wrote = await writeTargetBatch(
     updates,
     numberFormats,
     `Paste Special (${pasteAttribute}) ${actualPasteHeight * actualPasteWidth} cells`,
     target,
     styleWrites,
+    clipboard,
   );
   // Excel selects the pasted range (BUG-0349): the grid's own selection.
   if (wrote) selectPastedTarget(target, rect);

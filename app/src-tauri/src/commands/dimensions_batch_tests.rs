@@ -570,6 +570,49 @@ fn under_a_filter_a_resize_of_only_hidden_rows_shows_them() {
     assert_eq!(fx.heights().get(&2), None, "and puts its height back");
 }
 
+/// misc6 (misc5-verify-5), [LIVE] Excel 16 2026-11-06 (misc6/probe.ps1): an
+/// ADVANCED filter in place hiding row 4 -- Rows(4:4).RowHeight = 30 shows
+/// row 4 (FilterMode stays True), while Rows(3:5).RowHeight = 30 leaves it
+/// hidden. A whole-row move writes its vacated hidden rows as exactly that
+/// hidden-only resize (`lineMoveVacated.ts` `lineSizeWrites`), and Excel's
+/// `Range("3:5").Cut Range("A20")` shows row 4 at its old place. The row
+/// leaves the filter's set in the same one undo step; Ctrl+Z hides it again
+/// and Ctrl+Y shows it again.
+///
+/// SABOTAGE: never take a row out of the advanced filter's set in
+/// `set_line_sizes_core` -- fails at "ADVANCED-FILTERED".
+#[test]
+fn under_an_advanced_filter_a_resize_of_only_hidden_rows_shows_them() {
+    let fx = Fx::new();
+    let seed = crate::document_effect::test_seed_effect();
+    fx.state.advanced_filter_hidden_rows.write(&seed).unwrap().insert(0, vec![3, 8]);
+    let adv = |fx: &Fx| fx.state.advanced_filter_hidden_rows.read().unwrap().get(&0).cloned();
+
+    // Rows 3:5 hold visible rows: filter mode sizes those only.
+    let outcome = set_line_sizes_core(&fx.state, &fx.file, true, &[(2, 4)], 30.0).expect("rows 3:5");
+    assert_eq!(outcome.reached, vec![(2, 2), (4, 4)], "the visible rows only");
+    assert!(!outcome.unhid && !outcome.filter_changed);
+    assert_eq!(adv(&fx), Some(vec![3, 8]), "Rows(3:5) leaves the advanced-filtered row 4 hidden");
+
+    let depth = fx.undo_depth();
+    let outcome = set_line_sizes_core(&fx.state, &fx.file, true, &[(3, 3)], 30.0).expect("row 4");
+    assert_eq!(outcome.reached, vec![(3, 3)]);
+    assert!(outcome.unhid && outcome.filter_changed, "the advanced filter's set changed: {outcome:?}");
+    assert_eq!(
+        adv(&fx),
+        Some(vec![8]),
+        "ADVANCED-FILTERED: Excel shows an advanced-filtered row a resize of only hidden rows reaches"
+    );
+    assert_eq!(fx.heights().get(&3), Some(&30.0));
+    assert_eq!(fx.undo_depth(), depth + 1, "one undo step");
+
+    fx.undo();
+    assert_eq!(adv(&fx), Some(vec![3, 8]), "one Ctrl+Z hides row 4 again");
+    assert_eq!(fx.heights().get(&3), None, "and puts its height back");
+    fx.redo();
+    assert_eq!(adv(&fx), Some(vec![8]), "Ctrl+Y shows it again");
+}
+
 /// rev15C: THE SAME RESIZE'S UNDO RE-HIDES THE FILTERED-OUT ROW, AND THE
 /// TOTALS THAT READ VISIBILITY FOLLOW IT -- as the filter itself recalculates
 /// SUBTOTAL/AGGREGATE when it hides. The `obj_autofilter` restore announced no

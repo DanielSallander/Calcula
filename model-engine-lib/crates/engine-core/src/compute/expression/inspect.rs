@@ -427,6 +427,22 @@ impl Expression {
             .any(|c| c.contains_path_functions())
     }
 
+    /// Returns `true` if this tree contains a DAX `FORMAT(...)` call
+    /// ([`TextFunction::Format`](super::TextFunction::Format)) anywhere.
+    /// FORMAT is the engine's own UDF `calcula_format` (BUG-0522), which no
+    /// source has, so an expression holding one is evaluated locally.
+    pub fn contains_format(&self) -> bool {
+        matches!(
+            self,
+            Expression::TextFunc {
+                function: super::TextFunction::Format,
+                ..
+            }
+        ) || super::child_expressions(self)
+            .iter()
+            .any(|c| c.contains_format())
+    }
+
     /// Returns `true` if this tree contains a `THISROW(...)` anchor-row
     /// reference ([`Expression::ThisRow`]) anywhere. Drives calculated-column
     /// validation, measure rejection, and the host's format-version stamping

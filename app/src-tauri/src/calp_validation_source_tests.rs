@@ -37,7 +37,7 @@ fn list_range(sheet_index: Option<usize>) -> dv::ValidationRange {
         end_col: 0,
         validation: dv::DataValidation {
             rule: dv::DataValidationRule::List(dv::ListRule {
-                source: dv::ListSource::Range { sheet_index, start_row: 0, start_col: 0, end_row: 4, end_col: 0 },
+                source: dv::ListSource::Range { sheet_index, start_row: 0, start_col: 0, end_row: 4, end_col: 0, relative: Default::default(), sheet_gone: false },
                 in_cell_dropdown: true,
             }),
             ..dv::DataValidation::default()
@@ -203,6 +203,8 @@ impl Harness {
 
 fn source_sheet(source: &dv::ListSource) -> Option<Option<usize>> {
     match source {
+        // A source whose sheet is gone (BUG-0750) names no sheet at all.
+        dv::ListSource::Range { sheet_gone: true, .. } => None,
         dv::ListSource::Range { sheet_index, .. } => Some(*sheet_index),
         dv::ListSource::Values(_) => None,
     }

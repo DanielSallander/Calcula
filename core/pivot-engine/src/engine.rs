@@ -25,10 +25,18 @@ use crate::definition::{
     ValuesPosition,
 };
 use crate::view::{
-    BackgroundStyle, FilterRowInfo, HeaderFieldSummary, PivotCellType,
+    BackgroundStyle, FilterRowInfo, HeaderFieldSummary, PivotCellType, PivotCellValue,
     PivotColumnDescriptor, PivotColumnType, PivotRowDescriptor, PivotRowType,
     PivotView, PivotViewCell,
 };
+
+/// What a value sort orders one item by (see `aggregate_or_blank`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ValueSortKey {
+    Blank,
+    Number(f64),
+    Error,
+}
 
 // ============================================================================
 // AXIS TREE STRUCTURES
@@ -198,9 +206,6 @@ pub struct PivotCalculator<'a> {
     /// Attribute fields for columns.
     col_attribute_fields: Vec<AttributeFieldInfo>,
 
-    /// Pre-computed grand totals for each value field (for show_values_as).
-    grand_totals: Vec<f64>,
-
     /// Reusable buffer for building group keys in compute_aggregate.
     /// Avoids allocating a new Vec per cell (590K+ calls).
     agg_key_buf: Vec<ValueId>,
@@ -256,7 +261,6 @@ impl<'a> PivotCalculator<'a> {
             effective_col_fields: Vec::new(),
             row_attribute_fields: Vec::new(),
             col_attribute_fields: Vec::new(),
-            grand_totals: Vec::new(),
             agg_key_buf: Vec::new(),
             base_field_items: FxHashMap::default(),
             row_sibling_order: Vec::new(),
@@ -300,6 +304,8 @@ impl<'a> PivotCalculator<'a> {
                 apply_ragged_behavior(&mut col_tree, hc, 0);
             }
         }
+        // A row total's error is its items' as SHOWN (BUG-0760 follow-up).
+        self.rederive_row_total_errors(&row_tree);
         // What Show Values As walks: the items as the axis shows them.
         self.row_sibling_order = sibling_order_of(&row_tree, row_fields.len());
         self.col_sibling_order = sibling_order_of(&col_tree, col_fields.len());
@@ -476,74 +482,131 @@ impl<'a> PivotCalculator<'a> {
 
     fn precompute_grand_totals(&mut self) {
         // Ensure aggregates are computed once (triggers lazy computation).
+        // Show Values As reads each grand total, with its error, where it
+        // needs it (`aggregate_at`).
         self.ensure_aggregates_computed();
-
-        self.grand_totals = self.definition.value_fields.iter().enumerate().map(|(vf_idx, vf)| {
-            self.compute_aggregate(&[], &[], vf_idx, vf.aggregation)
-        }).collect();
     }
 
-    /// Applies the show_values_as transformation to a raw aggregate value.
+    /// Applies the show_values_as transformation to a cell's own aggregate
+    /// (`own`: its number, or the error it shows).
+    ///
+    /// A SOURCE ERROR IN A BASE (piv5, the piv4 verifier's finding 3) is what
+    /// Excel shows it as [LIVE, Excel 16, piv5 p1/p2: Region East 10, Mid
+    /// #DIV/0!, North 5, South 20; Year x Region with Y1/West #DIV/0!;
+    /// Cat > Item with A/a2 #N/A]:
+    /// - % of Grand / Row / Column Total and Index: the error, wherever the
+    ///   total divided by holds one -- every cell under % of Grand Total, the
+    ///   Y1 row under % of Row, the West column under % of Column. Calcula
+    ///   divided by a total that left the error out (East 28,57%).
+    /// - % of Parent Row / Column Total: EMPTY when the cell or its parent
+    ///   holds an error.
+    /// - Running Total In: the error from the first erroring item on; % Running
+    ///   Total In divides by the base field's total under the cell's parent,
+    ///   so an error anywhere in it is the error in every cell.
+    /// - Difference From: the error when the cell or its base item holds one;
+    ///   % Difference From: EMPTY when the base item holds one, else the
+    ///   cell's own error.
+    /// - Rank: an erroring item is EMPTY and is not ranked (East 2, North 1,
+    ///   South 3 with Mid left out).
+    /// And without any error [LIVE, piv5 p3]: under Difference, % Difference,
+    /// Running Total, % Running Total and Rank a TOTAL of the base field (the
+    /// grand total, a subtotal of a level above it) is EMPTY, and so is the
+    /// base item's own cell under (% ) Difference From; % Running Total In is
+    /// of the base field's total under the cell's parent (a2 100,00% under A),
+    /// never of the grand total; and % of Parent Row Total reads a subtotal
+    /// row's parent, not the subtotal itself (B 76,92% of 52, where its padded
+    /// path read 100%).
+    /// And over a ZERO or EMPTY base [LIVE, piv6 p1-p3]: % of Grand / Row /
+    /// Column Total and Index are #DIV/0! over a zero total (Calcula showed
+    /// 0); % of Parent is EMPTY over a zero parent; % Running Total In is
+    /// #DIV/0! over a zero total unless every item is 0, then EMPTY; %
+    /// Difference From is #NULL! in a cell no record reaches, EMPTY over a
+    /// base with none, #DIV/0! over a base of 0; Rank leaves an empty cell
+    /// EMPTY and unranked and numbers ties 1, 2, 2, 3. Running Total In and
+    /// Difference From read an empty cell as 0, as Excel does.
     fn transform_show_values_as(
         &mut self,
-        value: f64,
+        own: Result<f64, &'static str>,
         row_values: &[ValueId],
         col_values: &[ValueId],
         vf_idx: usize,
         aggregation: AggregationType,
         show_as: ShowValuesAs,
-    ) -> f64 {
+    ) -> ShownValue {
+        // A ratio of the cell over a total: the cell's error, else the
+        // total's, else #DIV/0! over a zero total -- an empty cell too
+        // (Excel [LIVE, piv6 p1 H_PCTROW]: Y5 = East 0 shows #DIV/0! in its
+        // empty West cell; K_PCTGT East 5, West -5 is #DIV/0! everywhere) --
+        // else the quotient.
+        let ratio = |own: Result<f64, &'static str>, base: Result<f64, &'static str>| match (own, base) {
+            (Err(code), _) | (_, Err(code)) => ShownValue::Error(code),
+            (Ok(_), Ok(b)) if b == 0.0 => ShownValue::Error("DIV/0!"),
+            (Ok(v), Ok(b)) => ShownValue::Number(v / b),
+        };
+        // A ratio of the cell over its parent: EMPTY over any error and over
+        // a zero parent (Excel [LIVE, piv6 p1 P_PCTPROW]: C/c1 West 3 under a
+        // C Total West of 0 is EMPTY, never #DIV/0!).
+        let parent_ratio = |own: Result<f64, &'static str>, base: Result<f64, &'static str>| match (own, base) {
+            (Ok(v), Ok(b)) if b != 0.0 => ShownValue::Number(v / b),
+            _ => ShownValue::Empty,
+        };
         match show_as {
-            ShowValuesAs::Normal => value,
+            ShowValuesAs::Normal => ShownValue::of(own),
             ShowValuesAs::PercentOfGrandTotal => {
-                let gt = self.grand_totals.get(vf_idx).copied().unwrap_or(0.0);
-                if gt != 0.0 { value / gt } else { 0.0 }
+                let gt = self.aggregate_at(&[], &[], vf_idx, aggregation);
+                ratio(own, gt)
             }
             ShowValuesAs::PercentOfRowTotal => {
-                let row_total = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
-                if row_total != 0.0 { value / row_total } else { 0.0 }
+                let row_total = self.aggregate_at(row_values, &[], vf_idx, aggregation);
+                ratio(own, row_total)
             }
             ShowValuesAs::PercentOfColumnTotal => {
-                let col_total = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
-                if col_total != 0.0 { value / col_total } else { 0.0 }
+                let col_total = self.aggregate_at(&[], col_values, vf_idx, aggregation);
+                ratio(own, col_total)
             }
             ShowValuesAs::PercentOfParentRow => {
-                if row_values.len() > 1 {
-                    let parent_row = &row_values[..row_values.len() - 1];
-                    let parent_total = self.compute_aggregate(parent_row, col_values, vf_idx, aggregation);
-                    if parent_total != 0.0 { value / parent_total } else { 0.0 }
-                } else {
-                    let gt = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
-                    if gt != 0.0 { value / gt } else { 0.0 }
-                }
+                let depth = shown_depth(row_values);
+                let parent = &row_values[..depth.saturating_sub(1)];
+                let parent_total = self.aggregate_at(parent, col_values, vf_idx, aggregation);
+                parent_ratio(own, parent_total)
             }
             ShowValuesAs::PercentOfParentColumn => {
-                if col_values.len() > 1 {
-                    let parent_col = &col_values[..col_values.len() - 1];
-                    let parent_total = self.compute_aggregate(row_values, parent_col, vf_idx, aggregation);
-                    if parent_total != 0.0 { value / parent_total } else { 0.0 }
-                } else {
-                    let gt = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
-                    if gt != 0.0 { value / gt } else { 0.0 }
-                }
+                let depth = shown_depth(col_values);
+                let parent = &col_values[..depth.saturating_sub(1)];
+                let parent_total = self.aggregate_at(row_values, parent, vf_idx, aggregation);
+                parent_ratio(own, parent_total)
             }
             ShowValuesAs::Index => {
-                let gt = self.grand_totals.get(vf_idx).copied().unwrap_or(0.0);
-                let row_total = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
-                let col_total = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
-                let denominator = row_total * col_total;
-                if denominator != 0.0 { (value * gt) / denominator } else { 0.0 }
+                let gt = self.aggregate_at(&[], &[], vf_idx, aggregation);
+                let row_total = self.aggregate_at(row_values, &[], vf_idx, aggregation);
+                let col_total = self.aggregate_at(&[], col_values, vf_idx, aggregation);
+                match (own, gt, row_total, col_total) {
+                    (Err(code), _, _, _) | (_, Err(code), _, _) | (_, _, Err(code), _) | (_, _, _, Err(code)) => {
+                        ShownValue::Error(code)
+                    }
+                    // A zero row or column total is #DIV/0! (Excel [LIVE,
+                    // piv6 p1 H_INDEX, p3 I_INDEX]); a zero grand total over
+                    // non-zero totals is 0.
+                    (Ok(value), Ok(gt), Ok(row_total), Ok(col_total)) => {
+                        let denominator = row_total * col_total;
+                        if denominator != 0.0 {
+                            ShownValue::Number((value * gt) / denominator)
+                        } else {
+                            ShownValue::Error("DIV/0!")
+                        }
+                    }
+                }
             }
             ShowValuesAs::Difference | ShowValuesAs::PercentDifference => {
-                self.compute_difference(value, row_values, col_values, vf_idx, aggregation,
+                self.compute_difference(own, row_values, col_values, vf_idx, aggregation,
                     matches!(show_as, ShowValuesAs::PercentDifference))
             }
             ShowValuesAs::RunningTotal | ShowValuesAs::PercentOfRunningTotal => {
-                self.compute_running_total(value, row_values, col_values, vf_idx, aggregation,
+                self.compute_running_total(own, row_values, col_values, vf_idx, aggregation,
                     matches!(show_as, ShowValuesAs::PercentOfRunningTotal))
             }
             ShowValuesAs::RankAscending | ShowValuesAs::RankDescending => {
-                self.compute_rank(value, row_values, col_values, vf_idx, aggregation,
+                self.compute_rank(own, row_values, col_values, vf_idx, aggregation,
                     matches!(show_as, ShowValuesAs::RankDescending))
             }
         }
@@ -662,26 +725,28 @@ impl<'a> PivotCalculator<'a> {
         None
     }
 
-    /// Computes Difference or PercentDifference from base item.
+    /// Computes Difference or PercentDifference from base item (see
+    /// [`Self::transform_show_values_as`] for what Excel shows over an error,
+    /// a total and the base item itself).
     fn compute_difference(
         &mut self,
-        value: f64,
+        own: Result<f64, &'static str>,
         row_values: &[ValueId],
         col_values: &[ValueId],
         vf_idx: usize,
         aggregation: AggregationType,
         is_percent: bool,
-    ) -> f64 {
+    ) -> ShownValue {
         let resolved = self.resolve_base_field(vf_idx, row_values, col_values);
         let (is_row, pos, ordered_items) = match resolved {
             Some(v) => v,
-            None => return value,
+            None => return ShownValue::of(own),
         };
 
         let vf = &self.definition.value_fields[vf_idx];
         let base_item_str = match &vf.base_item {
             Some(s) => s.clone(),
-            None => return value,
+            None => return ShownValue::of(own),
         };
 
         // Current item's ValueId at the base field position
@@ -690,6 +755,11 @@ impl<'a> PivotCalculator<'a> {
         } else {
             col_values.get(pos).copied().unwrap_or(VALUE_ID_EMPTY)
         };
+        // A total of the base field (the grand total, a subtotal above it)
+        // stands for no item: Excel shows it EMPTY [LIVE, piv5 p3].
+        if !ordered_items.contains(&current_vid) {
+            return ShownValue::Empty;
+        }
 
         // Determine the target ValueId
         let base_fi = self.definition.value_fields[vf_idx].base_field_index.unwrap();
@@ -699,22 +769,26 @@ impl<'a> PivotCalculator<'a> {
             match current_pos {
                 Some(cp) => {
                     if base_item_str == "(previous)" {
-                        if cp == 0 { return f64::NAN; }
+                        if cp == 0 { return ShownValue::Empty; }
                         ordered_items[cp - 1]
                     } else {
                         // "(next)"
-                        if cp + 1 >= ordered_items.len() { return f64::NAN; }
+                        if cp + 1 >= ordered_items.len() { return ShownValue::Empty; }
                         ordered_items[cp + 1]
                     }
                 }
-                None => return f64::NAN,
+                None => return ShownValue::Empty,
             }
         } else {
             match self.resolve_base_item_id(base_fi, &base_item_str) {
                 Some(vid) => vid,
-                None => return f64::NAN,
+                None => return ShownValue::Empty,
             }
         };
+        // The base item's own cell: EMPTY [LIVE, piv5 p3 A_DIFF_EAST].
+        if target_vid == current_vid {
+            return ShownValue::Empty;
+        }
 
         // Build modified row/col values with the target item substituted
         let base_value = if is_row {
@@ -722,36 +796,67 @@ impl<'a> PivotCalculator<'a> {
             if pos < modified.len() {
                 modified[pos] = target_vid;
             }
-            self.compute_aggregate(&modified, col_values, vf_idx, aggregation)
+            self.aggregate_at(&modified, col_values, vf_idx, aggregation)
         } else {
             let mut modified = col_values.to_vec();
             if pos < modified.len() {
                 modified[pos] = target_vid;
             }
-            self.compute_aggregate(row_values, &modified, vf_idx, aggregation)
+            self.aggregate_at(row_values, &modified, vf_idx, aggregation)
         };
 
         if is_percent {
-            if base_value != 0.0 { (value - base_value) / base_value } else { f64::NAN }
+            // Excel [LIVE, piv6 p1 H_PDIFF_*, p2 R_PDIFF_*]: a cell no record
+            // reaches is #NULL! whatever its base holds (an error, nothing, 0
+            // or a number); a base with an error or with no records is EMPTY;
+            // a base of 0 is #DIV/0!. Plain Difference From reads the empty
+            // cell and the empty base as 0 (H_DIFF_Y2).
+            let (cell_rows, cell_cols) = (row_values.to_vec(), col_values.to_vec());
+            if !self.has_records_at(&cell_rows, &cell_cols, vf_idx) {
+                return ShownValue::Error("NULL!");
+            }
+            let base_has_records = if is_row {
+                let mut modified = cell_rows;
+                if pos < modified.len() {
+                    modified[pos] = target_vid;
+                }
+                self.has_records_at(&modified, &cell_cols, vf_idx)
+            } else {
+                let mut modified = cell_cols;
+                if pos < modified.len() {
+                    modified[pos] = target_vid;
+                }
+                self.has_records_at(&cell_rows, &modified, vf_idx)
+            };
+            match (own, base_value) {
+                (_, Err(_)) => ShownValue::Empty,
+                (Err(code), _) => ShownValue::Error(code),
+                (Ok(_), Ok(_)) if !base_has_records => ShownValue::Empty,
+                (Ok(_), Ok(base)) if base == 0.0 => ShownValue::Error("DIV/0!"),
+                (Ok(value), Ok(base)) => ShownValue::Number((value - base) / base),
+            }
         } else {
-            value - base_value
+            match (own, base_value) {
+                (Err(code), _) | (_, Err(code)) => ShownValue::Error(code),
+                (Ok(value), Ok(base)) => ShownValue::Number(value - base),
+            }
         }
     }
 
     /// Computes RunningTotal or PercentOfRunningTotal along the base field.
     fn compute_running_total(
         &mut self,
-        _value: f64,
+        own: Result<f64, &'static str>,
         row_values: &[ValueId],
         col_values: &[ValueId],
         vf_idx: usize,
         aggregation: AggregationType,
         is_percent: bool,
-    ) -> f64 {
+    ) -> ShownValue {
         let resolved = self.resolve_base_field(vf_idx, row_values, col_values);
         let (is_row, pos, ordered_items) = match resolved {
             Some(v) => v,
-            None => return _value,
+            None => return ShownValue::of(own),
         };
 
         // Current item's ValueId
@@ -760,82 +865,142 @@ impl<'a> PivotCalculator<'a> {
         } else {
             col_values.get(pos).copied().unwrap_or(VALUE_ID_EMPTY)
         };
+        // A total of the base field is EMPTY -- under % Running Total In it
+        // shows the error it holds [LIVE, piv5 p1 A_PCTRUN; p3].
+        if !ordered_items.contains(&current_vid) {
+            return match (is_percent, own) {
+                (true, Err(code)) => ShownValue::Error(code),
+                _ => ShownValue::Empty,
+            };
+        }
 
-        // Sum all values from the first item through the current item
-        let mut running = 0.0;
+        // Sum the values from the first item through the current one (the
+        // first error met is the answer from there on), and -- for the
+        // percentage -- on through the last: the base field's total under
+        // the cell's parent.
+        let add = |acc: Result<f64, &'static str>, v: Result<f64, &'static str>| match (acc, v) {
+            (Err(code), _) | (_, Err(code)) => Err(code),
+            (Ok(a), Ok(b)) => Ok(a + b),
+        };
+        let mut total: Result<f64, &'static str> = Ok(0.0);
+        let mut running: Option<Result<f64, &'static str>> = None;
+        // Whether some item reads a non-zero number: % Running Total In over
+        // a zero total is #DIV/0! then, and EMPTY when every item is 0 or
+        // empty (Excel [LIVE, piv6 p1 K_PRUN East 5, Mid 0, West -5: #DIV/0!
+        // in all three; H_PRUN_REG Y4 East 0, West 0: EMPTY; P_PRUN_ITEM]).
+        let mut any_nonzero = false;
         for &vid in &ordered_items {
             let item_value = if is_row {
                 let mut modified = row_values.to_vec();
                 if pos < modified.len() {
                     modified[pos] = vid;
                 }
-                self.compute_aggregate(&modified, col_values, vf_idx, aggregation)
+                self.aggregate_at(&modified, col_values, vf_idx, aggregation)
             } else {
                 let mut modified = col_values.to_vec();
                 if pos < modified.len() {
                     modified[pos] = vid;
                 }
-                self.compute_aggregate(row_values, &modified, vf_idx, aggregation)
+                self.aggregate_at(row_values, &modified, vf_idx, aggregation)
             };
-            running += item_value;
+            any_nonzero |= matches!(item_value, Ok(v) if v != 0.0);
+            total = add(total, item_value);
             if vid == current_vid {
-                break;
+                running = Some(total);
+                if !is_percent {
+                    break;
+                }
             }
         }
+        let running = running.unwrap_or(total);
 
         if is_percent {
-            let gt = self.grand_totals.get(vf_idx).copied().unwrap_or(0.0);
-            if gt != 0.0 { running / gt } else { 0.0 }
+            match (running, total) {
+                (Err(code), _) | (_, Err(code)) => ShownValue::Error(code),
+                (Ok(r), Ok(t)) if t != 0.0 => ShownValue::Number(r / t),
+                (Ok(_), Ok(_)) if any_nonzero => ShownValue::Error("DIV/0!"),
+                (Ok(_), Ok(_)) => ShownValue::Empty,
+            }
         } else {
-            running
+            ShownValue::of(running)
         }
     }
 
-    /// Computes Rank (ascending or descending) among sibling items.
+    /// Computes Rank (ascending or descending) among sibling items. An item
+    /// that holds an error or that no record reaches is EMPTY and is not
+    /// ranked; a total of the base field is EMPTY [LIVE, piv5 p1 A_RANKASC,
+    /// p3; piv6 p1]; ties share a rank with no gap after them.
     fn compute_rank(
         &mut self,
-        value: f64,
+        own: Result<f64, &'static str>,
         row_values: &[ValueId],
         col_values: &[ValueId],
         vf_idx: usize,
         aggregation: AggregationType,
         descending: bool,
-    ) -> f64 {
+    ) -> ShownValue {
         let resolved = self.resolve_base_field(vf_idx, row_values, col_values);
         let (is_row, pos, ordered_items) = match resolved {
             Some(v) => v,
-            None => return value,
+            None => return ShownValue::of(own),
         };
+        let current_vid = if is_row {
+            row_values.get(pos).copied().unwrap_or(VALUE_ID_EMPTY)
+        } else {
+            col_values.get(pos).copied().unwrap_or(VALUE_ID_EMPTY)
+        };
+        if !ordered_items.contains(&current_vid) {
+            return ShownValue::Empty;
+        }
+        let value = match own {
+            Ok(v) => v,
+            Err(_) => return ShownValue::Empty,
+        };
+        // A cell no record reaches is EMPTY and is not ranked (Excel [LIVE,
+        // verify-piv5 v1 E_RANKASC_YEAR: Y2/East stays empty; piv6 p1
+        // H_RANKASC_YEAR]) -- it is not a 0.
+        if !self.has_records_at(row_values, col_values, vf_idx) {
+            return ShownValue::Empty;
+        }
 
-        // Collect all sibling values (varying only the base field position)
+        // Collect all sibling values (varying only the base field position);
+        // an erroring sibling and an empty one are not ranked.
         let mut sibling_values: Vec<f64> = Vec::with_capacity(ordered_items.len());
         for &vid in &ordered_items {
-            let item_value = if is_row {
+            let (rows, cols) = if is_row {
                 let mut modified = row_values.to_vec();
                 if pos < modified.len() {
                     modified[pos] = vid;
                 }
-                self.compute_aggregate(&modified, col_values, vf_idx, aggregation)
+                (modified, col_values.to_vec())
             } else {
                 let mut modified = col_values.to_vec();
                 if pos < modified.len() {
                     modified[pos] = vid;
                 }
-                self.compute_aggregate(row_values, &modified, vf_idx, aggregation)
+                (row_values.to_vec(), modified)
             };
-            sibling_values.push(item_value);
+            let item_value = self.aggregate_at(&rows, &cols, vf_idx, aggregation);
+            if let Ok(v) = item_value {
+                if self.has_records_at(&rows, &cols, vf_idx) {
+                    sibling_values.push(v);
+                }
+            }
         }
 
-        // Count how many items rank above the current value
-        let rank = if descending {
-            // Rank 1 = largest value
-            sibling_values.iter().filter(|&&v| v > value).count() + 1
-        } else {
-            // Rank 1 = smallest value
-            sibling_values.iter().filter(|&&v| v < value).count() + 1
-        };
+        // Ties share a rank and the next value takes the next number (Excel
+        // [LIVE, verify-piv5 v1 G_RANKASC]: South 5, East 10, North 10, West
+        // 20 rank 1, 2, 2, 3 -- never 1, 2, 2, 4): one plus the number of
+        // DISTINCT sibling values that rank above the current one.
+        let mut above: Vec<f64> = sibling_values
+            .into_iter()
+            .filter(|&v| if descending { v > value } else { v < value })
+            .collect();
+        above.sort_by(|a, b| a.total_cmp(b));
+        above.dedup();
+        let rank = above.len() + 1;
 
-        rank as f64
+        ShownValue::Number(rank as f64)
     }
     
     /// Applies definition filters to the cache.
@@ -1078,7 +1243,7 @@ impl<'a> PivotCalculator<'a> {
         let mut vf_info: Vec<(DateGroupLevel, usize, usize)> = Vec::new();
         for &level in levels {
             let name = format_date_level_name(&field.name, level);
-            let vf_idx = self.cache.add_virtual_field(name);
+            let vf_idx = self.cache.add_virtual_field(name, field.source_index);
             let effective_index = base_field_count + vf_idx;
             vf_info.push((level, vf_idx, effective_index));
         }
@@ -1186,12 +1351,25 @@ impl<'a> PivotCalculator<'a> {
             }
         }
 
-        // Create effective PivotField entries for each date level
-        for &(level, _, effective_index) in &vf_info {
+        // Create effective PivotField entries for each date level. The
+        // FINEST level is this field, with its own sort; every level above
+        // it is a field of its own with its own sort (`level_sorts`), as
+        // Excel keeps Years, Quarters and Date apart (verify-pivotfix).
+        let finest = vf_info.len().saturating_sub(1);
+        for (pos, &(level, vf_idx, effective_index)) in vf_info.iter().enumerate() {
             let name = format_date_level_name(&field.name, level);
             let mut vf_field = PivotField::new(effective_index, name);
-            vf_field.sort_order = field.sort_order;
-            vf_field.value_sort = field.value_sort.clone();
+            if pos == finest {
+                vf_field.sort_order = field.sort_order;
+                vf_field.value_sort = field.value_sort.clone();
+                vf_field.manual_item_order = field.manual_item_order.clone();
+            } else {
+                let own = field.level_sort(level.level_key());
+                self.cache.set_virtual_level(vf_idx, level.level_key());
+                vf_field.sort_order = own.sort_order;
+                vf_field.value_sort = own.value_sort;
+                vf_field.manual_item_order = own.manual_item_order;
+            }
             vf_field.show_subtotals = field.show_subtotals;
             // Individual item collapse state doesn't transfer to virtual fields
             vf_field.collapsed = false;
@@ -1218,7 +1396,7 @@ impl<'a> PivotCalculator<'a> {
 
         let base_field_count = self.cache.fields.len();
         let name = field.name.clone();
-        let vf_idx = self.cache.add_virtual_field(name.clone());
+        let vf_idx = self.cache.add_virtual_field(name.clone(), field.source_index);
         let effective_index = base_field_count + vf_idx;
 
         // Pre-compute bin labels and pre-intern them in order
@@ -1309,6 +1487,7 @@ impl<'a> PivotCalculator<'a> {
         let mut vf_field = PivotField::new(effective_index, name);
         vf_field.sort_order = field.sort_order;
         vf_field.value_sort = field.value_sort.clone();
+        vf_field.manual_item_order = field.manual_item_order.clone();
         vf_field.show_subtotals = field.show_subtotals;
         vf_field.collapsed = false;
         vf_field.collapsed_items = Vec::new();
@@ -1332,7 +1511,7 @@ impl<'a> PivotCalculator<'a> {
 
         let base_field_count = self.cache.fields.len();
         let name = format!("{} (Group)", field.name);
-        let vf_idx = self.cache.add_virtual_field(name.clone());
+        let vf_idx = self.cache.add_virtual_field(name.clone(), field.source_index);
         let effective_index = base_field_count + vf_idx;
 
         // Build a map from member label to group name
@@ -1381,9 +1560,15 @@ impl<'a> PivotCalculator<'a> {
         }
 
         // Add the virtual group field BEFORE the original field (creates hierarchy)
+        // The group field is a field of its own, with its own sort: sorting
+        // it leaves the detail field's order alone [LIVE, verify-pivotfix
+        // probe3 A_ORDERS]. It used to copy the detail field's.
         let mut group_field = PivotField::new(effective_index, name);
-        group_field.sort_order = field.sort_order;
-        group_field.value_sort = field.value_sort.clone();
+        let own = field.level_sort(crate::definition::MANUAL_GROUP_LEVEL);
+        self.cache.set_virtual_level(vf_idx, crate::definition::MANUAL_GROUP_LEVEL);
+        group_field.sort_order = own.sort_order;
+        group_field.value_sort = own.value_sort;
+        group_field.manual_item_order = own.manual_item_order;
         group_field.show_subtotals = true;
         effective.push(group_field);
 
@@ -1483,6 +1668,19 @@ impl<'a> PivotCalculator<'a> {
                         &self.cache.virtual_records,
                     );
                     first_shown.entry(member).or_insert(record_idx);
+                }
+                // MANUAL with a stored order (BUG-0733): the listed items in
+                // the list's order, then every other item in source order.
+                if field.sort_order == SortOrder::Manual && !field.manual_item_order.is_empty() {
+                    let listed = field.manual_item_order.len();
+                    for rank in first_shown.values_mut() {
+                        *rank = rank.saturating_add(listed);
+                    }
+                    for (position, key) in field.manual_item_order.iter().enumerate() {
+                        if let Some(id) = self.member_id_of_key(field.source_index, key) {
+                            first_shown.insert(id, position);
+                        }
+                    }
                 }
                 Some(first_shown)
             })
@@ -1696,9 +1894,10 @@ impl<'a> PivotCalculator<'a> {
             }
             SortOrder::Manual | SortOrder::DataSourceOrder => {
                 // The order the SOURCE first shows each item (wave F, Z2),
-                // never the order a hash set yields them. MANUAL is the same
-                // order: a definition stores no manual item order, so the
-                // source's is the one there is. Both override sort-by-column.
+                // never the order a hash set yields them. MANUAL is its
+                // stored item order (`PivotField::manual_item_order`, folded
+                // into `source_order` by build_axis_tree), the source's for
+                // every item it does not list. Both override sort-by-column.
                 // An item no record shows (show items with no data: a
                 // calculation group's declared items, pre-interned in
                 // declaration order) follows, in the cache's own order -- its
@@ -1786,6 +1985,53 @@ impl<'a> PivotCalculator<'a> {
         self.value_sort_level(tree, 0, &plans, &mut path, is_row);
     }
 
+    /// Gives every row subtotal and the grand total the errors of its items
+    /// in DISPLAY order (`PivotCache::rederive_total_errors`), deepest level
+    /// first, once the row items are in their final order. A no-op unless the
+    /// aggregation saw a source error. Without row fields the grand total
+    /// keeps its records' first error in source order, as Excel's does
+    /// [LIVE, piv4 probe5 F_NOROWS]. The COLUMN axis's totals keep
+    /// source order (not probed).
+    fn rederive_row_total_errors(&mut self, tree: &[AxisNode]) {
+        if tree.is_empty() {
+            return;
+        }
+        self.ensure_aggregates_computed();
+        if !self.cache.source_errors_seen() {
+            return;
+        }
+        let row_len = self.row_field_indices.len();
+        let mut path: Vec<ValueId> = Vec::new();
+        self.rederive_row_total_errors_level(tree, &mut path, row_len);
+    }
+
+    fn rederive_row_total_errors_level(&mut self, nodes: &[AxisNode], path: &mut Vec<ValueId>, row_len: usize) {
+        for node in nodes {
+            if !node.children.is_empty() {
+                path.push(node.value_id);
+                self.rederive_row_total_errors_level(&node.children, path, row_len);
+                path.pop();
+            }
+        }
+        let pad = |p: &[ValueId]| {
+            let mut key = vec![VALUE_ID_EMPTY; row_len];
+            let n = p.len().min(row_len);
+            key[..n].copy_from_slice(&p[..n]);
+            key
+        };
+        let parent = pad(path);
+        let children: Vec<Vec<ValueId>> = nodes
+            .iter()
+            .map(|node| {
+                path.push(node.value_id);
+                let key = pad(path);
+                path.pop();
+                key
+            })
+            .collect();
+        self.cache.rederive_total_errors(&parent, &children);
+    }
+
     /// One level of [`Self::apply_value_sorts`]: sorts `nodes` (the children
     /// of the item at `path`) when level `level` sorts by value, then recurses.
     fn value_sort_level(
@@ -1798,7 +2044,7 @@ impl<'a> PivotCalculator<'a> {
     ) {
         if let Some(Some((vf_idx, descending, line))) = plans.get(level) {
             let aggregation = self.definition.value_fields[*vf_idx].aggregation;
-            let keys: Vec<Option<f64>> = nodes
+            let keys: Vec<ValueSortKey> = nodes
                 .iter()
                 .map(|node| {
                     path.push(node.value_id);
@@ -1818,13 +2064,29 @@ impl<'a> PivotCalculator<'a> {
             // for the other: along a COLUMN line ascending ties read A..Z and
             // descending is the exact reverse (Z..A); along the GRAND TOTAL
             // descending ties read A..Z and ascending is the exact reverse.
+            //
+            // An item whose value is an ERROR (BUG-0760 follow-up) goes LAST in
+            // both directions, and the error items follow the sort's own
+            // direction by label (Excel [LIVE, piv4 probe4], by the grand
+            // total: descending East 17, North 3, West, South; ascending
+            // North 3, East 17, South, West).
             let ties_descending = if line.is_empty() { !*descending } else { *descending };
             order.sort_by(|&a, &b| {
+                use std::cmp::Ordering;
+                match (keys[a], keys[b]) {
+                    (ValueSortKey::Error, ValueSortKey::Error) => {
+                        return if *descending { b.cmp(&a) } else { a.cmp(&b) };
+                    }
+                    (ValueSortKey::Error, _) => return Ordering::Greater,
+                    (_, ValueSortKey::Error) => return Ordering::Less,
+                    _ => {}
+                }
                 let by_value = match (keys[a], keys[b]) {
-                    (None, None) => std::cmp::Ordering::Equal,
-                    (None, Some(_)) => std::cmp::Ordering::Less,
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                    (ValueSortKey::Blank, ValueSortKey::Blank) => Ordering::Equal,
+                    (ValueSortKey::Blank, _) => Ordering::Less,
+                    (_, ValueSortKey::Blank) => Ordering::Greater,
+                    (ValueSortKey::Number(x), ValueSortKey::Number(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+                    _ => Ordering::Equal,
                 };
                 let by_value = if *descending { by_value.reverse() } else { by_value };
                 by_value.then_with(|| if ties_descending { b.cmp(&a) } else { a.cmp(&b) })
@@ -1843,24 +2105,32 @@ impl<'a> PivotCalculator<'a> {
 
     /// The aggregate of value field `vf_idx` at a (row path, column path)
     /// intersection -- each a prefix of member ids, a shorter one reading the
-    /// subtotal -- or `None` when no record reaches it (Excel's empty cell).
+    /// subtotal -- as a value-sort key: `Blank` when no record reaches it
+    /// (Excel's empty cell), `Error` when the cell shows an error.
     fn aggregate_or_blank(
         &self,
         row_values: &[ValueId],
         col_values: &[ValueId],
         vf_idx: usize,
         aggregation: AggregationType,
-    ) -> Option<f64> {
+    ) -> ValueSortKey {
         let row_len = self.row_field_indices.len();
         let mut key = vec![VALUE_ID_EMPTY; row_len];
         let n = row_values.len().min(row_len);
         key[..n].copy_from_slice(&row_values[..n]);
-        let slot = self.cache.get_row_slot(&key)?;
-        let acc = slot.get(self.cache.col_layout().acc_index(col_values, vf_idx))?;
+        let Some(acc) = self
+            .cache
+            .get_row_slot(&key)
+            .and_then(|slot| slot.get(self.cache.col_layout().acc_index(col_values, vf_idx)))
+        else {
+            return ValueSortKey::Blank;
+        };
         if acc.count == 0 {
-            None
+            ValueSortKey::Blank
+        } else if acc.error_code(aggregation).is_some() {
+            ValueSortKey::Error
         } else {
-            Some(acc.compute(aggregation))
+            ValueSortKey::Number(acc.compute(aggregation))
         }
     }
 
@@ -2252,6 +2522,8 @@ impl<'a> PivotCalculator<'a> {
                 field_index: f.source_index,
                 field_name: f.name.clone(),
                 has_active_filter: !f.hidden_items.is_empty(),
+                sort_order: f.sort_order,
+                value_sort_field: self.value_sort_field_index(f).map(|i| self.definition.value_fields[i].name.clone()),
             }
         }).collect();
 
@@ -2260,6 +2532,8 @@ impl<'a> PivotCalculator<'a> {
                 field_index: f.source_index,
                 field_name: f.name.clone(),
                 has_active_filter: !f.hidden_items.is_empty(),
+                sort_order: f.sort_order,
+                value_sort_field: self.value_sort_field_index(f).map(|i| self.definition.value_fields[i].name.clone()),
             }
         }).collect();
 
@@ -3198,14 +3472,26 @@ impl<'a> PivotCalculator<'a> {
             use std::collections::HashMap;
             let mut field_values: HashMap<String, f64> = HashMap::new();
             let mut vf_aggregates: Vec<f64> = Vec::with_capacity(value_fields.len());
+            let mut vf_errors: Vec<Option<&'static str>> = Vec::with_capacity(value_fields.len());
+            // A cell no record reaches is EMPTY, as Excel shows it -- never a
+            // 0 -- and so is one a mask overlay answered BLANK. Under Show
+            // Values As it shows the computed value (Excel [LIVE, piv4
+            // probe6]: Running Total In 0, % of Row 0,00% in such a cell).
+            let mut vf_empty: Vec<bool> = Vec::with_capacity(value_fields.len());
             for (vf_idx, vf) in value_fields.iter().enumerate() {
                 let aggregate = self.lookup_aggregate_col(&[], vf_idx, vf.aggregation);
                 vf_aggregates.push(aggregate);
+                vf_errors.push(self.lookup_aggregate_error_col(&[], vf_idx, vf.aggregation));
+                vf_empty.push(
+                    vf.show_values_as == ShowValuesAs::Normal
+                        && self.lookup_accumulator_col(&[], vf_idx).is_none_or(|a| a.count == 0),
+                );
                 if let Some(fc) = self.cache.get_field(vf.source_index) {
                     field_values.insert(fc.name.clone(), aggregate);
                 }
                 field_values.insert(vf.name.clone(), aggregate);
             }
+            let calc_errors = self.lookup_calc_errors_col(&[], value_fields);
 
             let values_on_rows = self.values_on_rows();
             let col_order = self.value_columns_without_col_fields();
@@ -3230,12 +3516,27 @@ impl<'a> PivotCalculator<'a> {
                         let vf = &value_fields[vf_idx];
                         let aggregate = vf_aggregates[vf_idx];
 
-                        let display_value = self.transform_show_values_as(
-                            aggregate, &row_item.group_values, &[],
-                            vf_idx, vf.aggregation, vf.show_values_as,
-                        );
-
-                        let mut cell = PivotViewCell::data(display_value);
+                        let mut cell = PivotViewCell::data(aggregate);
+                        if vf.show_values_as == ShowValuesAs::Normal {
+                            if let Some(code) = vf_errors[vf_idx] {
+                                cell.value = PivotCellValue::Error(code.to_string());
+                            } else if vf_empty[vf_idx] {
+                                cell.value = PivotCellValue::Empty;
+                            }
+                        } else {
+                            // Show Values As decides what an error in the
+                            // cell or in its base shows (see the transform).
+                            let own = match vf_errors[vf_idx] {
+                                Some(code) => Err(code),
+                                None => Ok(aggregate),
+                            };
+                            cell.value = self
+                                .transform_show_values_as(
+                                    own, &row_item.group_values, &[],
+                                    vf_idx, vf.aggregation, vf.show_values_as,
+                                )
+                                .into_cell_value();
+                        }
                         cell.number_format = vf.number_format.clone();
                         cell.value_field_index = Some(vf_idx);
                         // The row's identity. Every consumer of a value cell
@@ -3278,7 +3579,9 @@ impl<'a> PivotCalculator<'a> {
                         if cf_idx >= self.definition.calculated_fields.len() { continue; }
                         let cf = &self.definition.calculated_fields[cf_idx];
 
-                        let result = if let Some((ri, vd)) = visual_ctx_data {
+                        let result = if let Some(err) = calc_field_source_error(&cf.formula, &calc_errors) {
+                            err
+                        } else if let Some((ri, vd)) = visual_ctx_data {
                             let ctx = crate::calculated::VisualCalcContext {
                                 current_row_idx: row_idx,
                                 row_items: ri,
@@ -3304,6 +3607,7 @@ impl<'a> PivotCalculator<'a> {
                         // boolean / error results carry their own display.
                         let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
                         let mut cell = PivotViewCell::data_value(result.into());
+                        cell.calculated_field_index = Some(cf_idx);
                         if is_numeric {
                             cell.number_format = cf.number_format.clone();
                         }
@@ -3355,24 +3659,51 @@ impl<'a> PivotCalculator<'a> {
 
                 let vf = &value_fields[vf_idx];
 
-                // Use batched lookup: row key already prepared, only overwrites col portion
+                // Batched lookup: only the column portion changes per cell.
+                // The row key is prepared AGAIN for each cell, because the
+                // previous cell's Show Values As (% of Column Total, % of
+                // Parent ...) reads other rows through `compute_aggregate`,
+                // which rewrites the same key buffer.
+                self.prepare_row_key(&row_item.group_values);
                 let aggregate = self.lookup_aggregate_col(
                     &col_group_values,
                     vf_idx,
                     vf.aggregation,
                 );
+                let source_error = self.lookup_aggregate_error_col(&col_group_values, vf_idx, vf.aggregation);
+                // A cell no record reaches is EMPTY, as Excel shows it (an
+                // intersection with no data, an item shown with no data),
+                // never a 0 -- under Show Values As the computed value stands
+                // (Excel [LIVE, piv4 probe6]: Running Total In reads 0 and %
+                // of Row 0,00% there).
+                let no_records = vf.show_values_as == ShowValuesAs::Normal
+                    && self.lookup_accumulator_col(&col_group_values, vf_idx).is_none_or(|a| a.count == 0);
 
-                // Apply show_values_as transformation
-                let display_value = self.transform_show_values_as(
-                    aggregate,
-                    &row_item.group_values,
-                    &col_group_values,
-                    vf_idx,
-                    vf.aggregation,
-                    vf.show_values_as,
-                );
-
-                let mut cell = PivotViewCell::data(display_value);
+                let mut cell = PivotViewCell::data(aggregate);
+                if vf.show_values_as == ShowValuesAs::Normal {
+                    if let Some(code) = source_error {
+                        cell.value = PivotCellValue::Error(code.to_string());
+                    } else if no_records {
+                        cell.value = PivotCellValue::Empty;
+                    }
+                } else {
+                    // Apply show_values_as transformation: it decides what
+                    // an error in the cell or in its base shows.
+                    let own = match source_error {
+                        Some(code) => Err(code),
+                        None => Ok(aggregate),
+                    };
+                    cell.value = self
+                        .transform_show_values_as(
+                            own,
+                            &row_item.group_values,
+                            &col_group_values,
+                            vf_idx,
+                            vf.aggregation,
+                            vf.show_values_as,
+                        )
+                        .into_cell_value();
+                }
                 cell.number_format = vf.number_format.clone();
                 cell.value_field_index = Some(vf_idx);
 
@@ -3464,6 +3795,9 @@ impl<'a> PivotCalculator<'a> {
         use std::collections::HashMap;
 
         let calc_fields = self.definition.calculated_fields.clone();
+        // The data cells before these may have rewritten the key buffer
+        // (Show Values As reads other rows through `compute_aggregate`).
+        self.prepare_row_key(&row_item.group_values);
 
         // Check if any calc fields use visual calc functions (for column axis support)
         let needs_col_ctx = calc_fields.iter().any(|cf| {
@@ -3482,9 +3816,12 @@ impl<'a> PivotCalculator<'a> {
                 }
                 field_values.insert(vf.name.clone(), aggregate);
             }
+            let calc_errors = self.lookup_calc_errors_col(&[], value_fields);
 
-            for cf in &calc_fields {
-                let result = if let Some((ri, vd)) = row_visual_ctx {
+            for (cf_idx, cf) in calc_fields.iter().enumerate() {
+                let result = if let Some(err) = calc_field_source_error(&cf.formula, &calc_errors) {
+                    err
+                } else if let Some((ri, vd)) = row_visual_ctx {
                     let ctx = crate::calculated::VisualCalcContext {
                         current_row_idx: row_idx,
                         row_items: ri,
@@ -3507,6 +3844,7 @@ impl<'a> PivotCalculator<'a> {
 
                 let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
                 let mut cell = PivotViewCell::data_value(result.into());
+                cell.calculated_field_index = Some(cf_idx);
                 if is_numeric {
                     cell.number_format = cf.number_format.clone();
                 }
@@ -3558,9 +3896,12 @@ impl<'a> PivotCalculator<'a> {
                     }
                     field_values.insert(vf.name.clone(), aggregate);
                 }
+                let calc_errors = self.lookup_calc_errors_col(col_group_values, value_fields);
 
-                for cf in &calc_fields {
-                    let result = if needs_col_ctx || row_visual_ctx.is_some() {
+                for (cf_idx, cf) in calc_fields.iter().enumerate() {
+                    let result = if let Some(err) = calc_field_source_error(&cf.formula, &calc_errors) {
+                        err
+                    } else if needs_col_ctx || row_visual_ctx.is_some() {
                         let col_ctx = if needs_col_ctx {
                             Some(crate::calculated::ColumnAxisContext {
                                 current_col_idx: col_idx,
@@ -3610,6 +3951,7 @@ impl<'a> PivotCalculator<'a> {
 
                     let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
                     let mut cell = PivotViewCell::data_value(result.into());
+                    cell.calculated_field_index = Some(cf_idx);
                     if is_numeric {
                         cell.number_format = cf.number_format.clone();
                     }
@@ -3687,6 +4029,39 @@ impl<'a> PivotCalculator<'a> {
         0.0
     }
 
+    /// [`Self::compute_aggregate`] with the error the cell there shows
+    /// (`AggregateAccumulator::error_code`): what a Show Values As
+    /// calculation reads of a total or a sibling. No accumulator reads 0.
+    fn aggregate_at(
+        &mut self,
+        row_values: &[ValueId],
+        col_values: &[ValueId],
+        value_field_idx: usize,
+        aggregation: AggregationType,
+    ) -> Result<f64, &'static str> {
+        let value = self.compute_aggregate(row_values, col_values, value_field_idx, aggregation);
+        // `compute_aggregate` left the padded row key in the buffer.
+        match self.lookup_aggregate_error_col(col_values, value_field_idx, aggregation) {
+            Some(code) => Err(code),
+            None => Ok(value),
+        }
+    }
+
+    /// Whether any record reaches the value cell at `row_values` x
+    /// `col_values` (an accumulator with a count): what tells an EMPTY cell
+    /// from one that sums to 0 for the Show Values As kinds that treat them
+    /// differently (Rank, % Difference From). Leaves the padded row key in
+    /// the buffer, as [`Self::aggregate_at`] does.
+    fn has_records_at(
+        &mut self,
+        row_values: &[ValueId],
+        col_values: &[ValueId],
+        value_field_idx: usize,
+    ) -> bool {
+        self.prepare_row_key(row_values);
+        self.lookup_accumulator_col(col_values, value_field_idx).is_some_and(|a| a.count > 0)
+    }
+
     /// Prepares the row key buffer for batched column lookups.
     /// Call once per row, then use `lookup_aggregate_col` for each column.
     fn prepare_row_key(&mut self, row_values: &[ValueId]) {
@@ -3714,6 +4089,108 @@ impl<'a> PivotCalculator<'a> {
 
         0.0
     }
+
+    /// The accumulator [`Self::lookup_aggregate_col`] reads, if any.
+    fn lookup_accumulator_col(
+        &self,
+        col_values: &[ValueId],
+        value_field_idx: usize,
+    ) -> Option<&crate::cache::AggregateAccumulator> {
+        let slot = self.cache.get_row_slot(&self.agg_key_buf)?;
+        slot.get(self.cache.col_layout().acc_index(col_values, value_field_idx))
+    }
+
+    /// The error the value cell at (prepared row key, `col_values`) shows
+    /// instead of [`Self::lookup_aggregate_col`]'s number, as a bare code
+    /// (BUG-0760 follow-up: a source error, or Average / StdDev / Var of too
+    /// few numbers -- see `AggregateAccumulator::error_code`).
+    fn lookup_aggregate_error_col(
+        &self,
+        col_values: &[ValueId],
+        value_field_idx: usize,
+        aggregation: AggregationType,
+    ) -> Option<&'static str> {
+        self.lookup_accumulator_col(col_values, value_field_idx)?.error_code(aggregation)
+    }
+
+    /// The errors a calculated field reads at (prepared row key,
+    /// `col_values`), by the names `field_values` holds: a value field's own
+    /// name reads the error its cell shows, its SOURCE field's name the last
+    /// source error (Excel [LIVE, piv4 probe5]: a calculated field over a
+    /// group holding #DIV/0! then #N/A answers #N/A).
+    fn lookup_calc_errors_col(
+        &self,
+        col_values: &[ValueId],
+        value_fields: &[ValueField],
+    ) -> std::collections::HashMap<String, &'static str> {
+        let mut errors = std::collections::HashMap::new();
+        for (vf_idx, vf) in value_fields.iter().enumerate() {
+            let Some(acc) = self.lookup_accumulator_col(col_values, vf_idx) else { continue };
+            if let Some(code) = acc.error_code(vf.aggregation) {
+                errors.insert(vf.name.clone(), code);
+            }
+            if let (Some(last), Some(fc)) = (acc.last_error, self.cache.get_field(vf.source_index)) {
+                errors.insert(fc.name.clone(), crate::cache::accumulator_error_code(last));
+            }
+        }
+        errors
+    }
+}
+
+/// What a value cell under Show Values As shows
+/// ([`PivotCalculator::transform_show_values_as`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ShownValue {
+    Number(f64),
+    Error(&'static str),
+    Empty,
+}
+
+impl ShownValue {
+    /// An aggregate shown as it is: its number or its error.
+    fn of(value: Result<f64, &'static str>) -> Self {
+        match value {
+            Ok(n) => ShownValue::Number(n),
+            Err(code) => ShownValue::Error(code),
+        }
+    }
+
+    fn into_cell_value(self) -> PivotCellValue {
+        match self {
+            ShownValue::Number(n) if n.is_nan() => PivotCellValue::Empty,
+            // `+ 0.0` turns the -0 of 0 / -3 into 0: Excel has no negative
+            // zero (piv6 p1 P_PCTPCOL c2 East 0,00%).
+            ShownValue::Number(n) => PivotCellValue::Number(n + 0.0),
+            ShownValue::Error(code) => PivotCellValue::Error(code.to_string()),
+            ShownValue::Empty => PivotCellValue::Empty,
+        }
+    }
+}
+
+/// How many levels of an axis path name an item: a subtotal's or the grand
+/// total's path is padded with `VALUE_ID_EMPTY` ("all values") below it.
+fn shown_depth(values: &[ValueId]) -> usize {
+    values.iter().position(|&v| v == VALUE_ID_EMPTY).unwrap_or(values.len())
+}
+
+/// The error a calculated field answers when a field its formula names reads
+/// an error at this cell (`errors`, from `lookup_calc_errors_col`): the first
+/// such reference's, in formula order. `None`: evaluate the formula.
+fn calc_field_source_error(
+    formula: &str,
+    errors: &std::collections::HashMap<String, &'static str>,
+) -> Option<crate::calculated::CalcValue> {
+    if errors.is_empty() {
+        return None;
+    }
+    let refs = crate::calculated::extract_references(formula).ok()?;
+    refs.iter()
+        .find_map(|r| {
+            errors
+                .get(r)
+                .or_else(|| errors.iter().find(|(k, _)| k.eq_ignore_ascii_case(r)).map(|(_, v)| v))
+        })
+        .map(|code| crate::calculated::CalcValue::Error((*code).to_string()))
 }
 
 // ============================================================================
@@ -3900,6 +4377,15 @@ pub fn calculate_pivot(
 ) -> PivotView {
     let mut calculator = PivotCalculator::new(definition, cache);
     calculator.calculate()
+}
+
+/// Applies `definition`'s hidden items to `cache.filter_mask` exactly as the
+/// first step of [`calculate_pivot`] does, and nothing else: afterwards
+/// `cache.filter_mask` is the mask a calculation of `definition` aggregates
+/// over. The host plans a filtered state's [`crate::cache::MaskOverlay`] from
+/// it (BUG-0108) without laying a whole view out.
+pub fn apply_definition_filters(definition: &PivotDefinition, cache: &mut PivotCache) {
+    PivotCalculator::new(definition, cache).apply_filters();
 }
 
 /// The value ids a field's `hidden_items` list names, resolved EXACTLY as the
@@ -4951,12 +5437,15 @@ mod blank_member_tests {
     fn a_blank_member_on_rows_crossed_with_columns_reads_its_own_cells() {
         let mut cache = east_blank_west();
         let view = calculate_pivot(&sum_def(&[(0, "Region")], &[(2, "Year")], &[]), &mut cache);
+        // An intersection with no data is an EMPTY cell (Excel [LIVE, piv4
+        // probe6]), which `body` does not list; it read 0 (pinned here as 0
+        // until wave 4).
         assert_eq!(
             body(&view),
             owned(&[
                 ("(blank)", &[30.0, 5.0, 35.0]),
-                ("East", &[10.0, 0.0, 10.0]),
-                ("West", &[0.0, 20.0, 20.0]),
+                ("East", &[10.0, 10.0]),
+                ("West", &[20.0, 20.0]),
                 ("Grand Total", &[40.0, 25.0, 65.0]),
             ]),
         );
@@ -4965,7 +5454,7 @@ mod blank_member_tests {
         let view = calculate_pivot(&sum_def(&[(0, "Region")], &[(2, "Year")], &[(0, &["East"])]), &mut cache);
         assert_eq!(
             body(&view),
-            owned(&[("(blank)", &[30.0, 5.0, 35.0]), ("West", &[0.0, 20.0, 20.0]), ("Grand Total", &[30.0, 25.0, 55.0])]),
+            owned(&[("(blank)", &[30.0, 5.0, 35.0]), ("West", &[20.0, 20.0]), ("Grand Total", &[30.0, 25.0, 55.0])]),
             "with East hidden",
         );
     }
@@ -4974,12 +5463,13 @@ mod blank_member_tests {
     fn a_blank_member_on_columns_reads_its_own_column_and_the_row_totals_count_it_once() {
         let mut cache = east_blank_west();
         let view = calculate_pivot(&sum_def(&[(2, "Year")], &[(0, "Region")], &[]), &mut cache);
-        // Columns: (blank), East, West, Grand Total.
+        // Columns: (blank), East, West, Grand Total. An intersection with no
+        // data is EMPTY (Excel [LIVE, piv4 probe6]) and not listed; it read 0.
         assert_eq!(
             body(&view),
             owned(&[
-                ("Y1", &[30.0, 10.0, 0.0, 40.0]),
-                ("Y2", &[5.0, 0.0, 20.0, 25.0]),
+                ("Y1", &[30.0, 10.0, 40.0]),
+                ("Y2", &[5.0, 20.0, 25.0]),
                 ("Grand Total", &[35.0, 10.0, 20.0, 65.0]),
             ]),
         );
@@ -4988,7 +5478,7 @@ mod blank_member_tests {
         let view = calculate_pivot(&sum_def(&[(2, "Year")], &[(0, "Region")], &[(0, &["West"])]), &mut cache);
         assert_eq!(
             body(&view),
-            owned(&[("Y1", &[30.0, 10.0, 40.0]), ("Y2", &[5.0, 0.0, 5.0]), ("Grand Total", &[35.0, 10.0, 45.0])]),
+            owned(&[("Y1", &[30.0, 10.0, 40.0]), ("Y2", &[5.0, 5.0]), ("Grand Total", &[35.0, 10.0, 45.0])]),
             "with West hidden",
         );
     }
@@ -5162,7 +5652,9 @@ mod blank_member_tests {
             body(&view).into_iter().skip_while(|(l, _)| l != "West").take(4).collect();
         assert_eq!(
             west,
-            owned(&[("West", &[16.0]), ("  (blank)", &[0.0]), ("  Apples", &[0.0]), ("  Pears", &[16.0])]),
+            // An item shown with no data has an EMPTY value cell (Excel
+            // [LIVE, piv4 probe6 P_NODATA]); it read 0 until wave 4.
+            owned(&[("West", &[16.0]), ("  (blank)", &[]), ("  Apples", &[]), ("  Pears", &[16.0])]),
         );
     }
 
@@ -5233,10 +5725,13 @@ mod blank_member_tests {
         assert_eq!((next[0].1, next[1].1), (35.0 - 10.0, 10.0 - 20.0), "{next:?}");
         assert!(next[2].1.is_nan(), "the last item has no next: {next:?}");
 
+        // The base item's own cell is EMPTY (read here as NaN), as Excel
+        // shows it [LIVE, piv5 p3 A_DIFF_EAST]; it read 0 until piv5.
         let from_blank = shown_along_region(ShowValuesAs::Difference, Some("(blank)"));
+        assert!(from_blank[0].1.is_nan(), "{from_blank:?}");
         assert_eq!(
-            from_blank,
-            vec![("(blank)".to_string(), 0.0), ("East".to_string(), 10.0 - 35.0), ("West".to_string(), 20.0 - 35.0)],
+            from_blank[1..].to_vec(),
+            vec![("East".to_string(), 10.0 - 35.0), ("West".to_string(), 20.0 - 35.0)],
         );
     }
 
@@ -5467,7 +5962,9 @@ mod blank_member_tests {
                 ("(blank)", &[31.0]),
                 ("  (blank)", &[10.0]),
                 ("  Apples", &[5.0]),
-                ("Grand Total", &[31.0]),
+                // A total of the base field is EMPTY under Running Total In
+                // [LIVE, piv5 p3 A_RUN]; it showed the running total of all.
+                ("Grand Total", &[]),
             ]),
             "Running Total In Region, regions Z-A: each product accumulates West, East, (blank)",
         );
@@ -5481,13 +5978,15 @@ mod blank_member_tests {
         let mut def = sum_def(&[(2, "Year")], &[(0, "Region")], &[]);
         def.column_fields[0].sort_order = SortOrder::Descending;
         let view = calc(&along(def, ShowValuesAs::RunningTotal, 0, None), east_blank_west());
-        // Columns: West, East, (blank), Grand Total.
+        // Columns: West, East, (blank), Grand Total -- the Grand Total
+        // column, a total of the base field, is EMPTY [LIVE, piv5 p3
+        // B_RUN_YEAR's Grand Total row]; it repeated the last running total.
         assert_eq!(
             body(&view),
             owned(&[
-                ("Y1", &[0.0, 10.0, 40.0, 40.0]),
-                ("Y2", &[20.0, 20.0, 25.0, 25.0]),
-                ("Grand Total", &[20.0, 30.0, 65.0, 65.0]),
+                ("Y1", &[0.0, 10.0, 40.0]),
+                ("Y2", &[20.0, 20.0, 25.0]),
+                ("Grand Total", &[20.0, 30.0, 65.0]),
             ]),
         );
     }
@@ -6312,5 +6811,874 @@ mod value_sort_tests {
         assert!(!plain.contains("value_sort"), "an absent value sort is not written: {plain}");
         let read: PivotField = serde_json::from_str(&plain).unwrap();
         assert_eq!(read.value_sort, None);
+    }
+}
+
+/// BUG-0760 follow-up: what a pivot's summaries show over a source holding
+/// errors and text, against Excel [LIVE, piv4 probe4 / probe5].
+#[cfg(test)]
+mod source_error_tests {
+    use super::*;
+    use engine::{CellError, CellValue};
+    use crate::definition::{AggregationType, CalculatedField, PivotField, PivotId, SortOrder, ValueField, ValueSort};
+    use crate::view::{PivotCellValue, PivotRowType};
+
+    fn pid() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7])
+    }
+
+    fn cache_of(names: &[&str], rows: &[Vec<CellValue>]) -> PivotCache {
+        let mut cache = PivotCache::new(pid(), names.len());
+        for (i, name) in names.iter().enumerate() {
+            cache.set_field_name(i, name.to_string());
+        }
+        for (i, row) in rows.iter().enumerate() {
+            cache.add_record(i as u32, row);
+        }
+        cache
+    }
+
+    fn t(s: &str) -> CellValue {
+        CellValue::Text(s.to_string())
+    }
+
+    fn n(v: f64) -> CellValue {
+        CellValue::Number(v)
+    }
+
+    fn e(err: CellError) -> CellValue {
+        CellValue::Error(err)
+    }
+
+    /// probe4's table: Region, Amount, Name.
+    fn probe4_cache() -> PivotCache {
+        cache_of(
+            &["Region", "Amount", "Name"],
+            &[
+                vec![t("East"), n(10.0), t("x")],
+                vec![t("West"), e(CellError::Div0), e(CellError::Div0)],
+                vec![t("West"), n(4.0), t("y")],
+                vec![t("South"), e(CellError::NA), t("z")],
+                vec![t("South"), e(CellError::Div0), t("w")],
+                vec![t("East"), n(7.0), t("v")],
+                vec![t("North"), t("text"), t("u")],
+                vec![t("North"), n(3.0), t("t")],
+            ],
+        )
+    }
+
+    fn show(v: &PivotCellValue, formatted: &str) -> String {
+        match v {
+            PivotCellValue::Number(x) => {
+                let r = (x * 10000.0).round() / 10000.0;
+                format!("{r}")
+            }
+            PivotCellValue::Error(code) => format!("#{}", code.trim_start_matches('#')),
+            PivotCellValue::Text(s) => s.clone(),
+            PivotCellValue::Boolean(b) => b.to_string(),
+            PivotCellValue::Empty => formatted.to_string(),
+        }
+    }
+
+    /// The Data / Subtotal / GrandTotal rows as "label,v1,v2..." joined by " ; ".
+    fn body(def: &PivotDefinition, cache: &mut PivotCache) -> String {
+        let view = calculate_pivot(def, cache);
+        view.rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| matches!(d.row_type, PivotRowType::Data | PivotRowType::Subtotal | PivotRowType::GrandTotal))
+            .map(|(_, cells)| {
+                cells.iter().map(|c| show(&c.value, &c.formatted_value)).collect::<Vec<_>>().join(",")
+            })
+            .collect::<Vec<_>>()
+            .join(" ; ")
+    }
+
+    fn by_region(aggregation: AggregationType) -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Region".into())];
+        def.value_fields = vec![
+            ValueField::new(1, "Of Amount".into(), aggregation),
+            ValueField::new(2, "Of Name".into(), aggregation),
+        ];
+        def
+    }
+
+    /// Excel [LIVE, piv4 probe4], every summary over Amount (numbers, a text,
+    /// #DIV/0!, #N/A) and Name (text and one #DIV/0!). A source error is the
+    /// result of every summary but Count and Count Numbers; Count counts text
+    /// and errors; Average of no numbers and StdDev / Var of fewer than two
+    /// are #DIV/0!; the grand total takes the first error of its items as
+    /// shown (South #N/A before West #DIV/0!, though the West error comes
+    /// first in the source).
+    ///
+    /// SABOTAGE (piv4-sabE): the value buffer drops every non-number again.
+    #[test]
+    fn every_summary_over_a_source_error_or_text_answers_as_excel_does() {
+        let cases: &[(AggregationType, &str)] = &[
+            (AggregationType::Sum, "East,17,0 ; North,3,0 ; South,#N/A,0 ; West,#DIV/0!,#DIV/0! ; Grand Total,#N/A,#DIV/0!"),
+            (AggregationType::Count, "East,2,2 ; North,2,2 ; South,2,2 ; West,2,2 ; Grand Total,8,8"),
+            (AggregationType::Average, "East,8.5,#DIV/0! ; North,3,#DIV/0! ; South,#N/A,#DIV/0! ; West,#DIV/0!,#DIV/0! ; Grand Total,#N/A,#DIV/0!"),
+            (AggregationType::Max, "East,10,0 ; North,3,0 ; South,#N/A,0 ; West,#DIV/0!,#DIV/0! ; Grand Total,#N/A,#DIV/0!"),
+            (AggregationType::Min, "East,7,0 ; North,3,0 ; South,#N/A,0 ; West,#DIV/0!,#DIV/0! ; Grand Total,#N/A,#DIV/0!"),
+            (AggregationType::Product, "East,70,0 ; North,3,0 ; South,#N/A,0 ; West,#DIV/0!,#DIV/0! ; Grand Total,#N/A,#DIV/0!"),
+            (AggregationType::CountNumbers, "East,2,0 ; North,1,0 ; South,0,0 ; West,1,0 ; Grand Total,4,0"),
+            (AggregationType::StdDev, "East,2.1213,#DIV/0! ; North,#DIV/0!,#DIV/0! ; South,#N/A,#DIV/0! ; West,#DIV/0!,#DIV/0! ; Grand Total,#N/A,#DIV/0!"),
+            (AggregationType::Var, "East,4.5,#DIV/0! ; North,#DIV/0!,#DIV/0! ; South,#N/A,#DIV/0! ; West,#DIV/0!,#DIV/0! ; Grand Total,#N/A,#DIV/0!"),
+        ];
+        for (aggregation, want) in cases {
+            let mut cache = probe4_cache();
+            let got = body(&by_region(*aggregation), &mut cache);
+            assert_eq!(&got, want, "{aggregation:?}");
+        }
+    }
+
+    /// probe5's table: which error a cell shows when it holds two.
+    fn probe5_cache() -> PivotCache {
+        cache_of(
+            &["Region", "Amount"],
+            &[
+                vec![t("Mm"), e(CellError::Div0)],
+                vec![t("Zz"), e(CellError::NA)],
+                vec![t("Mm"), e(CellError::NA)],
+                vec![t("Aa"), e(CellError::Num)],
+                vec![t("Kk"), n(5.0)],
+                vec![t("Pp"), e(CellError::NA)],
+                vec![t("Pp"), e(CellError::Div0)],
+            ],
+        )
+    }
+
+    fn probe5_def(order: SortOrder) -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        let mut region = PivotField::new(0, "Region".into());
+        region.sort_order = order;
+        def.row_fields = vec![region];
+        def.value_fields = vec![ValueField::new(1, "Sum of Amount".into(), AggregationType::Sum)];
+        def.calculated_fields.push(CalculatedField {
+            name: "Dbl".to_string(),
+            formula: "Amount*2".to_string(),
+            number_format: None,
+        });
+        def
+    }
+
+    /// Excel [LIVE, piv4 probe5]: an item's cell shows the FIRST error of its
+    /// records in source order, a calculated field over it the LAST, and the
+    /// grand total combines its items as they are SHOWN -- #NUM! / #N/A
+    /// ascending, #N/A / #NUM! descending. Without row fields the grand total
+    /// is the first error in source order.
+    ///
+    /// SABOTAGE (piv4-sabR): `rederive_row_total_errors` returns at once.
+    #[test]
+    fn a_cell_holding_two_errors_shows_the_one_excel_shows() {
+        let mut cache = probe5_cache();
+        assert_eq!(
+            body(&probe5_def(SortOrder::Ascending), &mut cache),
+            "Aa,#NUM!,#NUM! ; Kk,5,10 ; Mm,#DIV/0!,#N/A ; Pp,#N/A,#DIV/0! ; Zz,#N/A,#N/A ; Grand Total,#NUM!,#N/A"
+        );
+        let mut cache = probe5_cache();
+        assert_eq!(
+            body(&probe5_def(SortOrder::Descending), &mut cache),
+            "Zz,#N/A,#N/A ; Pp,#N/A,#DIV/0! ; Mm,#DIV/0!,#N/A ; Kk,5,10 ; Aa,#NUM!,#NUM! ; Grand Total,#N/A,#NUM!"
+        );
+        let mut def = probe5_def(SortOrder::Ascending);
+        def.row_fields.clear();
+        def.calculated_fields.clear();
+        let mut cache = probe5_cache();
+        let view = calculate_pivot(&def, &mut cache);
+        let values: Vec<String> = view
+            .cells
+            .iter()
+            .flat_map(|r| r.iter())
+            .filter(|c| c.value_field_index.is_some())
+            .map(|c| show(&c.value, &c.formatted_value))
+            .collect();
+        assert_eq!(values, vec!["#DIV/0!".to_string()]);
+    }
+
+    /// Excel [LIVE, piv4 probe4]: sorted by value, an item showing an error
+    /// goes LAST in both directions, the error items following the sort's
+    /// own direction by label.
+    ///
+    /// SABOTAGE: `aggregate_or_blank` answers the number even for an error.
+    #[test]
+    fn a_value_sort_puts_error_items_last_in_both_directions() {
+        let labels = |order: SortOrder| {
+            let mut def = by_region(AggregationType::Sum);
+            def.row_fields[0].sort_order = order;
+            def.row_fields[0].value_sort = Some(ValueSort { value_field: "Of Amount".into(), scope: Vec::new() });
+            let mut cache = probe4_cache();
+            let view = calculate_pivot(&def, &mut cache);
+            view.rows
+                .iter()
+                .zip(view.cells.iter())
+                .filter(|(d, _)| matches!(d.row_type, PivotRowType::Data))
+                .map(|(_, cells)| cells[0].formatted_value.clone())
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        assert_eq!(labels(SortOrder::Descending), "East|North|West|South");
+        assert_eq!(labels(SortOrder::Ascending), "North|East|South|West");
+    }
+
+    /// An intersection no record reaches is an EMPTY cell, as Excel shows it
+    /// (no "For empty cells show" text set), never a 0: West has no 2024.
+    ///
+    /// SABOTAGE (piv4-sabZ): the column branch drops its `no_records` test.
+    #[test]
+    fn an_intersection_no_record_reaches_is_an_empty_cell() {
+        let mut cache = cache_of(
+            &["Region", "Year", "Amount"],
+            &[
+                vec![t("East"), t("2023"), n(1.0)],
+                vec![t("East"), t("2024"), n(2.0)],
+                vec![t("West"), t("2023"), n(3.0)],
+            ],
+        );
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Region".into())];
+        def.column_fields = vec![PivotField::new(1, "Year".into())];
+        def.value_fields = vec![ValueField::new(2, "Sum of Amount".into(), AggregationType::Sum)];
+        let view = calculate_pivot(&def, &mut cache);
+        let west: Vec<String> = view
+            .rows
+            .iter()
+            .zip(view.cells.iter())
+            .find(|(d, cells)| matches!(d.row_type, PivotRowType::Data) && cells[0].formatted_value == "West")
+            .map(|(_, cells)| {
+                cells
+                    .iter()
+                    .filter(|c| c.value_field_index.is_some())
+                    .map(|c| match &c.value {
+                        PivotCellValue::Empty => "EMPTY".to_string(),
+                        other => show(other, ""),
+                    })
+                    .collect()
+            })
+            .expect("the West row");
+        assert_eq!(west, vec!["3".to_string(), "EMPTY".to_string(), "3".to_string()]);
+    }
+
+    /// % of Column Total with a column field: every cell of a row reads ITS
+    /// row. The previous cell's Show Values As rewrote the shared row key, so
+    /// the East 2024 cell read the grand-total row (145 / 145 = 100%).
+    ///
+    /// SABOTAGE (piv4-sabK): drop the per-cell `prepare_row_key` in the
+    /// column branch.
+    #[test]
+    fn percent_of_column_total_reads_each_cells_own_row() {
+        let mut cache = cache_of(
+            &["Region", "Year", "Amount"],
+            &[
+                vec![t("East"), t("2023"), n(60.0)],
+                vec![t("East"), t("2024"), n(75.0)],
+                vec![t("West"), t("2023"), n(105.0)],
+                vec![t("West"), t("2024"), n(70.0)],
+            ],
+        );
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Region".into())];
+        def.column_fields = vec![PivotField::new(1, "Year".into())];
+        let mut vf = ValueField::new(2, "Sum of Amount".into(), AggregationType::Sum);
+        vf.show_values_as = ShowValuesAs::PercentOfColumnTotal;
+        def.value_fields = vec![vf];
+        let got = body(&def, &mut cache);
+        assert_eq!(got, "East,0.3636,0.5172,0.4355 ; West,0.6364,0.4828,0.5645 ; Grand Total,1,1,1");
+    }
+}
+
+/// Grouped fields keep their own sorts, and a field keeps a manual item order
+/// (BUG-0733), against Excel [LIVE, verify-pivotfix probe3; piv4 probe5].
+#[cfg(test)]
+mod level_sort_tests {
+    use super::*;
+    use engine::CellValue;
+    use crate::definition::{
+        AggregationType, DateGroupLevel, FieldGrouping, ManualGroup, PivotField, PivotId, SortOrder, ValueField,
+        ValueSort, MANUAL_GROUP_LEVEL,
+    };
+    use crate::view::PivotRowType;
+
+    fn pid() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6])
+    }
+
+    fn cache_of(rows: &[(CellValue, f64)]) -> PivotCache {
+        let mut cache = PivotCache::new(pid(), 2);
+        cache.set_field_name(0, "Region".into());
+        cache.set_field_name(1, "Amount".into());
+        for (i, (label, amount)) in rows.iter().enumerate() {
+            cache.add_record(i as u32, &[label.clone(), CellValue::Number(*amount)]);
+        }
+        cache
+    }
+
+    fn labels(def: &PivotDefinition, cache: &mut PivotCache) -> String {
+        let view = calculate_pivot(def, cache);
+        view.rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| matches!(d.row_type, PivotRowType::Data | PivotRowType::Subtotal))
+            .map(|(_, cells)| cells.iter().map(|c| c.formatted_value.clone()).find(|s| !s.is_empty()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    fn regions() -> PivotCache {
+        cache_of(&[
+            (CellValue::Text("A".into()), 110.0),
+            (CellValue::Text("B".into()), 100.0),
+            (CellValue::Text("C".into()), 31.0),
+            (CellValue::Text("D".into()), 10.0),
+        ])
+    }
+
+    fn grouped_def() -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        let mut region = PivotField::new(0, "Region".into());
+        region.grouping = FieldGrouping::ManualGrouping {
+            groups: vec![
+                ManualGroup { name: "Group1".into(), members: vec!["A".into(), "B".into()] },
+                ManualGroup { name: "Group2".into(), members: vec!["C".into(), "D".into()] },
+            ],
+            ungrouped_name: "Other".into(),
+        };
+        def.row_fields = vec![region];
+        def.value_fields = vec![ValueField::new(1, "Sum of Amount".into(), AggregationType::Sum)];
+        def
+    }
+
+    /// Excel [LIVE, verify-pivotfix probe3 A_ORDERS]: sorting the group
+    /// field by value leaves the field it was grouped from in its own
+    /// (ascending label) order, and the other way round.
+    ///
+    /// SABOTAGE (piv4-sabG): the group field copies the detail field's sort
+    /// again.
+    #[test]
+    fn a_manual_group_parent_and_its_detail_field_sort_apart() {
+        let mut def = grouped_def();
+        let level = def.row_fields[0].level_sort_mut(MANUAL_GROUP_LEVEL);
+        level.sort_order = SortOrder::Ascending;
+        level.value_sort = Some(ValueSort { value_field: "Sum of Amount".into(), scope: Vec::new() });
+        assert_eq!(labels(&def, &mut regions()), "Group2|C|D|Group1|A|B");
+        // The detail field sorted descending by label: the groups keep their
+        // own (value) order.
+        def.row_fields[0].sort_order = SortOrder::Descending;
+        assert_eq!(labels(&def, &mut regions()), "Group2|D|C|Group1|B|A");
+    }
+
+    /// The level above the finest date level is a field of its own: Years
+    /// sorted descending leaves the months ascending, and the field's own
+    /// (finest-level) descending sort leaves the years ascending.
+    ///
+    /// SABOTAGE: the date levels copy the origin field's sort again.
+    #[test]
+    fn a_date_level_and_the_finest_level_sort_apart() {
+        // 2023-01-15, 2023-03-15, 2024-01-15, 2024-03-15 as serials.
+        let mut cache_rows = Vec::new();
+        for serial in [44941.0, 45000.0, 45306.0, 45366.0] {
+            cache_rows.push((CellValue::Number(serial), 1.0));
+        }
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        let mut date = PivotField::new(0, "Date".into());
+        date.grouping = FieldGrouping::DateGrouping { levels: vec![DateGroupLevel::Year, DateGroupLevel::Month] };
+        def.row_fields = vec![date];
+        def.value_fields = vec![ValueField::new(1, "Sum of Amount".into(), AggregationType::Sum)];
+        let plain = labels(&def, &mut cache_of(&cache_rows));
+        let parts: Vec<&str> = plain.split('|').collect();
+        assert_eq!(parts.len(), 6, "{plain}");
+        let (y1, m1, m2, y2) = (parts[0], parts[1], parts[2], parts[3]);
+        def.row_fields[0].level_sort_mut(DateGroupLevel::Year.level_key()).sort_order = SortOrder::Descending;
+        assert_eq!(labels(&def, &mut cache_of(&cache_rows)), [y2, m1, m2, y1, m1, m2].join("|"), "plain: {plain}");
+        def.row_fields[0].level_sorts.clear();
+        def.row_fields[0].sort_order = SortOrder::Descending;
+        assert_eq!(labels(&def, &mut cache_of(&cache_rows)), [y1, m2, m1, y2, m2, m1].join("|"), "plain: {plain}");
+    }
+
+    /// Excel [LIVE, piv4 probe5]: a manual order shows its items in the
+    /// stored order, and an item it does not name (a refresh brought it)
+    /// follows in source order.
+    ///
+    /// SABOTAGE (piv4-sabM): the manual list is never folded into the order.
+    #[test]
+    fn a_manual_item_order_is_kept_and_new_items_follow_it() {
+        let mut cache = cache_of(&[
+            (CellValue::Text("East".into()), 1.0),
+            (CellValue::Text("West".into()), 2.0),
+            (CellValue::Text("North".into()), 3.0),
+            (CellValue::Text("South".into()), 4.0),
+        ]);
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        let mut region = PivotField::new(0, "Region".into());
+        region.sort_order = SortOrder::Manual;
+        region.manual_item_order = vec!["West".into(), "South".into()];
+        def.row_fields = vec![region];
+        def.value_fields = vec![ValueField::new(1, "Sum of Amount".into(), AggregationType::Sum)];
+        assert_eq!(labels(&def, &mut cache), "West|South|East|North");
+        // Any other order ignores the list.
+        def.row_fields[0].sort_order = SortOrder::Ascending;
+        let mut cache2 = cache_of(&[
+            (CellValue::Text("East".into()), 1.0),
+            (CellValue::Text("West".into()), 2.0),
+        ]);
+        assert_eq!(labels(&def, &mut cache2), "East|West");
+        // Round trip: both new fields survive serde, and absent ones read empty.
+        let json = serde_json::to_string(&def.row_fields[0]).unwrap();
+        let back: PivotField = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.manual_item_order, def.row_fields[0].manual_item_order);
+        let plain = serde_json::to_string(&PivotField::new(0, "R".into())).unwrap();
+        assert!(!plain.contains("manual_item_order") && !plain.contains("level_sorts"), "{plain}");
+    }
+}
+
+#[cfg(test)]
+mod show_values_as_error_tests {
+    use super::*;
+    use engine::{CellError, CellValue};
+    use crate::definition::{AggregationType, PivotField, PivotId, ShowValuesAs, ValueField};
+    use crate::view::{PivotCellValue, PivotRowType};
+
+    fn pid() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9])
+    }
+
+    fn cache_of(names: &[&str], rows: &[Vec<CellValue>]) -> PivotCache {
+        let mut cache = PivotCache::new(pid(), names.len());
+        for (i, name) in names.iter().enumerate() {
+            cache.set_field_name(i, name.to_string());
+        }
+        for (i, row) in rows.iter().enumerate() {
+            cache.add_record(i as u32, row);
+        }
+        cache
+    }
+
+    fn t(s: &str) -> CellValue {
+        CellValue::Text(s.to_string())
+    }
+
+    fn n(v: f64) -> CellValue {
+        CellValue::Number(v)
+    }
+
+    /// Each Data / Subtotal / GrandTotal row's VALUE cells (no label),
+    /// joined: a number to 4 places, an error as `#CODE`, an empty cell `_`.
+    fn body(def: &PivotDefinition, cache: &mut PivotCache) -> String {
+        let view = calculate_pivot(def, cache);
+        view.rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| matches!(d.row_type, PivotRowType::Data | PivotRowType::Subtotal | PivotRowType::GrandTotal))
+            .map(|(_, cells)| {
+                cells
+                    .iter()
+                    .filter(|c| c.value_field_index.is_some())
+                    .map(|c| match &c.value {
+                        PivotCellValue::Number(x) if x.is_nan() => "_".to_string(),
+                        PivotCellValue::Number(x) => format!("{}", (x * 10000.0).round() / 10000.0),
+                        PivotCellValue::Error(code) => format!("#{}", code.trim_start_matches('#')),
+                        PivotCellValue::Empty => "_".to_string(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect::<Vec<_>>()
+            .join(" ; ")
+    }
+
+    /// probe A: Region East 10, North 5, Mid #DIV/0!, South 20 (shown East,
+    /// Mid, North, South).
+    fn cache_a() -> PivotCache {
+        cache_of(
+            &["Region", "Amount"],
+            &[
+                vec![t("East"), n(10.0)],
+                vec![t("North"), n(5.0)],
+                vec![t("Mid"), CellValue::Error(CellError::Div0)],
+                vec![t("South"), n(20.0)],
+            ],
+        )
+    }
+
+    fn def_a(show: ShowValuesAs, base_item: Option<&str>) -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Region".into())];
+        let mut vf = ValueField::new(1, "Sum of Amount".into(), AggregationType::Sum);
+        vf.show_values_as = show;
+        vf.base_field_index = Some(0);
+        vf.base_item = base_item.map(str::to_string);
+        def.value_fields = vec![vf];
+        def
+    }
+
+    /// probe B: Year rows x Region columns; Y1/West #DIV/0!.
+    fn cache_b() -> PivotCache {
+        cache_of(
+            &["Year", "Region", "Amount"],
+            &[
+                vec![t("Y1"), t("East"), n(10.0)],
+                vec![t("Y1"), t("West"), CellValue::Error(CellError::Div0)],
+                vec![t("Y2"), t("East"), n(30.0)],
+                vec![t("Y2"), t("West"), n(20.0)],
+            ],
+        )
+    }
+
+    fn def_b(show: ShowValuesAs, base: Option<usize>) -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Year".into())];
+        def.column_fields = vec![PivotField::new(1, "Region".into())];
+        let mut vf = ValueField::new(2, "Sum of Amount".into(), AggregationType::Sum);
+        vf.show_values_as = show;
+        vf.base_field_index = base;
+        def.value_fields = vec![vf];
+        def
+    }
+
+    /// probe C: Cat > Item rows; A/a2 #N/A.
+    fn cache_c() -> PivotCache {
+        cache_of(
+            &["Cat", "Item", "Amount"],
+            &[
+                vec![t("A"), t("a1"), n(10.0)],
+                vec![t("A"), t("a2"), CellValue::Error(CellError::NA)],
+                vec![t("B"), t("b1"), n(30.0)],
+                vec![t("B"), t("b2"), n(10.0)],
+            ],
+        )
+    }
+
+    fn def_c(show: ShowValuesAs, base: Option<usize>) -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Cat".into()), PivotField::new(1, "Item".into())];
+        let mut vf = ValueField::new(2, "Sum of Amount".into(), AggregationType::Sum);
+        vf.show_values_as = show;
+        vf.base_field_index = base;
+        def.value_fields = vec![vf];
+        def
+    }
+
+    fn cache_a_clean() -> PivotCache {
+        cache_of(
+            &["Region", "Amount"],
+            &[
+                vec![t("East"), n(10.0)],
+                vec![t("North"), n(5.0)],
+                vec![t("Mid"), n(8.0)],
+                vec![t("South"), n(20.0)],
+            ],
+        )
+    }
+
+    fn cache_b_clean() -> PivotCache {
+        cache_of(
+            &["Year", "Region", "Amount"],
+            &[
+                vec![t("Y1"), t("East"), n(10.0)],
+                vec![t("Y1"), t("West"), n(6.0)],
+                vec![t("Y2"), t("East"), n(30.0)],
+                vec![t("Y2"), t("West"), n(20.0)],
+            ],
+        )
+    }
+
+    fn cache_c_clean() -> PivotCache {
+        cache_of(
+            &["Cat", "Item", "Amount"],
+            &[
+                vec![t("A"), t("a1"), n(10.0)],
+                vec![t("A"), t("a2"), n(2.0)],
+                vec![t("B"), t("b1"), n(30.0)],
+                vec![t("B"), t("b2"), n(10.0)],
+            ],
+        )
+    }
+
+    fn check(failures: &mut Vec<String>, label: &str, got: String, want: &str) {
+        if got != want {
+            failures.push(format!("{label}: got  {got}\n{:width$}  want {want}", "", width = label.len()));
+        }
+    }
+
+    /// Excel [LIVE, piv5 p1/p2]: Show Values As over a source error. The
+    /// error in a total divided by is the error in every cell under % of
+    /// Grand / Row / Column Total and Index; % of Parent is EMPTY over one;
+    /// a running total is the error from the erroring item on and % Running
+    /// Total is the error everywhere; Difference From shows the error of the
+    /// cell or its base item, % Difference From is EMPTY over an erroring base;
+    /// Rank leaves an erroring item EMPTY and unranked. Cells are listed
+    /// value-cells-only per row (rows: East, Mid, North, South, Grand Total;
+    /// Y1, Y2, Grand Total x East, West, Grand Total; A, a1, a2, B, b1, b2,
+    /// Grand Total), `_` an empty cell. Calcula divided by totals that left
+    /// the error out (East 28,57% of 35) and ranked the error item as 0.
+    ///
+    /// SABOTAGE (piv5-sabS): `aggregate_at` never reports an error.
+    #[test]
+    fn show_values_as_over_a_source_error_answers_as_excel_does() {
+        use ShowValuesAs::*;
+        let d = "#DIV/0!";
+        let mut failures = Vec::new();
+        let all = |cells: usize| vec![d; cells].join(" ; ");
+        for (label, show, bi, want) in [
+            ("A_SUM", Normal, None, "10 ; #DIV/0! ; 5 ; 20 ; #DIV/0!".to_string()),
+            ("A_PCTGT", PercentOfGrandTotal, None, all(5)),
+            ("A_PCTCOL", PercentOfColumnTotal, None, all(5)),
+            ("A_PCTROW", PercentOfRowTotal, None, "1 ; #DIV/0! ; 1 ; 1 ; #DIV/0!".to_string()),
+            ("A_INDEX", Index, None, all(5)),
+            ("A_RUN", RunningTotal, None, "10 ; #DIV/0! ; #DIV/0! ; #DIV/0! ; _".to_string()),
+            ("A_PCTRUN", PercentOfRunningTotal, None, all(5)),
+            ("A_DIFF_EAST", Difference, Some("East"), "_ ; #DIV/0! ; -5 ; 10 ; _".to_string()),
+            ("A_DIFF_MID", Difference, Some("Mid"), "#DIV/0! ; _ ; #DIV/0! ; #DIV/0! ; _".to_string()),
+            ("A_DIFF_PREV", Difference, Some("(previous)"), "_ ; #DIV/0! ; #DIV/0! ; 15 ; _".to_string()),
+            ("A_DIFF_NEXT", Difference, Some("(next)"), "#DIV/0! ; #DIV/0! ; -15 ; _ ; _".to_string()),
+            ("A_PDIFF_PREV", PercentDifference, Some("(previous)"), "_ ; #DIV/0! ; _ ; 3 ; _".to_string()),
+            ("A_PDIFF_MID", PercentDifference, Some("Mid"), "_ ; _ ; _ ; _ ; _".to_string()),
+            ("A_PDIFF_EAST", PercentDifference, Some("East"), "_ ; #DIV/0! ; -0.5 ; 1 ; _".to_string()),
+            ("A_PDIFF_NEXT", PercentDifference, Some("(next)"), "_ ; #DIV/0! ; -0.75 ; _ ; _".to_string()),
+            ("A_RANKASC", RankAscending, None, "2 ; _ ; 1 ; 3 ; _".to_string()),
+            ("A_RANKDESC", RankDescending, None, "2 ; _ ; 3 ; 1 ; _".to_string()),
+            ("A_PCTPARENTROW", PercentOfParentRow, None, "_ ; _ ; _ ; _ ; _".to_string()),
+        ] {
+            check(&mut failures, label, body(&def_a(show, bi), &mut cache_a()), &want);
+        }
+        let all9 = vec!["#DIV/0!,#DIV/0!,#DIV/0!"; 3].join(" ; ");
+        for (label, show, base, want) in [
+            ("B_SUM", Normal, None, "10,#DIV/0!,#DIV/0! ; 30,20,50 ; 40,#DIV/0!,#DIV/0!".to_string()),
+            ("B_PCTGT", PercentOfGrandTotal, None, all9.clone()),
+            ("B_PCTROW", PercentOfRowTotal, None, "#DIV/0!,#DIV/0!,#DIV/0! ; 0.6,0.4,1 ; #DIV/0!,#DIV/0!,#DIV/0!".to_string()),
+            ("B_PCTCOL", PercentOfColumnTotal, None, "0.25,#DIV/0!,#DIV/0! ; 0.75,#DIV/0!,#DIV/0! ; 1,#DIV/0!,#DIV/0!".to_string()),
+            ("B_INDEX", Index, None, all9.clone()),
+            ("B_RUN_YEAR", RunningTotal, Some(0), "10,#DIV/0!,#DIV/0! ; 40,#DIV/0!,#DIV/0! ; _,_,_".to_string()),
+            ("B_RANKASC_YEAR", RankAscending, Some(0), "1,_,_ ; 2,1,1 ; _,_,_".to_string()),
+            ("B_PCTPARENTROW", PercentOfParentRow, None, "0.25,_,_ ; 0.75,_,_ ; 1,_,_".to_string()),
+            ("B_PCTPARENTCOL", PercentOfParentColumn, None, "_,_,_ ; 0.6,0.4,1 ; _,_,_".to_string()),
+        ] {
+            check(&mut failures, label, body(&def_b(show, base), &mut cache_b()), &want);
+        }
+        let na = "#N/A ; #N/A ; #N/A ; #N/A ; #N/A ; #N/A ; #N/A";
+        for (label, show, base, want) in [
+            ("C_SUM", Normal, None, "#N/A ; 10 ; #N/A ; 40 ; 30 ; 10 ; #N/A"),
+            ("C_PCTPARENTROW", PercentOfParentRow, None, "_ ; _ ; _ ; _ ; 0.75 ; 0.25 ; _"),
+            ("C_PCTGT", PercentOfGrandTotal, None, na),
+            ("C_RANKDESC_ITEM", RankDescending, Some(1), "_ ; 1 ; _ ; _ ; 1 ; 2 ; _"),
+            ("C_RUN_ITEM", RunningTotal, Some(1), "_ ; 10 ; #N/A ; _ ; 30 ; 40 ; _"),
+        ] {
+            check(&mut failures, label, body(&def_c(show, base), &mut cache_c()), want);
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// Excel [LIVE, piv5 p3], the same pivots without an error: a TOTAL of
+    /// the base field (the grand total; a subtotal of a level above an Item
+    /// base) is EMPTY under Running Total, % Running Total, Difference, %
+    /// Difference and Rank, and so is the base item's own cell; % Running
+    /// Total In is of the base field's total under the cell's parent (a2
+    /// 100,00% under A, not 12 of 52); % of Parent Row Total reads a parent
+    /// row's own parent (B 76,92%, not 100%). Calcula showed the grand total
+    /// a running total, a rank of 1 and a difference, and East 0 under
+    /// Difference From East.
+    ///
+    /// SABOTAGE (piv5-sabS covers the error test; piv5-sabT): a total of the
+    /// base field is ranked again.
+    #[test]
+    fn show_values_as_totals_and_base_items_answer_as_excel_does() {
+        use ShowValuesAs::*;
+        let mut failures = Vec::new();
+        for (label, show, bi, want) in [
+            ("A_RUN", RunningTotal, None, "10 ; 18 ; 23 ; 43 ; _"),
+            ("A_PCTRUN", PercentOfRunningTotal, None, "0.2326 ; 0.4186 ; 0.5349 ; 1 ; _"),
+            ("A_DIFF_EAST", Difference, Some("East"), "_ ; -2 ; -5 ; 10 ; _"),
+            ("A_DIFF_MID", Difference, Some("Mid"), "2 ; _ ; -3 ; 12 ; _"),
+            ("A_PDIFF_PREV", PercentDifference, Some("(previous)"), "_ ; -0.2 ; -0.375 ; 3 ; _"),
+            ("A_RANKASC", RankAscending, None, "3 ; 2 ; 1 ; 4 ; _"),
+            ("A_RANKDESC", RankDescending, None, "2 ; 3 ; 4 ; 1 ; _"),
+            ("A_PCTPARENTROW", PercentOfParentRow, None, "0.2326 ; 0.186 ; 0.1163 ; 0.4651 ; 1"),
+            ("A_PCTGT", PercentOfGrandTotal, None, "0.2326 ; 0.186 ; 0.1163 ; 0.4651 ; 1"),
+        ] {
+            check(&mut failures, label, body(&def_a(show, bi), &mut cache_a_clean()), want);
+        }
+        for (label, show, base, want) in [
+            ("B_RUN_YEAR", RunningTotal, Some(0), "10,6,16 ; 40,26,66 ; _,_,_"),
+            ("B_RANKASC_YEAR", RankAscending, Some(0), "1,1,1 ; 2,2,2 ; _,_,_"),
+            ("B_PCTPARENTROW", PercentOfParentRow, None, "0.25,0.2308,0.2424 ; 0.75,0.7692,0.7576 ; 1,1,1"),
+            ("B_PCTPARENTCOL", PercentOfParentColumn, None, "0.625,0.375,1 ; 0.6,0.4,1 ; 0.6061,0.3939,1"),
+            ("B_INDEX", Index, None, "1.0313,0.9519,1 ; 0.99,1.0154,1 ; 1,1,1"),
+        ] {
+            check(&mut failures, label, body(&def_b(show, base), &mut cache_b_clean()), want);
+        }
+        for (label, show, base, want) in [
+            ("C_PCTPARENTROW", PercentOfParentRow, None, "0.2308 ; 0.8333 ; 0.1667 ; 0.7692 ; 0.75 ; 0.25 ; 1"),
+            ("C_RANKDESC_ITEM", RankDescending, Some(1), "_ ; 1 ; 2 ; _ ; 1 ; 2 ; _"),
+            ("C_RUN_ITEM", RunningTotal, Some(1), "_ ; 10 ; 12 ; _ ; 30 ; 40 ; _"),
+            ("C_RUN_CAT", RunningTotal, Some(0), "12 ; 10 ; 2 ; 52 ; 30 ; 10 ; _"),
+            ("C_PCTRUN_ITEM", PercentOfRunningTotal, Some(1), "_ ; 0.8333 ; 1 ; _ ; 0.75 ; 1 ; _"),
+            ("C_DIFF_ITEM_PREV", Difference, Some(1), "_ ; _ ; -8 ; _ ; _ ; -20 ; _"),
+        ] {
+            let mut def = def_c(show, base);
+            if label == "C_DIFF_ITEM_PREV" {
+                def.value_fields[0].base_item = Some("(previous)".into());
+            }
+            check(&mut failures, label, body(&def, &mut cache_c_clean()), want);
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// piv6 p1 H: Year rows x Region columns (East, West, Z) with empty
+    /// intersections (Y2/East, Y2/Z, Y4/Z, Y5/West, Y5/Z, Y6/Z), an all-zero
+    /// column (Z) and rows whose total is 0 (Y4 0+0, Y5 0, Y6 4-4).
+    fn cache_h() -> PivotCache {
+        let rec = |y: &str, r: &str, v: f64| vec![t(y), t(r), n(v)];
+        cache_of(
+            &["Year", "Region", "Amount"],
+            &[
+                rec("Y1", "East", 10.0), rec("Y1", "West", 6.0), rec("Y1", "Z", 0.0),
+                rec("Y2", "West", 20.0),
+                rec("Y3", "East", 5.0), rec("Y3", "West", 8.0), rec("Y3", "Z", 0.0),
+                rec("Y4", "East", 0.0), rec("Y4", "West", 0.0),
+                rec("Y5", "East", 0.0),
+                rec("Y6", "East", 4.0), rec("Y6", "West", -4.0),
+            ],
+        )
+    }
+
+    /// piv6 p1 P: Cat > Item rows x Region columns; C's items are 0 + 0 in
+    /// East and 3 - 3 in West, so both of C's parent totals are 0.
+    fn cache_p() -> PivotCache {
+        let rec = |c: &str, i: &str, r: &str, v: f64| vec![t(c), t(i), t(r), n(v)];
+        cache_of(
+            &["Cat", "Item", "Region", "Amount"],
+            &[
+                rec("A", "a1", "East", 10.0), rec("A", "a2", "East", 5.0), rec("A", "a1", "West", 2.0),
+                rec("C", "c1", "East", 0.0), rec("C", "c2", "East", 0.0),
+                rec("C", "c1", "West", 3.0), rec("C", "c2", "West", -3.0),
+                rec("D", "d1", "West", 7.0),
+            ],
+        )
+    }
+
+    fn def_p(show: ShowValuesAs, base: Option<usize>, base_item: Option<&str>) -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Cat".into()), PivotField::new(1, "Item".into())];
+        def.column_fields = vec![PivotField::new(2, "Region".into())];
+        let mut vf = ValueField::new(3, "Sum of Amount".into(), AggregationType::Sum);
+        vf.show_values_as = show;
+        vf.base_field_index = base;
+        vf.base_item = base_item.map(str::to_string);
+        def.value_fields = vec![vf];
+        def
+    }
+
+    /// Excel [LIVE, piv6 p1, scratch piv6/p1.ps1 -> p1.out; verify-piv5
+    /// v1 G]: Show Values As over a ZERO or EMPTY base. % of Grand / Row /
+    /// Column Total and Index are #DIV/0! over a zero total, an empty cell
+    /// too (Calcula showed 0); % of Parent Row / Column Total is EMPTY over a
+    /// zero parent; % Running Total In over a zero total is #DIV/0! unless
+    /// every item is 0 (then EMPTY); % Difference From is #NULL! in a cell
+    /// no record reaches, EMPTY over a base with none and #DIV/0! over a base
+    /// of 0 (Calcula showed -100% and EMPTY); Rank leaves an empty cell EMPTY
+    /// and unranked (Calcula ranked it as 0) and numbers ties 1, 2, 2, 3
+    /// (Calcula 1, 2, 2, 4). Rows here list value cells per row, `_` empty.
+    ///
+    /// SABOTAGE (each failed this test at the labels named): piv6-s1 a zero
+    /// total reads 0 again (H_PCTROW, H_PCTCOL, K_*, P_PCTROW); piv6-s2 ties
+    /// leave gaps (H_RANKASC_YEAR, G_*); piv6-s3 an empty cell is not #NULL!
+    /// (H_PDIFF_PREV, H_PDIFF_REG_EAST, P_PDIFF_PREV_ITEM); piv6-s4 % Running
+    /// Total over a zero total is EMPTY (H_PRUN_REG, K_PRUN, P_PRUN_ITEM);
+    /// piv6-s5 an empty cell is ranked (H_RANK*, P_RANKASC_ITEM).
+    #[test]
+    fn show_values_as_over_a_zero_or_empty_base_answers_as_excel_does() {
+        use ShowValuesAs::*;
+        let d = "#DIV/0!,#DIV/0!,#DIV/0!,#DIV/0!";
+        let e = "_,_,_,_";
+        let mut failures = Vec::new();
+        let h = |show, base: Option<usize>, bi: Option<&str>| {
+            let mut def = def_b(show, base);
+            def.value_fields[0].base_item = bi.map(str::to_string);
+            body(&def, &mut cache_h())
+        };
+        let cases: Vec<(&str, String, String)> = vec![
+            ("H_PCTGT", h(PercentOfGrandTotal, None, None),
+                "0.2041,0.1224,0,0.3265 ; 0,0.4082,0,0.4082 ; 0.102,0.1633,0,0.2653 ; 0,0,0,0 ; 0,0,0,0 ; 0.0816,-0.0816,0,0 ; 0.3878,0.6122,0,1".into()),
+            ("H_PCTROW", h(PercentOfRowTotal, None, None),
+                format!("0.625,0.375,0,1 ; 0,1,0,1 ; 0.3846,0.6154,0,1 ; {d} ; {d} ; {d} ; 0.3878,0.6122,0,1")),
+            ("H_PCTCOL", h(PercentOfColumnTotal, None, None),
+                "0.5263,0.2,#DIV/0!,0.3265 ; 0,0.6667,#DIV/0!,0.4082 ; 0.2632,0.2667,#DIV/0!,0.2653 ; 0,0,#DIV/0!,0 ; 0,0,#DIV/0!,0 ; 0.2105,-0.1333,#DIV/0!,0 ; 1,1,#DIV/0!,1".into()),
+            ("H_PCTPROW", h(PercentOfParentRow, None, None),
+                "0.5263,0.2,_,0.3265 ; 0,0.6667,_,0.4082 ; 0.2632,0.2667,_,0.2653 ; 0,0,_,0 ; 0,0,_,0 ; 0.2105,-0.1333,_,0 ; 1,1,_,1".into()),
+            ("H_PCTPCOL", h(PercentOfParentColumn, None, None),
+                format!("0.625,0.375,0,1 ; 0,1,0,1 ; 0.3846,0.6154,0,1 ; {e} ; {e} ; {e} ; 0.3878,0.6122,0,1")),
+            ("H_INDEX", h(Index, None, None),
+                format!("1.6118,0.6125,#DIV/0!,1 ; 0,1.6333,#DIV/0!,1 ; 0.9919,1.0051,#DIV/0!,1 ; {d} ; {d} ; {d} ; 1,1,#DIV/0!,1")),
+            ("H_DIFF_Y2", h(Difference, Some(0), Some("Y2")),
+                format!("10,-14,0,-4 ; {e} ; 5,-12,0,-7 ; 0,-20,0,-20 ; 0,-20,0,-20 ; 4,-24,0,-20 ; {e}")),
+            ("H_PDIFF_PREV", h(PercentDifference, Some(0), Some("(previous)")),
+                format!("{e} ; #NULL!,2.3333,#NULL!,0.25 ; _,-0.6,_,-0.35 ; -1,-1,#NULL!,-1 ; #DIV/0!,#NULL!,#NULL!,#DIV/0! ; #DIV/0!,_,#NULL!,#DIV/0! ; {e}")),
+            ("H_PDIFF_Y2", h(PercentDifference, Some(0), Some("Y2")),
+                format!("_,-0.7,_,-0.2 ; {e} ; _,-0.6,_,-0.35 ; _,-1,#NULL!,-1 ; _,#NULL!,#NULL!,-1 ; _,-1.2,#NULL!,-1 ; {e}")),
+            ("H_PDIFF_Y5", h(PercentDifference, Some(0), Some("Y5")),
+                format!("#DIV/0!,_,_,#DIV/0! ; #NULL!,_,#NULL!,#DIV/0! ; #DIV/0!,_,_,#DIV/0! ; #DIV/0!,_,#NULL!,#DIV/0! ; {e} ; #DIV/0!,_,#NULL!,#DIV/0! ; {e}")),
+            ("H_PDIFF_REG_EAST", h(PercentDifference, Some(1), Some("East")),
+                "_,-0.4,-1,_ ; _,_,#NULL!,_ ; _,0.6,-1,_ ; _,#DIV/0!,#NULL!,_ ; _,#NULL!,#NULL!,_ ; _,-2,#NULL!,_ ; _,0.5789,-1,_".into()),
+            ("H_RUN_YEAR", h(RunningTotal, Some(0), None),
+                format!("10,6,0,16 ; 10,26,0,36 ; 15,34,0,49 ; 15,34,0,49 ; 15,34,0,49 ; 19,30,0,49 ; {e}")),
+            ("H_PRUN_YEAR", h(PercentOfRunningTotal, Some(0), None),
+                format!("0.5263,0.2,_,0.3265 ; 0.5263,0.8667,_,0.7347 ; 0.7895,1.1333,_,1 ; 0.7895,1.1333,_,1 ; 0.7895,1.1333,_,1 ; 1,1,_,1 ; {e}")),
+            ("H_PRUN_REG", h(PercentOfRunningTotal, Some(1), None),
+                format!("0.625,1,1,_ ; 0,1,1,_ ; 0.3846,1,1,_ ; {e} ; {e} ; #DIV/0!,#DIV/0!,#DIV/0!,_ ; 0.3878,1,1,_")),
+            ("H_RANKASC_YEAR", h(RankAscending, Some(0), None),
+                format!("4,3,1,3 ; _,5,_,4 ; 3,4,1,2 ; 1,2,_,1 ; 1,_,_,1 ; 2,1,_,1 ; {e}")),
+            ("H_RANKDESC_YEAR", h(RankDescending, Some(0), None),
+                format!("1,3,1,2 ; _,1,_,1 ; 2,2,1,3 ; 4,4,_,4 ; 4,_,_,4 ; 3,5,_,4 ; {e}")),
+            ("H_RANKASC_REG", h(RankAscending, Some(1), None),
+                "3,2,1,_ ; _,1,_,_ ; 2,3,1,_ ; 1,1,_,_ ; 1,_,_,_ ; 2,1,_,_ ; 2,3,1,_".into()),
+        ];
+        for (label, got, want) in cases {
+            check(&mut failures, label, got, &want);
+        }
+
+        // K: East 5, Mid 0, West -5 -- a grand total of 0.
+        let k = || cache_of(&["Region", "Amount"], &[vec![t("East"), n(5.0)], vec![t("West"), n(-5.0)], vec![t("Mid"), n(0.0)]]);
+        for (label, show, want) in [
+            ("K_PCTGT", PercentOfGrandTotal, "#DIV/0! ; #DIV/0! ; #DIV/0! ; #DIV/0!"),
+            ("K_PCTCOL", PercentOfColumnTotal, "#DIV/0! ; #DIV/0! ; #DIV/0! ; #DIV/0!"),
+            ("K_PCTROW", PercentOfRowTotal, "1 ; #DIV/0! ; 1 ; #DIV/0!"),
+            ("K_PCTPROW", PercentOfParentRow, "_ ; _ ; _ ; _"),
+            ("K_INDEX", Index, "#DIV/0! ; #DIV/0! ; #DIV/0! ; #DIV/0!"),
+            ("K_PRUN", PercentOfRunningTotal, "#DIV/0! ; #DIV/0! ; #DIV/0! ; _"),
+            ("K_RUN", RunningTotal, "5 ; 5 ; 0 ; _"),
+        ] {
+            check(&mut failures, label, body(&def_a(show, None), &mut k()), want);
+        }
+
+        // G (verify-piv5 v1): East 10, North 10, South 5, West 20 -- a tie.
+        let g = || cache_of(
+            &["Region", "Amount"],
+            &[vec![t("East"), n(10.0)], vec![t("North"), n(10.0)], vec![t("South"), n(5.0)], vec![t("West"), n(20.0)]],
+        );
+        check(&mut failures, "G_RANKASC", body(&def_a(RankAscending, None), &mut g()), "2 ; 2 ; 1 ; 3 ; _");
+        check(&mut failures, "G_RANKDESC", body(&def_a(RankDescending, None), &mut g()), "2 ; 2 ; 3 ; 1 ; _");
+
+        // P: rows A, a1, a2, C, c1, c2, D, d1, Grand Total (subtotals on
+        // top) x East, West, Grand Total.
+        let x = "_,_,_";
+        for (label, show, base, bi, want) in [
+            ("P_PCTPROW", PercentOfParentRow, None, None,
+                format!("1,0.2222,0.7083 ; 0.6667,1,0.7059 ; 0.3333,0,0.2941 ; 0,0,0 ; {x} ; {x} ; 0,0.7778,0.2917 ; _,1,1 ; 1,1,1")),
+            ("P_PCTPCOL", PercentOfParentColumn, None, None,
+                format!("0.8824,0.1176,1 ; 0.8333,0.1667,1 ; 1,0,1 ; {x} ; 0,1,1 ; 0,1,1 ; 0,1,1 ; 0,1,1 ; 0.625,0.375,1")),
+            ("P_PCTROW", PercentOfRowTotal, None, None,
+                "0.8824,0.1176,1 ; 0.8333,0.1667,1 ; 1,0,1 ; #DIV/0!,#DIV/0!,#DIV/0! ; 0,1,1 ; 0,1,1 ; 0,1,1 ; 0,1,1 ; 0.625,0.375,1".to_string()),
+            ("P_RANKASC_ITEM", RankAscending, Some(1), None,
+                format!("{x} ; 2,1,2 ; 1,_,1 ; {x} ; 1,2,2 ; 1,1,1 ; {x} ; _,1,1 ; {x}")),
+            ("P_PRUN_ITEM", PercentOfRunningTotal, Some(1), None,
+                format!("{x} ; 0.6667,1,0.7059 ; 1,1,1 ; {x} ; _,#DIV/0!,#DIV/0! ; _,#DIV/0!,#DIV/0! ; {x} ; _,1,1 ; {x}")),
+            ("P_PDIFF_PREV_ITEM", PercentDifference, Some(1), Some("(previous)"),
+                format!("{x} ; {x} ; -0.5,#NULL!,-0.5833 ; {x} ; {x} ; #DIV/0!,-2,-2 ; {x} ; {x} ; {x}")),
+        ] {
+            check(&mut failures, label, body(&def_p(show, base, bi), &mut cache_p()), &want);
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 }

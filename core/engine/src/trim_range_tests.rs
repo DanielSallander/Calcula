@@ -179,15 +179,29 @@ fn it_makes_an_over_reaching_reference_compute_over_its_data() {
     assert_eq!(num(&g, "=ROWS(A:A)"), 8.0, "control: untrimmed spans the used range");
 }
 
+/// Trimming every row away is #REF!, as Excel answers it -- this test pinned
+/// a blank (SUM 0) until lane formfix measured Excel [LIVE, Excel 16,
+/// 2026-11-06, lane formfix p1.json / p3.json, E1:E5 empty:
+/// `=TRIMRANGE(E1:E5)`, `=E1:.E5`, `=SUM(TRIMRANGE(E1:E5))`,
+/// `=ROWS(TRIMRANGE(E1:E5))`, `(E1:E5,3,0)`, `(E1:E5,1,1)` #REF!, and
+/// `=IFERROR(TRIMRANGE(E1:E5),"x")` "x"]. With the ROWS untrimmed the
+/// all-blank range is kept whole: `(E1:E5,0)`, `(E1:E5,0,1)` spill five 0s.
+///
+/// SABOTAGE (formfix-trim): the all-blank answer back to a blank -- fails at
+/// "ALL ROWS TRIMMED".
 #[test]
-fn an_all_blank_range_answers_a_blank_rather_than_an_error() {
-    // Trimming everything leaves a range with no rows, which no array shape can
-    // express. A blank keeps `SUM` at 0; an error would make an empty column
-    // poison every formula reading it.
+fn an_all_blank_range_is_a_ref_error_as_in_excel() {
     let mut g = Grid::new();
     g.set_cell(7, 7, Cell::new_number(9.0));
-    assert_eq!(eval(&g, "=TRIMRANGE(A1:A5)"), EvalResult::Blank);
-    assert_eq!(num(&g, "=SUM(TRIMRANGE(A1:A5))"), 0.0);
+    assert_eq!(eval(&g, "=TRIMRANGE(A1:A5)"), EvalResult::Error(CellError::Ref), "ALL ROWS TRIMMED");
+    assert_eq!(eval(&g, "=SUM(TRIMRANGE(A1:A5))"), EvalResult::Error(CellError::Ref));
+    assert_eq!(eval(&g, "=ROWS(TRIMRANGE(A1:A5))"), EvalResult::Error(CellError::Ref));
+    assert_eq!(eval(&g, "=TRIMRANGE(A1:A5,3,0)"), EvalResult::Error(CellError::Ref));
+    assert_eq!(eval(&g, "=TRIMRANGE(A1:A5,1,1)"), EvalResult::Error(CellError::Ref));
+    assert_eq!(eval(&g, "=SUM(A1:.A5)"), EvalResult::Error(CellError::Ref));
+    // Rows untrimmed: the whole range, columns and all.
+    assert_eq!(flat(&eval(&g, "=TRIMRANGE(A1:A5,0)")).len(), 5);
+    assert_eq!(flat(&eval(&g, "=TRIMRANGE(A1:A5,0,1)")).len(), 5);
 }
 
 #[test]

@@ -351,6 +351,24 @@ pub(crate) fn working_copy_sheet_renames(
 /// sheet after both the signature and the signer check, and the swapped cells
 /// went into the working copy -- to ride its next signed push (review finding;
 /// the held-code readers were already hardened against exactly this).
+///
+/// `local_spilled`: `None` reads the version's cells as saved (the diff
+/// views). A LAY-IN (both doors pass `Some`, this copy's own spilled cells on
+/// the sheet, [`local_spill_outputs`]) settles the dynamic arrays first
+/// (wave-3 verifier, backmisc; wave-5, misc5): a SPILLED value in that version
+/// -- inside a dynamic-array origin's extent (`sp`), not the origin itself --
+/// is the engine's answer, not content, so it comes back as `None` (the
+/// version has no content there); and a position where the version has
+/// nothing while THIS copy holds one of its own spilled values is left out,
+/// because that value is derived here too. Laying either as a literal, or
+/// clearing this copy's spilled value, was refused as a write into a spilled
+/// cell (BUG-0775's background gate, and the active sheet's batch) -- so a
+/// merge or hold-back whose version only GREW or SHRANK an array could never
+/// be laid. What is laid: the origin and its inputs; an empty cell over a
+/// LITERAL of this copy standing where the version's array spills (otherwise
+/// the merged array shows #SPILL!); and the version's deletions. The
+/// recalculation that follows re-derives (or releases) the spill here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn published_cells_in_local_names(
     registry: &dyn calp::transport::WorkspaceTransport,
     package_name: &str,
@@ -359,6 +377,7 @@ pub(crate) fn published_cells_in_local_names(
     sheet_id: &str,
     positions: &[(u32, u32)],
     renames: &calp::sheet_renames::SheetRenames,
+    local_spilled: Option<&std::collections::HashSet<(u32, u32)>>,
 ) -> Result<Option<Vec<((u32, u32), Option<persistence::SavedCell>)>>, String> {
     let rel = format!("sheets/{}/data.json", sheet_id);
     let Some(bytes) = registry
@@ -381,18 +400,71 @@ pub(crate) fn published_cells_in_local_names(
     }
     let data: calcula_format::sheet_data::SheetData =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let derived = if local_spilled.is_some() { published_spill_outputs(&data) } else { std::collections::HashSet::new() };
     let cells = calcula_format::sheet_data::sheet_data_to_cells(&data);
     Ok(Some(
         positions
             .iter()
-            .map(|pos| {
-                let cell = cells
-                    .get(pos)
-                    .map(|saved| renames.rename_saved_cell(saved).into_owned());
-                (*pos, cell)
+            .filter_map(|pos| {
+                let cell = if derived.contains(pos) {
+                    None
+                } else {
+                    cells.get(pos).map(|saved| renames.rename_saved_cell(saved).into_owned())
+                };
+                // Nothing in the version, one of this copy's own spilled values
+                // here: derived on both sides, left to the recalculation.
+                if cell.is_none() && local_spilled.is_some_and(|spilled| spilled.contains(pos)) {
+                    return None;
+                }
+                Some((*pos, cell))
             })
             .collect(),
     ))
+}
+
+/// THIS copy's spilled cells on `sheet` (every cell a dynamic array spilled
+/// into, its origin excepted): the `local_spilled` a lay-in hands
+/// [`published_cells_in_local_names`]. Read and released; the spilled-cell
+/// gates the lay-in meets later read the map again, so a spill that moved in
+/// between is refused there, never written through.
+pub(crate) fn local_spill_outputs(state: &AppState, sheet: usize) -> Result<std::collections::HashSet<(u32, u32)>, String> {
+    let hosts = state.spill_hosts.lock().map_err(|e| e.to_string())?;
+    Ok(hosts
+        .iter()
+        .filter(|(&(s, r, c), &origin)| s == sheet && (r, c) != origin)
+        .map(|(&(_, r, c), _)| (r, c))
+        .collect())
+}
+
+/// The SPILLED cells of one published sheet: every position inside a
+/// dynamic-array origin's extent (`sp` on a cell that holds a formula), the
+/// origin itself excepted -- the cells `calp::diff`'s spill rule calls
+/// derived. Bounded per origin like that rule, because `sp` is publisher
+/// text: an extent past 100,000 cells is not skipped, so its cells are laid
+/// as cells and meet the spilled-cell gates (fail closed: refused, never a
+/// silent loss).
+pub(crate) fn published_spill_outputs(
+    data: &calcula_format::sheet_data::SheetData,
+) -> std::collections::HashSet<(u32, u32)> {
+    const MAX_SPILL_CELLS: u64 = 100_000;
+    let mut out = std::collections::HashSet::new();
+    for (a1, entry) in &data.cells {
+        let (Some(sp), Some(_)) = (entry.sp.as_ref(), entry.f.as_ref()) else { continue };
+        let Some(origin) = calcula_format::cell_ref::from_a1(a1) else { continue };
+        let Some((r0, c0, r1, c1)) = calcula_format::cell_ref::range_from_a1(sp) else { continue };
+        let area = (r1 as u64 - r0 as u64 + 1).saturating_mul(c1 as u64 - c0 as u64 + 1);
+        if area > MAX_SPILL_CELLS || (r0, c0) != origin {
+            continue;
+        }
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                if (r, c) != origin {
+                    out.insert((r, c));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// THE ONE MERGE of a publish's custom objects: the host-collected ones FIRST,
@@ -592,6 +664,13 @@ pub struct PullResponse {
     /// static bytes can be approved). Always empty on a checkout.
     #[serde(default)]
     pub inline_button_code_removed: Vec<String>,
+    /// Charts and ribbon filters this pull did NOT add because the workbook
+    /// already holds one under that id (another application's, or the
+    /// workbook's own) or, for a ribbon filter, under that name -- one sentence
+    /// each, naming the object and the application (BUG-0734). They used to be
+    /// skipped with nothing said.
+    #[serde(default)]
+    pub objects_not_added: Vec<String>,
 }
 
 /// A pulled custom object handed to the frontend for provider materialization
@@ -1153,10 +1232,22 @@ fn assemble_publish_snapshot(
         }
     }
 
-    // Include any author-designated writeback regions in the publish
-    let writeback_regions = {
+    // Include any author-designated writeback regions in the publish (under the
+    // package's own ids when it is a fork -- `rekey_carried_objects` below).
+    //
+    // ONLY THE REGIONS ON A SHEET THIS PACKAGE CARRIES. A region on any other
+    // sheet names cells no subscriber has (`localized_writeback_declarations`
+    // drops it), so declaring it can only claim an id: a workbook that checked
+    // out A and then B holds A's regions beside B's (checkout is additive), and
+    // a push of B shipped A's regions under A's ids -- two applications
+    // declaring one region (BUG-0734).
+    let mut writeback_regions = {
         let drafts = state.writeback_draft_regions.read().map_err(|e| e.to_string())?;
-        if drafts.is_empty() { None } else { Some(drafts.clone()) }
+        let carried: std::collections::HashSet<SheetId> =
+            sheet_indices.iter().filter_map(|&i| workbook.sheets.get(i).map(|s| s.id)).collect();
+        let on_carried: Vec<calp::WritebackRegionDeclaration> =
+            drafts.iter().filter(|d| carried.contains(&d.selector.sheet_id)).cloned().collect();
+        if on_carried.is_empty() { None } else { Some(on_carried) }
     };
 
     // Include object scripts in the publish
@@ -1260,6 +1351,17 @@ fn assemble_publish_snapshot(
     // the validation below, which must see the keys the package will carry.
     let rekeys = data_source_rekeys_for_target(state, bi_state, registry_path, package_name)?;
     rekey_carried_data_sources(&mut workbook, &mut data_sources, &mut model_writebacks, &rekeys);
+
+    // ...AND ONE APPLICATION, ONE SET OF OBJECT IDS (BUG-0734, owner decision
+    // 2026-11-06): a copy published as ANOTHER application carries its
+    // writeback regions, charts and ribbon filters under ids of its own, and a
+    // subscribed chart or filter is never filed under its application's id --
+    // see `object_rekeys_for_target`. Here, before core publish signs a
+    // byte, so the signed manifest names the package's own ids; and in the one
+    // door the preview and the diff share, so they agree with the publish.
+    let object_rekeys =
+        object_rekeys_for_target(state, registry_path, package_name, &workbook, writeback_regions.as_deref())?;
+    rekey_carried_objects(&mut workbook, writeback_regions.as_mut(), object_scripts.as_mut(), &object_rekeys);
 
     // Validate BI pivot definitions against the embedded model before publishing.
     // This catches mismatched field names (e.g., grid-style "Category" instead of
@@ -2399,6 +2501,11 @@ pub(crate) fn record_push_in_working_copy_link(
     now: &str,
     published_sheets: Vec<calp::WorkingCopySheetRef>,
     shipped: calp::WorkingCopyContent,
+    // The (workspace, application) the link targeted when the push STARTED,
+    // when that was ANOTHER application than the one pushed: a deliberate
+    // "publish as a new application" from a working copy (BUG-0734). A link
+    // still on it is a fork, not a re-point.
+    fork_of: Option<&(String, String)>,
 ) -> Result<PushLinkRecord, String> {
     let pending = state.working_copy_link.lock_pending().map_err(|e| e.to_string())?;
     if file_state.document_replaced_since(epoch) {
@@ -2406,6 +2513,9 @@ pub(crate) fn record_push_in_working_copy_link(
     }
     if let Some(existing) = pending.as_ref() {
         if !existing.targets(registry_path, package_name) {
+            if fork_of.is_some_and(|(registry, package)| existing.targets(registry, package)) {
+                return Ok(PushLinkRecord::Forked { working_copy_of: existing.package_name.clone() });
+            }
             return Ok(PushLinkRecord::LinkRepointed { now_targets: existing.package_name.clone() });
         }
     }
@@ -2443,6 +2553,10 @@ pub(crate) enum PushLinkRecord {
     /// The link was re-pointed at ANOTHER application (`now_targets`) mid-push:
     /// nothing written, that application's link left as it was.
     LinkRepointed { now_targets: String },
+    /// A working copy of `working_copy_of` was deliberately published as the
+    /// NEW application pushed (BUG-0734): the link stays on the application
+    /// the workbook is a working copy of, as it was when the push started.
+    Forked { working_copy_of: String },
 }
 
 impl PushLinkRecord {
@@ -2450,6 +2564,12 @@ impl PushLinkRecord {
     fn warning(&self, package_name: &str, version: &str) -> Option<String> {
         match self {
             PushLinkRecord::Recorded => None,
+            PushLinkRecord::Forked { working_copy_of } => Some(format!(
+                "Version {version} of '{package_name}' was published as a new application, with writeback \
+                 regions, charts and ribbon filters under ids of its own. This workbook is still a working copy \
+                 of '{working_copy_of}'. To edit '{package_name}', open it for editing (Collaboration > Open \
+                 Application for Editing)."
+            )),
             PushLinkRecord::DocumentReplaced => Some(push_not_recorded_warning(package_name, version)),
             PushLinkRecord::LinkRepointed { now_targets } => Some(format!(
                 "Version {version} of '{package_name}' was published, but while it was being pushed this \
@@ -2505,47 +2625,16 @@ pub(crate) fn record_push_audit_row(
     now: &str,
     extra: std::collections::HashMap<String, serde_json::Value>,
 ) -> bool {
-    let session_copy = extra.clone();
-    let recorded = file_state.with_document_pinned(epoch, || {
-        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(
-            crate::document_effect::CleanReason::AuditTrail,
-        )) {
-            audit.record_with_extra(calp::audit::AuditEvent::Published, description, user, now, extra);
-        }
-    });
-    if recorded.is_none() {
-        // The durable home: this computer's trail. Written holding no lock
-        // (the pin above is released), and never failing the push it records.
-        let mut machine_extra = session_copy.clone();
-        machine_extra.insert(
-            "reason".to_string(),
-            serde_json::Value::String(crate::machine_audit::REASON_DOCUMENT_REPLACED.to_string()),
-        );
-        crate::machine_audit::record(
-            &calcula_profile_dir(),
-            &calp::audit::AuditEntry {
-                timestamp: now.to_string(),
-                event: calp::audit::AuditEvent::Published,
-                description: description.to_string(),
-                user: user.to_string(),
-                extra: machine_extra,
-            },
-        );
-        let mut fields: Vec<String> =
-            session_copy.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        fields.sort();
-        crate::log_warn!(
-            "CALP",
-            "AUDIT (session): {} by {} at {} -- the workbook that pushed was replaced by File > Open / New \
-             before the push finished, so no workbook's trail holds this row; this computer's \
-             collaboration trail does [{}]",
-            description,
-            user,
-            now,
-            fields.join(", ")
-        );
-    }
-    recorded.is_some()
+    // One home for every row whose workbook can be replaced mid-act
+    // (BUG-0735): the workbook's trail while it is live, this computer's
+    // trail (`reason: documentReplaced`) once it is not.
+    crate::machine_audit::WorkbookAudit::of_epoch(&state.audit_log, file_state, epoch).record(
+        calp::audit::AuditEvent::Published,
+        description,
+        user,
+        now,
+        extra,
+    )
 }
 
 /// The push preview's word on an incomplete calculation (rev11A). The push
@@ -2778,6 +2867,17 @@ pub fn calp_publish(
     // that is still restoring its stores is waited for -- the push judges the
     // outgoing workbook or the whole opened one, never one half restored.
     let document_epoch = file_state.settled_document_epoch();
+    // A WORKING COPY OF ANOTHER APPLICATION, as the push starts: this push is
+    // "publish as a new application" (a fork, BUG-0734), and a link still on
+    // that application when the push lands was not re-pointed mid-push
+    // (`PushLinkRecord::Forked`).
+    let fork_of: Option<(String, String)> = state
+        .working_copy_link
+        .read()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .filter(|l| !l.targets(&params.registry_path, &params.package_name))
+        .map(|l| (l.registry_url.clone(), l.package_name.clone()));
 
     // ---- PHASE A: the gates only this layer can run ------------------------
     // Workspace-fact gates (mode, base version, monotonic version, key
@@ -3115,6 +3215,17 @@ pub fn calp_publish(
     // preview's manifest cannot disagree with this one about `minAppVersion`.
     stamp_min_app_version(&mut request);
 
+    // ONE REGION, ONE APPLICATION, on the publish side too (BUG-0734): no
+    // region id another application in this workspace declares, whatever the
+    // working-copy link says, model writeback columns included. Before core
+    // publish writes a byte; core asks again under the workspace lock.
+    refuse_regions_another_application_declares(
+        registry.as_ref(),
+        &request.package_name,
+        request.writeback_regions.as_deref().unwrap_or_default(),
+        request.model_writebacks.as_deref().unwrap_or_default(),
+    )?;
+
     // ---- PHASE B: core runs the workspace-fact gates under the workspace lock --
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
@@ -3168,6 +3279,7 @@ pub fn calp_publish(
             &now,
             published_sheets,
             shipped,
+            fork_of.as_ref(),
         )?;
     }
     // A push or a first publish changes which version the author's own
@@ -3863,6 +3975,17 @@ pub fn calp_publish_preview(
         assembly.writeback_regions.as_ref(),
         params.registry_path.as_deref().unwrap_or(&link_target.0),
     ));
+    // ONE WRITEBACK ID, ONE APPLICATION (BUG-0734): the dry run asks the
+    // workspace the publish asks, so it never passes what the publish refuses
+    // (CALP_REGION_TAKEN). Said as a warning -- a preview refuses nothing.
+    if let (Some(registry_path), Some(package_name)) = (params.registry_path.as_deref(), params.package_name.as_deref()) {
+        warnings.extend(region_taken_preview_warning(
+            registry_path,
+            package_name,
+            assembly.writeback_regions.as_deref().unwrap_or_default(),
+            &assembly.model_writebacks,
+        ));
+    }
     // The push recalculates an incomplete calculation first; a dry run must
     // not, so it SAYS that the values it describes may not be the ones the
     // push ships (rev11A).
@@ -4227,9 +4350,10 @@ use crate::calp_push_scope::CUSTOM_FUNCTIONS_LIB_ID;
 
 /// A PULLED VERSION'S NAMES, judged by the rule the subscriber's own UI applies
 /// (`calp::publish::published_name_problem`, over `identity::is_valid_defined_name`
-/// -- the rule `NamedRange::is_valid_name` and the table commands delegate to):
-/// a defined name or table name that reads as a reference (`R1C1`, `C`, `Q1`),
-/// a table and a name sharing one name, two tables sharing one. The publish
+/// and `identity::is_valid_table_name` -- the rules `NamedRange::is_valid_name`
+/// and the table commands delegate to): a defined name or table name that reads
+/// as a reference (`R1C1`, `C`, `Q1`), a table and a WORKBOOK-scoped name
+/// sharing one name, two tables sharing one. The publish
 /// door refuses all of these too, so a version carrying one was signed by a
 /// build without that gate, or assembled by hand.
 ///
@@ -4852,7 +4976,7 @@ fn materialize_pulled_sheet_state(
 /// clobbered). Appends a ledger entry per table actually added when a ledger
 /// is supplied. Returns the number materialized. Shared by pull, refresh, and
 /// the dev-mode preview loop.
-fn materialize_pulled_tables(
+pub(crate) fn materialize_pulled_tables(
     effect: &crate::document_effect::DocumentEffect,
     state: &AppState,
     saved_tables: &[persistence::SavedTable],
@@ -4875,10 +4999,30 @@ fn materialize_pulled_tables(
         let Some(&idx) = map.get(&saved.sheet_id) else {
             continue; // the table's sheet wasn't pulled
         };
+        // A name Excel would not take as a table name is no table this door
+        // lands (BUG-0741): the table commands refuse it (`R1C1`, `Q1`, `?x`),
+        // and its `.xlsx` export is a file Excel will not open. The pull and
+        // refresh doors refuse a package carrying one up front
+        // (`refuse_invalid_pulled_names`); this is the materializer's own
+        // gate, so the dev-mode preview loop and any later caller meet it too.
+        if !crate::tables::is_valid_table_name(&saved.name) {
+            crate::log_warn!(
+                "CALP",
+                "pulled table '{}' not added: Excel does not accept that as a table name",
+                saved.name
+            );
+            continue;
+        }
         let name_key = crate::tables::table_name_key(&saved.name);
         if table_names.contains_key(&name_key) {
             continue; // don't clobber a table the subscriber already has
         }
+        // A WORKBOOK name of that spelling (the keys are (scope, name),
+        // BUG-0744, and a workbook name's is its name key): Excel lets a table
+        // share a spelling with a SHEET-scoped name, never with a workbook one
+        // [LIVE, Excel 16, 2026-11-06, lane names q4.ps1: a table renamed to a
+        // `Sheet1!LocOnly` spelling stands; `Sheet1.Names.Add` of a table's
+        // spelling is refused], so the sheet-scoped keys never match here.
         if defined_name_keys.contains(&name_key) {
             // ...nor shadow a defined name the subscriber already has: the
             // same additive rule, across the one namespace the two share.
@@ -6777,6 +6921,66 @@ pub(crate) fn refresh_pkg_to_index(
         .collect())
 }
 
+/// The sentence for a pulled chart NOT added because the workbook already holds
+/// a chart under its id (BUG-0734), naming the chart by its title when the spec
+/// has one.
+/// One sentence per pulled object of `kind` (a slicer, a timeline, a pane
+/// control, a saved pivot layout) that did NOT land: `pulled` is every
+/// (id, name) the version carries, `applied` what the materializer inserted,
+/// `taken_before` the ids the workbook held before it ran. An id collision is
+/// said as one (BUG-0734: these were skipped with a log line, or nothing);
+/// with `name_rule`, an object whose id was free but did not land was refused
+/// for its name. Anything else (its sheet was not pulled) is not a collision
+/// and says nothing, as for charts.
+pub(crate) fn objects_not_added_text(
+    kind: &str,
+    package_name: &str,
+    pulled: &[(String, String)],
+    applied: &[(String, String)],
+    taken_before: &std::collections::HashSet<String>,
+    name_rule: bool,
+) -> Vec<String> {
+    let landed: std::collections::HashSet<&str> = applied.iter().map(|(id, _)| id.as_str()).collect();
+    pulled
+        .iter()
+        .filter(|(id, _)| !landed.contains(id.as_str()))
+        .filter_map(|(id, name)| {
+            if taken_before.contains(id) {
+                Some(format!(
+                    "The {kind} '{name}' from '{package_name}' was not added: this workbook already has a \
+                     {kind} with the same id ({id}), so it keeps that one. If the other one came from a \
+                     different application, ask the publisher of '{package_name}' to publish it again (this \
+                     version of Calcula gives an application published as a copy of another its own ids)."
+                ))
+            } else if name_rule {
+                Some(format!(
+                    "The {kind} '{name}' from '{package_name}' was not added: this workbook already has a \
+                     control or filter with that name, or its settings could not be read."
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn chart_not_added_text(package_name: &str, spec: &serde_json::Value, id: identity::EntityId) -> String {
+    let title = ["title", "name"]
+        .iter()
+        .find_map(|key| spec.get(*key).and_then(|v| v.as_str()))
+        .filter(|t| !t.trim().is_empty());
+    let named = match title {
+        Some(t) => format!("The chart '{t}'"),
+        None => "A chart".to_string(),
+    };
+    format!(
+        "{named} from '{package_name}' was not added: this workbook already has a chart with the same \
+         id ({id}), so it keeps that one. If the other one came from a different application, ask the \
+         publisher of '{package_name}' to publish it again (this version of Calcula gives an \
+         application published as a copy of another its own ids)."
+    )
+}
+
 /// Refresh's ledger-scoped REPLACE for charts, pure so it can be tested
 /// without a window.
 ///
@@ -6799,13 +7003,16 @@ pub(crate) fn refresh_pkg_to_index(
 /// PUBLISHER's sheet id, which exists nowhere here), while a chart whose own
 /// sheet is the detached one is still dropped -- the subscriber owns that page.
 ///
-/// Appends a fresh "chart" ledger entry per chart added.
+/// Appends a fresh "chart" ledger entry per chart added, and one sentence to
+/// `not_added` per chart NOT added because the workbook already holds a chart
+/// under its id (another application's, or the subscriber's own -- BUG-0734).
 pub(crate) fn apply_refreshed_charts(
     charts: &mut Vec<crate::api_types::ChartEntry>,
     sub: &calp::manifest::Subscription,
     pull: &calp::pull::PullResult,
     sheet_ids: &[SheetId],
     entries: &mut Vec<calp::manifest::SubscribedObject>,
+    not_added: &mut Vec<String>,
 ) {
     let owned: std::collections::HashSet<String> = sub
         .objects
@@ -6854,6 +7061,7 @@ pub(crate) fn apply_refreshed_charts(
             continue;
         };
         if charts.iter().any(|c| c.id == chart.id) {
+            not_added.push(chart_not_added_text(&pull.package_name, &chart.spec, chart.id));
             continue;
         }
         entries.push(calp::manifest::SubscribedObject {
@@ -6890,13 +7098,18 @@ pub(crate) fn apply_refreshed_charts(
 /// RibbonFilterState.filters.
 ///
 /// Returns (id, name) for each filter ACTUALLY inserted.
-fn materialize_pulled_ribbon_filters(
+pub(crate) fn materialize_pulled_ribbon_filters(
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     effect: &crate::document_effect::DocumentEffect,
     on_grid_controls: &crate::controls::ControlStorage,
     pulled: &[persistence::SavedRibbonFilter],
     pulled_data_source_ids: &std::collections::HashSet<String>,
+    // The application the filters come from, for the sentences below.
+    package_name: &str,
+    // Each filter NOT added because its id or its name is already taken here,
+    // one sentence each (BUG-0734) -- it used to reach only the log.
+    not_added: &mut Vec<String>,
 ) -> Result<Vec<(String, String)>, String> {
     if pulled.is_empty() {
         return Ok(Vec::new());
@@ -6940,10 +7153,27 @@ fn materialize_pulled_ribbon_filters(
                 "Skipping pulled ribbon filter \"{}\": its data source is not embedded in the application",
                 saved.name
             );
+            // Said, not only logged (BUG-0734): the filter can never bind here.
+            not_added.push(format!(
+                "The ribbon filter '{}' from '{}' was not added: the model it filters is not part of \
+                 the application, so it could not filter anything in this workbook. Ask the publisher \
+                 of '{}' to publish it again with that model.",
+                saved.name, package_name, package_name
+            ));
             continue;
         }
         if filters.contains_key(&saved.id) {
-            continue; // subscriber already has this filter (id collision)
+            // The workbook already holds a filter under this id -- its own, or
+            // another application's that carried the same id (BUG-0734). Never
+            // clobbered, and never skipped in silence.
+            not_added.push(format!(
+                "The ribbon filter '{}' from '{}' was not added: this workbook already has a ribbon \
+                 filter with the same id ({}), so it keeps that one. If the other one came from a \
+                 different application, ask the publisher of '{}' to publish it again (this version \
+                 of Calcula gives an application published as a copy of another its own ids).",
+                saved.name, package_name, saved.id, package_name
+            ));
+            continue;
         }
         if taken_names.contains(&saved.name.to_uppercase()) {
             crate::log_warn!(
@@ -6951,6 +7181,11 @@ fn materialize_pulled_ribbon_filters(
                 "Skipping pulled ribbon filter \"{}\": name already in use",
                 saved.name
             );
+            not_added.push(format!(
+                "The ribbon filter '{}' from '{}' was not added: this workbook already has a control \
+                 or filter with that name.",
+                saved.name, package_name
+            ));
             continue;
         }
         let mut filter = crate::persistence::saved_to_ribbon_filter(saved);
@@ -7619,6 +7854,24 @@ pub fn calp_pull(
         &std::collections::HashSet::new(),
         &current_data_source_claims(&state)?,
     )?;
+    // ...nor declare a writeback region id another subscription already
+    // declares (BUG-0734): answers are routed by region id, so the second
+    // claimant would strand both. Also before the effect; the subscriptions
+    // are cloned out, never held across the workspace reads.
+    {
+        let subscriptions = state.subscriptions.read().map_err(|e| e.to_string())?.subscriptions.clone();
+        refuse_region_already_declared(
+            &result.writeback_regions,
+            &result.package_name,
+            &subscribed_region_claims(&subscriptions),
+        )?;
+        // ...nor a model writeback column id (routed the same way).
+        refuse_model_writeback_already_declared(
+            &result.model_writebacks,
+            &result.package_name,
+            &subscribed_writeback_claims(&subscriptions, WritebackIdKind::ModelColumn),
+        )?;
+    }
     // ...nor names the subscriber's own UI would refuse (`R1C1`, a table and a
     // name sharing one). Before the effect.
     refuse_invalid_pulled_names(&result.package_name, &result.named_ranges, &result.tables)?;
@@ -8073,6 +8326,9 @@ pub(crate) fn materialize_pull_result(
     // The ids landed here are kept so that re-bind reaches exactly these charts.
     let mut materialized_chart_ids: std::collections::HashSet<identity::EntityId> =
         std::collections::HashSet::new();
+    // What this pull did NOT add, said by name (BUG-0734): a chart under an id
+    // the workbook already holds, and the ribbon filters below.
+    let mut objects_not_added: Vec<String> = Vec::new();
     if !result.charts.is_empty() {
         let chart_ref_map: std::collections::HashMap<SheetId, (SheetId, usize)> = result
             .sheets
@@ -8083,7 +8339,9 @@ pub(crate) fn materialize_pull_result(
         let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         for chart in result.charts {
             if let Some(&sheet_index) = chart_sheet_index.get(&chart.sheet_id) {
-                if !charts.iter().any(|c| c.id == chart.id) {
+                if charts.iter().any(|c| c.id == chart.id) {
+                    objects_not_added.push(chart_not_added_text(&result.package_name, &chart.spec, chart.id));
+                } else {
                     sub_objects.push(sub_object("chart", chart.id.to_string(), String::new()));
                     materialized_chart_ids.insert(chart.id);
                     let mut spec = chart.spec;
@@ -8132,7 +8390,12 @@ pub(crate) fn materialize_pull_result(
         let table_names = state.table_names.read().map_err(|e| e.to_string())?;
         for nr in &result.named_ranges {
             let key = crate::name_resolution::name_key(&nr.name);
-            if names.contains_key(&key) {
+            // Held under its (scope, name) registry key (BUG-0744); the
+            // ledger keeps naming it by its NAME key, which no sheet
+            // renumbering can move.
+            let sheet_index = nr.sheet_id.and_then(|sid| pkg_to_index.get(&sid).copied());
+            let reg_key = crate::named_ranges::registry_key(sheet_index, &nr.name);
+            if names.contains_key(&reg_key) {
                 continue; // don't clobber a name the subscriber already defined
             }
             if table_names.contains_key(&key) {
@@ -8148,10 +8411,10 @@ pub(crate) fn materialize_pull_result(
             }
             sub_objects.push(sub_object("namedRange", key.clone(), nr.name.clone()));
             names.insert(
-                key,
+                reg_key,
                 crate::named_ranges::NamedRange {
                     name: nr.name.clone(),
-                    sheet_index: nr.sheet_id.and_then(|sid| pkg_to_index.get(&sid).copied()),
+                    sheet_index,
                     refers_to: nr.refers_to.clone(),
                     comment: None,
                     folder: None,
@@ -8517,6 +8780,8 @@ pub(crate) fn materialize_pull_result(
     // list so a collision-skipped control is never attributed to this application.
     // `on_grid_snapshot` predates the application's own on-grid materialization
     // above (see the comment at its binding).
+    let pane_taken: std::collections::HashSet<String> =
+        pane_control_state.controls.lock().map_err(|e| e.to_string())?.keys().map(|k| k.to_string()).collect();
     let applied_pane_controls = materialize_pulled_pane_controls(
         &pane_control_state,
         &ribbon_filter_state,
@@ -8526,6 +8791,14 @@ pub(crate) fn materialize_pull_result(
     for (id, name) in &applied_pane_controls {
         sub_objects.push(sub_object("paneControl", id.clone(), name.clone()));
     }
+    objects_not_added.extend(objects_not_added_text(
+        "pane control",
+        &result.package_name,
+        &result.pane_controls.iter().map(|c| (c.id.to_string(), c.name.clone())).collect::<Vec<_>>(),
+        &applied_pane_controls,
+        &pane_taken,
+        true,
+    ));
 
     // Delete-path hygiene: a collision-skipped pane control must not leave
     // the application's own just-landed "pane-{id}" object script behind with no
@@ -8597,6 +8870,8 @@ pub(crate) fn materialize_pull_result(
     // Their computed properties come with them, on a subscribe AND a checkout
     // (BUG-0263) -- see `materialize_pulled_slicers`; `rename_pull` above has
     // already moved their sheet references onto a collision-renamed sheet.
+    let slicers_taken: std::collections::HashSet<String> =
+        slicer_state.slicers.read().map_err(|e| e.to_string())?.keys().map(|k| k.to_string()).collect();
     let applied_slicers = materialize_pulled_slicers(
         &effect,
         &state,
@@ -8607,6 +8882,14 @@ pub(crate) fn materialize_pull_result(
     for (id, name) in &applied_slicers {
         sub_objects.push(sub_object("slicer", id.clone(), name.clone()));
     }
+    objects_not_added.extend(objects_not_added_text(
+        "slicer",
+        &result.package_name,
+        &result.slicers.iter().map(|s| (s.id.to_string(), s.name.clone())).collect::<Vec<_>>(),
+        &applied_slicers,
+        &slicers_taken,
+        false,
+    ));
 
     // Materialize pulled TIMELINE slicers onto their (remapped) local sheet --
     // shared with the refresh path, slicer semantics: APPLICATION sheet ids,
@@ -8614,6 +8897,8 @@ pub(crate) fn materialize_pull_result(
     // already has the id. The pivot a timeline filters keeps its stable id
     // through the application, so the binding holds once that pivot restores
     // below.
+    let timelines_taken: std::collections::HashSet<String> =
+        timeline_state.timelines.read().map_err(|e| e.to_string())?.keys().map(|k| k.to_string()).collect();
     let applied_timelines = materialize_pulled_timeline_slicers(
         &effect,
         timeline_state,
@@ -8623,6 +8908,14 @@ pub(crate) fn materialize_pull_result(
     for (id, name) in &applied_timelines {
         sub_objects.push(sub_object("timelineSlicer", id.clone(), name.clone()));
     }
+    objects_not_added.extend(objects_not_added_text(
+        "timeline",
+        &result.package_name,
+        &result.timeline_slicers.iter().map(|t| (t.id.to_string(), t.name.clone())).collect::<Vec<_>>(),
+        &applied_timelines,
+        &timelines_taken,
+        false,
+    ));
 
     // Materialize pulled FLOATING RANGE object rows: both the host and the
     // backing sheet id arrive as APPLICATION ids and are bound to the local
@@ -8657,6 +8950,8 @@ pub(crate) fn materialize_pull_result(
         &on_grid_snapshot,
         &result.ribbon_filters,
         &pulled_ds_ids,
+        &result.package_name,
+        &mut objects_not_added,
     )?;
     for (id, name) in &applied_ribbon_filters {
         sub_objects.push(sub_object("ribbonFilter", id.clone(), name.clone()));
@@ -8668,6 +8963,15 @@ pub(crate) fn materialize_pull_result(
         let mut layouts = state.pivot_layouts.write(&effect).map_err(|e| e.to_string())?;
         for layout in &result.pivot_layouts {
             if layouts.iter().any(|l| l.id == layout.id) {
+                // Never clobbered, and never skipped in silence (BUG-0734).
+                objects_not_added.extend(objects_not_added_text(
+                    "saved pivot layout",
+                    &result.package_name,
+                    &[(layout.id.to_string(), layout.name.clone())],
+                    &[],
+                    &[layout.id.to_string()].into_iter().collect(),
+                    false,
+                ));
                 continue;
             }
             sub_objects.push(sub_object(
@@ -8715,6 +9019,11 @@ pub(crate) fn materialize_pull_result(
         MaterializeMode::Subscribe => {
             let mut subscription = result.subscription.clone();
             subscription.objects = sub_objects;
+            // The region ids its verified version declares, recorded locally so
+            // every later claim set counts this subscription even while its
+            // workspace cannot be reached (BUG-0734, `region_ledger_entries`).
+            subscription.objects.extend(region_ledger_entries(&result.writeback_regions));
+            subscription.objects.extend(model_writeback_ledger_entries(&result.model_writebacks));
             let mut subs = state.subscriptions.write(effect).map_err(|e| e.to_string())?;
             subs.subscriptions.push(subscription);
         }
@@ -8952,6 +9261,7 @@ pub(crate) fn materialize_pull_result(
         button_links_removed,
         inline_button_code_held,
         inline_button_code_removed,
+        objects_not_added,
     })
 }
 
@@ -9777,6 +10087,10 @@ pub fn calp_hold_back_cells(
             &sheet_id.to_string(),
             positions,
             &renames,
+            // A spilled value is not held back as a literal, nor is one of
+            // this copy's own spilled values cleared: the base's origin and
+            // inputs are laid, and the recalculation below re-derives it.
+            Some(&local_spill_outputs(&state, *local_index)?),
         )?
         .unwrap_or_else(|| positions.iter().map(|pos| (*pos, None)).collect());
 
@@ -9922,6 +10236,14 @@ pub fn calp_hold_back_cells(
     // exactly the artifact this exists to avoid.
     //
     // NOT `?`. The transaction is open, and a `?` here would leave it that way.
+    //
+    // A DATA TABLE the base version holds is THE VERSION'S table, not a typed
+    // `=TABLE(..)`: held back over a workbook whose author deleted it, its
+    // marker was refused "That function isn't valid." (the merge's BUG-0757).
+    // The marker claim names exactly the marker cells the laid grids hold, as
+    // `calp_push_merge_apply` does; a write over part of a table is still
+    // refused. Closed with the write.
+    let version_tables = crate::data_tables::claim_version_tables(&grids);
     let applied = crate::scripting::commands::apply_script_modified_grids(
         &state,
         &file_state,
@@ -9938,6 +10260,7 @@ pub fn calp_hold_back_cells(
         // output may differ from this one's inside a pivot region.
         crate::commands::data::RegionGate::VersionOverlay,
     );
+    drop(version_tables);
 
     // ALWAYS close it, on both paths, and take the id the push stamps. An empty
     // transaction — the write touched nothing — commits nothing and yields
@@ -10986,7 +11309,8 @@ pub fn calp_get_application_objects(
                     .find(|c| c.id.to_string() == o.id)
                     .map(|c| (true, sheet_name_at(c.sheet_index)))
                     .unwrap_or((false, String::new())),
-                "namedRange" => (named_ranges.contains_key(&o.id), String::new()),
+                // The ledger names a name by its NAME key, in any scope (BUG-0744).
+                "namedRange" => (crate::named_ranges::defined_in_any_scope(&named_ranges, &o.id), String::new()),
                 "objectScript" => (
                     object_scripts.iter().any(|s| s.id == o.id),
                     String::new(),
@@ -12135,6 +12459,9 @@ pub fn calp_refresh_apply(
     // ...and refuse a model that would land under an id another connection
     // already serves (one key, one connection) -- also before the effect.
     refuse_refreshed_data_sources_already_served(&state, &bi_state, &payloads)?;
+    // ...and a version declaring a writeback region id another subscription
+    // declares (BUG-0734), as the subscribe refuses it -- before the effect.
+    refuse_refreshed_regions_already_declared(&state, &payloads)?;
 
     // NOTHING TO DO IS NOT A MUTATION. `DocumentEffect::mutates` dirties at
     // construction, and this command used to build it as its first statement —
@@ -12160,6 +12487,7 @@ pub fn calp_refresh_apply(
             button_actions_removed: Vec::new(),
             button_links_removed: Vec::new(),
             inline_button_code_removed: Vec::new(),
+            objects_not_added: Vec::new(),
         });
     }
 
@@ -12367,6 +12695,10 @@ pub(crate) fn apply_refresh_payloads(
             &payload.pull_result.tables,
         )?;
     }
+    // The charts and ribbon filters this refresh did NOT add because their id
+    // (or a filter's name) is already taken here, one sentence each, returned
+    // in the result (BUG-0734).
+    let mut objects_not_added: Vec<String> = Vec::new();
     // THE APPLICATIONS' BOUND OBJECTS AS THEY ARE NOW, before anything below
     // replaces them: each payload's bindings are REPLACED, not merged, at the
     // end (`land_pulled_bindings`), so a binding the publisher removed -- or one
@@ -12628,13 +12960,56 @@ pub(crate) fn apply_refresh_payloads(
         // nowhere here is skipped -- it used to land with `sheet_index: None`,
         // i.e. WORKBOOK-scoped, silently changing what every formula naming it
         // on every other sheet resolves to. Only applied names are ledgered.
+        // THE RENAME-AND-REUSE EDGE (BUG-0741). A version that renames one of
+        // the application's own tables and reuses its spelling for a NAME (or
+        // drops a name and reuses its spelling for a TABLE) collided with
+        // itself: the names are upserted HERE, before the tables are swapped
+        // below, so v1's own table `Sales` still held the namespace and v2's
+        // name `Sales` was refused as a clash with "this workbook's" table --
+        // and v1's own name `Rate`, which v2 no longer carries, made the
+        // materializer refuse v2's table `Rate`. What the application itself
+        // owned (its provenance ledger) is never the subscriber's to protect:
+        // a ledgered table about to be replaced does not block a name, and a
+        // ledgered name that v2 drops and reuses as a table goes. Read before
+        // `named_ranges` is taken (the subscriptions are read, then released).
+        let (own_table_keys, own_name_keys): (
+            Vec<std::collections::HashSet<String>>,
+            Vec<std::collections::HashSet<String>>,
+        ) = {
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+            payloads
+                .iter()
+                .map(|payload| {
+                    let ledger = subs.subscriptions.get(payload.subscription_index).map(|s| s.objects.as_slice()).unwrap_or(&[]);
+                    let of = |kind: &str| -> std::collections::HashSet<String> {
+                        ledger.iter().filter(|o| o.kind == kind).map(|o| identity::defined_name_key(&o.name)).collect()
+                    };
+                    (of("table"), of("namedRange"))
+                })
+                .unzip()
+        };
+        if payloads.iter().any(|p| !p.pull_result.tables.is_empty()) {
+            let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
+            for (payload, own_names) in payloads.iter().zip(own_name_keys.iter()) {
+                let kept: std::collections::HashSet<String> =
+                    payload.pull_result.named_ranges.iter().map(|n| identity::defined_name_key(&n.name)).collect();
+                for table in &payload.pull_result.tables {
+                    let key = identity::defined_name_key(&table.name);
+                    if own_names.contains(&key) && !kept.contains(&key) {
+                        // The application's own WORKBOOK name, dropped by this
+                        // version for a table of its spelling.
+                        names.remove(&crate::named_ranges::registry_key(None, &table.name));
+                    }
+                }
+            }
+        }
         if payloads.iter().any(|p| !p.pull_result.named_ranges.is_empty()) {
             let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
             // Names and tables share one namespace; read under `named_ranges`
             // (order named_ranges -> tables -> table_names).
             let table_names = state.table_names.read().map_err(|e| e.to_string())?;
-            for ((payload, pkg_to_index), detached) in
-                payloads.iter().zip(pkg_maps.iter()).zip(detached_by_payload.iter())
+            for (((payload, pkg_to_index), detached), own_tables) in
+                payloads.iter().zip(pkg_maps.iter()).zip(detached_by_payload.iter()).zip(own_table_keys.iter())
             {
                 let mut applied: Vec<(String, String)> = Vec::new();
                 for nr in &payload.pull_result.named_ranges {
@@ -12655,7 +13030,9 @@ pub(crate) fn apply_refresh_payloads(
                         },
                     };
                     let key = crate::name_resolution::name_key(&nr.name);
-                    if table_names.contains_key(&key) {
+                    // ...unless the table is the application's own, which the
+                    // table swap below replaces (the rename-and-reuse edge).
+                    if table_names.contains_key(&key) && !own_tables.contains(&key) {
                         // A table holds the name (the subscriber's own, or one
                         // of the application's an earlier version shipped).
                         // Upserting it would put a name and a table under one
@@ -12668,7 +13045,8 @@ pub(crate) fn apply_refresh_payloads(
                         continue;
                     }
                     names.insert(
-                        key.clone(),
+                        // (scope, name), BUG-0744; the ledger keeps the name key.
+                        crate::named_ranges::registry_key(sheet_index, &nr.name),
                         crate::named_ranges::NamedRange {
                             name: nr.name.clone(),
                             sheet_index,
@@ -12897,6 +13275,10 @@ pub(crate) fn apply_refresh_payloads(
                 pkg_to_index,
                 Some(entries),
             )?;
+            // The new version's region ids replace the old ones in the ledger
+            // (the kind is not carried by the merge below), BUG-0734.
+            entries.extend(region_ledger_entries(&payload.pull_result.writeback_regions));
+            entries.extend(model_writeback_ledger_entries(&payload.pull_result.model_writebacks));
         }
     }
 
@@ -12914,7 +13296,7 @@ pub(crate) fn apply_refresh_payloads(
                 continue;
             };
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
-            apply_refreshed_charts(&mut charts, sub, &payload.pull_result, &sheet_ids, entries);
+            apply_refreshed_charts(&mut charts, sub, &payload.pull_result, &sheet_ids, entries, &mut objects_not_added);
         }
     }
 
@@ -13179,12 +13561,22 @@ pub(crate) fn apply_refresh_payloads(
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
         for payload in &payloads {
+            let taken: std::collections::HashSet<String> =
+                pane_control_state.controls.lock().map_err(|e| e.to_string())?.keys().map(|k| k.to_string()).collect();
             let applied = materialize_pulled_pane_controls(
                 &pane_control_state,
                 &ribbon_filter_state,
                 &on_grid_snapshot,
                 &payload.pull_result.pane_controls,
             )?;
+            objects_not_added.extend(objects_not_added_text(
+                "pane control",
+                &payload.pull_result.package_name,
+                &payload.pull_result.pane_controls.iter().map(|c| (c.id.to_string(), c.name.clone())).collect::<Vec<_>>(),
+                &applied,
+                &taken,
+                true,
+            ));
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for (id, name) in applied {
                 entries.push(ledger_entry("paneControl", id, name));
@@ -13242,6 +13634,8 @@ pub(crate) fn apply_refresh_payloads(
             // The same materializer as a first pull, computed properties and
             // all (BUG-0263); `prepare_refresh_payloads` already renamed their
             // sheet references with the rest of the pull.
+            let taken: std::collections::HashSet<String> =
+                slicer_state.slicers.read().map_err(|e| e.to_string())?.keys().map(|k| k.to_string()).collect();
             let applied = materialize_pulled_slicers(
                 &effect,
                 &state,
@@ -13249,6 +13643,14 @@ pub(crate) fn apply_refresh_payloads(
                 &payload.pull_result.slicers,
                 |sid| pkg_to_index.get(&sid).copied(),
             )?;
+            objects_not_added.extend(objects_not_added_text(
+                "slicer",
+                &payload.pull_result.package_name,
+                &payload.pull_result.slicers.iter().map(|s| (s.id.to_string(), s.name.clone())).collect::<Vec<_>>(),
+                &applied,
+                &taken,
+                false,
+            ));
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for (id, name) in applied {
                 entries.push(ledger_entry("slicer", id, name));
@@ -13287,6 +13689,15 @@ pub(crate) fn apply_refresh_payloads(
         for ((payload, (owned_timelines, owned_ranges)), pkg_to_index) in
             payloads.iter().zip(owned_by_payload.iter()).zip(pkg_maps.iter())
         {
+            // What the workbook holds once this subscription's own are removed.
+            let taken: std::collections::HashSet<String> = timeline_slicer_state
+                .timelines
+                .read()
+                .map_err(|e| e.to_string())?
+                .keys()
+                .map(|k| k.to_string())
+                .filter(|id| !owned_timelines.contains(id))
+                .collect();
             let applied_timelines = replace_refreshed_timeline_slicers(
                 &effect,
                 &timeline_slicer_state,
@@ -13294,6 +13705,19 @@ pub(crate) fn apply_refresh_payloads(
                 &payload.pull_result.timeline_slicers,
                 |sid| pkg_to_index.get(&sid).copied(),
             )?;
+            objects_not_added.extend(objects_not_added_text(
+                "timeline",
+                &payload.pull_result.package_name,
+                &payload
+                    .pull_result
+                    .timeline_slicers
+                    .iter()
+                    .map(|t| (t.id.to_string(), t.name.clone()))
+                    .collect::<Vec<_>>(),
+                &applied_timelines,
+                &taken,
+                false,
+            ));
             let applied_ranges = replace_refreshed_floating_ranges(
                 &effect,
                 &state,
@@ -13349,6 +13773,8 @@ pub(crate) fn apply_refresh_payloads(
                 &on_grid_snapshot,
                 &payload.pull_result.ribbon_filters,
                 &pulled_ds_ids,
+                &payload.pull_result.package_name,
+                &mut objects_not_added,
             )?;
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for (id, name) in applied {
@@ -13384,6 +13810,15 @@ pub(crate) fn apply_refresh_payloads(
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for layout in &payload.pull_result.pivot_layouts {
                 if layouts.iter().any(|l| l.id == layout.id) {
+                    // Never clobbered, and never skipped in silence (BUG-0734).
+                    objects_not_added.extend(objects_not_added_text(
+                        "saved pivot layout",
+                        &payload.pull_result.package_name,
+                        &[(layout.id.to_string(), layout.name.clone())],
+                        &[],
+                        &[layout.id.to_string()].into_iter().collect(),
+                        false,
+                    ));
                     continue;
                 }
                 entries.push(ledger_entry(
@@ -13990,6 +14425,7 @@ pub(crate) fn apply_refresh_payloads(
     // and named in the result. LOCK ORDER as on the pull door: the script maps
     // were taken and released inside `materialize_distributed_scripts` long
     // before, ahead of the media and controls locks.
+    result.objects_not_added.extend(std::mem::take(&mut objects_not_added));
     result.button_links_removed.extend(std::mem::take(&mut button_links_removed));
     result.inline_button_code_removed.extend(std::mem::take(&mut inline_button_code_removed));
     {
@@ -15411,6 +15847,7 @@ pub(crate) fn dev_subscribe_inner(
         button_links_removed: Vec::new(),
         inline_button_code_held: 0,
         inline_button_code_removed: Vec::new(),
+        objects_not_added: Vec::new(),
     })
 }
 
@@ -15905,6 +16342,7 @@ pub(crate) fn dev_refresh_inner(
         button_links_removed: Vec::new(),
         inline_button_code_held: 0,
         inline_button_code_removed: Vec::new(),
+        objects_not_added: Vec::new(),
     })
 }
 
@@ -16831,7 +17269,17 @@ pub(crate) fn owning_subscription_for_region(
     region_id: &str,
 ) -> Result<OwningSubscription, String> {
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-    for sub in &subs.subscriptions {
+    // EVERY subscription is asked, not the first that answers (BUG-0734): two
+    // applications can declare ONE region id -- a working copy of A published
+    // as a NEW application B by an earlier build kept A's region ids, and a
+    // hand-made package can carry any -- and the first answer sent
+    // the answers a subscriber typed into B's sheet to A's publisher, signed.
+    let mut owners: Vec<OwningSubscription> = Vec::new();
+    // The subscription INDEX of each owner found, beside it: claimants are
+    // counted by subscription, never by application name (two applications of
+    // one name from two workspaces are two claimants).
+    let mut owner_indices: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    for (index, sub) in subs.subscriptions.iter().enumerate() {
         if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
@@ -16859,7 +17307,8 @@ pub(crate) fn owning_subscription_for_region(
         };
         if let Some(ref regions) = manifest.writeback_regions {
             if let Some(declaration) = regions.iter().find(|r| r.id == region_id) {
-                return Ok(OwningSubscription {
+                owner_indices.insert(index);
+                owners.push(OwningSubscription {
                     package_name: sub.package_name.clone(),
                     resolved_version: sub.resolved_version.clone(),
                     registry_path,
@@ -16871,10 +17320,49 @@ pub(crate) fn owning_subscription_for_region(
             }
         }
     }
-    Err(format!(
-        "No subscription declares writeback region '{}'",
-        region_id
-    ))
+    // THE CLAIMANTS ARE COUNTED FROM LOCAL, VERIFIED STATE FIRST (BUG-0734):
+    // every subscription whose ledger recorded this region id at its subscribe
+    // or refresh is a claimant whether or not its workspace answered above. A
+    // claimant whose workspace is down, backed off or no longer pinned used to
+    // drop out of `owners`, and the other application became the one owner --
+    // answers typed into the first application's region were signed for the
+    // second and written into its workspace while the outage lasted.
+    let mut claimants: std::collections::BTreeSet<usize> =
+        recorded_region_claimants(&subs.subscriptions).remove(region_id).unwrap_or_default();
+    claimants.extend(owner_indices);
+    if claimants.len() > 1 {
+        return Err(region_shared_refusal(region_id, &claimant_labels(&subs.subscriptions, &claimants)));
+    }
+    the_one_region_owner(owners, region_id)
+}
+
+/// The ONE subscription that owns `region_id`, or the refusal (BUG-0734).
+///
+/// FAIL CLOSED ON A SHARED ID. A region id belongs to one application, but a
+/// working copy of application A published as a NEW application B by an
+/// earlier build kept A's region ids (this build re-keys them,
+/// `object_rekeys_for_target`, and a subscribe refuses a shared id,
+/// `refuse_region_already_declared`; a hand-made package can still carry
+/// one), so a subscriber to both holds two declarations of one id. The
+/// owner used to be whichever subscription answered first: the answers typed
+/// into B's region were signed and written into A's workspace, where A's
+/// publisher reads them -- one application's data collected by another. No
+/// guess is safe (both declarations are verified), so every subscriber-side
+/// door that resolves an owner -- submit, submit all, the draft save, the
+/// reads -- refuses by name until one of the two is unsubscribed or published
+/// again under ids of its own.
+pub(crate) fn the_one_region_owner(
+    mut owners: Vec<OwningSubscription>,
+    region_id: &str,
+) -> Result<OwningSubscription, String> {
+    match owners.len() {
+        0 => Err(format!("No subscription declares writeback region '{}'", region_id)),
+        1 => Ok(owners.remove(0)),
+        _ => Err(region_shared_refusal(
+            region_id,
+            &owners.iter().map(|o| o.package_name.clone()).collect(),
+        )),
+    }
 }
 
 /// Versions of an application strictly OLDER than `resolved_version` (semver
@@ -17468,7 +17956,7 @@ fn own_current_records_for_region(
 ///   false`); the read is never repeated.
 ///
 /// A region no subscription accounts for is absent from the map.
-fn own_sent_records_by_region(
+pub(crate) fn own_sent_records_by_region(
     state: &AppState,
 ) -> Result<std::collections::HashMap<String, Result<OwnSentRecords, String>>, String> {
     let own = get_subscriber_identity(state)?;
@@ -17491,7 +17979,12 @@ fn own_sent_records_by_region(
             .map(|(r, _)| r.clone())
             .collect()
     };
-    for sub in &subscriptions {
+    // Region id -> every subscription (by index) that claims it: its ledger's
+    // rows, plus each verified manifest read below. A region two subscriptions
+    // claim is answered by NEITHER (BUG-0734): this used to fill a region's
+    // cells with what was sent to whichever subscription declared it first.
+    let mut claimants = recorded_region_claimants(&subscriptions);
+    for (index, sub) in subscriptions.iter().enumerate() {
         let registry_path = subscription_registry_path(sub).to_string();
         if calp::dev_mode::is_dev_subscription(sub) || crate::calp_registry::is_http_location(&registry_path) {
             for region_id in regions_of_package(&sub.package_name) {
@@ -17533,8 +18026,10 @@ fn own_sent_records_by_region(
             crate::log_debug!("CALP", "writeback: a partial read of what was sent: {}", unread.join("; "));
         }
         for declared in manifest.writeback_regions.unwrap_or_default() {
-            // A region is answered by the FIRST subscription that declares it,
-            // as `owning_subscription_for_region` decides.
+            claimants.entry(declared.id.clone()).or_default().insert(index);
+            // A region is answered by the subscription that owns it, as
+            // `owning_subscription_for_region` decides; a shared one is
+            // refused below.
             if out.get(&declared.id).is_some_and(|r| r.is_ok()) {
                 continue;
             }
@@ -17545,6 +18040,11 @@ fn own_sent_records_by_region(
                     complete: unread.is_empty(),
                 }),
             );
+        }
+    }
+    for (region_id, indices) in claimants {
+        if indices.len() > 1 {
+            out.insert(region_id.clone(), Err(region_shared_refusal(&region_id, &claimant_labels(&subscriptions, &indices))));
         }
     }
     Ok(out)
@@ -21076,7 +21576,7 @@ mod writeback_claim_tests {
 /// (application, resolved version, workspace path, the SIGNED declaration). The
 /// declaration always comes from the signature-verified manifest — it is the
 /// governance every submit gate below re-validates against.
-fn owning_subscription_for_model_writeback(
+pub(crate) fn owning_subscription_for_model_writeback(
     state: &AppState,
     writeback_id: &str,
 ) -> Result<
@@ -21084,7 +21584,17 @@ fn owning_subscription_for_model_writeback(
     String,
 > {
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-    for sub in &subs.subscriptions {
+    // EVERY subscription is asked, and every claimant counted BY SUBSCRIPTION
+    // (BUG-0734): a working copy of A published as a NEW application B by an
+    // earlier build kept A's model writeback column ids, and the first
+    // subscription that declared one won -- an entry typed into B's model was
+    // signed for A and written into A's workspace, where A's publisher reads
+    // it. The ledger's rows count a claimant whose workspace cannot be reached.
+    let mut owners: Vec<(String, String, String, String, calp::writeback::ModelWritebackDeclaration, String)> =
+        Vec::new();
+    let mut claimants: std::collections::BTreeSet<usize> =
+        recorded_model_writeback_claimants(&subs.subscriptions).remove(writeback_id).unwrap_or_default();
+    for (index, sub) in subs.subscriptions.iter().enumerate() {
         if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
@@ -21111,7 +21621,8 @@ fn owning_subscription_for_model_writeback(
             .as_ref()
             .and_then(|d| d.iter().find(|d| d.id == writeback_id))
         {
-            return Ok((
+            claimants.insert(index);
+            owners.push((
                 sub.package_name.clone(),
                 sub.resolved_version.clone(),
                 registry_path,
@@ -21126,10 +21637,16 @@ fn owning_subscription_for_model_writeback(
             ));
         }
     }
-    Err(format!(
-        "No subscription declares writeback column '{}' — the application may need a re-pull",
-        writeback_id
-    ))
+    if claimants.len() > 1 {
+        return Err(model_writeback_shared_refusal(writeback_id, &claimant_labels(&subs.subscriptions, &claimants)));
+    }
+    match owners.len() {
+        1 => Ok(owners.remove(0)),
+        _ => Err(format!(
+            "No subscription declares writeback column '{}' — the application may need a re-pull",
+            writeback_id
+        )),
+    }
 }
 
 /// Submit one model writeback entry to the owning application's workspace
@@ -21147,6 +21664,9 @@ pub(crate) fn submit_model_writeback(
     key: Vec<String>,
     value: calp::writeback::SubmissionValue,
     identity: &calp::SubmitterIdentity,
+    // The workbook the submission was made in (BUG-0735): its audit row goes
+    // there, or to this computer's trail once that workbook is replaced.
+    audit: &crate::machine_audit::WorkbookAudit<'_>,
 ) -> Result<(), String> {
     let (package_name, resolved_version, registry_path, environment, decl, _publisher_key) =
         owning_subscription_for_model_writeback(state, wb.id())?;
@@ -21227,21 +21747,20 @@ pub(crate) fn submit_model_writeback(
     // Audit + refresh (the gather invalidation also queues the BI feeds).
     {
         let user = audit_user(state);
-        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
-            audit.record(
-                calp::audit::AuditEvent::WritebackSubmitted,
-                &format!(
-                    "Submitted model writeback '{}' ({}.{}) to {} v{}",
-                    wb.name(),
-                    decl.table,
-                    decl.column,
-                    package_name,
-                    resolved_version
-                ),
-                &user,
-                &now,
-            );
-        }
+        audit.record(
+            calp::audit::AuditEvent::WritebackSubmitted,
+            &format!(
+                "Submitted model writeback '{}' ({}.{}) to {} v{}",
+                wb.name(),
+                decl.table,
+                decl.column,
+                package_name,
+                resolved_version
+            ),
+            &user,
+            &now,
+            std::collections::HashMap::new(),
+        );
     }
     invalidate_gather_cache(state);
     Ok(())
@@ -23033,6 +23552,7 @@ fn gather_fingerprint(
         .map(|(region_id, region)| {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             region_id.hash(&mut h);
+            region.refused.hash(&mut h);
             let mut rows: Vec<String> = region
                 .submissions
                 .iter()
@@ -23196,8 +23716,16 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
         Ok(s) => s.subscriptions.clone(),
         Err(_) => return result,
     };
+    // Region id -> every subscription (by index) that declares it (read from
+    // none when there are two or more, BUG-0734). SEEDED FROM THE LEDGERS
+    // (`recorded_region_claimants`), so a claimant whose workspace is
+    // unreachable, backed off or unpinned below still counts: otherwise the
+    // other application's answers would feed this GATHER for as long as the
+    // outage lasted.
+    let mut claimants: std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> =
+        recorded_region_claimants(&subscriptions);
 
-    for sub in &subscriptions {
+    for (sub_index, sub) in subscriptions.iter().enumerate() {
         // Skip dev subscriptions
         if calp::dev_mode::is_dev_subscription(sub) {
             continue;
@@ -23369,12 +23897,23 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
                 })
             }).collect();
 
-            // First subscription declaring a region wins, matching the
-            // submit path (owning_subscription_for_region) — last-wins here
-            // would read a different workspace than submits write to.
+            // A REGION ID TWO SUBSCRIPTIONS DECLARE IS READ FROM NEITHER
+            // (BUG-0734), as the submit path refuses it
+            // (`the_one_region_owner`): the first subscription used to win,
+            // so a GATHER on one application's sheet totalled ANOTHER
+            // application's answers. Every subscription is still walked, so a
+            // third claimant cannot revive it.
+            claimants.entry(region.id.clone()).or_default().insert(sub_index);
             result
                 .entry(region.id.clone())
-                .or_insert(engine::GatherRegionData { submissions: gather_subs });
+                .or_insert(engine::GatherRegionData { submissions: gather_subs, refused: false });
+        }
+    }
+    // ...AND IT IS #REF! ON THE SHEET, not an empty region whose SUM is a
+    // plausible 0 (`GatherRegionData::refused`).
+    for (id, by) in &claimants {
+        if by.len() > 1 {
+            result.insert(id.clone(), engine::GatherRegionData { submissions: Vec::new(), refused: true });
         }
     }
 
@@ -23434,6 +23973,7 @@ mod gather_hot_path_tests {
                     cell_col: 0,
                     value: engine::EvalResult::Number(7.0),
                 }],
+                refused: false,
             },
         );
         m
@@ -25141,7 +25681,12 @@ fn load_embedded_data_sources(
             calculated_measures: Vec::new(),
         };
 
-        bi_state.connections.lock().unwrap().insert(conn_id, connection);
+        // Inserted through the ONE door that re-applies the app locale's
+        // FORMAT culture inside the connections lock (BUG-0731 d): a
+        // `set_locale` between the engine's birth above and this insert
+        // listed the engines without this one, and the application's DAX
+        // FORMAT kept writing the old locale until the next switch.
+        crate::bi::commands::insert_connection_with_current_culture(bi_state, conn_id, connection);
         ds_to_conn.insert(ds.definition.id.clone(), conn_id);
 
         crate::log_info!(
@@ -25412,6 +25957,76 @@ pub(crate) fn restore_application_bi_connections(
     )
 }
 
+/// GIVE EVERY SUBSCRIPTION ITS WRITEBACK-ID LEDGER ROWS (BUG-0734). Every
+/// claim set that decides "does one application own this id" counts a
+/// subscription's `writebackRegion` / `modelWriteback` rows first, so that a
+/// claimant whose workspace is down still counts. A subscription made by an
+/// earlier build has none until its next refresh; for it, an outage reopened
+/// the original leak. So at open, each subscription whose workspace answers
+/// gets a row for every region and model writeback column id its PINNED
+/// (verified) manifest declares that it does not already record -- exactly
+/// the rows its next refresh would write.
+///
+/// An HTTP workspace is not asked (no network wait while a workbook opens;
+/// its next refresh records them), nor is a development-mode subscription.
+/// Rows are derived from verified state the workbook already holds, so this
+/// does not dirty the document (`CleanReason::LoadingFromDisk`).
+pub(crate) fn backfill_writeback_id_ledgers(state: &AppState, profile_dir: &std::path::Path) {
+    let subscriptions = match state.subscriptions.read() {
+        Ok(s) => s.subscriptions.clone(),
+        Err(_) => return,
+    };
+    let mut additions: Vec<(usize, String, String, Vec<calp::manifest::SubscribedObject>)> = Vec::new();
+    for (index, sub) in subscriptions.iter().enumerate() {
+        let registry_path = subscription_registry_path(sub);
+        if calp::dev_mode::is_dev_subscription(sub) || crate::calp_registry::is_http_location(registry_path) {
+            continue;
+        }
+        let Ok((registry, scope)) = crate::calp_registry::open_workspace_scoped(registry_path) else {
+            continue;
+        };
+        let Ok(manifest) = calp::integrity::load_pinned_manifest_via(
+            registry.as_ref(),
+            &sub.package_name,
+            &sub.resolved_version,
+            &scope,
+            profile_dir,
+        ) else {
+            continue;
+        };
+        let recorded: std::collections::HashSet<(String, String)> = sub
+            .objects
+            .iter()
+            .filter(|o| o.kind == REGION_LEDGER_KIND || o.kind == MODEL_WRITEBACK_LEDGER_KIND)
+            .map(|o| (o.kind.clone(), o.id.clone()))
+            .collect();
+        let mut rows = region_ledger_entries(manifest.writeback_regions.as_deref().unwrap_or_default());
+        rows.extend(model_writeback_ledger_entries(manifest.model_writebacks.as_deref().unwrap_or_default()));
+        rows.retain(|r| !recorded.contains(&(r.kind.clone(), r.id.clone())));
+        if !rows.is_empty() {
+            additions.push((index, sub.package_name.clone(), sub.resolved_version.clone(), rows));
+        }
+    }
+    if additions.is_empty() {
+        return;
+    }
+    let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::LoadingFromDisk,
+    );
+    let Ok(mut subs) = state.subscriptions.write(&effect) else { return };
+    for (index, package_name, version, rows) in additions {
+        // The same subscription it was read from, never one that took its
+        // place while the workspaces were read.
+        if let Some(sub) = subs
+            .subscriptions
+            .get_mut(index)
+            .filter(|s| s.package_name == package_name && s.resolved_version == version)
+        {
+            sub.objects.extend(rows);
+        }
+    }
+}
+
 /// [`restore_application_bi_connections`] against an explicit trust profile
 /// (the pins), so a test can run the real restore over a temporary one.
 pub(crate) fn restore_application_bi_connections_in(
@@ -25421,6 +26036,11 @@ pub(crate) fn restore_application_bi_connections_in(
     slicer_state: &crate::slicer::SlicerState,
     profile_dir: &std::path::Path,
 ) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
+    // The open is also where a subscription made by an EARLIER build gets the
+    // writeback-id ledger rows this build records at every subscribe and
+    // refresh (BUG-0734): it MUST follow `restore_collaboration_user_files`,
+    // exactly like the restore below.
+    backfill_writeback_id_ledgers(state, profile_dir);
     // CLONED, not held: the walk below is workspace I/O and manifest hashing.
     let subscriptions = match state.subscriptions.read() {
         Ok(s) => s.subscriptions.clone(),
@@ -26713,7 +27333,32 @@ pub(crate) fn rekey_carried_data_sources(
             _ => {}
         }
     }
+    // A MODEL'S WRITEBACK COLUMNS BELONG TO ITS APPLICATION TOO (BUG-0734). A
+    // column's id is the `region_id` its entries are routed and filed by, and a
+    // re-keyed model kept its source's column ids: a subscriber to both
+    // applications sent an entry typed into the copy's model to the original's
+    // publisher, signed, and the copy's model read the original's entries. So
+    // every column of a re-keyed data source gets an id of this application's
+    // own -- derived from the data source's NEW key, which is already distinct
+    // per application and deterministic, so the next push keeps it -- in its
+    // declaration, in the embedded model (the column's `id` and the
+    // `__wb_{id}` store tables named after it) and in the publisher's baseline.
+    let mut column_rekeys: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
+        std::collections::HashMap::new();
+    for wb in model_writebacks.iter_mut() {
+        if let Some(own_ds) = rekeys.get(wb.data_source_id.as_str()) {
+            let own = model_writeback_id_for_data_source(own_ds, &wb.id);
+            column_rekeys.entry(wb.data_source_id.clone()).or_default().insert(wb.id.clone(), own.clone());
+            wb.id = own;
+        }
+    }
     for ds in data_sources.iter_mut() {
+        if let Some(columns) = column_rekeys.get(ds.id.as_str()) {
+            rekey_model_writeback_columns(&mut ds.model_json, columns);
+            if let Some(history) = ds.writeback_history_json.as_mut() {
+                rekey_model_writeback_columns(history, columns);
+            }
+        }
         swap(&mut ds.id, rekeys);
     }
     for wb in model_writebacks.iter_mut() {
@@ -26742,6 +27387,771 @@ pub(crate) fn rekey_carried_data_sources(
     workbook.cell_types.iter_mut().for_each(|c| walk(&mut c.cells, rekeys));
     workbook.cell_behaviors.iter_mut().for_each(|c| walk(&mut c.binding, rekeys));
     workbook.extension_data.values_mut().for_each(|v| walk(v, rekeys));
+}
+
+/// The id a model writeback column `source_id` gets in the data source an
+/// application files under `own_data_source_id` (BUG-0734): the
+/// [`object_key_for_application`] rule, keyed by the data source's own
+/// (already per-application) id. Lowercase UUID-shaped, which is the charset
+/// the engine requires of a writeback column id (`[a-z0-9-]`).
+pub(crate) fn model_writeback_id_for_data_source(own_data_source_id: &str, source_id: &str) -> String {
+    object_key_for_application("modelWriteback", own_data_source_id, source_id)
+}
+
+/// Rewrite one embedded model's writeback column ids through `columns` (old
+/// id -> new id): every string that IS an old id, every object key that is
+/// one, and every `__wb_{id without hyphens}` store-table name inside any
+/// string -- the engine names a column's synthesized history and current
+/// tables after its id (`WritebackColumn::history_table_name`), and an
+/// exposed history table can be named by a measure.
+pub(crate) fn rekey_model_writeback_columns(
+    value: &mut serde_json::Value,
+    columns: &std::collections::HashMap<String, String>,
+) {
+    if columns.is_empty() {
+        return;
+    }
+    let compact: Vec<(String, String)> = columns
+        .iter()
+        .map(|(old, own)| (format!("__wb_{}", old.replace('-', "")), format!("__wb_{}", own.replace('-', ""))))
+        .collect();
+    fn rewrite(s: &mut String, columns: &std::collections::HashMap<String, String>, compact: &[(String, String)]) {
+        if let Some(own) = columns.get(s.as_str()) {
+            *s = own.clone();
+            return;
+        }
+        for (old, own) in compact {
+            if s.contains(old.as_str()) {
+                *s = s.replace(old.as_str(), own);
+            }
+        }
+    }
+    fn walk(value: &mut serde_json::Value, columns: &std::collections::HashMap<String, String>, compact: &[(String, String)]) {
+        match value {
+            serde_json::Value::String(s) => rewrite(s, columns, compact),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|v| walk(v, columns, compact)),
+            serde_json::Value::Object(map) => {
+                let keys: Vec<String> = map.keys().cloned().collect();
+                for old in keys {
+                    let mut renamed = old.clone();
+                    rewrite(&mut renamed, columns, compact);
+                    if renamed != old {
+                        if let Some(v) = map.remove(&old) {
+                            map.insert(renamed, v);
+                        }
+                    }
+                }
+                map.values_mut().for_each(|v| walk(v, columns, compact));
+            }
+            _ => {}
+        }
+    }
+    walk(value, columns, &compact);
+}
+
+/// The id application `package_name` gives an OBJECT of family `family`
+/// (`"writebackRegion"`, `"chart"`, `"ribbonFilter"`) that it carries from
+/// ANOTHER application, where the object's id is `source_id` (BUG-0734, owner
+/// decision 2026-11-06).
+///
+/// [`data_source_key_for_application`]'s rule for the other ids an
+/// application owns: deterministic (the fork's next version, pushed from its
+/// own working copy, which a checkout gives exactly these ids, keeps them),
+/// distinct per application, per family and per source id, never the
+/// source's own. UUID-shaped (RFC 9562 version 8, from SHA-256), because every
+/// one of these ids is read back as an `EntityId` or a UUID v7 somewhere.
+pub(crate) fn object_key_for_application(family: &str, package_name: &str, source_id: &str) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"calcula.calp.object\0");
+    hasher.update(family.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(package_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80; // version 8 (custom)
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 9562 variant
+    identity::EntityId::from_bytes(bytes).to_string()
+}
+
+/// WHICH WRITEBACK REGIONS, CHARTS AND RIBBON FILTERS A PACKAGE FOR
+/// (`registry_path`, `package_name`) CARRIES UNDER IDS OF ITS OWN: id in this
+/// workbook -> id in that package (BUG-0734, owner decision 2026-11-06).
+///
+/// An object keeps its id in exactly one case: it is this workbook's own, or
+/// the application the workbook is a working copy of, pushed back to that
+/// application (every push must keep the ids the previous version used --
+/// a subscriber's refresh and ledger correlate by them). Two cases re-key:
+///
+/// * A FORK -- the workbook is a working copy of one application and this
+///   package is ANOTHER ("publish as a new application", another name or
+///   another workspace). Every region, chart and ribbon filter it carries
+///   came from, or was authored beside, the first application's, and before
+///   this a subscriber to both held two applications declaring one region id:
+///   answers typed into the copy's region were signed and written into the
+///   original's workspace (the wave-3 backstop `the_one_region_owner` now
+///   refuses that), and the copy's charts and filters were silently skipped.
+/// * A chart or ribbon filter a SUBSCRIPTION brought in, on any push: it is
+///   that subscription's application's object, never this one's (the
+///   data-source rule, [`data_source_rekeys_for_target`]).
+///
+/// A standalone workbook (no link) publishes its own ids: its first publish
+/// creates the application, and the link it then records makes every later
+/// push a push to that application, which keeps them. One that holds ANOTHER
+/// application's region ids (a template copy, a lost link) is refused at the
+/// publish instead ([`refuse_regions_another_application_declares`]).
+///
+/// The same rule covers slicers, timelines, pane controls and saved pivot
+/// layouts; and an `Err` names a carrier that would file two objects of one
+/// family under one id (`CALP_OBJECT_ID_TAKEN`).
+pub(crate) fn object_rekeys_for_target(
+    state: &AppState,
+    registry_path: &str,
+    package_name: &str,
+    workbook: &persistence::Workbook,
+    writeback_regions: Option<&[calp::WritebackRegionDeclaration]>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let forking = state
+        .working_copy_link
+        .read()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .is_some_and(|l| !l.targets(registry_path, package_name));
+    // (kind, id) -> the application whose subscription brought the object in.
+    let subscribed: std::collections::HashMap<(String, String), String> = state
+        .subscriptions
+        .read()
+        .map_err(|e| e.to_string())?
+        .subscriptions
+        .iter()
+        .flat_map(|s| s.objects.iter().map(move |o| (s, o)))
+        .filter(|(_, o)| SUBSCRIBED_REKEY_KINDS.contains(&o.kind.as_str()))
+        .map(|(s, o)| ((o.kind.clone(), o.id.clone()), s.package_name.clone()))
+        .collect();
+    let mut rekeys = std::collections::HashMap::new();
+    // Every id each family will carry, after the re-key: two objects of one
+    // family must never be filed under one id in one signed package.
+    let mut carried: std::collections::HashMap<&'static str, Vec<(String, String)>> = std::collections::HashMap::new();
+    let mut consider = |family: &'static str, ledger_kind: &str, id: String, rekeys: &mut std::collections::HashMap<String, String>| {
+        // A SUBSCRIBED object's id is derived WITH ITS SOURCE APPLICATION, so it
+        // can never land on the id this application derived for its own copy of
+        // the same source object (a fork that subscribes to its original: the
+        // fork's filter is `F'` = derive(B, F), and the original's `F` arriving
+        // by subscription re-keyed to derive(B, F) = `F'` too -- two filters
+        // under one id in B's signed package).
+        let own = match subscribed.get(&(ledger_kind.to_string(), id.clone())) {
+            Some(source) => Some(object_key_for_application(family, package_name, &format!("{source}\0{id}"))),
+            None if forking => Some(object_key_for_application(family, package_name, &id)),
+            None => None,
+        };
+        let shipped = own.clone().unwrap_or_else(|| id.clone());
+        carried.entry(family).or_default().push((id.clone(), shipped));
+        if let Some(own) = own {
+            rekeys.insert(id, own);
+        }
+    };
+    for chart in &workbook.charts {
+        consider("chart", "chart", chart.id.to_string(), &mut rekeys);
+    }
+    for filter in &workbook.ribbon_filters {
+        consider("ribbonFilter", "ribbonFilter", filter.id.to_string(), &mut rekeys);
+    }
+    // The pane's other objects a fork carries keep no id of the original's
+    // either: a subscriber to both used to skip the copy's slicers, timelines,
+    // pane controls and saved pivot layouts in silence, as it did its charts.
+    for slicer in &workbook.slicers {
+        consider("slicer", "slicer", slicer.id.to_string(), &mut rekeys);
+    }
+    for timeline in &workbook.timeline_slicers {
+        consider("timelineSlicer", "timelineSlicer", timeline.id.to_string(), &mut rekeys);
+    }
+    for control in &workbook.pane_controls {
+        consider("paneControl", "paneControl", control.id.to_string(), &mut rekeys);
+    }
+    for layout in &workbook.pivot_layouts {
+        consider("pivotLayout", "pivotLayout", layout.id.to_string(), &mut rekeys);
+    }
+    for region in writeback_regions.unwrap_or_default() {
+        let own = forking.then(|| object_key_for_application("writebackRegion", package_name, &region.id));
+        carried
+            .entry("writebackRegion")
+            .or_default()
+            .push((region.id.clone(), own.clone().unwrap_or_else(|| region.id.clone())));
+        if let Some(own) = own {
+            rekeys.insert(region.id.clone(), own);
+        }
+    }
+    // THE BACKSTOP: refuse, by name, a package that would carry one id twice.
+    for (family, ids) in &carried {
+        let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for (source, shipped) in ids {
+            if let Some(other) = seen.insert(shipped.as_str(), source.as_str()) {
+                if other != source.as_str() {
+                    return Err(format!(
+                        "CALP_OBJECT_ID_TAKEN: Publishing '{package_name}' would file two {family} objects \
+                         (ids {other} and {source}) under the one id {shipped}, so nothing was published. One \
+                         of them was brought in by a subscription and the other is this workbook's own copy of \
+                         it; delete the one this application should not carry and publish again."
+                    ));
+                }
+            }
+        }
+    }
+    Ok(rekeys)
+}
+
+/// The provenance-ledger kinds whose objects a push files under ids of its
+/// own when a SUBSCRIPTION brought them in ([`object_rekeys_for_target`]).
+const SUBSCRIBED_REKEY_KINDS: &[&str] = &["chart", "ribbonFilter", "slicer", "timelineSlicer", "paneControl", "pivotLayout"];
+
+/// THE PUBLISH-SIDE OF ONE REGION, ONE APPLICATION (BUG-0734): refuse a push
+/// whose carrier declares a writeback region id ANOTHER application in the
+/// same workspace already declares (in any of its versions) while the pushed
+/// application's own history does not.
+///
+/// The fork re-key ([`object_rekeys_for_target`]) is decided by the
+/// working-copy link, and a workbook can hold another application's region
+/// ids with no link naming it: a file copied as a template, a working copy
+/// whose link was lost (a missing or unreadable `working_copy_link.json` opens
+/// as a standalone workbook), or the regions a second checkout left beside the
+/// first's. Published as a new application, those ids would be declared by
+/// two applications, and a subscriber to both could send to neither. A
+/// re-key here cannot be the answer: the workbook's own designations and its
+/// `GATHER` formulas would keep the old ids, so its Collected Responses would
+/// read nothing of the new application's. The remedy is named instead.
+///
+/// The pushed application's OWN history keeps its ids: a region it already
+/// declares is its own (a package from an earlier build that shares it is
+/// refused on every subscriber, `refuse_region_already_declared`).
+///
+/// MODEL WRITEBACK COLUMN ids are asked too: they are routed and filed by the
+/// same `region_id`. And it FAILS CLOSED: an application whose versions or a
+/// version manifest cannot be read refuses the push rather than counting as
+/// one that declares nothing (BUG-0734, rekey2 verifier). This is the host's
+/// EARLY answer (and the push preview's); core publish asks the same question
+/// again under the workspace lock
+/// (`calp::publish::refuse_writeback_ids_another_application_declares`), so
+/// two first publishes of two copies cannot both pass it.
+pub(crate) fn refuse_regions_another_application_declares(
+    registry: &dyn calp::WorkspaceTransport,
+    package_name: &str,
+    regions: &[calp::WritebackRegionDeclaration],
+    model_writebacks: &[calp::writeback::ModelWritebackDeclaration],
+) -> Result<(), String> {
+    calp::publish::refuse_writeback_ids_another_application_declares(registry, package_name, regions, model_writebacks)
+        .map_err(|e| e.to_string())
+}
+
+/// The push PREVIEW's copy of [`refuse_regions_another_application_declares`]:
+/// the refusal the publish would give, as a warning (`None` when it would
+/// not). A workspace that cannot be opened says so too -- the publish would
+/// not get past it either.
+pub(crate) fn region_taken_preview_warning(
+    registry_path: &str,
+    package_name: &str,
+    regions: &[calp::WritebackRegionDeclaration],
+    model_writebacks: &[calp::writeback::ModelWritebackDeclaration],
+) -> Option<String> {
+    if regions.is_empty() && model_writebacks.is_empty() {
+        return None;
+    }
+    let refusal = match crate::calp_registry::open_workspace_scoped(registry_path) {
+        Ok((registry, _scope)) => {
+            refuse_regions_another_application_declares(registry.as_ref(), package_name, regions, model_writebacks).err()
+        }
+        Err(e) => Some(
+            calp::CalpError::WritebackIdsUnchecked { package: package_name.to_string(), reason: e.to_string() }.to_string(),
+        ),
+    }?;
+    Some(format!("The push would be refused: {refusal}"))
+}
+
+/// Rewrite every region, chart and ribbon-filter id the carrier names through
+/// `rekeys` ([`object_rekeys_for_target`]) -- BEFORE core publish signs
+/// anything, so the signed manifest and every signed record name the package's
+/// own ids and nothing is rewritten after the fact.
+///
+/// Where those ids are named: the region declarations themselves; every stored
+/// object family, walked whole as its saved JSON (charts and their specs,
+/// ribbon filters and their dependents and "selected visuals", object
+/// bindings, slicers, timelines, pane and grid controls, cell types and
+/// behaviours, floating ranges, pivots and their BI metadata, object scripts'
+/// instance ids, extension data, a canvas sheet's layout and interactions);
+/// and a FORMULA's string literal -- `=GATHER("<region id>")` names a region
+/// by its id, and a copy whose GATHER still named the original's id would read
+/// the original's answers on a subscriber to both. A cell or name whose text
+/// is exactly an id follows too (`=GATHER(A1)`). Matched EXACTLY: each id is an
+/// opaque UUID that names one object and nothing else.
+pub(crate) fn rekey_carried_objects(
+    workbook: &mut persistence::Workbook,
+    writeback_regions: Option<&mut Vec<calp::WritebackRegionDeclaration>>,
+    object_scripts: Option<&mut Vec<persistence::SavedObjectScript>>,
+    rekeys: &std::collections::HashMap<String, String>,
+) {
+    if rekeys.is_empty() {
+        return;
+    }
+    fn walk(value: &mut serde_json::Value, rekeys: &std::collections::HashMap<String, String>) -> bool {
+        match value {
+            serde_json::Value::String(s) => match rekeys.get(s.as_str()) {
+                Some(own) => {
+                    *s = own.clone();
+                    true
+                }
+                None => false,
+            },
+            serde_json::Value::Array(items) => items.iter_mut().fold(false, |changed, v| walk(v, rekeys) | changed),
+            serde_json::Value::Object(map) => {
+                let renamed: Vec<String> =
+                    map.keys().filter(|k| rekeys.contains_key(k.as_str())).cloned().collect();
+                let mut changed = !renamed.is_empty();
+                for old in renamed {
+                    if let Some(v) = map.remove(&old) {
+                        map.insert(rekeys[&old].clone(), v);
+                    }
+                }
+                for v in map.values_mut() {
+                    changed |= walk(v, rekeys);
+                }
+                changed
+            }
+            _ => false,
+        }
+    }
+    // A typed store, through its own saved JSON: a store that does not change
+    // keeps its value untouched (never re-serialised), and one whose rewritten
+    // JSON would not read back is left as it was and logged.
+    fn walk_typed<T: serde::Serialize + serde::de::DeserializeOwned>(
+        item: &mut T,
+        rekeys: &std::collections::HashMap<String, String>,
+    ) {
+        let Ok(mut value) = serde_json::to_value(&*item) else { return };
+        if !walk(&mut value, rekeys) {
+            return;
+        }
+        match serde_json::from_value::<T>(value) {
+            Ok(rekeyed) => *item = rekeyed,
+            Err(e) => crate::log_warn!("CALP", "an object store kept its ids: {e}"),
+        }
+    }
+    fn swap_literals(formula: &mut String, rekeys: &std::collections::HashMap<String, String>) {
+        for (old, own) in rekeys {
+            let quoted = format!("\"{old}\"");
+            if formula.contains(&quoted) {
+                *formula = formula.replace(&quoted, &format!("\"{own}\""));
+            }
+        }
+    }
+    if let Some(regions) = writeback_regions {
+        for region in regions.iter_mut() {
+            if let Some(own) = rekeys.get(&region.id) {
+                region.id = own.clone();
+            }
+        }
+    }
+    if let Some(scripts) = object_scripts {
+        scripts.iter_mut().for_each(|s| walk_typed(s, rekeys));
+    }
+    workbook.object_scripts.iter_mut().for_each(|s| walk_typed(s, rekeys));
+    workbook.charts.iter_mut().for_each(|c| walk_typed(c, rekeys));
+    workbook.ribbon_filters.iter_mut().for_each(|f| walk_typed(f, rekeys));
+    workbook.object_bindings.iter_mut().for_each(|b| {
+        walk_typed(b, rekeys);
+        swap_literals(&mut b.formula, rekeys);
+    });
+    workbook.slicers.iter_mut().for_each(|s| walk_typed(s, rekeys));
+    workbook.timeline_slicers.iter_mut().for_each(|t| walk_typed(t, rekeys));
+    workbook.pane_controls.iter_mut().for_each(|p| walk_typed(p, rekeys));
+    workbook.pivot_layouts.iter_mut().for_each(|l| walk_typed(l, rekeys));
+    workbook.controls.iter_mut().for_each(|c| walk_typed(c, rekeys));
+    workbook.cell_types.iter_mut().for_each(|c| walk_typed(c, rekeys));
+    workbook.cell_behaviors.iter_mut().for_each(|c| walk_typed(c, rekeys));
+    workbook.floating_ranges.iter_mut().for_each(|f| walk_typed(f, rekeys));
+    workbook.pivot_definitions.iter_mut().for_each(|p| walk_typed(p, rekeys));
+    workbook.bi_pivot_metadata.iter_mut().for_each(|v| {
+        walk(v, rekeys);
+    });
+    workbook.extension_data.values_mut().for_each(|v| {
+        walk(v, rekeys);
+    });
+    for named in workbook.named_ranges.iter_mut() {
+        swap_literals(&mut named.refers_to, rekeys);
+    }
+    for sheet in workbook.sheets.iter_mut() {
+        walk_typed(&mut sheet.kind, rekeys);
+        for cell in sheet.cells.values_mut() {
+            if let Some(formula) = cell.formula.as_mut() {
+                swap_literals(formula, rekeys);
+            }
+            if let persistence::SavedCellValue::Text(text) = &mut cell.value {
+                if let Some(own) = rekeys.get(text.as_str()) {
+                    *text = own.clone();
+                }
+            }
+        }
+    }
+}
+
+/// The provenance-ledger kind that records a writeback region id a
+/// subscription's verified version declared (BUG-0734).
+pub(crate) const REGION_LEDGER_KIND: &str = "writebackRegion";
+
+/// The ledger rows recording `regions` -- the region ids a subscribe or a
+/// refresh read from the PINNED (verified) manifest it materialized.
+///
+/// LOCAL, VERIFIED, AND INDEPENDENT OF REACHABILITY. Every claim set that
+/// decides "does one application own this region id" used to be asked only of
+/// the workspaces that answered and verified just then, so while one of two
+/// claimants' workspaces was down, backed off or unpinned, the other was the
+/// only claimant: answers typed into the first application's region were
+/// signed for the second and written into its workspace, and a GATHER on the
+/// first application's sheet totalled the second's answers -- the original
+/// BUG-0734 leak, for as long as the outage lasted. These rows are what the
+/// claim sets read first (`recorded_region_claims`), and a live answer can only
+/// ADD a claimant, never remove one.
+pub(crate) fn region_ledger_entries(
+    regions: &[calp::WritebackRegionDeclaration],
+) -> Vec<calp::manifest::SubscribedObject> {
+    regions
+        .iter()
+        .map(|r| calp::manifest::SubscribedObject {
+            kind: REGION_LEDGER_KIND.to_string(),
+            id: r.id.clone(),
+            name: String::new(),
+            extra: std::collections::HashMap::new(),
+        })
+        .collect()
+}
+
+/// The provenance-ledger kind that records a MODEL writeback column id a
+/// subscription's verified version declared (BUG-0734). A model column's id is
+/// the `region_id` its entries are routed and filed by, exactly like a grid
+/// region's, so it is claimed, counted and refused the same way.
+pub(crate) const MODEL_WRITEBACK_LEDGER_KIND: &str = "modelWriteback";
+
+/// The ledger rows recording `declarations` -- the model writeback column ids
+/// a subscribe or a refresh read from the PINNED manifest it materialized
+/// ([`region_ledger_entries`]'s twin).
+pub(crate) fn model_writeback_ledger_entries(
+    declarations: &[calp::writeback::ModelWritebackDeclaration],
+) -> Vec<calp::manifest::SubscribedObject> {
+    declarations
+        .iter()
+        .map(|d| calp::manifest::SubscribedObject {
+            kind: MODEL_WRITEBACK_LEDGER_KIND.to_string(),
+            id: d.id.clone(),
+            name: d.column.clone(),
+            extra: std::collections::HashMap::new(),
+        })
+        .collect()
+}
+
+/// The two families of writeback id a subscriber routes answers by (BUG-0734).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WritebackIdKind {
+    /// A grid writeback region (`writeback_regions`).
+    Region,
+    /// A model writeback column (`model_writebacks`).
+    ModelColumn,
+}
+
+impl WritebackIdKind {
+    fn ledger_kind(self) -> &'static str {
+        match self {
+            Self::Region => REGION_LEDGER_KIND,
+            Self::ModelColumn => MODEL_WRITEBACK_LEDGER_KIND,
+        }
+    }
+
+    /// The ids of this family a verified version manifest declares.
+    fn declared_in(self, manifest: &calp::manifest::VersionManifest) -> Vec<String> {
+        match self {
+            Self::Region => manifest.writeback_regions.iter().flatten().map(|r| r.id.clone()).collect(),
+            Self::ModelColumn => manifest.model_writebacks.iter().flatten().map(|m| m.id.clone()).collect(),
+        }
+    }
+
+    /// The ids of this family a pulled (verified) version declares.
+    fn declared_in_pull(self, pulled: &calp::pull::PullResult) -> Vec<String> {
+        match self {
+            Self::Region => pulled.writeback_regions.iter().map(|r| r.id.clone()).collect(),
+            Self::ModelColumn => pulled.model_writebacks.iter().map(|m| m.id.clone()).collect(),
+        }
+    }
+}
+
+/// Id -> the subscriptions (by INDEX into `subscriptions`) whose ledger
+/// records it under `ledger_kind`. No workspace is opened.
+fn recorded_claimants_of_kind(
+    subscriptions: &[calp::manifest::Subscription],
+    ledger_kind: &str,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> {
+    let mut claims: std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> =
+        std::collections::BTreeMap::new();
+    for (index, sub) in subscriptions.iter().enumerate() {
+        if calp::dev_mode::is_dev_subscription(sub) {
+            continue;
+        }
+        for o in sub.objects.iter().filter(|o| o.kind == ledger_kind) {
+            claims.entry(o.id.clone()).or_default().insert(index);
+        }
+    }
+    claims
+}
+
+/// Region id -> the subscriptions (by INDEX into `subscriptions`) whose ledger
+/// records it ([`region_ledger_entries`]). No workspace is opened.
+pub(crate) fn recorded_region_claimants(
+    subscriptions: &[calp::manifest::Subscription],
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> {
+    recorded_claimants_of_kind(subscriptions, REGION_LEDGER_KIND)
+}
+
+/// Model writeback column id -> the subscriptions (by INDEX) whose ledger
+/// records it ([`model_writeback_ledger_entries`]). No workspace is opened.
+pub(crate) fn recorded_model_writeback_claimants(
+    subscriptions: &[calp::manifest::Subscription],
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> {
+    recorded_claimants_of_kind(subscriptions, MODEL_WRITEBACK_LEDGER_KIND)
+}
+
+/// EVERY CLAIM, BY SUBSCRIPTION INDEX (BUG-0734): id -> the subscriptions whose
+/// LEDGER records it, plus those whose PINNED (verified) manifest declares it
+/// now when the workspace answers. Subscriptions in `skip` are left out (a
+/// refresh counts what the refreshed ones will declare AFTERWARDS instead).
+///
+/// BY INDEX, NEVER BY APPLICATION NAME. A subscriber may hold two applications
+/// of one name from two workspaces (`calp_pull` allows the same name from
+/// another workspace); counting names made them ONE claimant, so a refresh
+/// that brought one of them the other's region id was not refused, and while
+/// one workspace was down the other became the one owner.
+pub(crate) fn writeback_claims_by_index(
+    subscriptions: &[calp::manifest::Subscription],
+    kind: WritebackIdKind,
+    skip: &std::collections::HashSet<usize>,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> {
+    let mut claims = recorded_claimants_of_kind(subscriptions, kind.ledger_kind());
+    for set in claims.values_mut() {
+        set.retain(|i| !skip.contains(i));
+    }
+    claims.retain(|_, set| !set.is_empty());
+    for (index, sub) in subscriptions.iter().enumerate() {
+        if skip.contains(&index) || calp::dev_mode::is_dev_subscription(sub) {
+            continue;
+        }
+        let Ok((registry, scope)) = crate::calp_registry::open_workspace_scoped(subscription_registry_path(sub))
+        else {
+            continue;
+        };
+        let Ok(manifest) = calp::integrity::load_pinned_manifest_via(
+            registry.as_ref(),
+            &sub.package_name,
+            &sub.resolved_version,
+            &scope,
+            &calcula_profile_dir(),
+        ) else {
+            continue;
+        };
+        for id in kind.declared_in(&manifest) {
+            claims.entry(id).or_default().insert(index);
+        }
+    }
+    claims
+}
+
+/// How a refusal names the subscriptions in `indices`: by application name,
+/// and with its workspace when another subscription of this workbook shares
+/// that name -- "'report', 'report'" would read as one application, and a
+/// lone "'report'" would not say WHICH.
+pub(crate) fn claimant_labels(
+    subscriptions: &[calp::manifest::Subscription],
+    indices: &std::collections::BTreeSet<usize>,
+) -> std::collections::BTreeSet<String> {
+    indices
+        .iter()
+        .filter_map(|&i| subscriptions.get(i))
+        .map(|sub| {
+            let twins = subscriptions.iter().filter(|o| o.package_name == sub.package_name).count();
+            if twins > 1 {
+                format!("{} in {}", sub.package_name, sub.registry_url)
+            } else {
+                sub.package_name.clone()
+            }
+        })
+        .collect()
+}
+
+/// The refusal every subscriber-side door gives for a region id more than one
+/// subscribed application declares (BUG-0734).
+pub(crate) fn region_shared_refusal(region_id: &str, applications: &std::collections::BTreeSet<String>) -> String {
+    format!(
+        "CALP_REGION_SHARED: The writeback region '{}' is declared by more than one \
+         application this workbook subscribes to ({}). An answer typed into it could reach \
+         the wrong application's publisher, so nothing was sent or read. Unsubscribe from \
+         one of them, or ask its publisher to publish the region again under an id of its \
+         own.",
+        region_id,
+        applications.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "),
+    )
+}
+
+/// Every writeback region id the subscriptions in `subscriptions` declare, and
+/// by which application: what each one's LEDGER recorded at its subscribe or
+/// refresh ([`recorded_region_claimants`]), plus what its PINNED (verified)
+/// manifest declares now when its workspace answers -- the trust question
+/// `owning_subscription_for_region` asks. An unreachable workspace removes no
+/// claim: its ledger still makes it a claimant.
+pub(crate) fn subscribed_region_claims(
+    subscriptions: &[calp::manifest::Subscription],
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    subscribed_writeback_claims(subscriptions, WritebackIdKind::Region)
+}
+
+/// [`subscribed_region_claims`] for either family of writeback id: id -> the
+/// labels ([`claimant_labels`]) of every subscription that claims it, counted
+/// by subscription ([`writeback_claims_by_index`]).
+pub(crate) fn subscribed_writeback_claims(
+    subscriptions: &[calp::manifest::Subscription],
+    kind: WritebackIdKind,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    writeback_claims_by_index(subscriptions, kind, &std::collections::HashSet::new())
+        .into_iter()
+        .map(|(id, indices)| (id, claimant_labels(subscriptions, &indices)))
+        .collect()
+}
+
+/// The refusal for a model writeback column id more than one subscribed
+/// application declares (BUG-0734) -- the model twin of
+/// [`region_shared_refusal`].
+pub(crate) fn model_writeback_shared_refusal(
+    writeback_id: &str,
+    applications: &std::collections::BTreeSet<String>,
+) -> String {
+    format!(
+        "CALP_WRITEBACK_COLUMN_SHARED: The model writeback column '{}' is declared by more than one \
+         application this workbook subscribes to ({}). An entry typed into it could reach the wrong \
+         application's publisher, so nothing was sent or read. Unsubscribe from one of them, or ask its \
+         publisher to publish it again (this version of Calcula gives an application published from \
+         another application's model writeback columns of its own).",
+        writeback_id,
+        applications.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "),
+    )
+}
+
+/// The subscribe-time side of one model writeback column, one application
+/// (BUG-0734): [`refuse_region_already_declared`] for `model_writebacks`.
+pub(crate) fn refuse_model_writeback_already_declared(
+    incoming: &[calp::writeback::ModelWritebackDeclaration],
+    package_name: &str,
+    claims: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> Result<(), String> {
+    for column in incoming {
+        if let Some(others) = claims.get(&column.id) {
+            return Err(format!(
+                "CALP_WRITEBACK_COLUMN_SHARED: '{}' declares the model writeback column '{}' ({}), which {} \
+                 also declare{} in this workbook. Every entry is sent by that id, so entries typed into either \
+                 could not be sent to the right application, and nothing was changed. Unsubscribe from one of \
+                 them, or ask the publisher of '{}' to publish it again (this version of Calcula gives an \
+                 application published from another application's model writeback columns of its own).",
+                package_name,
+                column.column,
+                column.id,
+                others.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "),
+                if others.len() == 1 { "s" } else { "" },
+                package_name,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// THE SUBSCRIBE-TIME SIDE OF ONE REGION, ONE APPLICATION (BUG-0734): refuse a
+/// subscription that would declare a writeback region id another subscription
+/// already declares, by name, before anything is written. Every answer is
+/// routed by its region id (`owning_subscription_for_region`), so the second
+/// claimant would leave both regions unable to send; the remedy is the
+/// publisher's -- this version of Calcula gives a copy published as a new
+/// application region ids of its own.
+pub(crate) fn refuse_region_already_declared(
+    incoming: &[calp::WritebackRegionDeclaration],
+    package_name: &str,
+    claims: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> Result<(), String> {
+    for region in incoming {
+        if let Some(others) = claims.get(&region.id) {
+            return Err(format!(
+                "CALP_REGION_SHARED: '{}' declares the writeback region '{}', which {} also \
+                 declare{} in this workbook. Every answer is sent by its region id, so answers \
+                 typed into either region could not be sent to the right application, and nothing \
+                 was changed. Unsubscribe from one of them, or ask the publisher of '{}' to publish \
+                 it again (this version of Calcula gives an application published from another \
+                 application's working copy region ids of its own).",
+                package_name,
+                region.id,
+                others.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "),
+                if others.len() == 1 { "s" } else { "" },
+                package_name,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`refuse_region_already_declared`] for every payload of a refresh
+/// (BUG-0734): a refresh that brings a version declaring a writeback region id
+/// ANOTHER subscription declares is refused by name, before its effect, as the
+/// subscribe is. What another subscription declares is what it will declare
+/// AFTERWARDS: the new version's regions when this refresh updates it too
+/// (so a copy re-published under ids of its own and the original can both be
+/// updated in one refresh), else its ledger's recorded ids plus its pinned
+/// manifest's -- an unreachable workspace removes no claim.
+///
+/// Counted BY SUBSCRIPTION INDEX, and only the refreshed subscription's OWN
+/// index is excused: two applications of one name from two workspaces are two
+/// claimants (removing the payload's NAME from every claim set removed the
+/// other workspace's claim too, so a same-named copy could be refreshed onto
+/// the original's region id). Model writeback column ids are refused the same
+/// way (`CALP_WRITEBACK_COLUMN_SHARED`).
+pub(crate) fn refuse_refreshed_regions_already_declared(
+    state: &AppState,
+    payloads: &[calp::refresh::RefreshPayload],
+) -> Result<(), String> {
+    let subscriptions = state.subscriptions.read().map_err(|e| e.to_string())?.subscriptions.clone();
+    let refreshed: std::collections::HashSet<usize> = payloads.iter().map(|p| p.subscription_index).collect();
+    for kind in [WritebackIdKind::Region, WritebackIdKind::ModelColumn] {
+        let mut claims = writeback_claims_by_index(&subscriptions, kind, &refreshed);
+        for payload in payloads {
+            for id in kind.declared_in_pull(&payload.pull_result) {
+                claims.entry(id).or_default().insert(payload.subscription_index);
+            }
+        }
+        for payload in payloads {
+            let others: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = claims
+                .iter()
+                .filter_map(|(id, set)| {
+                    let mut set = set.clone();
+                    set.remove(&payload.subscription_index);
+                    (!set.is_empty()).then(|| (id.clone(), claimant_labels(&subscriptions, &set)))
+                })
+                .collect();
+            match kind {
+                WritebackIdKind::Region => refuse_region_already_declared(
+                    &payload.pull_result.writeback_regions,
+                    &payload.pull_result.package_name,
+                    &others,
+                )?,
+                WritebackIdKind::ModelColumn => refuse_model_writeback_already_declared(
+                    &payload.pull_result.model_writebacks,
+                    &payload.pull_result.package_name,
+                    &others,
+                )?,
+            }
+        }
+    }
+    Ok(())
 }
 
 /// THE SUBSCRIBER'S SIDE OF ONE KEY, ONE CONNECTION: refuse to bring in a data
@@ -29813,6 +31223,12 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
          install never changes the subscriber's mode, so the publisher's mode \
          has nothing to set on the other side and nothing the subscriber relies \
          on is lost.",
+    ),
+    (
+        "calculation_except_tables",
+        "SILENT: the other half of the same APPLICATION calculation mode \
+         (Automatic except for data tables, BUG-0754), recorded and adopted \
+         exactly as calculation_manual is, for the same reason.",
     ),
     (
         "format_version",

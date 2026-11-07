@@ -858,6 +858,161 @@ async fn bare_division_reset_share_groups_by_a_fact_column() {
     assert!((ratio[&2] - 60.0 / 190.0).abs() < 1e-9, "{}", ratio[&2]);
 }
 
+/// The clear fixture plus a SECOND fact, `Returns(prod_id, qty)` -> Product
+/// (Bikes 1, Helmets 2 + 3), so a query holding a Returns measure beside the
+/// Sales shares takes the MULTI-FACT route (`execute_multi_group_aggregation`),
+/// which renders its compound measures on its own.
+fn multi_fact_engine() -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Product",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Returns",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("qty", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Product",
+            "Sales",
+            "prod_id",
+            "Product",
+            "id",
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Returns_Product",
+            "Returns",
+            "prod_id",
+            "Product",
+            "id",
+        ))
+        .add_measure(expression_measure(
+            "PctOfTotal",
+            parse_measure("DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], RESET()))").unwrap(),
+        ))
+        .add_measure(expression_measure(
+            "ShareRatio",
+            parse_measure("SUM(Sales[amount]) / SUM(Sales[amount], RESET())").unwrap(),
+        ))
+        .add_measure(sum_measure("ReturnQty", "Returns", "qty"))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    for t in ["Sales", "Product", "Returns"] {
+        engine.bind_table(t, 0, SourceBinding::new("public", &t.to_lowercase()));
+    }
+    let base = clear_engine();
+    for t in ["Sales", "Product"] {
+        engine
+            .cache
+            .store(t, base.cache.get(t).expect("fixture batch").clone())
+            .unwrap();
+    }
+    engine
+        .cache
+        .store(
+            "Returns",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("prod_id", ArrowType::Int64, true),
+                    Field::new("qty", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2, 2])),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn compound_reset_share_groups_by_a_fact_column_on_the_multi_fact_route() {
+    // BUG-0444's compound RESET shape on the MULTI-FACT route (BUG-0730):
+    // `DIVIDE(SUM(x), SUM(x, RESET()))` grouped by a FACT column, beside a
+    // second fact's measure. The route repeats the share in its HAVING, so an
+    // inline grand-total subquery failed there exactly as on the single-fact
+    // route ("No field named __scalar_sq_1.__clear_scalar"). Returns does not
+    // reach Sales[prod_id], so its total (6) repeats on every row.
+    let engine = multi_fact_engine();
+    for measures in [
+        vec!["PctOfTotal", "ReturnQty"],
+        vec!["ShareRatio", "PctOfTotal", "ReturnQty"],
+    ] {
+        let req = QueryRequest {
+            measures: measures.iter().map(|m| m.to_string()).collect(),
+            group_by: vec![ColumnRef::new("Sales", "prod_id")],
+            ..Default::default()
+        };
+        let batches = engine.query(req).await.unwrap_or_else(|e| {
+            panic!("{measures:?} by Sales[prod_id] on the multi-fact route: {e}")
+        });
+        let returns = grouped_i64(&batches, "prod_id", "ReturnQty");
+        for share in measures.iter().filter(|m| **m != "ReturnQty") {
+            let got = grouped_i64(&batches, "prod_id", share);
+            for (k, want) in [(1_i64, 130.0 / 190.0), (2, 60.0 / 190.0)] {
+                assert!((got[&k] - want).abs() < 1e-9, "{share} {k}: {}", got[&k]);
+                assert_eq!(returns[&k], 6.0, "ReturnQty broadcast to prod_id {k}");
+            }
+        }
+    }
+    // A fact column AND a dimension column: the Returns group is grouped by
+    // the dimension it reaches and combined on it.
+    let req = QueryRequest {
+        measures: vec!["PctOfTotal".into(), "ReturnQty".into()],
+        group_by: vec![
+            ColumnRef::new("Product", "name"),
+            ColumnRef::new("Sales", "prod_id"),
+        ],
+        ..Default::default()
+    };
+    let batches = engine
+        .query(req)
+        .await
+        .expect("a compound RESET share by fact + dimension columns on the multi-fact route");
+    let pct = grouped(&batches, "PctOfTotal");
+    let returns = grouped(&batches, "ReturnQty");
+    assert!(
+        (pct["Bikes"] - 130.0 / 190.0).abs() < 1e-9,
+        "Bikes {}",
+        pct["Bikes"]
+    );
+    assert!(
+        (pct["Helmets"] - 60.0 / 190.0).abs() < 1e-9,
+        "Helmets {}",
+        pct["Helmets"]
+    );
+    assert_eq!(returns["Bikes"], 1.0);
+    assert_eq!(returns["Helmets"], 5.0);
+}
+
 fn format_engine() -> Engine {
     let model = DataModel::builder()
         .add_table(
@@ -951,7 +1106,9 @@ async fn dax_format_writes_the_format_string_in_the_engines_culture() {
     engine.set_format_culture(crate::FormatCulture::sv_se());
     let batches = engine.query(req).await.expect("FORMAT under sv-SE");
     assert_eq!(grouped_text(&batches, "Fmt")["Bikes"], "1\u{a0}300,00");
-    assert_eq!(grouped_text(&batches, "FmtCurrency")["Bikes"], "1\u{a0}300,00\u{a0}kr");
+    // [LIVE] Excel 16's data model under sv-SE: a plain space before "kr"
+    // (the no-break space is the group separator only; BUG-0731).
+    assert_eq!(grouped_text(&batches, "FmtCurrency")["Bikes"], "1\u{a0}300,00 kr");
     assert_eq!(grouped_text(&batches, "FmtPct")["Bikes"], "68,4%");
 }
 

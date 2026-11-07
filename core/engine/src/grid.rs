@@ -429,6 +429,7 @@ mod tests {
             CellError::Conflict,
             CellError::Blocked,
             CellError::Limit,
+            CellError::Calc,
         ];
 
         let mut grid = Grid::new();

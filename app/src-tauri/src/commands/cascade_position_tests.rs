@@ -540,7 +540,8 @@ fn every_same_sheet_cascade_evaluates_through_the_positioned_per_cell_evaluator(
             command
         );
         assert!(
-            !body.contains("evaluate_formula_raw_with_ast_files_and_cube("),
+            !body.contains("evaluate_formula_raw_with_ast_files_and_cube(")
+                && !body.contains("evaluate_formula_raw_with_ast_files_cube_and_pivot("),
             "`{}` evaluates a cell through the POSITIONLESS entry point again -- \
              ROW()/COLUMN() answer #VALUE!, `@` intersects row 1, and a cube or \
              custom-function cell is clobbered instead of kept",
@@ -560,7 +561,8 @@ fn the_cross_sheet_walk_evaluates_each_dependent_at_its_own_cell() {
         "the cross-sheet walk's per-cell step must evaluate the dependent at its own cell"
     );
     assert!(
-        !walked.contains("evaluate_formula_raw_with_ast_files_and_cube("),
+        !walked.contains("evaluate_formula_raw_with_ast_files_and_cube(")
+            && !walked.contains("evaluate_formula_raw_with_ast_files_cube_and_pivot("),
         "the cross-sheet walk's per-cell step went back to the positionless entry point"
     );
 }

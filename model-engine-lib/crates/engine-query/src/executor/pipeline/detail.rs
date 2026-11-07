@@ -106,6 +106,7 @@ impl QueryExecutor {
             crate::request::ColumnRef,
             engine_core::compute::expression::Expression,
         )],
+        udfs: Option<&engine_core::compute::udf::UdfRegistry>,
         token: &CancellationToken,
     ) -> QueryResult<Vec<RecordBatch>> {
         // Cancellation checkpoint: before any work.
@@ -235,10 +236,13 @@ impl QueryExecutor {
         for dim in &propagate_dims {
             // The detail↔dimension relationship must be the one propagatable
             // shape. `find_relationship` returns only ACTIVE relationships; we
-            // additionally require single-condition equi. This MUST agree with
-            // the aggregation IN-propagation gate and with `rls_relevance`'s
-            // `fact_restrictable_by_dimension` — if it disagreed we could drop
-            // a restriction the fail-closed check assumed enforceable.
+            // additionally require the one shape a role restriction propagates
+            // through, in EITHER direction: the shared gate
+            // `security_filter::role_restriction_propagates` (single-column
+            // equality), the same function the aggregation fetch's key
+            // propagation and `rls_relevance`'s `fact_restrictable_by_dimension`
+            // call -- if this copy disagreed we could drop a restriction the
+            // fail-closed check assumed enforceable.
             let Ok(rel) = model.find_relationship(detail_table, dim) else {
                 // A dimension carrying a cell filter but no active relationship
                 // to the detail table cannot restrict it — reject (cell
@@ -250,7 +254,7 @@ impl QueryExecutor {
                      relationship to the detail table '{detail_table}'"
                 )));
             };
-            if rel.conditions().len() != 1 || !rel.is_equi_only() {
+            if !crate::security_filter::role_restriction_propagates(rel) {
                 return Err(QueryError::InvalidQuery(format!(
                     "drillthrough filter targets dimension '{dim}', related to the detail \
                      table '{detail_table}' only through a relationship that cannot be \
@@ -486,7 +490,7 @@ impl QueryExecutor {
             return Ok(final_batches);
         }
         check_cancelled(token)?;
-        append_context_columns(final_batches, context_column_exprs, detail_table).await
+        append_context_columns(final_batches, context_column_exprs, detail_table, udfs).await
     }
 }
 
@@ -507,11 +511,18 @@ async fn append_context_columns(
         engine_core::compute::expression::Expression,
     )],
     detail_table: &str,
+    udfs: Option<&engine_core::compute::udf::UdfRegistry>,
 ) -> QueryResult<Vec<RecordBatch>> {
     if batches.is_empty() {
         return Ok(batches);
     }
-    let ctx = SessionContext::new();
+    // The engine's UDFs (calcula_format, script and host functions): a
+    // context column holding FORMAT or a UDF call failed here with "Invalid
+    // function 'calcula_format'" while the grouped query answered.
+    let ctx = match udfs {
+        Some(registry) => engine_core::compute::udf::session_context_with_udfs(registry),
+        None => SessionContext::new(),
+    };
     let table = detail_table.to_lowercase();
     register_partitioned_table(&ctx, &table, batches)?;
 

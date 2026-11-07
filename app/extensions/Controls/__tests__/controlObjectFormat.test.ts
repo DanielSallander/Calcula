@@ -361,6 +361,17 @@ describe("bindingPath answers FROM CONTAINER_BINDING_PATHS", () => {
     expect(CONTAINER_BINDING_PATHS.button["border.color"]).toBe("/properties/borderColor");
     expect(CONTAINER_BINDING_PATHS.pageNavigator["background.color"]).toBe("/properties/containerBackgroundColor");
   });
+
+  // BUG-0772: a shape's (text box's, button's) background transparency
+  // could not be bound -- the row was null although the shape paints the key.
+  // SABOTAGE: put the shape's "background.transparency" back to null.
+  it("background transparency binds on every kind, at the key that paints it", () => {
+    for (const kind of CONTROL_CONTAINER_KINDS) {
+      const path = CONTAINER_BINDING_PATHS[kind]["background.transparency"];
+      expect(path, kind).toBe("/properties/" + BACKGROUND_TRANSPARENCY_KEY);
+      expect(isBindablePath("control", path!), kind).not.toBeNull();
+    }
+  });
 });
 
 // ============================================================================

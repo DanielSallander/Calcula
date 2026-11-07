@@ -529,7 +529,11 @@ impl<'a> Lexer<'a> {
         let mut ident = String::from(first_char);
 
         while let Some(&ch) = self.input.peek() {
-            if is_letter(ch) || ch.is_ascii_digit() {
+            // `?` CONTINUES a name (it never starts one): [LIVE, Excel 16,
+            // 2026-11-06, lane names q2.ps1] `abc?`, `a?b`, `_?` are defined
+            // names and `=abc?` reads one (BUG-0741). Nothing else in a
+            // formula outside a string is a `?`.
+            if is_letter(ch) || ch.is_ascii_digit() || ch == '?' {
                 ident.push(ch);
                 self.input.next();
             } else if ch == '.' {
@@ -541,7 +545,7 @@ impl<'a> Lexer<'a> {
                 let mut look = self.input.clone();
                 look.next();
                 match look.peek() {
-                    Some(&next) if is_letter(next) || next.is_ascii_digit() => {
+                    Some(&next) if is_letter(next) || next.is_ascii_digit() || next == '?' => {
                         ident.push(ch);
                         self.input.next();
                     }

@@ -22,6 +22,8 @@ import {
   getMergedRegions,
   shiftFormulasBatch,
   getRangeCellsTyped,
+  getCell,
+  getStyle,
 } from "../../lib/tauri-api";
 import {
   ownUndoTransaction,
@@ -497,6 +499,10 @@ export function useSpreadsheetEditing({
         write: (updates) => updateCellsBatch(updates),
         shift: (inputs) => shiftFormulasBatch(inputs),
         typeAt: async (row, col) => (await getRangeCellsTyped(row, col, row, col))[0]?.type ?? "empty",
+        textFormatAt: async (row, col) => {
+          const cell = await getCell(row, col);
+          return cell ? (await getStyle(cell.styleIndex)).numberFormat === "@" : false;
+        },
       });
       await tx.commit();
 

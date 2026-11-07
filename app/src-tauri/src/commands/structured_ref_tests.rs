@@ -1047,7 +1047,8 @@ fn command_wiring() {
         "add_table_column",
         "remove_table_column",
         "rename_table_column_core",
-        "enforce_table_header",
+        // The command is a wrapper; its body is `enforce_table_header_core`.
+        "enforce_table_header_core",
         // These four commands are wrappers over their `_core`s.
         "check_table_auto_expand_core",
         "add_table_row_core",
@@ -1248,6 +1249,44 @@ fn the_range_operator_spans_structured_references_and_name_halves() {
     wb.set(15, 9, "=SUM(sheet1!A1:SHEET1!A3)");
     assert_eq!(wb.formula_of(0, 15, 9), "SUM(Sheet1!A1:Sheet1!A3)", "both qualifiers, spelled as the tab is");
     assert_eq!(wb.number(0, 15, 9), 6.0);
+}
+
+/// BUG-0737 through the real entry path: a LAMBDA parameter called with a
+/// reference as a range half, a function-call half, an unqualified first half
+/// with a qualified second, and the INTERIOR of a LET-name span as a precedent.
+/// [LIVE, Excel 16, lane formula p1.json, A1:A5 = 1..5, B = 10x, C = 100x:
+/// `LAMBDA(b,SUM(A1:b))(A3)` 6, `SUM(A1:INDEX(A1:A5,3))` 6,
+/// `SUM(A1:Sheet1!A3)` 6 (shown as typed), `LET(a,B2,SUM(a:C3))` 550, and
+/// `SUM(A1:SUM(A3))` refused at entry.] The first three were parse errors or
+/// #VALUE!, and an edit inside B2:C3 never reached the LET.
+#[test]
+fn a_range_half_may_be_a_lambda_parameter_a_call_or_a_qualified_cell() {
+    let wb = Workbook::new(1);
+    let sep = wb.state.locale.lock().unwrap().list_separator.to_string();
+    for r in 0..5u32 {
+        let n = r + 1;
+        wb.set(r, 0, &n.to_string());
+        wb.set(r, 1, &(10 * n).to_string());
+        wb.set(r, 2, &(100 * n).to_string());
+    }
+    wb.set(10, 9, &"=LAMBDA(b,SUM(A1:b))(A3)".replace(',', &sep));
+    assert_eq!(wb.number(0, 10, 9), 6.0);
+    wb.set(11, 9, &"=SUM(A1:INDEX(A1:A5,3))".replace(',', &sep));
+    assert_eq!(wb.number(0, 11, 9), 6.0);
+    wb.set(12, 9, "=SUM(A1:Sheet1!A3)");
+    assert_eq!(wb.formula_of(0, 12, 9), "SUM(A1:Sheet1!A3)", "the second qualifier is kept");
+    assert_eq!(wb.number(0, 12, 9), 6.0);
+    wb.set(13, 9, &format!("=LET(a{sep}B2{sep}SUM(a:C3))"));
+    assert_eq!(wb.number(0, 13, 9), 550.0);
+    // C2 is INSIDE B2:C3 and named by neither half: the LET must recalculate.
+    wb.set(1, 2, "1000");
+    assert_eq!(wb.number(0, 13, 9), 1350.0, "an edit inside the LET span recalculates it");
+    // A2 is inside A1:A3, which the LAMBDA reads through its parameter.
+    wb.set(1, 0, "20");
+    assert_eq!(wb.number(0, 10, 9), 24.0, "an edit inside the LAMBDA span recalculates it");
+    // A function returning a VALUE is no range half: Excel refuses the entry.
+    wb.set(14, 9, "=SUM(A1:SUM(A3))");
+    assert!(matches!(wb.value(0, 14, 9), CellValue::Text(_)), "refused at entry: {:?}", wb.value(0, 14, 9));
 }
 
 /// BUG-0646: `a#` where a LET name or an invoked LAMBDA's parameter is bound to

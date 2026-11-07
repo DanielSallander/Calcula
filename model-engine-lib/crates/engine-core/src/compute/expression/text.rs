@@ -69,9 +69,10 @@ pub enum TextFunction {
     /// Extract part of a delimited string: `SPLIT(text, delimiter, part_number)`.
     /// Maps to SQL `SPLIT_PART`. Part number is 1-based. Snowflake extension.
     Split,
-    /// Format a value as text: `FORMAT(value, format_string)` -- DAX's
-    /// format-string language, in the engine's format culture, through the
-    /// local UDF `calcula_format` (`compute::format_string`).
+    /// Format a value as text: `FORMAT(value, format_string [,
+    /// locale_name])` -- DAX's format-string language, in the engine's
+    /// format culture or the one `locale_name` names, through the local UDF
+    /// `calcula_format` (`compute::format_string`).
     Format,
     /// Check if text contains a substring: `CONTAINS(text, search)`.
     /// Returns boolean. Case-insensitive.
@@ -222,13 +223,14 @@ impl TextFunction {
             Self::Format => {
                 // DAX FORMAT (BUG-0522): the local UDF that reads DAX's
                 // format-string language in the engine's format culture
-                // (`compute::format_string`). Never pushed to a source
-                // (`has_unpushable_ops`), so no source dialect sees it.
+                // (`compute::format_string`), or in the culture DAX's third
+                // argument names (BUG-0731; it was silently dropped). Never
+                // pushed to a source (`has_unpushable_ops`), so no source
+                // dialect sees it.
                 format!(
-                    "{}({}, {})",
+                    "{}({})",
                     crate::compute::format_string::FORMAT_UDF_NAME,
-                    args[0],
-                    args[1]
+                    args.join(", ")
                 )
             }
             Self::Contains => {

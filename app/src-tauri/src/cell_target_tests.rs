@@ -482,3 +482,46 @@ fn the_styled_read_runs_beside_a_style_command_without_deadlocking() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
+
+/// BUG-0748: the floating-grid painter resolves a rule's defined name and
+/// spill reference as the sheet's own painter does. On the backing sheet B2 =
+/// 10 and D1:D3 spill three 1s; rule 7 `=A1>Lim` (Lim = 5) and rule 8
+/// `=SUM($D$1#)>2` both format B2. Evaluated with no names (the old
+/// `evaluate_conditional_formats_for`), both answered an error and painted
+/// nothing. SABOTAGE (cfdvb-flt): Section B evaluates without names.
+#[test]
+fn the_floating_grid_painter_resolves_names_and_spill_references() {
+    let wb = Workbook::new(1);
+    let (id, backing) = float_on_host(&wb, 4, 4);
+    seed_backing(&wb, backing, 1, 1, CellValue::Number(10.0), CellStyle::new());
+    for r in 0..3u32 {
+        seed_backing(&wb, backing, r, 3, CellValue::Number(1.0), CellStyle::new());
+    }
+    let seed = crate::document_effect::test_seed_effect();
+    wb.state.spill_ranges.write(&seed).unwrap().insert((backing, 0, 3), vec![(1, 3), (2, 3)]);
+    wb.state.named_ranges.write(&seed).unwrap().insert(
+        crate::name_resolution::name_key("Lim"),
+        crate::named_ranges::NamedRange {
+            name: "Lim".to_string(),
+            sheet_index: None,
+            refers_to: "=5".to_string(),
+            comment: None,
+            folder: None,
+        },
+    );
+    {
+        let mut cf = wb.state.conditional_formats.write(&seed).unwrap();
+        let expr = |f: &str| {
+            ConditionalFormatRule::Expression(crate::conditional_formatting::ExpressionRule { formula: f.to_string() })
+        };
+        let mut by_name = rule(7, expr("=A1>Lim"), "#00FF00");
+        by_name.ranges = vec![ConditionalFormatRange { start_row: 0, start_col: 0, end_row: 3, end_col: 2 }];
+        let mut by_spill = rule(8, expr("=SUM($D$1#)>2"), "#0000FF");
+        by_spill.ranges = vec![ConditionalFormatRange { start_row: 1, start_col: 1, end_row: 1, end_col: 1 }];
+        cf.insert(backing, vec![by_name, by_spill]);
+    }
+    let out = get_cell_target_cells_inner(&wb.state, &target(id), 0, 0, 3, 3).expect("read");
+    let hits: Vec<(u32, u32, Option<u64>)> = out.conditional.iter().map(|c| (c.row, c.col, c.rule_id)).collect();
+    assert!(hits.contains(&(1, 1, Some(7))), "B2 = 10 > Lim: {hits:?}");
+    assert!(hits.contains(&(1, 1, Some(8))), "SUM(D1#) = 3 > 2: {hits:?}");
+}

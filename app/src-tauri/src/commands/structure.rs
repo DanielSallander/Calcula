@@ -1051,43 +1051,10 @@ fn shift_sheet_auto_filter(
         }
     }
 
-    // Re-key criteria whenever the column origin moved, and drop any whose
-    // column no longer exists inside the filter.
-    if af.start_col != old_start_col || !af.column_filters.is_empty() {
-        let new_start = af.start_col;
-        let new_end = af.end_col;
-        let remapped: std::collections::HashMap<u32, crate::autofilter::ColumnFilter> = before
-            .column_filters
-            .iter()
-            .filter_map(|(rel, cf)| {
-                let abs = old_start_col + rel;
-                // Follow the column edit for the absolute position too.
-                let abs = match edit {
-                    calp::writeback::StructuralEdit::ColInsert { at, count } if abs >= at => {
-                        abs + count
-                    }
-                    calp::writeback::StructuralEdit::ColDelete { at, count } => {
-                        if abs >= at.saturating_add(count) {
-                            abs - count
-                        } else if abs >= at {
-                            return None; // The column itself was deleted.
-                        } else {
-                            abs
-                        }
-                    }
-                    _ => abs,
-                };
-                if abs < new_start || abs > new_end {
-                    return None;
-                }
-                let new_rel = abs - new_start;
-                let mut moved = cf.clone();
-                moved.column_index = new_rel;
-                Some((new_rel, moved))
-            })
-            .collect();
-        af.column_filters = remapped;
-    }
+    // Re-key the criteria AND the remembered sort (both keyed relative to
+    // the first column), following the column edit, and drop any whose column
+    // no longer exists inside the filter.
+    af.rekey_columns(old_start_col, |abs| follow_column_edit(edit, abs));
 
     // Hidden rows are positional, so a ROW edit at or above the filter's last
     // row invalidates them and they are cheapest to drop — keeping a stale set
@@ -1114,11 +1081,31 @@ fn shift_sheet_auto_filter(
         || af.end_row != before.end_row
         || af.start_col != before.start_col
         || af.end_col != before.end_col
-        || af.column_filters.len() != before.column_filters.len()
+        || af.column_keys() != before.column_keys()
         || (rows_invalidated && !before.hidden_rows.is_empty());
     drop(auto_filters);
     if changed {
         record_auto_filter_shift(undo_stack, sheet_index, before);
+    }
+}
+
+/// Where absolute column `abs` lands after `edit`: a row edit leaves it, an
+/// insert at or left of it moves it right, a delete left of it moves it left,
+/// and `None` when the delete removed it.
+pub(crate) fn follow_column_edit(edit: calp::writeback::StructuralEdit, abs: u32) -> Option<u32> {
+    use calp::writeback::StructuralEdit;
+    match edit {
+        StructuralEdit::ColInsert { at, count } if abs >= at => Some(abs + count),
+        StructuralEdit::ColDelete { at, count } => {
+            if abs >= at.saturating_add(count) {
+                Some(abs - count)
+            } else if abs >= at {
+                None
+            } else {
+                Some(abs)
+            }
+        }
+        _ => Some(abs),
     }
 }
 
@@ -1834,6 +1821,7 @@ pub(crate) fn insert_rows_impl(
             &mut undo_stack,
             active_sheet,
             &sheet_name,
+            &sheet_names_snapshot,
             calp::writeback::StructuralEdit::RowInsert { at: row, count },
         );
         // Object property BINDING formulas are coordinate holders too (WP-D):
@@ -2385,6 +2373,7 @@ pub(crate) fn insert_columns_impl(
             &mut undo_stack,
             active_sheet,
             &sheet_name,
+            &sheet_names_snapshot,
             calp::writeback::StructuralEdit::ColInsert { at: col, count },
         );
         // Object property BINDING formulas are coordinate holders too (WP-D).
@@ -3966,6 +3955,7 @@ pub(crate) fn delete_rows_impl(
             &mut undo_stack,
             active_sheet,
             &sheet_name,
+            &sheet_names_snapshot,
             calp::writeback::StructuralEdit::RowDelete { at: row, count },
         );
         // Object property BINDING formulas are coordinate holders too (WP-D):
@@ -4574,6 +4564,7 @@ pub(crate) fn delete_columns_impl(
             &mut undo_stack,
             active_sheet,
             &sheet_name,
+            &sheet_names_snapshot,
             calp::writeback::StructuralEdit::ColDelete { at: col, count },
         );
         // Object property BINDING formulas are coordinate holders too (WP-D).
@@ -6313,9 +6304,11 @@ fn shift_named_ranges(
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
     sheet_name: &str,
+    sheet_names: &[String],
     edit: calp::writeback::StructuralEdit,
 ) -> Vec<String> {
     use calp::writeback::StructuralEdit as SE;
+    let rows_axis = matches!(edit, SE::RowInsert { .. } | SE::RowDelete { .. });
 
     let mut store = match state.named_ranges.write(effect) {
         Ok(s) => s,
@@ -6355,6 +6348,10 @@ fn shift_named_ranges(
                 &nr.refers_to, formula_sheet, sheet_name, at, -(count as i32),
             ),
         };
+        // A RELATIVE part neither moves nor dies (BUG-0749 [LIVE]): it is an
+        // offset from the cell that uses the name, not a cell.
+        let shifted =
+            crate::named_ranges::keep_relative_name_parts(&nr.refers_to, &shifted, rows_axis, sheet_names);
         if shifted != nr.refers_to {
             nr.refers_to = shifted;
             changed_names.push(nr.name.clone());
@@ -9601,7 +9598,7 @@ pub(crate) fn off_sheet_structural_edit(
             .unwrap_or_default();
 
         names_rewritten =
-            shift_named_ranges(state, &effect, &mut undo_stack, target, &edited_sheet_name, edit);
+            shift_named_ranges(state, &effect, &mut undo_stack, target, &edited_sheet_name, &sheet_names_snapshot, edit);
         // Object property BINDING formulas that read the edited sheet (WP-D).
         crate::object_bindings::cascade::shift_object_bindings(state, &effect, &mut undo_stack, &edited_sheet_name, edit);
         shift_sheet_range_strings(state, &effect, &mut undo_stack, target, edit);

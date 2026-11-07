@@ -148,6 +148,14 @@ pub struct PivotViewCell {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_field_index: Option<usize>,
 
+    /// Index (into `PivotDefinition::calculated_fields`) of the CALCULATED
+    /// field this data cell shows, as `value_field_index` names a value
+    /// field's. GETPIVOTDATA matches a calculated field's cells by it -- the
+    /// column its caption heads was the one cell column it could find, so
+    /// with a column field every other column read #REF! (wave-3 verify).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calculated_field_index: Option<usize>,
+
     /// Pre-formatted display string.
     pub formatted_value: String,
     
@@ -182,6 +190,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: None,
             member_source: None,
         }
@@ -204,6 +213,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: None,
             member_source: None,
         }
@@ -225,6 +235,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: None,
             member_source: None,
         }
@@ -246,6 +257,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: None,
             member_source: None,
         }
@@ -267,6 +279,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: None,
             member_source: None,
         }
@@ -288,6 +301,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: None,
             member_source: None,
         }
@@ -309,6 +323,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: Some(field_index),
             member_source: None,
         }
@@ -330,6 +345,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: Some(field_index),
             member_source: None,
         }
@@ -352,6 +368,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: None,
             member_source: None,
         }
@@ -374,6 +391,7 @@ impl PivotViewCell {
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
             value_field_index: None,
+            calculated_field_index: None,
             filter_field_index: None,
             member_source: None,
         }
@@ -554,6 +572,16 @@ pub struct HeaderFieldSummary {
     pub field_name: String,
     /// Whether this field currently has an active filter (hidden items).
     pub has_active_filter: bool,
+    /// The field's sort as this view applied it -- a grouped level's own
+    /// (`PivotField::level_sorts`) for a grouped field -- so the Sort
+    /// (<field>) dialog opens on it, as Excel's opens on the field's
+    /// AutoSortOrder / AutoSortField.
+    #[serde(default)]
+    pub sort_order: crate::definition::SortOrder,
+    /// The value field (by name) the field is sorted by, when it is sorted
+    /// by value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_sort_field: Option<String>,
 }
 
 // ============================================================================

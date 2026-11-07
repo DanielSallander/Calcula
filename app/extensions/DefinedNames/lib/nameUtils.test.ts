@@ -248,9 +248,9 @@ describe("isValidName", () => {
       expect(isValidName("false")).toBe(false);
     });
 
-    it("should reject reserved word NULL (case-insensitive)", () => {
-      expect(isValidName("NULL")).toBe(false);
-      expect(isValidName("null")).toBe(false);
+    it("accepts NULL, which Excel takes as a name [LIVE, lane miscb] (BUG-0741)", () => {
+      expect(isValidName("NULL")).toBe(true);
+      expect(isValidName("null")).toBe(true);
     });
 
     it("should reject valid cell references", () => {

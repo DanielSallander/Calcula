@@ -47,6 +47,7 @@ import {
   describeButtonLinksHeld,
   describeInlineButtonCodeHeld,
 } from "./ButtonActionsNotice";
+import { ObjectsNotAddedNotice } from "./ObjectsNotAddedNotice";
 
 /**
  * Short human phrase for a declared capability id (R19), for the review box —
@@ -261,6 +262,9 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   // written as a formula, which cannot be approved as exact bytes. Listed the
   // same way; static inline code is HELD instead and counted in the status.
   const [removedInlineButtonCode, setRemovedInlineButtonCode] = useState<string[]>([]);
+  // Charts and ribbon filters the pull did NOT add because the workbook already
+  // holds one under that id or name (BUG-0734). Listed the same way.
+  const [objectsNotAdded, setObjectsNotAdded] = useState<string[]>([]);
   const keepOpenRef = useRef(false);
   const closeSoon = () => {
     if (!keepOpenRef.current) setTimeout(() => onClose(), 1200);
@@ -451,10 +455,14 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       const removed = result.buttonActionsRemoved ?? [];
       const removedLinks = result.buttonLinksRemoved ?? [];
       const removedInline = result.inlineButtonCodeRemoved ?? [];
+      const notAdded = result.objectsNotAdded ?? [];
       keepOpenRef.current = removed.length > 0 || removedLinks.length > 0 || removedInline.length > 0;
+      // ...and while a chart or filter it did not add is listed (BUG-0734).
+      if (notAdded.length > 0) keepOpenRef.current = true;
       setRemovedButtonActions(removed);
       setRemovedButtonLinks(removedLinks);
       setRemovedInlineButtonCode(removedInline);
+      setObjectsNotAdded(notAdded);
 
       // Notify the app that sheets have changed so UI refreshes
       emitAppEvent(AppEvents.SHEET_CHANGED, {});
@@ -653,6 +661,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       <ButtonActionsNotice actions={removedButtonActions} mode="removed" testId="subscribe-button-actions-removed" />
       <ButtonLinksNotice links={removedButtonLinks} testId="subscribe-button-links-removed" />
       <InlineButtonCodeNotice removed={removedInlineButtonCode} testId="subscribe-inline-button-code-removed" />
+      <ObjectsNotAddedNotice objects={objectsNotAdded} testId="subscribe-objects-not-added" />
     </>
   );
 

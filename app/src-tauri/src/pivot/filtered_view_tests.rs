@@ -637,3 +637,115 @@ async fn the_filtered_view_paints_the_model_format_the_real_pivot_adopted() {
         assert_eq!(cell.number_format.as_deref(), Some("#,##0.00"), "rows {rows:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// 6. A hand-placed order survives the rebuilds (piv5)
+// ---------------------------------------------------------------------------
+
+/// The data-row labels a response shows, top to bottom.
+fn row_labels(response: &PivotViewResponse) -> Vec<String> {
+    response
+        .rows
+        .iter()
+        .filter(|r| r.row_type == pivot_engine::PivotRowType::Data)
+        .map(|r| match &r.cells[0].value {
+            PivotCellValueData::Text(t) => t.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+/// piv5 (the piv4 verifier's finding 2). A BI pivot's region moved by hand
+/// (Move "West" to Beginning: Excel's PivotItem.Position, which turns the
+/// field Manual) keeps that order through a plain Refresh, through a
+/// field-list edit and in the paint-only cross-filtered view -- as a grid
+/// pivot's does, and as Excel keeps a manual order through a refresh [LIVE,
+/// piv4 probe5]. Each of those rebuilds the fields over a NEW cache and
+/// carried the sort order (Manual) but not the list, so the field showed
+/// its items in source order with no notice.
+///
+/// SABOTAGE (piv5-sabM): `preserve_field_settings` no longer carries
+/// `manual_item_order` -- fails at "REFRESH".
+#[tokio::test]
+async fn a_bi_pivots_hand_placed_order_survives_refresh_a_field_list_edit_and_the_filtered_view() {
+    let fx = Fx::new().await;
+    let (pivot, first) = fx.pivot(&["region"]).await;
+    assert_eq!(row_labels(&first), strings(&["East", "North", "West"]), "fixture: ascending");
+    let (field_index, west) = {
+        let tables = fx.pivots.pivot_tables.read().unwrap();
+        let (def, cache) = &tables[&pivot];
+        let index = def.row_fields[0].source_index;
+        let west = cache
+            .find_value_id(index, &pivot_engine::CacheValue::Text("West".into()))
+            .expect("fixture: West is a member");
+        (index, west)
+    };
+    let request = crate::pivot::types::SortPivotFieldRequest {
+        pivot_id: pivot,
+        field_index,
+        sort_by: crate::pivot::types::SortBy::Ascending,
+        values_hierarchy: None,
+        pivot_item_scope: None,
+        scope_group_path: None,
+        move_item: Some(crate::pivot::types::PivotItemMove {
+            value_id: west,
+            to: crate::pivot::types::PivotItemMoveTo::Beginning,
+        }),
+    };
+    let moved = crate::pivot::commands::sort_pivot_field_core(
+        &fx.state,
+        &fx.file,
+        &fx.pivots,
+        crate::pivot::operations::PivotRecalcStates { pane: &fx.pane, ribbon: &fx.filters, user_files: &fx.files },
+        request,
+    )
+    .expect("move West to the beginning");
+    let hand = strings(&["West", "East", "North"]);
+    assert_eq!(row_labels(&moved), hand, "fixture: the move");
+
+    let refreshed = crate::pivot::commands::refresh_bi_pivot_core(&fx.ctx(), pivot).await.expect("refresh");
+    assert_eq!(row_labels(&refreshed), hand, "REFRESH dropped the hand-placed order");
+
+    let edited = fx.lay_out(pivot, &["region"]).await;
+    assert_eq!(row_labels(&edited), hand, "FIELD-LIST EDIT dropped the hand-placed order");
+
+    let view = fx.filtered(pivot, vec![]).await.expect("the filtered view");
+    assert_eq!(row_labels(&view), hand, "FILTERED VIEW dropped the hand-placed order");
+}
+
+/// piv5 (the piv4 verifier's finding 4). A Refresh asked while a field
+/// change holds the BI field-change queue waits its turn BEFORE it reads the
+/// definition it rebuilds from, so it rebuilds the layout that change left.
+/// It read the definition first and then queued, so once the change had
+/// stored Year it rebuilt the pivot from Region again: the change was
+/// silently reverted -- the very race the queue exists to prevent.
+///
+/// SABOTAGE (piv5-sabQ): `refresh_bi_pivot_core` takes its turn after
+/// building its request -- fails at "QUEUED REFRESH".
+#[tokio::test]
+async fn a_refresh_queued_behind_a_field_change_rebuilds_the_layout_that_change_left() {
+    use std::future::Future;
+    let fx = Fx::new().await;
+    let (pivot, first) = fx.pivot(&["region"]).await;
+    assert_eq!(row_labels(&first), strings(&["East", "North", "West"]), "fixture: by region");
+
+    let ctx = fx.ctx();
+    // A field change holds the queue...
+    let turn = crate::pivot::commands::BiFieldChangeTurn::take().await;
+    // ...when a Refresh is asked: it must wait.
+    let mut refresh = Box::pin(crate::pivot::commands::refresh_bi_pivot_core(&ctx, pivot));
+    let waiting = std::future::poll_fn(|cx| std::task::Poll::Ready(refresh.as_mut().poll(cx).is_pending())).await;
+    assert!(waiting, "fixture: the refresh waits behind the held queue");
+    // The field change stores its new layout (Year) and ends.
+    crate::pivot::commands::update_bi_pivot_fields_unrecorded(&ctx, layout_request(pivot, &["year"]), Vec::new(), Some(&turn))
+        .await
+        .expect("the field change");
+    drop(turn);
+
+    let refreshed = refresh.await.expect("the refresh");
+    assert_eq!(row_labels(&refreshed), strings(&["Y1", "Y2"]), "QUEUED REFRESH put the replaced layout back");
+    let names: Vec<String> =
+        fx.pivots.pivot_tables.read().unwrap()[&pivot].0.row_fields.iter().map(|f| f.name.clone()).collect();
+    assert_eq!(names.len(), 1, "QUEUED REFRESH: one row field, {names:?}");
+    assert!(names[0].contains("year"), "QUEUED REFRESH: the stored row field is {names:?}");
+}

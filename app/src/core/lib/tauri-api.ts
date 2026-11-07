@@ -2242,7 +2242,12 @@ export async function getFunctionTemplate(functionName: string): Promise<string>
  */
 let calculationModeQueue: Promise<unknown> = Promise.resolve();
 
-export function setCalculationMode(mode: "automatic" | "manual"): Promise<string> {
+/**
+ * "automaticExceptTables" is Excel's "Automatic except for data tables"
+ * (xlCalculationSemiautomatic, BUG-0754): every formula recalculates
+ * automatically and only the live data tables wait for F9.
+ */
+export function setCalculationMode(mode: "automatic" | "automaticExceptTables" | "manual"): Promise<string> {
   const run = calculationModeQueue.then(async () => {
     const startedAt = performance.now();
     const change = await invoke<CalculationModeChange>("set_calculation_mode", { mode });
@@ -4180,6 +4185,26 @@ export async function shiftFormulasBatch(
  * Non-formula cells are copied verbatim (value + style).
  * This is the backend for Ctrl+D (Fill Down), Ctrl+R (Fill Right), etc.
  */
+/**
+ * The merged areas of an OBJECT's cells (a floating grid, P3) that meet the
+ * rectangle -- the `merges` of `get_cell_target_cells`, for a fill that widens
+ * its source band to the merges it holds as the sheet's fill does (BUG-0768).
+ */
+export async function getCellTargetMergedRegions(
+  target: CellTargetRef,
+  range: { startRow: number; startCol: number; endRow: number; endCol: number },
+): Promise<MergedRegion[]> {
+  const placed = cellTargetArg("get_cell_target_cells", { target });
+  const answer = await invoke<{ merges?: MergedRegion[] }>("get_cell_target_cells", {
+    ...placed,
+    startRow: Math.max(0, Math.min(range.startRow, range.endRow)),
+    startCol: Math.max(0, Math.min(range.startCol, range.endCol)),
+    endRow: Math.max(range.startRow, range.endRow),
+    endCol: Math.max(range.startCol, range.endCol),
+  });
+  return Array.isArray(answer?.merges) ? answer.merges : [];
+}
+
 export async function fillRange(
   sourceStartRow: number,
   sourceStartCol: number,
@@ -4318,17 +4343,23 @@ export async function updateNamedRange(
 }
 
 /**
- * Delete a named range.
+ * Delete a named range. `sheetIndex` is the SCOPE of the name to delete
+ * (a workbook `Rate` and a `Sheet1!Rate` are two names, as in Excel); omitted
+ * or null, the workbook's name, else (Excel's `Names(name)`) the first sheet's
+ * own; a name scoped only to a later sheet is not found.
  */
-export async function deleteNamedRange(name: string): Promise<NamedRangeResult> {
-  return invoke<NamedRangeResult>("delete_named_range", { name });
+export async function deleteNamedRange(name: string, sheetIndex?: number | null): Promise<NamedRangeResult> {
+  return invoke<NamedRangeResult>("delete_named_range", { name, sheetIndex: sheetIndex ?? null });
 }
 
 /**
- * Get a named range by name.
+ * Get a named range by name. `fromSheetIndex` is the sheet it is asked FROM
+ * (the Name Box's active sheet): that sheet's own name of the spelling shadows
+ * the workbook's, as in a formula, and `Sheet2!Rate` asks Sheet2's. Omitted,
+ * the workbook's name, else (Excel's `Names(name)`) the first sheet's own.
  */
-export async function getNamedRange(name: string): Promise<NamedRange | null> {
-  return invoke<NamedRange | null>("get_named_range", { name });
+export async function getNamedRange(name: string, fromSheetIndex?: number | null): Promise<NamedRange | null> {
+  return invoke<NamedRange | null>("get_named_range", { name, sheetIndex: fromSheetIndex ?? null });
 }
 
 /**
@@ -4363,9 +4394,11 @@ export async function getNamedRangeForSelection(
  */
 export async function renameNamedRange(
   oldName: string,
-  newName: string
+  newName: string,
+  sheetIndex?: number | null
 ): Promise<NamedRangeResult> {
-  return invoke<NamedRangeResult>("rename_named_range", { oldName, newName });
+  // `sheetIndex`: the SCOPE of the name to rename, as for deleteNamedRange.
+  return invoke<NamedRangeResult>("rename_named_range", { oldName, newName, sheetIndex: sheetIndex ?? null });
 }
 
 /**
@@ -4567,6 +4600,7 @@ import type {
   ReplyResult,
   CommentIndicator,
   AddCommentParams,
+  PasteCommentsResult,
   UpdateCommentParams,
   AddReplyParams,
   UpdateReplyParams,
@@ -4603,6 +4637,21 @@ export async function addComment(params: AddCommentParams): Promise<CommentResul
   console.log(`[tauri-api] addComment(${params.row}, ${params.col})`);
   const result = await invoke<CommentResult>("add_comment", { params });
   if (result.success) emitAnnotationsChanged();
+  return result;
+}
+
+/**
+ * Paste Special > Comments in ONE call and one undo step (BUG-0725), on the
+ * active sheet: each of `comments` REPLACES its destination's comment, and
+ * each `cleared` destination ([row, col], its copied cell had none) loses its
+ * comment -- Excel's paste [LIVE]. A destination holding a Note is skipped.
+ */
+export async function pasteComments(
+  comments: AddCommentParams[],
+  cleared: Array<[number, number]>,
+): Promise<PasteCommentsResult> {
+  const result = await invoke<PasteCommentsResult>("paste_comments", { comments, cleared });
+  if (result.pasted > 0 || result.removed > 0) emitAnnotationsChanged();
   return result;
 }
 

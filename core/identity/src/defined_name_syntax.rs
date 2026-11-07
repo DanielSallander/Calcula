@@ -32,10 +32,12 @@ fn leading_digits(s: &str) -> usize {
 
 /// Whether `name` is a name Excel would accept as a defined name.
 ///
-/// Characters: a letter or underscore first, then letters, digits,
-/// underscores and periods, at most [`MAX_DEFINED_NAME_CHARS`] of them.
-/// (Excel also allows a leading backslash and `?` / `\` later on, but the
-/// formula lexer cannot read those, so such a name could never be used.)
+/// Characters [`is_valid_table_name`]'s, plus one rule of a defined name's
+/// own: a name that begins with a backslash is `\` alone or at least three
+/// characters long [LIVE, Excel 16, 2026-11-06, lane names q2.ps1 + q3.ps1:
+/// `\`, `\ab`, `\a1`, `\_a`, `\1a`, `\.a`, `\?a`, `\\a`, `\11`, `\RC`,
+/// `\A1`, `\TRUE`, `\R1C1` are names; `\a`, `\A`, `\b`, `\x`, `\_`, `\.`,
+/// `\1`, `\?`, `\\` are refused -- while a TABLE may be named `\a` (q4.ps1)].
 ///
 /// Refused because it reads as a reference or a constant [LIVE, Excel 16
 /// build 20326, 2026-11-05, miscb-probe1..4.ps1, `Names.Add` per name]:
@@ -50,23 +52,51 @@ fn leading_digits(s: &str) -> usize {
 ///   cell again (`A1.B1x`, `A1.R1C1`, `x.A1.B1` are names);
 /// - `TRUE` and `FALSE` in any case (`NULL` is a name in Excel).
 pub fn is_valid_defined_name(name: &str) -> bool {
+    if name.starts_with('\\') && name.chars().count() == 2 {
+        return false;
+    }
+    is_valid_table_name(name)
+}
+
+/// Whether `name` is a name Excel would accept as a TABLE name: the defined
+/// name's rule without its two-character backslash refusal
+/// ([`is_valid_defined_name`]; [LIVE, Excel 16, 2026-11-06, lane names
+/// q4.ps1: `ListObject.Name` takes `\abc`, `a\b`, `abc?`, `\`, `\a`, `_x`,
+/// `a?b`, `\ab`]).
+///
+/// Characters: a letter, underscore or BACKSLASH first; then letters,
+/// digits, underscores, periods, backslashes and question marks; at most
+/// [`MAX_DEFINED_NAME_CHARS`] of them [LIVE, q1-q3.ps1: `\abc`, `a\b`,
+/// `abc?`, `a?b`, `_?`, `a\`, `a?.b` are names, `?abc`, `?`, `.a`, `1a`,
+/// `\a b` are not; `=\abc`, `=a\b`, `=abc?`, `=\` read the names]. A name
+/// that begins with a backslash is never a reference (`\A1`, `\R1C1`,
+/// `\TRUE` are names), and one that holds a `?` or `\` is no A1 cell or
+/// Lotus range (`A1?`, `A1.B1?`, `TRUE?` are names) -- but the R1C1 prefix
+/// rule reads past them (`R1?`, `C1\`, `RC1?` are refused, `R?` and `C\`
+/// are names).
+pub fn is_valid_table_name(name: &str) -> bool {
     if name.is_empty() || name.chars().count() > MAX_DEFINED_NAME_CHARS {
         return false;
     }
 
     let mut chars = name.chars();
 
-    // First character must be letter or underscore
-    match chars.next() {
-        Some(c) if c.is_alphabetic() || c == '_' => {}
+    // First character must be a letter, an underscore or a backslash.
+    let leading_backslash = match chars.next() {
+        Some('\\') => true,
+        Some(c) if c.is_alphabetic() || c == '_' => false,
         _ => return false,
-    }
+    };
 
-    // Remaining characters can be alphanumeric, underscore, or period
+    // Remaining characters: letters, digits, underscore, period, backslash,
+    // question mark.
     for c in chars {
-        if !c.is_alphanumeric() && c != '_' && c != '.' {
+        if !c.is_alphanumeric() && !matches!(c, '_' | '.' | '\\' | '?') {
             return false;
         }
+    }
+    if leading_backslash {
+        return true;
     }
 
     // Cannot be a valid cell reference (like A1, B2, etc.)

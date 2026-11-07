@@ -1428,13 +1428,14 @@ export const vNamedStyleCreate: Validator = ([name, format]) => {
 // twins) reuse vRangeRef / vCellRef — a format read is addressed exactly like
 // a value read. Below are the validators the new WRITE/CONTROL rows need.
 
-/** The two calculation modes the backend stores (calculation.rs). The Rust
- *  setter is STRICT since the Wave-3 hardening: anything else — including the
- *  formerly-coerced "auto" — rejects with the accepted pair, so this gate and
- *  the backend agree spelling for spelling and getCalculationMode() === the
- *  value you set. */
+/** The three calculation modes the backend answers (calculation.rs):
+ *  automatic, Excel's "Automatic except for data tables" (BUG-0754) and
+ *  manual. The Rust setter is STRICT since the Wave-3 hardening: anything else
+ *  — including the formerly-coerced "auto" — rejects, so this gate and the
+ *  backend agree spelling for spelling and getCalculationMode() === the value
+ *  you set. */
 export const SCRIPT_CALCULATION_MODES: ReadonlySet<string> = new Set([
-  "automatic", "manual",
+  "automatic", "automaticExceptTables", "manual",
 ]);
 
 /** api.setCalculationMode args: [mode]. */

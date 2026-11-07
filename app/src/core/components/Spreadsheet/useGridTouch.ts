@@ -14,6 +14,7 @@
 import { useEffect, useRef } from "react";
 import type { DimensionOverrides, GridConfig, Selection, Viewport } from "../../types";
 import { installTouchBridge, type TouchPressKind } from "../../lib/touchBridge";
+import { installPointerPrecision } from "../../lib/pointerPrecision";
 import { findPointerClaim } from "../../lib/pointerClaims";
 import { findFloatingRegionAt } from "../../hooks/useMouseSelection/layout/overlayMoveHandlers";
 import { createFillHandleCursorChecker } from "../../hooks/useMouseSelection/utils/fillHandleUtils";
@@ -31,6 +32,8 @@ export interface GridTouchState {
   zoom: number;
   /** The grid canvas (objects, cells and headers are all painted on it). */
   canvas: HTMLCanvasElement | null;
+  /** Set the sheet's zoom (the zoom slider's state): a pinch zooms through it. */
+  setZoom?: (zoom: number) => void;
 }
 
 /**
@@ -77,7 +80,15 @@ export function useGridTouch(
   useEffect(() => {
     const area = containerRef.current;
     if (!area) return;
-    return installTouchBridge(area, {
+    // A finger's or a pen's targets are 44 px (BUG-0729): the last pointer's
+    // kind, for every hit test of the mouse door.
+    const uninstallPrecision = installPointerPrecision(area, () => stateRef.current().zoom || 1);
+    const uninstallBridge = installTouchBridge(area, {
+      // PINCH ZOOM (BUG-0729): the same zoom state the zoom slider sets.
+      zoom: {
+        get: () => stateRef.current().zoom || 1,
+        set: (zoom) => stateRef.current().setZoom?.(zoom),
+      },
       // A claimed element (an on-grid form, a cell editor) keeps the browser's
       // own touch handling, exactly as the mouse door leaves it its clicks.
       isNative: (target) => findPointerClaim(target) !== null,
@@ -108,5 +119,9 @@ export function useGridTouch(
         );
       },
     });
+    return () => {
+      uninstallBridge();
+      uninstallPrecision();
+    };
   }, [containerRef]);
 }

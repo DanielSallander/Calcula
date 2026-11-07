@@ -381,6 +381,15 @@ fn the_push_assembly_and_the_merge_follow_a_working_copys_collision_renames() {
         let call = &body[read_cells..];
         let call = &call[..call.find(")?").unwrap()];
         assert!(call.contains("&renames,"), "{door} hands the read the working copy's renames");
+        // ...and lays no SPILLED value as a literal (wave-3 verifier, backmisc;
+        // `a_laid_versions_spilled_values_are_left_to_the_recalculation`).
+        // (`call` ends at the first `)?`, inside the `local_spill_outputs(..)?`
+        // argument.) Wave 5, misc5: this copy's own spilled cells, so a
+        // shrunk array is not cleared from under the recalculation either.
+        assert!(
+            call.contains("Some(&") && call.contains("local_spill_outputs("),
+            "{door} must read with this copy's spilled cells (`Some(&..local_spill_outputs(..)?)`): {call}"
+        );
         assert!(
             !body.contains("sheet_data_to_cells("),
             "{door} reads a published sheet's cells by hand again -- unrenamed"
@@ -545,6 +554,7 @@ fn record_as(
         "2026-10-31T10:00:00Z",
         Vec::new(),
         calp::WorkingCopyContent::default(),
+        None,
     )
     .expect("the link write does not fail")
 }

@@ -40,6 +40,9 @@ let hierarchiesById: Record<string, unknown> = {};
 let columnValues: string[] = [];
 /** What get_slicer_items answers (undefined: the default switch arm). */
 let slicerItems: Array<{ key: string; label: string }> | undefined;
+/** What get_slicer_items answers with `forTable` (BUG-0732): that table's
+ *  own (key, display text) pairs. */
+let tableItemsById: Record<string, Array<{ key: string; label: string }>> = {};
 /** What an apply/clear on a pivot reports it grew over (its response). */
 let overwriteById: Record<string, { overwrittenCellCount: number; overwriteToken?: number }> = {};
 
@@ -67,8 +70,11 @@ vi.mock("../slicerBackend", () => ({
               styleOptions: { headerRow: true, showFilterButton: true },
             },
           ]);
-        case "get_slicer_items":
+        case "get_slicer_items": {
+          const forTable = (args as { forTable?: string } | undefined)?.forTable;
+          if (forTable !== undefined) return Promise.resolve(tableItemsById[forTable] ?? []);
           return Promise.resolve(slicerItems);
+        }
         case "bi_get_column_values":
           // The backend answers MEMBERS (P2): key = label for plain text.
           return Promise.resolve(columnValues.map((key) => ({ key, label: key })));
@@ -199,6 +205,7 @@ beforeEach(() => {
   columnValues = [];
   overwriteById = {};
   autoFilterCalls.length = 0;
+  tableItemsById = { t1: [{ key: "East", label: "East" }] };
 });
 
 // ---------------------------------------------------------------------------
@@ -436,19 +443,41 @@ describe("a table slicer's filter", () => {
 
   it("writes each selected KEY as its item's display text (BUG-0523)", async () => {
     // A numeric table column: keyed by the invariant value, shown in the app locale.
-    slicerItems = [
+    tableItemsById.t1 = [
       { key: "99", label: "99,0" },
       { key: "1234.5", label: "1 234,5" },
     ];
+    await applySlicerFilter(tableSlicer({ selectedItems: ["1234.5", ""] }));
+    expect(autoFilterCalls).toEqual([
+      { op: "get" },
+      { op: "setColumn", column: 0, criteria: { kind: "values", values: ["1 234,5"], includeBlanks: true } },
+    ]);
+  });
+
+  it("writes a CONNECTED table by the texts ITS cells show, never the slicer's own (BUG-0732)", async () => {
+    // The slicer's source is another table, whose cells show the number in
+    // General; the connected table t1 shows it in two formats, and holds no 77.
+    slicerItems = [
+      { key: "1234.5", label: "1234.5" },
+      { key: "77", label: "77" },
+    ];
+    tableItemsById.t1 = [
+      { key: "1234.5", label: "1 234,5" },
+      { key: "99", label: "99,0" },
+      { key: "1234.5", label: "1 234,50" },
+    ];
     try {
-      await applySlicerFilter(tableSlicer({ selectedItems: ["1234.5", ""] }));
+      await applySlicerFilter(
+        tableSlicer({ cacheSourceId: "t0", selectedItems: ["1234.5", "77"], connectedSources: [{ sourceType: "table", sourceId: "t1" }] }),
+      );
     } finally {
       slicerItems = undefined;
     }
     expect(autoFilterCalls).toEqual([
       { op: "get" },
-      { op: "setColumn", column: 0, criteria: { kind: "values", values: ["1 234,5"], includeBlanks: true } },
+      { op: "setColumn", column: 0, criteria: { kind: "values", values: ["1 234,5", "1 234,50"], includeBlanks: false } },
     ]);
+    expect(calls.filter((c) => c.cmd === "get_slicer_items").map((c) => c.args)).toEqual([{ slicerId: "s-1", forTable: "t1" }]);
   });
 
   it("clears the column through the owner too", async () => {

@@ -306,6 +306,14 @@ pub struct RefreshResult {
     /// removed. Filled by the host; said, never dropped silently.
     #[serde(default)]
     pub inline_button_code_removed: Vec<String>,
+    /// Charts, ribbon filters, slicers, timelines, pane controls and saved
+    /// pivot layouts the host did NOT add because the workbook already holds
+    /// one under that id (another application's, or the subscriber's own) or,
+    /// for a ribbon filter or a pane control, under that name, and ribbon
+    /// filters whose model the version does not carry -- one sentence each
+    /// (BUG-0734). Filled by the host; said, never dropped silently.
+    #[serde(default)]
+    pub objects_not_added: Vec<String>,
 }
 
 // ============================================================================
@@ -336,6 +344,10 @@ pub struct RefreshSheetNames {
     /// written onto here: the DETACHED ones (the subscriber took them) and a
     /// tracked one whose local sheet no longer exists.
     pub blocked_destinations: std::collections::HashSet<String>,
+    /// The payload's sheets in its order, by the PUBLISHER's names: what a 3-D
+    /// span with an endpoint on a gone sheet is walked inward over
+    /// (`SheetRenames::with_span_order`, BUG-0751).
+    pub payload_order: Vec<String>,
 }
 
 impl RefreshSheetNames {
@@ -371,11 +383,13 @@ impl RefreshSheetNames {
     /// subscriber's own sheet: an honest `#REF!` silently became a number. The
     /// same for a tracked sheet whose local copy is gone.
     pub fn renames(&self) -> crate::sheet_renames::SheetRenames {
-        crate::sheet_renames::SheetRenames::new(self.local_names.iter()).with_gone(
-            self.blocked_destinations
-                .iter()
-                .filter(|name| self.local_name(name).is_none()),
-        )
+        crate::sheet_renames::SheetRenames::new(self.local_names.iter())
+            .with_gone(
+                self.blocked_destinations
+                    .iter()
+                    .filter(|name| self.local_name(name).is_none()),
+            )
+            .with_span_order(self.payload_order.iter())
     }
 }
 
@@ -414,7 +428,7 @@ pub fn resolve_refresh_sheet_names(
     taken: &mut Vec<String>,
 ) -> RefreshSheetNames {
     let original: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
-    let mut out = RefreshSheetNames::default();
+    let mut out = RefreshSheetNames { payload_order: original.clone(), ..RefreshSheetNames::default() };
     let mut skip: std::collections::HashSet<SheetId> = std::collections::HashSet::new();
     if let Some(sub) = sub {
         for ((package_sid, _), original) in names.iter().zip(original.iter()) {
@@ -1296,6 +1310,7 @@ pub fn apply_refresh(
         button_actions_removed: Vec::new(),
         button_links_removed: Vec::new(),
         inline_button_code_removed: Vec::new(),
+        objects_not_added: Vec::new(),
     }
 }
 
@@ -3025,7 +3040,13 @@ mod tests {
         for (input, expected) in [
             ("@Data!A1:A9", "@#REF!A1:A9"),
             ("Data!A1#", "#REF!A1#"),
-            ("SUM(Data:Report!A1)", "SUM(#REF!A1)"),
+            // A 3-D span whose endpoint is gone moves it inward over the
+            // payload's tabs (Data, Calc, Report, Kept): Data and Calc are
+            // gone, so the span is Report alone -- the host delete's rule and
+            // Excel's [LIVE, lane namescalp p2.ps1], BUG-0751. It read
+            // `SUM(#REF!A1)`, which the subscriber's own deletes never write.
+            ("SUM(Data:Report!A1)", "SUM(Report!A1)"),
+            ("SUM(Data:Calc!A1)", "SUM(#REF!A1)"),
             ("-Data!A1", "-#REF!A1"),
         ] {
             let out = renames.rename_formula(input);

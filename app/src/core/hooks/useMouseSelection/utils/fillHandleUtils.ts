@@ -8,6 +8,7 @@ import { calculateVisibleRange, getColumnWidth, getRowHeight, getColumnX, getRow
 import { ensureDimensions } from "../../../lib/gridRenderer/styles/styleUtils";
 import { getGridRegions } from "../../../../api/gridOverlays";
 import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
+import { touchTarget } from "../../../lib/pointerPrecision";
 
 interface FillHandleCursorDependencies {
   config: GridConfig;
@@ -112,11 +113,8 @@ export function createFillHandleCursorChecker(
     const handleTop = handleY - handleSize / 2 - hitPadding;
     const handleBottom = handleY + handleSize / 2 + hitPadding;
 
-    return (
-      mouseX >= handleLeft &&
-      mouseX <= handleRight &&
-      mouseY >= handleTop &&
-      mouseY <= handleBottom
-    );
+    // A finger or a pen grabs it within a 44 px touch target (BUG-0729).
+    const hit = touchTarget({ x: handleLeft, y: handleTop, width: handleRight - handleLeft, height: handleBottom - handleTop });
+    return mouseX >= hit.x && mouseX <= hit.x + hit.width && mouseY >= hit.y && mouseY <= hit.y + hit.height;
   };
 }

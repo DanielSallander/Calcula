@@ -3282,12 +3282,12 @@
       "stated": null,
       "statedResult": "",
       "expect": {
-        "kind": "error",
-        "error": "#N/A"
+        "kind": "number",
+        "number": 4
       },
       "oracle": "engine",
       "volatile": false,
-      "engineDisplay": "#N/A"
+      "engineDisplay": "4"
     },
     {
       "id": "COUNTBLANK#1",
@@ -7207,60 +7207,6 @@
       "oracle": "engine",
       "volatile": false,
       "engineDisplay": "1.3"
-    },
-    {
-      "id": "DROP#1",
-      "function": "DROP",
-      "intent": "The DROP function removes a specified number of rows or columns from the start or end of an array, returning the remaining data.",
-      "fixture": [
-        {
-          "a1": "A1",
-          "input": "Name"
-        },
-        {
-          "a1": "B1",
-          "input": "Score"
-        },
-        {
-          "a1": "A2",
-          "input": "Alice"
-        },
-        {
-          "a1": "B2",
-          "input": "95"
-        },
-        {
-          "a1": "A3",
-          "input": "Bob"
-        },
-        {
-          "a1": "B3",
-          "input": "87"
-        },
-        {
-          "a1": "A4",
-          "input": "Carol"
-        },
-        {
-          "a1": "B4",
-          "input": "92"
-        },
-        {
-          "a1": "A5",
-          "input": "Without header"
-        }
-      ],
-      "target": "B5",
-      "formula": "=DROP(A1:B4, 1)",
-      "stated": null,
-      "statedResult": "{Alice, 95; Bob, 87; Carol, 92} (header row removed)",
-      "expect": {
-        "kind": "error",
-        "error": "#VALUE!"
-      },
-      "oracle": "engine",
-      "volatile": false,
-      "engineDisplay": "#VALUE!"
     },
     {
       "id": "DURATION#1",
@@ -11377,44 +11323,6 @@
       "oracle": "engine",
       "volatile": false,
       "engineDisplay": "0"
-    },
-    {
-      "id": "HSTACK#1",
-      "function": "HSTACK",
-      "intent": "The HSTACK function appends arrays horizontally (stacks them side by side by columns).",
-      "fixture": [
-        {
-          "a1": "A1",
-          "input": "1"
-        },
-        {
-          "a1": "C1",
-          "input": "10"
-        },
-        {
-          "a1": "A2",
-          "input": "2"
-        },
-        {
-          "a1": "C2",
-          "input": "20"
-        },
-        {
-          "a1": "A3",
-          "input": "Joined"
-        }
-      ],
-      "target": "B3",
-      "formula": "=HSTACK(A1:A2, C1:C2)",
-      "stated": null,
-      "statedResult": "A 2x2 array: {1, 10; 2, 20}",
-      "expect": {
-        "kind": "error",
-        "error": "#VALUE!"
-      },
-      "oracle": "engine",
-      "volatile": false,
-      "engineDisplay": "#VALUE!"
     },
     {
       "id": "HYPGEOM.DIST#1",
@@ -26207,60 +26115,6 @@
       "engineDisplay": ""
     },
     {
-      "id": "TAKE#1",
-      "function": "TAKE",
-      "intent": "The TAKE function returns a specified number of rows or columns from the start or end of an array.",
-      "fixture": [
-        {
-          "a1": "A1",
-          "input": "Alice"
-        },
-        {
-          "a1": "B1",
-          "input": "95"
-        },
-        {
-          "a1": "A2",
-          "input": "Bob"
-        },
-        {
-          "a1": "B2",
-          "input": "87"
-        },
-        {
-          "a1": "A3",
-          "input": "Carol"
-        },
-        {
-          "a1": "B3",
-          "input": "92"
-        },
-        {
-          "a1": "A4",
-          "input": "Dave"
-        },
-        {
-          "a1": "B4",
-          "input": "78"
-        },
-        {
-          "a1": "A5",
-          "input": "Top 2"
-        }
-      ],
-      "target": "B5",
-      "formula": "=TAKE(A1:B4, 2)",
-      "stated": null,
-      "statedResult": "{Alice, 95; Bob, 87} (first 2 rows)",
-      "expect": {
-        "kind": "error",
-        "error": "#VALUE!"
-      },
-      "oracle": "engine",
-      "volatile": false,
-      "engineDisplay": "#VALUE!"
-    },
-    {
       "id": "TAN#1",
       "function": "TAN",
       "intent": "The TAN function returns the tangent of an angle specified in radians.",
@@ -30340,6 +30194,10 @@
       "reason": "the result is a spill and has no single-cell value"
     },
     {
+      "id": "DROP#1",
+      "reason": "the result is a spill and has no single-cell value"
+    },
+    {
       "id": "EXPAND#1",
       "reason": "the result is a spill and has no single-cell value"
     },
@@ -30366,6 +30224,10 @@
     {
       "id": "FV#1.A2",
       "reason": "the fixture did not settle"
+    },
+    {
+      "id": "HSTACK#1",
+      "reason": "the result is a spill and has no single-cell value"
     },
     {
       "id": "LINEST#1",
@@ -30405,6 +30267,10 @@
     },
     {
       "id": "SORT#3",
+      "reason": "the result is a spill and has no single-cell value"
+    },
+    {
+      "id": "TAKE#1",
       "reason": "the result is a spill and has no single-cell value"
     },
     {

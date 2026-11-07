@@ -330,8 +330,8 @@ pub(crate) fn collect_udf_calls_impl(
     // scratch evaluation sees the same external context.
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
-        crate::pivot::operations::lookup_pivot_data(
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
+        crate::pivot::operations::lookup_pivot_value(
             &pivot_tables,
             &pivot_views,
             data_field,
@@ -712,6 +712,7 @@ mod tests {
             (CellError::Conflict, "#CONFLICT!"),
             (CellError::Blocked, "#BLOCKED!"),
             (CellError::Limit, "#LIMIT!"),
+            (CellError::Calc, "#CALC!"),
         ] {
             let u = UdfValue::Error { value: lit.to_string() };
             assert_eq!(

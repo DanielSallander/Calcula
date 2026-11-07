@@ -26,6 +26,7 @@ import {
 } from "../../../lib/layoutSurface";
 import { applyAspectLock, aspectLockedEdges } from "../../../../api/aspectLock";
 import { getGridStateSnapshot } from "../../../state/GridContext";
+import { touchTarget } from "../../../lib/pointerPrecision";
 import { isGlobalFormulaMode } from "../../useEditing";
 import {
   floatingHandleAt,
@@ -232,10 +233,14 @@ export function createOverlayResizeHandlers(
       // Cell-based overlay: check bottom-right corner only
       const corner = getOverlayBottomRightPixel(region, config, viewport, dimensions);
       if (!corner) continue;
-      if (
-        Math.abs(mouseX - corner.x) <= CELL_HANDLE_HIT_SIZE &&
-        Math.abs(mouseY - corner.y) <= CELL_HANDLE_HIT_SIZE
-      ) {
+      // A finger or a pen grabs it within a 44 px touch target (BUG-0729).
+      const hit = touchTarget({
+        x: corner.x - CELL_HANDLE_HIT_SIZE,
+        y: corner.y - CELL_HANDLE_HIT_SIZE,
+        width: 2 * CELL_HANDLE_HIT_SIZE,
+        height: 2 * CELL_HANDLE_HIT_SIZE,
+      });
+      if (mouseX >= hit.x && mouseX <= hit.x + hit.width && mouseY >= hit.y && mouseY <= hit.y + hit.height) {
         return { region, cursor: "nwse-resize" };
       }
     }

@@ -106,10 +106,11 @@ export interface BorderSide {
   style: "none" | "thin" | "medium" | "thick" | "dashed" | "dotted" | "double";
   color: string;
   /**
-   * A range's outer edge whose cells draw DIFFERENT lines (BUG-0365): the
-   * Border tab shows it greyed, as Excel does, and OK never writes it -- only
-   * a line the user then chooses for that edge is written. Only the loader
-   * sets it (lib/borderEdges.ts); every setter writes a real line.
+   * A range's outer edge whose cells draw DIFFERENT lines (BUG-0365), or an
+   * inside line whose inner boundaries do (BUG-0726): the Border tab shows it
+   * greyed, as Excel does, and OK never writes it -- only a line the user then
+   * chooses for that edge is written. Only the loader sets it
+   * (lib/borderEdges.ts); every setter writes a real line.
    */
   mixed?: boolean;
 }

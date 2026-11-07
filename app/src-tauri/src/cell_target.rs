@@ -951,16 +951,20 @@ pub(crate) fn get_cell_target_cells_inner(
 
     // ---- Section B: conditional formats, on the BACKING grid ----------------
     let (conditional, rules) = {
+        // The rule formulas resolve names, tables and spill references as the
+        // sheet's own painter does (BUG-0748), snapshotted before the guards.
+        let names = crate::conditional_formatting::snapshot_rule_names(state);
         let grids = state.grids.read().map_err(|e| e.to_string())?;
         let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
         let cf = state.conditional_formats.read().map_err(|e| e.to_string())?;
         match (cf.get(&backing), grids.get(backing)) {
             (Some(all_rules), Some(grid)) if !all_rules.is_empty() => {
-                let conditional = crate::conditional_formatting::evaluate_conditional_formats_for(
+                let conditional = crate::conditional_formatting::evaluate_conditional_formats_resolved(
                     grid,
                     &grids,
                     &sheet_names,
                     backing,
+                    names.tables(&sheet_names),
                     all_rules,
                     r0,
                     r1,

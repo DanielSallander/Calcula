@@ -31,6 +31,8 @@ const h = vi.hoisted(() => ({
   stands: vi.fn(),
   sheets: vi.fn(),
   alert: vi.fn(),
+  /** Run inside the format check (`setCellStyle`), when set. */
+  onFormatCheck: null as null | (() => void),
 }));
 
 /** The continuous writer: one tick per backend call. */
@@ -51,7 +53,7 @@ vi.mock("@api/lib", async (importOriginal) => ({
   getCell: vi.fn(async () => null),
   getStyle: vi.fn(async () => { tick(); return { numberFormat: "General" }; }),
   updateCell: vi.fn(async () => ({ cells: [] })),
-  setCellStyle: vi.fn(async () => { tick(); return null; }),
+  setCellStyle: vi.fn(async () => { tick(); h.onFormatCheck?.(); return null; }),
   setCellStyles: vi.fn(async () => { tick(); return null; }),
   applyFormatting: vi.fn(async () => { tick(); return { cells: [], styles: [] }; }),
   updateCellsBatch: vi.fn(async (updates: Array<Record<string, unknown>>, opts?: { target?: unknown }) => {
@@ -145,6 +147,7 @@ beforeEach(() => {
   h.alert.mockReset();
   h.alert.mockResolvedValue(undefined);
   h.live.set("0,0", 100);
+  h.onFormatCheck = null;
 });
 
 describe("Paste Special names its source, so a continuously written source pastes what it holds at the write", () => {
@@ -217,6 +220,19 @@ describe("where the backend has no rule, the snapshot is pasted (no source named
     // Standing when the paste planned its writes; moved by the time it sends them.
     h.stands.mockReturnValueOnce(true).mockReturnValue(false);
     await paste(copyOfA1(100), "values");
+    expect(writeAtF3().source).toBeUndefined();
+  });
+
+  // BUG-0777: onto a floating grid, the re-check ran BEFORE the batch's own
+  // format check and undo begin were awaited, so a copy that followed a shift
+  // in that window still named cells it no longer stands on. It now runs
+  // right before the write, as on a sheet.
+  // SABOTAGE: drop the re-check inside writeTargetBatch (and call it before,
+  // as it was) -> the write still names A1.
+  it("onto a floating grid: a copy that followed a shift during the batch's format check names no source", async () => {
+    h.onFormatCheck = () => h.stands.mockReturnValue(false);
+    await paste(copyOfA1(100), "all", { target: REF });
+    expect(h.batches[0].target).toEqual(REF);
     expect(writeAtF3().source).toBeUndefined();
   });
 

@@ -358,6 +358,9 @@ mod writeback_local_sheet_tests;
 mod calp_collection_tests;
 
 #[cfg(test)]
+mod calp_rekey_tests;
+
+#[cfg(test)]
 mod submitter_identity_tests;
 
 #[cfg(test)]
@@ -409,6 +412,20 @@ mod state_digest_lock_order_tests;
 /// bare table name is the whole table.
 #[cfg(test)]
 mod namese_tests;
+
+/// Ledger programme 2, lane names: the (scope, name) registry, a relative
+/// name at the active cell, Excel's name characters.
+#[cfg(test)]
+mod names_lane_tests;
+/// Lane formfix (ledger programme 2, wave 3): a sheet-qualified name in a
+/// formula, read in that sheet's scope; the Name Manager's arity message.
+#[cfg(test)]
+mod formfix_lane_tests;
+/// Ledger programme 2, wave 4, lane form4: a name rename repoints its
+/// sheet-qualified readers by their qualifier; an XLOOKUP half's
+/// if-not-found reference is a precedent.
+#[cfg(test)]
+mod form4_lane_tests;
 
 // ============================================================================
 // APPLICATION STATE
@@ -991,6 +1008,16 @@ pub struct AppState {
     /// is refused before any gate. Session-only and LOCK-FREE: an atomic adds
     /// no edge to the lock order, and it is never saved.
     pub whatif_run: std::sync::atomic::AtomicBool,
+    /// "AUTOMATIC EXCEPT FOR DATA TABLES" (Excel's xlCalculationSemiautomatic,
+    /// `calcMode="autoNoTable"`, BUG-0754): set together with
+    /// `calculation_mode = "automatic"`, under that lock, by every writer of the
+    /// mode (`calculation::store_calculation_mode`). Calculation is automatic
+    /// for every formula and only the live data tables wait for F9, so every
+    /// `calculation_mode == "automatic"` question stays right and only the data
+    /// tables ask this one (`calculation::data_tables_recalculate_automatically`).
+    /// An APPLICATION value like the mode it qualifies (see the census entry for
+    /// `calculation_mode`), LOCK-FREE: an atomic adds no edge to the lock order.
+    pub calculation_except_tables: std::sync::atomic::AtomicBool,
     /// Cells a CANCELLED recalculation never reached. `None` = the workbook is
     /// fully calculated. See `eval_budget::PendingRecalc` for why the remainder
     /// is recorded rather than rolled back.
@@ -1160,6 +1187,7 @@ pub fn create_app_state() -> AppState {
         calc_cancel: engine::CancelToken::new(),
         sheet_structure_generation: std::sync::atomic::AtomicU64::new(0),
         whatif_run: std::sync::atomic::AtomicBool::new(false),
+        calculation_except_tables: std::sync::atomic::AtomicBool::new(false),
         pending_recalc: document_effect::Persisted::new(None),
     };
 
@@ -1808,7 +1836,15 @@ pub fn extract_references(expr: &ParserExpr, grid: &Grid) -> CoordSet {
 
 pub fn extract_all_references(expr: &ParserExpr, grid: &Grid) -> ExtractedRefs {
     let mut refs = ExtractedRefs::new();
-    extract_references_recursive(expr, grid, &mut refs);
+    // A range half that is a LET name (or an inline LAMBDA's parameter) bound
+    // to a reference reads the whole rectangle -- `LET(a,B2,SUM(a:C3))` reads
+    // B2:C3 -- so the precedents are taken from the tree with those halves
+    // bound (BUG-0737, `parser::bind_range_name_halves`); `None` for every
+    // other formula, which is extracted as it is.
+    match parser::bind_range_name_halves(expr) {
+        Some(bound) => extract_references_recursive(&bound, grid, &mut refs),
+        None => extract_references_recursive(expr, grid, &mut refs),
+    }
     refs
 }
 
@@ -1869,6 +1905,46 @@ fn static_reference_span(
                 }
                 _ => None,
             },
+            // A half that is a CALL returning a reference within its range
+            // argument (`A1:INDEX(C1:C5,3)` spans A1:C3, W1 formula verifier):
+            // the box of what it can return, so every cell of the span is a
+            // precedent whichever cell the call picks. `@x` is x; an IF /
+            // CHOOSE half every branch it could take.
+            ParserExpr::ImplicitIntersection { operand } => rect(operand),
+            ParserExpr::FunctionCall { func, args, .. } => {
+                let candidates: Vec<&ParserExpr> = match func {
+                    ParserBuiltinFn::Index | ParserBuiltinFn::Take | ParserBuiltinFn::Drop | ParserBuiltinFn::TrimRange => {
+                        args.first().into_iter().collect()
+                    }
+                    // The return array, and the if-not-found argument when it
+                    // is a reference: the half IS it when nothing matches
+                    // (lane form4, [LIVE] verify-formfix rename.ps1 XL1/XL2:
+                    // `=SUM(C1:XLOOKUP(99,C1:C5,C1:C5,E9))` spans C1:E9 and
+                    // follows an edit of D5). A value there spans nothing.
+                    ParserBuiltinFn::XLookup => args
+                        .get(2)
+                        .into_iter()
+                        .chain(args.get(3).filter(|a| rect(a).is_some()))
+                        .collect(),
+                    ParserBuiltinFn::If | ParserBuiltinFn::Choose => args.iter().skip(1).collect(),
+                    _ => Vec::new(),
+                };
+                let mut boxes = candidates.into_iter().map(rect);
+                let mut out = boxes.next()??;
+                for b in boxes {
+                    let (s, r1, r2, c1, c2) = b?;
+                    let same = match (&out.0, &s) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => identity::sheet_names_equal(a, b),
+                        _ => false,
+                    };
+                    if !same {
+                        return None;
+                    }
+                    out = (out.0, out.1.min(r1), out.2.max(r2), out.3.min(c1), out.4.max(c2));
+                }
+                Some(out)
+            }
             _ => None,
         }
     }
@@ -2109,7 +2185,22 @@ pub fn resolve_names_in_ast(
 }
 
 /// [`resolve_names_in_ast`] for a formula USED AT the cell `at` (0-based row,
-/// column).
+/// column). A caller with no sheet list: a SHEET-QUALIFIED name
+/// (`Sheet1!Rate`) stays unresolved there (#NAME?); see
+/// [`resolve_names_in_ast_in`].
+pub fn resolve_names_in_ast_at(
+    ast: &ParserExpr,
+    named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    current_sheet_index: usize,
+    at: (u32, u32),
+    visited: &mut HashSet<String>,
+) -> ParserExpr {
+    resolve_names_walk(ast, named_ranges, &[], current_sheet_index, at, visited)
+}
+
+/// [`resolve_names_in_ast_at`] with the workbook's sheet names (index order),
+/// which a SHEET-QUALIFIED name (`Sheet1!Rate`, BUG-0744/0749) needs to find
+/// the scope it names.
 ///
 /// A DEFINED NAME'S RELATIVE REFERENCES MEAN THE CELL THAT USES IT
 /// (NEW-relative-name-anchor). Excel keeps a `refers_to` in the file as text
@@ -2128,9 +2219,21 @@ pub fn resolve_names_in_ast(
 /// recursion itself, so anchoring the outer tree afterwards would move the
 /// inner one twice. The cell's own references never move: only a name's tree
 /// is anchored.
-pub fn resolve_names_in_ast_at(
+pub fn resolve_names_in_ast_in(
     ast: &ParserExpr,
     named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    at: (u32, u32),
+    visited: &mut HashSet<String>,
+) -> ParserExpr {
+    resolve_names_walk(ast, named_ranges, sheet_names, current_sheet_index, at, visited)
+}
+
+fn resolve_names_walk(
+    ast: &ParserExpr,
+    named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    sheet_names: &[String],
     current_sheet_index: usize,
     at: (u32, u32),
     visited: &mut HashSet<String>,
@@ -2144,68 +2247,34 @@ pub fn resolve_names_in_ast_at(
                 return ParserExpr::Literal(ParserValue::Number(f64::NAN));
             }
 
-            // Look up the name (scope-aware: prefer sheet-scoped, then workbook-scoped)
-            let nr = named_ranges
-                .values()
-                .find(|nr| {
-                    let nr_key = crate::name_resolution::name_key(&nr.name);
-                    if nr_key != key {
-                        return false;
-                    }
-                    // Sheet-scoped name matching current sheet
-                    nr.sheet_index == Some(current_sheet_index)
-                })
-                .or_else(|| {
-                    // Fall back to workbook-scoped
-                    named_ranges.values().find(|nr| {
-                        let nr_key = crate::name_resolution::name_key(&nr.name);
-                        nr_key == key && nr.sheet_index.is_none()
-                    })
-                });
+            // Look up the name (scope-aware: the evaluating sheet's own name
+            // shadows the workbook's -- one (scope, name) key each, BUG-0744).
+            let nr = named_ranges::resolve_in_scope(named_ranges, name, Some(current_sheet_index));
 
             match nr {
-                Some(nr) => {
-                    // Parse the refers_to formula
-                    match parse_formula(&nr.refers_to) {
-                        Ok(mut sub_ast) => {
-                            // The name's relative references mean THIS cell.
-                            parser::anchor_name_references(&mut sub_ast, at.0, at.1);
-                            // Recursively resolve names in the sub-AST
-                            visited.insert(key.clone());
-                            let resolved = resolve_names_in_ast_at(
-                                &sub_ast,
-                                named_ranges,
-                                current_sheet_index,
-                                at,
-                                visited,
-                            );
-                            visited.remove(&key);
-                            resolved
-                        }
-                        Err(_) => {
-                            // Parse error in refers_to — treat as #NAME? error
-                            ParserExpr::Literal(ParserValue::Number(f64::NAN))
-                        }
-                    }
-                }
+                Some(nr) => splice_defined_name(nr, key, named_ranges, sheet_names, current_sheet_index, at, visited),
                 None => {
                     // Name not found — leave as NamedRef (will become #NAME? in convert_expr)
                     ast.clone()
                 }
             }
         }
+        // `Sheet1!Rate`: the name as SHEET1 sees it (BUG-0744/0749).
+        ParserExpr::Range { .. } if parser::parser::qualified_name_parts(ast).is_some() => {
+            resolve_qualified_name(ast, named_ranges, sheet_names, current_sheet_index, at, visited)
+        }
         ParserExpr::Literal(_) => ast.clone(),
         ParserExpr::CellRef { .. } => ast.clone(),
         ParserExpr::ColumnRef { .. } => ast.clone(),
         ParserExpr::RowRef { .. } => ast.clone(),
         ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
-            left: Box::new(resolve_names_in_ast_at(left, named_ranges, current_sheet_index, at, visited)),
+            left: Box::new(resolve_names_walk(left, named_ranges, sheet_names, current_sheet_index, at, visited)),
             op: *op,
-            right: Box::new(resolve_names_in_ast_at(right, named_ranges, current_sheet_index, at, visited)),
+            right: Box::new(resolve_names_walk(right, named_ranges, sheet_names, current_sheet_index, at, visited)),
         },
         ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
             op: *op,
-            operand: Box::new(resolve_names_in_ast_at(operand, named_ranges, current_sheet_index, at, visited)),
+            operand: Box::new(resolve_names_walk(operand, named_ranges, sheet_names, current_sheet_index, at, visited)),
         },
         ParserExpr::FunctionCall { func, args, .. } => {
             // For LAMBDA and LET, parameter name positions must NOT be resolved
@@ -2228,7 +2297,7 @@ pub fn resolve_names_in_ast_at(
                     // Body: resolve names EXCEPT parameter names
                     let body = args.last().unwrap();
                     resolved_args.push(resolve_names_in_ast_with_shadows(
-                        body, named_ranges, current_sheet_index, at, visited, &param_names,
+                        body, named_ranges, sheet_names, current_sheet_index, at, visited, &param_names,
                     ));
                     ParserExpr::FunctionCall {
                         func: func.clone(),
@@ -2254,7 +2323,7 @@ pub fn resolve_names_in_ast_at(
                         } else {
                             // Value and body positions: resolve with shadows
                             resolved_args.push(resolve_names_in_ast_with_shadows(
-                                arg, named_ranges, current_sheet_index, at, visited, &let_names,
+                                arg, named_ranges, sheet_names, current_sheet_index, at, visited, &let_names,
                             ));
                         }
                     }
@@ -2272,24 +2341,13 @@ pub fn resolve_names_in_ast_at(
                     // its own name too (`BuiltinFunction::user_definable_name`).
                     if let Some(custom_name) = func.user_definable_name() {
                         let key = crate::name_resolution::name_key(custom_name);
-                        let nr = named_ranges
-                            .values()
-                            .find(|nr| {
-                                let nr_key = crate::name_resolution::name_key(&nr.name);
-                                nr_key == key && nr.sheet_index == Some(current_sheet_index)
-                            })
-                            .or_else(|| {
-                                named_ranges.values().find(|nr| {
-                                    let nr_key = crate::name_resolution::name_key(&nr.name);
-                                    nr_key == key && nr.sheet_index.is_none()
-                                })
-                            });
+                        let nr = named_ranges::resolve_in_scope(named_ranges, custom_name, Some(current_sheet_index));
                         if let Some(nr) = nr {
                             if let Ok(mut sub_ast) = parse_formula(&nr.refers_to) {
                                 parser::anchor_name_references(&mut sub_ast, at.0, at.1);
                                 visited.insert(key.clone());
-                                let resolved_callee = resolve_names_in_ast_at(
-                                    &sub_ast, named_ranges, current_sheet_index, at, visited,
+                                let resolved_callee = resolve_names_walk(
+                                    &sub_ast, named_ranges, sheet_names, current_sheet_index, at, visited,
                                 );
                                 visited.remove(&key);
                                 // Build __INVOKE__(displayName, resolved_lambda, arg1, ...).
@@ -2303,8 +2361,8 @@ pub fn resolve_names_in_ast_at(
                                     resolved_callee,
                                 ];
                                 for a in args {
-                                    invoke_args.push(resolve_names_in_ast_at(
-                                        a, named_ranges, current_sheet_index, at, visited,
+                                    invoke_args.push(resolve_names_walk(
+                                        a, named_ranges, sheet_names, current_sheet_index, at, visited,
                                     ));
                                 }
                                 return ParserExpr::FunctionCall {
@@ -2319,7 +2377,7 @@ pub fn resolve_names_in_ast_at(
                         func: func.clone(),
                         args: args
                             .iter()
-                            .map(|a| resolve_names_in_ast_at(a, named_ranges, current_sheet_index, at, visited))
+                            .map(|a| resolve_names_walk(a, named_ranges, sheet_names, current_sheet_index, at, visited))
                             .collect(),
                         ref_site_id: Default::default(),
                     }
@@ -2328,42 +2386,114 @@ pub fn resolve_names_in_ast_at(
         }
         ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
-            start: Box::new(resolve_names_in_ast_at(start, named_ranges, current_sheet_index, at, visited)),
-            end: Box::new(resolve_names_in_ast_at(end, named_ranges, current_sheet_index, at, visited)),
+            start: Box::new(resolve_names_walk(start, named_ranges, sheet_names, current_sheet_index, at, visited)),
+            end: Box::new(resolve_names_walk(end, named_ranges, sheet_names, current_sheet_index, at, visited)),
             ref_site_id: Default::default(),
         },
+        // A NAME behind a 3-D span (`Sheet1:Sheet2!Rate`) is no name any
+        // sheet holds [LIVE, lane formfix p1.json J290: #NAME?]: left as is.
+        ParserExpr::Sheet3DRef { reference, .. } if matches!(reference.as_ref(), ParserExpr::NamedRef { .. }) => {
+            ast.clone()
+        }
         // 3D cross-sheet reference: recurse into inner reference
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
-            reference: Box::new(resolve_names_in_ast_at(reference, named_ranges, current_sheet_index, at, visited)),
+            reference: Box::new(resolve_names_walk(reference, named_ranges, sheet_names, current_sheet_index, at, visited)),
             ref_site_id: Default::default(),
         },
         // TableRef is resolved separately by resolve_table_refs_in_ast — pass through
         ParserExpr::TableRef { .. } => ast.clone(),
         ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
-            target: Box::new(resolve_names_in_ast_at(target, named_ranges, current_sheet_index, at, visited)),
-            index: Box::new(resolve_names_in_ast_at(index, named_ranges, current_sheet_index, at, visited)),
+            target: Box::new(resolve_names_walk(target, named_ranges, sheet_names, current_sheet_index, at, visited)),
+            index: Box::new(resolve_names_walk(index, named_ranges, sheet_names, current_sheet_index, at, visited)),
         },
         ParserExpr::ArrayLiteral { rows } => ParserExpr::ArrayLiteral {
-            rows: rows.iter().map(|r| r.iter().map(|e| resolve_names_in_ast_at(e, named_ranges, current_sheet_index, at, visited)).collect()).collect(),
+            rows: rows.iter().map(|r| r.iter().map(|e| resolve_names_walk(e, named_ranges, sheet_names, current_sheet_index, at, visited)).collect()).collect(),
         },
         ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
-            elements: elements.iter().map(|e| resolve_names_in_ast_at(e, named_ranges, current_sheet_index, at, visited)).collect(),
+            elements: elements.iter().map(|e| resolve_names_walk(e, named_ranges, sheet_names, current_sheet_index, at, visited)).collect(),
         },
         ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
             entries: entries.iter().map(|(k, v)| (
-                resolve_names_in_ast_at(k, named_ranges, current_sheet_index, at, visited),
-                resolve_names_in_ast_at(v, named_ranges, current_sheet_index, at, visited),
+                resolve_names_walk(k, named_ranges, sheet_names, current_sheet_index, at, visited),
+                resolve_names_walk(v, named_ranges, sheet_names, current_sheet_index, at, visited),
             )).collect(),
         },
         ParserExpr::SpillRef { cell, .. } => ParserExpr::SpillRef {
-            cell: Box::new(resolve_names_in_ast_at(cell, named_ranges, current_sheet_index, at, visited)),
+            cell: Box::new(resolve_names_walk(cell, named_ranges, sheet_names, current_sheet_index, at, visited)),
             ref_site_id: Default::default(),
         },
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
-            operand: Box::new(resolve_names_in_ast_at(operand, named_ranges, current_sheet_index, at, visited)),
+            operand: Box::new(resolve_names_walk(operand, named_ranges, sheet_names, current_sheet_index, at, visited)),
         },
+    }
+}
+
+/// The tree a DEFINED name `nr` stands for at the cell `at`: its `refers_to`
+/// parsed, anchored at that cell, and the names inside it resolved in turn
+/// (from `sheet`'s scope). A definition that does not parse is #NAME?.
+fn splice_defined_name(
+    nr: &named_ranges::NamedRange,
+    key: String,
+    named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    sheet_names: &[String],
+    sheet: usize,
+    at: (u32, u32),
+    visited: &mut HashSet<String>,
+) -> ParserExpr {
+    match parse_formula(&nr.refers_to) {
+        Ok(mut sub_ast) => {
+            // The name's relative references mean THIS cell.
+            parser::anchor_name_references(&mut sub_ast, at.0, at.1);
+            // Recursively resolve names in the sub-AST
+            visited.insert(key.clone());
+            let resolved = resolve_names_walk(&sub_ast, named_ranges, sheet_names, sheet, at, visited);
+            visited.remove(&key);
+            resolved
+        }
+        // Parse error in refers_to — treat as #NAME? error
+        Err(_) => ParserExpr::Literal(ParserValue::Number(f64::NAN)),
+    }
+}
+
+/// A SHEET-QUALIFIED NAME, `Sheet1!Rate` (BUG-0744/0749): the name `Rate` as
+/// Sheet1 sees it -- Sheet1's own `Rate`, else the workbook's -- wherever the
+/// formula is, and never a LET / LAMBDA binding. [LIVE, Excel 16, lane formfix
+/// p1.json] with a workbook Dup = 1, a Sheet1 Dup = 2, a workbook Glob = 7 and
+/// a Sheet2 LocTwo = 5: on Sheet2 `=Sheet1!Dup` is 2 and `=Dup` 1; on Sheet1
+/// `=Sheet2!Dup` is 1 and `=Sheet1!Glob` 7; `=Sheet1!LocTwo` and
+/// `=Sheet1!Nope` are #NAME?; `=LET(Dup,9,Sheet1!Dup)` is 2;
+/// `=SUM(Sheet1!RngN)` reads Sheet1's range name. A name of Sheet1's own is
+/// read from Sheet1's scope inside, too. No sheet of that name, or no sheet
+/// list (`resolve_names_in_ast_at`): left standing, which the evaluator reads
+/// as #NAME?.
+fn resolve_qualified_name(
+    ast: &ParserExpr,
+    named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    at: (u32, u32),
+    visited: &mut HashSet<String>,
+) -> ParserExpr {
+    let Some((qualifier, name)) = parser::parser::qualified_name_parts(ast) else {
+        return ast.clone();
+    };
+    let Some(target) = sheet_names.iter().position(|s| identity::sheet_names_equal(s, qualifier)) else {
+        return ast.clone();
+    };
+    let key = crate::name_resolution::name_key(name);
+    if visited.contains(&key) {
+        return ParserExpr::Literal(ParserValue::Number(f64::NAN));
+    }
+    match named_ranges::resolve_in_scope(named_ranges, name, Some(target)) {
+        // The names inside a sheet's own name mean that sheet's; inside a
+        // workbook name they mean what they do where the formula is.
+        Some(nr) => {
+            let scope = if nr.sheet_index.is_some() { target } else { current_sheet_index };
+            splice_defined_name(nr, key, named_ranges, sheet_names, scope, at, visited)
+        }
+        None => ast.clone(),
     }
 }
 
@@ -2374,6 +2504,7 @@ pub fn resolve_names_in_ast_at(
 fn resolve_names_in_ast_with_shadows(
     ast: &ParserExpr,
     named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    sheet_names: &[String],
     current_sheet_index: usize,
     at: (u32, u32),
     visited: &mut HashSet<String>,
@@ -2387,19 +2518,19 @@ fn resolve_names_in_ast_with_shadows(
                 return ast.clone();
             }
             // Otherwise, delegate to the normal resolver
-            resolve_names_in_ast_at(ast, named_ranges, current_sheet_index, at, visited)
+            resolve_names_walk(ast, named_ranges, sheet_names, current_sheet_index, at, visited)
         }
         ParserExpr::Literal(_) | ParserExpr::CellRef { .. }
         | ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. }
         | ParserExpr::TableRef { .. } => ast.clone(),
         ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
-            left: Box::new(resolve_names_in_ast_with_shadows(left, named_ranges, current_sheet_index, at, visited, shadows)),
+            left: Box::new(resolve_names_in_ast_with_shadows(left, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
             op: *op,
-            right: Box::new(resolve_names_in_ast_with_shadows(right, named_ranges, current_sheet_index, at, visited, shadows)),
+            right: Box::new(resolve_names_in_ast_with_shadows(right, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
         },
         ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
             op: *op,
-            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, at, visited, shadows)),
+            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
         },
         ParserExpr::FunctionCall { func, args, .. } => {
             // For nested LAMBDA/LET inside a shadowed context, extend shadows
@@ -2416,7 +2547,7 @@ fn resolve_names_in_ast_with_shadows(
                         resolved_args.push(p_arg.clone());
                     }
                     resolved_args.push(resolve_names_in_ast_with_shadows(
-                        args.last().unwrap(), named_ranges, current_sheet_index, at, visited, &inner_shadows,
+                        args.last().unwrap(), named_ranges, sheet_names, current_sheet_index, at, visited, &inner_shadows,
                     ));
                     ParserExpr::FunctionCall { func: func.clone(), args: resolved_args, ref_site_id: Default::default() }
                 }
@@ -2434,7 +2565,7 @@ fn resolve_names_in_ast_with_shadows(
                             resolved_args.push(arg.clone());
                         } else {
                             resolved_args.push(resolve_names_in_ast_with_shadows(
-                                arg, named_ranges, current_sheet_index, at, visited, &inner_shadows,
+                                arg, named_ranges, sheet_names, current_sheet_index, at, visited, &inner_shadows,
                             ));
                         }
                     }
@@ -2447,24 +2578,13 @@ fn resolve_names_in_ast_with_shadows(
                         let key = crate::name_resolution::name_key(custom_name);
                         // Don't resolve if shadowed by a LAMBDA/LET parameter
                         if !shadows.contains(&identity::sheet_name_key(custom_name)) {
-                            let nr = named_ranges
-                                .values()
-                                .find(|nr| {
-                                    let nr_key = crate::name_resolution::name_key(&nr.name);
-                                    nr_key == key && nr.sheet_index == Some(current_sheet_index)
-                                })
-                                .or_else(|| {
-                                    named_ranges.values().find(|nr| {
-                                        let nr_key = crate::name_resolution::name_key(&nr.name);
-                                        nr_key == key && nr.sheet_index.is_none()
-                                    })
-                                });
+                            let nr = named_ranges::resolve_in_scope(named_ranges, custom_name, Some(current_sheet_index));
                             if let Some(nr) = nr {
                                 if let Ok(mut sub_ast) = parse_formula(&nr.refers_to) {
                                     parser::anchor_name_references(&mut sub_ast, at.0, at.1);
                                     visited.insert(key.clone());
                                     let resolved_callee = resolve_names_in_ast_with_shadows(
-                                        &sub_ast, named_ranges, current_sheet_index, at, visited, shadows,
+                                        &sub_ast, named_ranges, sheet_names, current_sheet_index, at, visited, shadows,
                                     );
                                     visited.remove(&key);
                                     // See the non-shadowed branch: a leading display-name
@@ -2475,7 +2595,7 @@ fn resolve_names_in_ast_with_shadows(
                                     ];
                                     for a in args {
                                         invoke_args.push(resolve_names_in_ast_with_shadows(
-                                            a, named_ranges, current_sheet_index, at, visited, shadows,
+                                            a, named_ranges, sheet_names, current_sheet_index, at, visited, shadows,
                                         ));
                                     }
                                     return ParserExpr::FunctionCall {
@@ -2489,46 +2609,54 @@ fn resolve_names_in_ast_with_shadows(
                     }
                     ParserExpr::FunctionCall {
                         func: func.clone(),
-                        args: args.iter().map(|a| resolve_names_in_ast_with_shadows(a, named_ranges, current_sheet_index, at, visited, shadows)).collect(),
+                        args: args.iter().map(|a| resolve_names_in_ast_with_shadows(a, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)).collect(),
                         ref_site_id: Default::default(),
                     }
                 },
             }
         }
+        // A sheet-qualified name is never a LET / LAMBDA binding [LIVE, lane
+        // formfix p1.json: `=LET(Dup,9,Sheet1!Dup)` is 2].
+        ParserExpr::Range { .. } if parser::parser::qualified_name_parts(ast).is_some() => {
+            resolve_qualified_name(ast, named_ranges, sheet_names, current_sheet_index, at, visited)
+        }
         ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
-            start: Box::new(resolve_names_in_ast_with_shadows(start, named_ranges, current_sheet_index, at, visited, shadows)),
-            end: Box::new(resolve_names_in_ast_with_shadows(end, named_ranges, current_sheet_index, at, visited, shadows)),
+            start: Box::new(resolve_names_in_ast_with_shadows(start, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
+            end: Box::new(resolve_names_in_ast_with_shadows(end, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
             ref_site_id: Default::default(),
         },
+        ParserExpr::Sheet3DRef { reference, .. } if matches!(reference.as_ref(), ParserExpr::NamedRef { .. }) => {
+            ast.clone()
+        }
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
-            reference: Box::new(resolve_names_in_ast_with_shadows(reference, named_ranges, current_sheet_index, at, visited, shadows)),
+            reference: Box::new(resolve_names_in_ast_with_shadows(reference, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
             ref_site_id: Default::default(),
         },
         ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
-            target: Box::new(resolve_names_in_ast_with_shadows(target, named_ranges, current_sheet_index, at, visited, shadows)),
-            index: Box::new(resolve_names_in_ast_with_shadows(index, named_ranges, current_sheet_index, at, visited, shadows)),
+            target: Box::new(resolve_names_in_ast_with_shadows(target, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
+            index: Box::new(resolve_names_in_ast_with_shadows(index, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
         },
         ParserExpr::ArrayLiteral { rows } => ParserExpr::ArrayLiteral {
-            rows: rows.iter().map(|r| r.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, current_sheet_index, at, visited, shadows)).collect()).collect(),
+            rows: rows.iter().map(|r| r.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)).collect()).collect(),
         },
         ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
-            elements: elements.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, current_sheet_index, at, visited, shadows)).collect(),
+            elements: elements.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)).collect(),
         },
         ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
             entries: entries.iter().map(|(k, v)| (
-                resolve_names_in_ast_with_shadows(k, named_ranges, current_sheet_index, at, visited, shadows),
-                resolve_names_in_ast_with_shadows(v, named_ranges, current_sheet_index, at, visited, shadows),
+                resolve_names_in_ast_with_shadows(k, named_ranges, sheet_names, current_sheet_index, at, visited, shadows),
+                resolve_names_in_ast_with_shadows(v, named_ranges, sheet_names, current_sheet_index, at, visited, shadows),
             )).collect(),
         },
         ParserExpr::SpillRef { cell, .. } => ParserExpr::SpillRef {
-            cell: Box::new(resolve_names_in_ast_with_shadows(cell, named_ranges, current_sheet_index, at, visited, shadows)),
+            cell: Box::new(resolve_names_in_ast_with_shadows(cell, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
             ref_site_id: Default::default(),
         },
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
-            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, at, visited, shadows)),
+            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, sheet_names, current_sheet_index, at, visited, shadows)),
         },
     }
 }
@@ -2731,9 +2859,10 @@ pub fn split_entered_formula(
             let named_ranges_map = state.named_ranges.read().unwrap();
             let mut visited = HashSet::new();
             // At THIS cell: a relative name means the cell it is used in.
-            let out = resolve_names_in_ast_at(
+            let out = resolve_names_in_ast_in(
                 &stored,
                 &named_ranges_map,
+                sheet_names,
                 sheet_index,
                 (row, col),
                 &mut visited,
@@ -4503,7 +4632,7 @@ pub fn evaluate_formula_with_pivot(
     eval_ctx: engine::EvalContext,
     style_registry: Option<&engine::StyleRegistry>,
     user_files: &HashMap<String, Vec<u8>>,
-    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup>,
     gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
 ) -> CellValue {
     evaluate_formula_raw_with_files_and_pivot(
@@ -4563,7 +4692,7 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
     eval_ctx: engine::EvalContext,
     style_registry: Option<&engine::StyleRegistry>,
     user_files: &HashMap<String, Vec<u8>>,
-    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup>,
     gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
     udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
 ) -> EvalResult {
@@ -4596,7 +4725,7 @@ pub fn evaluate_formula_raw_reporting_refusal(
     eval_ctx: engine::EvalContext,
     style_registry: Option<&engine::StyleRegistry>,
     user_files: &HashMap<String, Vec<u8>>,
-    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup>,
     gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
     udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
 ) -> (EvalResult, Option<CellError>) {
@@ -4756,7 +4885,8 @@ pub fn evaluate_formula_raw_with_ast_and_files(
 /// defects; they now go through `commands::data::reevaluate_formula_cell` or an
 /// `EvalContext` carrying the cell's own position, and
 /// `cascade_position_tests` pins that. Its remaining caller,
-/// `update_cell_on_sheets`, evaluates the cell it WRITES, which the off-sheet
+/// `update_cell_on_sheets` (through the `_cube_and_pivot` sibling below),
+/// evaluates the cell it WRITES, which the off-sheet
 /// recalculation right after re-evaluates in place (`recalculate_sheet_values`).
 pub fn evaluate_formula_raw_with_ast_files_and_cube(
     grids: &[Grid],
@@ -4767,6 +4897,28 @@ pub fn evaluate_formula_raw_with_ast_files_and_cube(
     udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
     cube: Option<std::sync::Arc<engine::CubePrefetch>>,
     control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
+) -> EvalResult {
+    evaluate_formula_raw_with_ast_files_cube_and_pivot(
+        grids, sheet_names, current_sheet_index, ast, user_files, udf_fn, cube, control_values, None,
+    )
+}
+
+/// [`evaluate_formula_raw_with_ast_files_and_cube`] with a GETPIVOTDATA
+/// lookup. `update_cell_on_sheets` hands its own (BUG-0765): without one the
+/// written `=GETPIVOTDATA(..)` stored #REF!, and a write that defers its
+/// recalculation (`recalc: false`, a floating grid's or a script's bulk
+/// write) kept it until the next recalculation.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_formula_raw_with_ast_files_cube_and_pivot(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    user_files: &HashMap<String, Vec<u8>>,
+    udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
+    cube: Option<std::sync::Arc<engine::CubePrefetch>>,
+    control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup>,
 ) -> EvalResult {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         return EvalResult::Error(CellError::Ref);
@@ -4788,6 +4940,9 @@ pub fn evaluate_formula_raw_with_ast_files_and_cube(
         evaluator.set_cube_prefetch(c);
     }
     if let Some(cv) = control_values { evaluator.set_control_values(cv); }
+    if let Some(pf) = pivot_data_fn {
+        evaluator.set_pivot_data_fn(pf);
+    }
     evaluator.evaluate(ast)
 }
 
@@ -6410,6 +6565,7 @@ pub fn run() {
             comments::has_comment,
             comments::clear_all_comments,
             comments::clear_comments_in_range,
+            comments::paste_comments,
             // Note commands
             notes::add_note,
             notes::update_note,

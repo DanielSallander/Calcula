@@ -24,6 +24,8 @@ const h = vi.hoisted(() => ({
   select: vi.fn(),
   owner: null as unknown,
   alert: vi.fn(),
+  protectedSheet: false,
+  setDV: vi.fn(),
 }));
 
 vi.mock("@api/state", () => ({
@@ -43,6 +45,7 @@ vi.mock("@api/lib", async (importOriginal) => ({
   setCellStyles: (...a: unknown[]) => h.setCellStyles(...a),
   applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
   updateCellsBatch: (...a: unknown[]) => h.batch(...a),
+  setDataValidation: (...a: unknown[]) => h.setDV(...a),
   getRangeCellsTyped: vi.fn(async () => []),
   getSheets: vi.fn(async () => ({ sheets: [{ index: 0, name: "Sheet1", sheetId: "sheet-a" }], activeIndex: 0 })),
   shiftFormulasBatch: vi.fn(async (inputs: Array<{ formula: string }>) => inputs.map((i) => i.formula)),
@@ -51,7 +54,10 @@ vi.mock("@api/lib", async (importOriginal) => ({
   commitUndoTransaction: vi.fn(async () => undefined),
   cancelUndoTransaction: vi.fn(async () => undefined),
   getSpillRanges: vi.fn(async () => []),
-  isSheetProtected: vi.fn(async () => false),
+  isSheetProtected: vi.fn(async () => h.protectedSheet),
+  // A protected host with Format Cells NOT allowed and every destination unlocked.
+  canPerformAction: vi.fn(async () => ({ canEdit: false, reason: "Format Cells is not allowed." })),
+  canEditCells: vi.fn(async () => ({ canEdit: true, reason: "" })),
 }));
 vi.mock("@api/cellTarget", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/cellTarget")>()),
@@ -64,7 +70,7 @@ vi.mock("@api/floatingRangeSpills", () => ({ getFloatingRangeSpillRanges: vi.fn(
 vi.mock("@api/cellClipboard", () => ({ internalClipboardIsCurrent: vi.fn(async () => true) }));
 vi.mock("@api/dialogs", () => ({ alertAsync: (...a: unknown[]) => h.alert(...a) }));
 
-import { executePasteLink, executePasteSpecial } from "../pasteSpecialExecute";
+import { executePasteLink, executePasteSpecial, validationGroups } from "../pasteSpecialExecute";
 import type { PasteAttribute } from "../types";
 
 const REF = { kind: "floatingRange" as const, id: "fr-1" };
@@ -123,6 +129,9 @@ beforeEach(() => {
   h.setCellStyles.mockResolvedValue(undefined);
   h.alert.mockResolvedValue(undefined);
   h.owner = null;
+  h.protectedSheet = false;
+  h.setDV.mockReset();
+  h.setDV.mockResolvedValue({ success: true, validation: null, error: null });
 });
 
 describe("[LIVE] every Paste Special variant selects the pasted range (BUG-0349)", () => {
@@ -149,6 +158,25 @@ describe("[LIVE] every Paste Special variant selects the pasted range (BUG-0349)
   it("Paste Link selects the pasted range", async () => {
     expect(await executePasteLink(A1B3, sel(0, 3, 0, 3), 1000, 100)).toBe(true);
     expect(selected()).toEqual([["grid", D1E3]]);
+  });
+
+  // BUG-0725 [LIVE, Excel 16 COM, 2026-11-06, backmisc/probe1.ps1]: a
+  // formatting-only Paste Special that CHANGES NOTHING -- onto unlocked cells of
+  // a protected sheet with Format Cells off -- still selects the destination
+  // (Excel: C1:C3 selected, C1 not bold). Calcula selected nothing.
+  // SABOTAGE: drop the selectPastedSheetArea call in the nothingToPaste branch.
+  it("a formatting-only paste that changes nothing still selects the destination, on a sheet and on a floating grid", async () => {
+    h.protectedSheet = true;
+    h.setCellStyle.mockRejectedValue(new Error("Format Cells is not allowed."));
+    expect(await paste("formats", sel(0, 3, 0, 3))).toBe(true);
+    expect(h.setCellStyles, "nothing was formatted").not.toHaveBeenCalled();
+    expect(selected()).toEqual([["grid", D1E3]]);
+    h.select.mockReset();
+    h.owner = { kind: "object", ownerId: "floatingRange", ref: REF, selection: sel(3, 0, 3, 0), bounds: { rows: 10, cols: 10 }, label: "Float1", wholeObject: false };
+    expect(await paste("formats", sel(3, 0, 3, 0), false, REF)).toBe(true);
+    expect(h.setCellStyles).not.toHaveBeenCalled();
+    expect(h.alert, "nothing is said").not.toHaveBeenCalled();
+    expect(selected()).toEqual([["object", { startRow: 3, startCol: 0, endRow: 5, endCol: 1 }]]);
   });
 
   it("a paste the backend refuses selects nothing", async () => {
@@ -213,5 +241,45 @@ describe("[LIVE] Values / Formulas and Number Formats give an EMPTY source posit
   it("Skip Blanks still skips the empty position (nothing is written there)", async () => {
     await executePasteSpecial(g1g2(null), sel(0, 8, 0, 8), { pasteAttribute: "valuesAndNumberFormats", operation: "none", skipBlanks: true, transpose: false }, 1000, 100);
     expect(formats()).toEqual(["0,8=General"]);
+  });
+});
+
+// BUG-0725: Paste Validation wrote ONE backend call per cell. A block under
+// one rule is now one call over the pasted block, a block under two rules one
+// call per rectangle of each, all in the paste's one undo step.
+// SABOTAGE: make validationGroups return one 1x1 rectangle per cell.
+describe("Paste Validation sends one call per rectangle of one rule (BUG-0725)", () => {
+  const ruleA = { rule: { type: "wholeNumber", operator: "between", formula1: "1", formula2: "9" } };
+  const ruleB = { rule: { type: "list", source: "a,b" } };
+  function withRules(rules: Array<Array<unknown>>): never {
+    const validations = new Map<string, unknown>();
+    rules.forEach((row, r) => row.forEach((v, c) => { if (v) validations.set(`${r},${c}`, v); }));
+    return { ...(A1B3 as object), validations } as never;
+  }
+
+  it("a 3x2 block under one rule is ONE call over the pasted D1:E3", async () => {
+    const clip = withRules([[ruleA, ruleA], [ruleA, ruleA], [ruleA, ruleA]]);
+    expect(await executePasteSpecial(clip, sel(0, 3, 0, 3), { pasteAttribute: "validation", operation: "none", skipBlanks: false, transpose: false }, 1000, 100)).toBe(true);
+    expect(h.setDV.mock.calls.map((c) => c.slice(0, 4))).toEqual([[0, 3, 2, 4]]);
+  });
+
+  it("two rules side by side: one call per column block; a cell without a rule is left alone", () => {
+    const groups = validationGroups([
+      { row: 0, col: 0, validation: ruleA }, { row: 1, col: 0, validation: ruleA },
+      { row: 0, col: 1, validation: ruleB }, { row: 1, col: 1, validation: ruleB },
+      { row: 0, col: 2, validation: ruleB },
+    ] as never);
+    expect(groups.map((g) => [g.startRow, g.startCol, g.endRow, g.endCol, g.validation === ruleA ? "A" : "B"])).toEqual([
+      [0, 0, 1, 0, "A"],
+      [0, 1, 1, 1, "B"],
+      [0, 2, 0, 2, "B"],
+    ]);
+  });
+
+  it("a refused rectangle is told, not dropped unread", async () => {
+    h.setDV.mockResolvedValue({ success: false, validation: null, error: "The cell is protected." });
+    const clip = withRules([[ruleA, ruleA], [ruleA, ruleA], [ruleA, ruleA]]);
+    await executePasteSpecial(clip, sel(0, 3, 0, 3), { pasteAttribute: "validation", operation: "none", skipBlanks: false, transpose: false }, 1000, 100);
+    expect(String(h.alert.mock.calls[0]?.[0])).toContain("The cell is protected.");
   });
 });

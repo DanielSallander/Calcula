@@ -20,10 +20,11 @@ use pivot_engine::{
 /// is an ERROR VALUE: `ISERROR` is TRUE, `ERROR.TYPE` is 2, `ISTEXT` FALSE.
 /// The writer put the TEXT "#DIV/0!" in the grid, so `ISERROR` answered FALSE.
 ///
-/// The code arrives in two spellings: a calculated field's bare code
-/// (`"DIV/0!"`, `"NUM!"`, `"VALUE!"`; `CalcValue::Error`) and a source cell's
-/// variant name (`"Div0"`, `"NA"`; `CacheValue::Error` is written with
-/// `{:?}`). Both map to their error; anything else is `#VALUE!`.
+/// The code is the bare Excel code (`"DIV/0!"`, `"NUM!"`, `"N/A"`), from a
+/// calculated field (`CalcValue::Error`) and, since BUG-0761, from a source
+/// cell (`CacheValue::Error`); the old variant-name spelling (`"Div0"`,
+/// `"NA"`, which the cache wrote with `{:?}`) still maps. Anything else is
+/// `#VALUE!`.
 pub(crate) fn pivot_error_value(code: &str) -> engine::CellError {
     use engine::CellError;
     let bare = code.trim().trim_start_matches('#');
@@ -40,6 +41,7 @@ pub(crate) fn pivot_error_value(code: &str) -> engine::CellError {
         "Null" => CellError::Null,
         "Num" => CellError::Num,
         "Spill" => CellError::Spill,
+        "Calc" => CellError::Calc,
         "Circular" => CellError::Circular,
         "Conflict" => CellError::Conflict,
         "Blocked" => CellError::Blocked,
@@ -439,8 +441,9 @@ pub(crate) fn preserve_collapse_state(new_fields: &mut [PivotField], old_fields:
     }
 }
 
-/// Carry each field's own SETTINGS -- sort order (by label or by value),
-/// subtotals, show-all-items and grouping -- from the field of the same NAME and kind
+/// Carry each field's own SETTINGS -- sort order (by label, by value or by
+/// hand, with each grouped level's own sort), subtotals, show-all-items and
+/// grouping -- from the field of the same NAME and kind
 /// ([`previous_namesake`]) the pivot held before a rebuild, found in ANY zone
 /// (a field dragged from Rows to Columns is still the same field and keeps its
 /// settings, as in Excel).
@@ -460,6 +463,12 @@ pub(crate) fn preserve_field_settings(new_fields: &mut [PivotField], old_fields:
             new_field.show_subtotals = old.show_subtotals;
             new_field.show_all_items = old.show_all_items;
             new_field.grouping = old.grouping.clone();
+            // A hand-placed order (Move, Manual) and the sorts of its
+            // grouped levels are the field's own settings too (piv5): a
+            // rebuild kept Manual and dropped the list, so the items came
+            // back in source order.
+            new_field.manual_item_order = old.manual_item_order.clone();
+            new_field.level_sorts = old.level_sorts.clone();
         }
     }
 }
@@ -810,6 +819,19 @@ pub(crate) fn api_grouping_config_to_engine(config: &FieldGroupingConfig) -> Fie
     }
 }
 
+/// The notice a data-model pivot gets when its render left a grouped
+/// level's subtotals EMPTY (`PivotCache::grouped_totals_withheld`): nothing
+/// evaluates a group made in the PivotTable for a measure whose totals are not
+/// the sum of its items, and the summed number would be wrong (wave-3 verify).
+fn grouped_totals_notice(cache: &PivotCache) -> Vec<crate::pivot::types::PivotNotice> {
+    if !cache.grouped_totals_withheld() {
+        return Vec::new();
+    }
+    vec![crate::pivot::types::PivotNotice::degraded(
+        "Some subtotals of grouped items are left empty: an average, ratio or distinct count cannot be added up from its items, and the Data Model cannot evaluate a group made in the PivotTable.",
+    )]
+}
+
 /// Converts engine PivotView to response format, including filter row data with unique values
 /// Maximum number of rows before auto-windowing kicks in.
 const WINDOW_THRESHOLD: usize = 500;
@@ -967,24 +989,31 @@ pub(crate) fn view_to_response(
         .collect();
 
     // Build row/column field summaries for header filter dropdowns
-    let row_field_summaries: Vec<HeaderFieldSummaryData> = view
-        .row_field_summaries
-        .iter()
-        .map(|s| HeaderFieldSummaryData {
+    fn header_field_summary_data(s: &pivot_engine::HeaderFieldSummary) -> HeaderFieldSummaryData {
+        HeaderFieldSummaryData {
             field_index: s.field_index,
             field_name: s.field_name.clone(),
             has_active_filter: s.has_active_filter,
-        })
+            sort_order: match s.sort_order {
+                SortOrder::Ascending => "asc",
+                SortOrder::Descending => "desc",
+                SortOrder::Manual => "manual",
+                SortOrder::DataSourceOrder => "source",
+            }
+            .to_string(),
+            sort_by_value_field: s.value_sort_field.clone(),
+        }
+    }
+    let row_field_summaries: Vec<HeaderFieldSummaryData> = view
+        .row_field_summaries
+        .iter()
+        .map(header_field_summary_data)
         .collect();
 
     let column_field_summaries: Vec<HeaderFieldSummaryData> = view
         .column_field_summaries
         .iter()
-        .map(|s| HeaderFieldSummaryData {
-            field_index: s.field_index,
-            field_name: s.field_name.clone(),
-            has_active_filter: s.has_active_filter,
-        })
+        .map(header_field_summary_data)
         .collect();
 
     if use_windowing {
@@ -1023,7 +1052,7 @@ pub(crate) fn view_to_response(
             overwrite_token: None,
             // Filled after the fact by the producer that has something to say,
             // exactly as `overwritten_cell_count` is.
-            notices: Vec::new(),
+            notices: grouped_totals_notice(cache),
             value_field_names,
             group_members: Vec::new(),
         }
@@ -1048,7 +1077,7 @@ pub(crate) fn view_to_response(
             row_descriptors: Vec::new(),
             overwritten_cell_count: 0,
             overwrite_token: None,
-            notices: Vec::new(),
+            notices: grouped_totals_notice(cache),
             value_field_names,
             group_members: Vec::new(),
         }
@@ -1573,5 +1602,29 @@ mod previous_namesake_tests {
             !placed[0].show_subtotals && placed[0].collapsed,
             "the synthetic row lost its own settings from one rebuild to the next"
         );
+    }
+
+    /// piv5: a field's hand-placed order and its grouped levels' sorts (a
+    /// group parent's, a date level's: `level_sorts`) are its own settings, so
+    /// a BI rebuild carries them with the sort order. It carried Manual and
+    /// dropped the list, and put every grouped level back to Ascending.
+    ///
+    /// SABOTAGE (piv5-sabL): `preserve_field_settings` no longer carries
+    /// `level_sorts` -- fails at "LEVEL SORTS".
+    #[test]
+    fn a_rebuild_keeps_a_fields_manual_order_and_its_grouped_levels_sorts() {
+        let mut region = PivotField::new(3, "Region".to_string());
+        region.sort_order = SortOrder::Manual;
+        region.manual_item_order = vec!["West".to_string(), "East".to_string()];
+        region.level_sort_mut("Region2").sort_order = SortOrder::Descending;
+        let old = vec![region.clone()];
+
+        let mut placed = vec![PivotField::new(0, "Region".to_string())];
+        preserve_field_settings(&mut placed, &old);
+        assert_eq!(placed[0].sort_order, SortOrder::Manual, "the sort order");
+        assert_eq!(placed[0].manual_item_order, region.manual_item_order, "MANUAL ORDER dropped by the rebuild");
+        assert_eq!(placed[0].level_sorts.len(), 1, "LEVEL SORTS dropped by the rebuild");
+        assert_eq!(placed[0].level_sorts[0].level, "Region2", "LEVEL SORTS");
+        assert_eq!(placed[0].level_sorts[0].sort_order, SortOrder::Descending, "LEVEL SORTS");
     }
 }

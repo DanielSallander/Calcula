@@ -50,6 +50,7 @@ import { parseDate } from "@api/locale";
 import { detectCategoryField, readShownNumber, serialToEpochMs } from "./chartFieldTypes";
 import { lowerEncoding } from "./lowerEncoding";
 import { forgetHiddenSignature, rememberHiddenSignature } from "./hiddenLinesWatch";
+import { getChartById } from "./chartStore";
 
 // ============================================================================
 // Sandboxed-transform routing
@@ -264,7 +265,12 @@ export async function readChartData(spec: ChartSpec): Promise<ParsedChartData> {
  * placed chart (`chartId`) has bindings. A literal that starts with "=" is
  * text and paints as typed: there is no second, in-spec spelling of a link.
  */
-export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?: string): Promise<{
+export async function readChartDataResolved(
+  spec: ChartSpec,
+  depth = 0,
+  chartId?: string,
+  askingSheet?: number,
+): Promise<{
   spec: ChartSpec;
   data: ParsedChartData;
   /** Data before chart filters applied (for filter dropdown to show all options). */
@@ -278,6 +284,10 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // seam's cache). Concat children are not placed charts and have none.
   let resolvedSpec = overlayChartBindings(depth === 0 ? chartId : undefined, spec);
   const diagnostics: TransformDiagnostic[] = [];
+  // The sheet a name or an unqualified range is asked FROM: the chart's own
+  // placement (kept current by the store through sheet moves), never whichever
+  // sheet happens to be active while the chart is read off screen.
+  const askFrom = askingSheet ?? (chartId ? getChartById(chartId)?.sheetIndex : undefined);
 
   // Concatenation: read each child chart independently and tile them. The
   // container has no data of its own, so this short-circuits the single-source
@@ -286,7 +296,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   if (resolvedSpec.concat && resolvedSpec.concat.charts.length > 0 && depth < MAX_CONCAT_DEPTH) {
     const concat = await assembleConcat(
       resolvedSpec.concat.charts,
-      (child) => readChartDataResolved(child, depth + 1),
+      (child) => readChartDataResolved(child, depth + 1, undefined, askFrom),
       diagnostics,
     );
     const empty: ParsedChartData = { categories: [], series: [] };
@@ -322,7 +332,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     // Apply data transforms if specified
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
       // Pre-resolve lookup sources (async) so the pipeline can join by index.
-      const lookupData = await resolveLookupSources(resolvedSpec.transform);
+      const lookupData = await resolveLookupSources(resolvedSpec.transform, askFrom);
       // Async pipeline: sandboxed transforms await IN ORDER; built-ins/in-process run sync.
       parsedData = withoutSourceText(await applyTransformsAsync(parsedData, resolvedSpec.transform, sandboxTransformRunner, diagnostics, lookupData, undefined, params));
     }
@@ -354,7 +364,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
 
   // Resolve the data source to concrete coordinates AND its live sheet (a
   // deleted source sheet throws here, and the renderer shows that message).
-  const dataRef = await resolveDataSource(resolvedSpec.data);
+  const dataRef = await resolveDataSource(resolvedSpec.data, askFrom);
 
   // A 2D grid of display values AND typed values, read from the data's OWN
   // sheet -- without its hidden rows/columns unless the spec plots them (an
@@ -393,7 +403,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // Resolve lookup sources once (async); reused by the top-level transform run
   // AND by every facet panel so faceting never re-reads ranges.
   const lookupData = lowered.transform && lowered.transform.length > 0
-    ? await resolveLookupSources(lowered.transform)
+    ? await resolveLookupSources(lowered.transform, askFrom)
     : new Map<number, ParsedChartData>();
 
   // Apply data transforms if specified. Lookups are resolved against the lowered
@@ -623,6 +633,7 @@ function applySeriesColorOverrides(
  */
 async function resolveLookupSources(
   transforms: TransformSpec[] | undefined,
+  askingSheet: number | undefined,
 ): Promise<Map<number, ParsedChartData>> {
   const map = new Map<number, ParsedChartData>();
   if (!transforms) return map;
@@ -630,7 +641,7 @@ async function resolveLookupSources(
     const t = transforms[i];
     if (t.type === "lookup") {
       try {
-        map.set(i, await readLookupRange(t.from));
+        map.set(i, await readLookupRange(t.from, askingSheet));
       } catch {
         // Leave unset; applyLookup reports a "could not be loaded" diagnostic.
       }
@@ -643,8 +654,8 @@ async function resolveLookupSources(
  * Read a lookup table range as a ParsedChartData: columns orientation, header
  * row, first column as the join key (categories), remaining columns as series.
  */
-async function readLookupRange(from: DataSource): Promise<ParsedChartData> {
-  const ref = await resolveDataSource(from);
+async function readLookupRange(from: DataSource, askingSheet: number | undefined): Promise<ParsedChartData> {
+  const ref = await resolveDataSource(from, askingSheet);
   // ONE read of the lookup's own sheet serves both the series detection and the
   // parse (it used to read the range twice, both times from the active sheet).
   const { display: grid, numbers } = await readRangeGrid(ref);

@@ -351,7 +351,22 @@ impl Parser {
             "PATHLENGTH" => self.parse_text_call(TextFunction::PathLength, 1),
             "PATHITEM" => self.parse_text_call(TextFunction::PathItem, 2),
             "SPLIT" => self.parse_text_call(TextFunction::Split, 3),
-            "FORMAT" => self.parse_text_call(TextFunction::Format, 2),
+            // FORMAT(value, format_string [, locale_name]) -- DAX's 3-argument
+            // form formats in the named culture (BUG-0731). A fourth argument
+            // was accepted and silently dropped, like the third.
+            "FORMAT" => {
+                let call = self.parse_text_call(TextFunction::Format, 2)?;
+                if let Expression::TextFunc { args, .. } = &call {
+                    if args.len() > 3 {
+                        return Err(self.parse_err(format!(
+                            "FORMAT: expected at most 3 arguments (value, format string, locale \
+                             name), got {}",
+                            args.len()
+                        )));
+                    }
+                }
+                Ok(call)
+            }
             "CONTAINS" => self.parse_text_call(TextFunction::Contains, 2),
             "STARTSWITH" => self.parse_text_call(TextFunction::StartsWith, 2),
             "ENDSWITH" => self.parse_text_call(TextFunction::EndsWith, 2),

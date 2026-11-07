@@ -1964,6 +1964,11 @@ pub(crate) fn auto_fit_pivot_columns(
 ///
 /// Uses each data cell's `group_path` (which contains both row and column
 /// field values) to match against the requested field/item pairs.
+///
+/// The number of [`lookup_pivot_value`] -- an error cell reads as no number.
+/// Tests only: every GETPIVOTDATA route reads `lookup_pivot_value`, so a cell
+/// holding an error answers that error (BUG-0760).
+#[cfg(test)]
 pub fn lookup_pivot_data(
     pivot_tables: &HashMap<PivotId, (PivotDefinition, PivotCache)>,
     pivot_views: &HashMap<PivotId, PivotView>,
@@ -1973,6 +1978,49 @@ pub fn lookup_pivot_data(
     pivot_col: u32,
     field_item_pairs: &[(&str, &str)],
 ) -> Option<f64> {
+    lookup_pivot_value(pivot_tables, pivot_views, data_field, pivot_sheet, pivot_row, pivot_col, field_item_pairs)
+        .and_then(Result::ok)
+}
+
+/// The answer one matched value cell gives GETPIVOTDATA: its number, or the
+/// error it holds -- [LIVE, Excel 16, pivotfix probe1] Excel's GETPIVOTDATA
+/// over a `#DIV/0!` value cell (a calculated field `=Amount/0`, a Sum over a
+/// source `#DIV/0!`, and the grand total over either) is `#DIV/0!`
+/// (`ERROR.TYPE` 2), where Calcula answered #REF! because
+/// the lookup could carry only a number (BUG-0760). Any other content is no
+/// answer, as before.
+///
+/// An EMPTY value cell answers 0 (piv5): [LIVE, Excel 16, piv5 p1/p4]
+/// GETPIVOTDATA over an intersection no record reaches is 0 under every
+/// summary (Sum, Count, Average, Max, Min, Product, StdDev), and so is every
+/// cell Show Values As leaves empty (the grand total under Running Total In,
+/// the base item under Difference From, an erroring item under Rank, every
+/// cell of % of Parent Row Total over an error). It answered #REF! once those
+/// cells became EMPTY instead of 0 (the piv4 verifier's regression finding).
+fn pivot_cell_answer(cell: &pivot_engine::PivotViewCell) -> engine::PivotDataLookup {
+    match &cell.value {
+        pivot_engine::PivotCellValue::Number(n) => Some(Ok(*n)),
+        pivot_engine::PivotCellValue::Error(code) => Some(Err(crate::pivot::utils::pivot_error_value(code))),
+        pivot_engine::PivotCellValue::Empty
+            if cell.value_field_index.is_some() || cell.calculated_field_index.is_some() =>
+        {
+            Some(Ok(0.0))
+        }
+        _ => None,
+    }
+}
+
+/// GETPIVOTDATA's lookup: the value -- number or error -- of the one cell
+/// the request names (see [`engine::PivotDataLookup`]).
+pub fn lookup_pivot_value(
+    pivot_tables: &HashMap<PivotId, (PivotDefinition, PivotCache)>,
+    pivot_views: &HashMap<PivotId, PivotView>,
+    data_field: &str,
+    pivot_sheet: Option<&str>,
+    pivot_row: u32,
+    pivot_col: u32,
+    field_item_pairs: &[(&str, &str)],
+) -> engine::PivotDataLookup {
     // Excel's sheet-name case rule, the one every sheet lookup uses.
     let wanted_sheet = pivot_sheet;
     // Find which pivot table contains the referenced cell
@@ -1997,11 +2045,36 @@ pub fn lookup_pivot_data(
 
     let (definition, cache) = pivot_tables.get(pivot_id)?;
 
-    // Find the value field by name (case-insensitive)
-    let data_field_lower = data_field.to_lowercase();
+    // Find the value field by name (case-insensitive): its name, or the
+    // caption the pivot shows for it (`custom_name`), which is the name
+    // Excel's GETPIVOTDATA takes.
     let vf_idx = definition.value_fields.iter().position(|vf| {
-        vf.name.to_lowercase() == data_field_lower
-    })?;
+        vf.name.eq_ignore_ascii_case(data_field)
+            || vf.custom_name.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(data_field))
+    });
+    // Or a CALCULATED field (BUG-0760) -- named as the pivot shows it
+    // ("Ratio") or as Excel names its data field ("Sum of Ratio"). [LIVE,
+    // Excel 16, pivotfix probe1] `GETPIVOTDATA("Sum of Ratio",..)` over
+    // `=Amount/0` is #DIV/0!. Its cells carry the calculated field's own
+    // index (`PivotViewCell::calculated_field_index`), so every column of it
+    // is found -- under each column item, the row grand totals and the
+    // corner. The first fix found only the one column its caption heads, so
+    // with a column field every other cell read #REF! (wave-3 verify).
+    let cf_idx: Option<usize> = match vf_idx {
+        Some(_) => None,
+        None => Some(definition.calculated_fields.iter().position(|cf| {
+            cf.name.eq_ignore_ascii_case(data_field)
+                || format!("Sum of {}", cf.name).eq_ignore_ascii_case(data_field)
+        })?),
+    };
+    // Is the cell at column `col` one of the requested field's value cells?
+    let names_field = |_col: usize, cell: &pivot_engine::PivotViewCell| -> bool {
+        match (vf_idx, cf_idx) {
+            (Some(i), _) => cell.value_field_index == Some(i),
+            (None, Some(c)) => cell.calculated_field_index == Some(c),
+            (None, None) => false,
+        }
+    };
 
     // If no field/item pairs, return the grand total for this value field --
     // the value that stands for the WHOLE dataset. That is the GrandTotal
@@ -2012,23 +2085,24 @@ pub fn lookup_pivot_data(
     // answered #REF! beside the very count it names (found live 2026-09-29,
     // e2e fixall-pivot R4).
     if field_item_pairs.is_empty() {
-        let is_field = |cell: &pivot_engine::PivotViewCell| {
-            cell.value_field_index == Some(vf_idx) || definition.value_fields.len() == 1
+        let is_field = |col: usize, cell: &pivot_engine::PivotViewCell| {
+            names_field(col, cell) || (vf_idx.is_some() && definition.value_fields.len() == 1)
         };
         for row_cells in &view.cells {
-            for cell in row_cells {
-                if cell.cell_type == pivot_engine::PivotCellType::GrandTotal && is_field(cell) {
-                    if let pivot_engine::PivotCellValue::Number(n) = cell.value {
-                        return Some(n);
+            for (col, cell) in row_cells.iter().enumerate() {
+                if cell.cell_type == pivot_engine::PivotCellType::GrandTotal && is_field(col, cell) {
+                    if let Some(answer) = pivot_cell_answer(cell) {
+                        return Some(answer);
                     }
                 }
             }
         }
         for row_cells in &view.cells {
-            for cell in row_cells {
-                if cell.value_field_index.is_some() && is_field(cell) && cell.group_path.is_empty() {
-                    if let pivot_engine::PivotCellValue::Number(n) = cell.value {
-                        return Some(n);
+            for (col, cell) in row_cells.iter().enumerate() {
+                let is_value_cell = cell.value_field_index.is_some() || cell.calculated_field_index.is_some();
+                if is_value_cell && is_field(col, cell) && cell.group_path.is_empty() {
+                    if let Some(answer) = pivot_cell_answer(cell) {
+                        return Some(answer);
                     }
                 }
             }
@@ -2066,13 +2140,9 @@ pub fn lookup_pivot_data(
     // accepted any cell whose path merely CONTAINED the pairs, so a partial
     // spelling answered whichever leaf the view listed first, silently.
     for row_cells in &view.cells {
-        for cell in row_cells {
-            // Only consider data-area cells with a value_field_index
-            let cell_vf = match cell.value_field_index {
-                Some(idx) => idx,
-                None => continue,
-            };
-            if cell_vf != vf_idx || cell.group_path.len() != field_item_pairs.len() {
+        for (col, cell) in row_cells.iter().enumerate() {
+            // Only consider the requested field's data-area cells
+            if !names_field(col, cell) || cell.group_path.len() != field_item_pairs.len() {
                 continue;
             }
             let every_entry_requested = cell.group_path.iter().all(|&(field_index, value_id)| {
@@ -2086,8 +2156,8 @@ pub fn lookup_pivot_data(
                     .any(|&(field_index, value_id)| entry_answers(field_index, value_id, req_field, req_item))
             });
             if every_entry_requested && every_request_answered {
-                if let pivot_engine::PivotCellValue::Number(n) = cell.value {
-                    return Some(n);
+                if let Some(answer) = pivot_cell_answer(cell) {
+                    return Some(answer);
                 }
             }
         }
@@ -2179,8 +2249,8 @@ impl<'a> PivotLookupGuards<'a> {
         pivot_row: u32,
         pivot_col: u32,
         pairs: &[(&str, &str)],
-    ) -> Option<f64> {
-        lookup_pivot_data(&self.tables, &self.views, data_field, pivot_sheet, pivot_row, pivot_col, pairs)
+    ) -> engine::PivotDataLookup {
+        lookup_pivot_value(&self.tables, &self.views, data_field, pivot_sheet, pivot_row, pivot_col, pairs)
     }
 }
 
@@ -2207,7 +2277,7 @@ impl<'a> LazyPivotLookup<'a> {
         pivot_row: u32,
         pivot_col: u32,
         pairs: &[(&str, &str)],
-    ) -> Option<f64> {
+    ) -> engine::PivotDataLookup {
         self.guards
             .get_or_init(|| self.pivots.and_then(PivotLookupGuards::lock))
             .as_ref()?
@@ -2513,11 +2583,17 @@ pub(crate) struct PivotRecalcStates<'a> {
 /// GETPIVOTDATA: the cascade answers it from this pivot store
 /// (`with_cascade_pivots`, NEW-getpivotdata-trials) -- on the active sheet and
 /// across the cross-sheet walk. It used to evaluate with no pivot lookup, so
-/// every GETPIVOTDATA it reached came out #REF!, and on that branch the
+/// every GETPIVOTDATA it reached came out #REF!.
+///
+/// THE SECOND PASS is for VOLATILE readers: on the active-sheet branch the
 /// cascade is still followed by `recalc_after_off_sheet_write(&[dest])`,
 /// which re-evaluates the active sheet and every sheet that reads it through
-/// `recalculate_sheet_values`, where the lookup IS wired: the pass ends on the
-/// pivot's numbers. (Running only the active sheet's whole-sheet pass here --
+/// `recalculate_sheet_values`. The cascade walks dependency edges only, and
+/// `=INDIRECT("F6")` over a pivot cell has none; Excel recalculates it when
+/// the pivot moves (BUG-0767 was NOT real for that reason --
+/// `pivotfix_tests::a_volatile_reader_of_a_pivot_follows_the_pivots_write`
+/// pins it). Do not drop the pass as a redundant GETPIVOTDATA repair.
+/// (Running only the active sheet's whole-sheet pass here --
 /// the first version of this fix -- left Sheet2's `=GETPIVOTDATA(..;
 /// Sheet1!E1)` at #REF!, where the old active-only pass had at least left it
 /// alone; `a_cross_sheet_getpivotdata_survives_a_write_to_a_pivot_on_the_
@@ -2561,8 +2637,10 @@ pub(crate) fn recalc_after_pivot_write(
                 &mut recalculated,
             )
         });
-        // GETPIVOTDATA repair pass (see above): the active sheet and every
-        // sheet reading it, re-evaluated WITH the pivot lookup.
+        // The VOLATILE readers' pass (see above): the active sheet and every
+        // sheet reading it, whole -- `=INDIRECT(..)` over a pivot cell has no
+        // dependency edge for the cascade to follow
+        // (a_volatile_reader_of_a_pivot_follows_the_pivots_write).
         crate::commands::data::recalc_after_off_sheet_write(
             state,
             states.user_files,
@@ -2677,8 +2755,8 @@ pub(crate) fn recalculate_sheet_formulas(
     // Build pivot data lookup closure for GETPIVOTDATA evaluation
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
-        lookup_pivot_data(&pivot_tables, &pivot_views, data_field, pivot_sheet, pivot_row, pivot_col, pairs)
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
+        lookup_pivot_value(&pivot_tables, &pivot_views, data_field, pivot_sheet, pivot_row, pivot_col, pairs)
     };
 
     // Collect all cells with formulas on the active sheet
@@ -3139,7 +3217,7 @@ mod error_value_cell_tests {
         let mut views = HashMap::new();
         views.insert(id, view);
         let lookup = |field: &str, sheet: Option<&str>, row: u32, col: u32, pairs: &[(&str, &str)]| {
-            lookup_pivot_data(&tables, &views, field, sheet, row, col, pairs)
+            lookup_pivot_value(&tables, &views, field, sheet, row, col, pairs)
         };
         let grid = engine::Grid::new();
         let mut evaluator = engine::Evaluator::new(&grid);

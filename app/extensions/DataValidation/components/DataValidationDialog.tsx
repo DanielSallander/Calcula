@@ -13,6 +13,7 @@ import type {
 } from "@api";
 import {
   getDataValidation,
+  getAllDataValidations,
   setDataValidation,
   clearDataValidation,
   getSheets,
@@ -23,14 +24,15 @@ import {
   createWholeNumberRule,
   createDecimalRule,
   createListRule,
-  createListRuleFromRange,
   createTextLengthRule,
   createCustomRule,
   createDateRule,
   createTimeRule,
 } from "@api";
 import { joinValidationRefresh, getCurrentSelection } from "../lib/validationStore";
-import { formatListSourceText, parseListSourceText } from "../lib/listSourceRef";
+import { formatListSourceText, moveListRange, parseListSourceText } from "../lib/listSourceRef";
+import { activeCellOf } from "@api/activeCell";
+import { moveRuleFormula } from "../../_shared/lib/moveRuleFormula";
 import {
   operatorNeedsSecondValue,
   parseCriterionValue,
@@ -216,6 +218,12 @@ export function DataValidationDialog(props: DialogProps) {
   const [endRow, setEndRow] = useState(0);
   const [endCol, setEndCol] = useState(0);
 
+  // The ACTIVE cell. Excel's dialog states a relative Source and a custom
+  // formula for it, and reads what is typed relative to it (lane cfdvfix;
+  // [LIVE] cfdvb/probe1.ps1 C1: `=F1:F2` on H2:H4 reads `=F2:F3` at H3).
+  // The rule is stored for the range's top-left.
+  const [activeCell, setActiveCell] = useState<{ row: number; col: number }>({ row: 0, col: 0 });
+
   // Workbook sheets, for reading and writing a range-backed list source.
   // Null means the sheet list could not be read, which is NOT the same as "the
   // first sheet" -- a range would be stored against the wrong sheet.
@@ -241,6 +249,8 @@ export function DataValidationDialog(props: DialogProps) {
     let er = dialogData?.endRow ?? 0;
     let ec = dialogData?.endCol ?? 0;
 
+    // Without a selection's own active cell, the range's top-left is it.
+    let active = { row: Math.min(sr, er), col: Math.min(sc, ec) };
     if (!dialogData) {
       const sel = getCurrentSelection();
       if (sel) {
@@ -248,6 +258,7 @@ export function DataValidationDialog(props: DialogProps) {
         sc = sel.startCol;
         er = sel.endRow;
         ec = sel.endCol;
+        active = activeCellOf(sel) ?? { row: Math.min(sr, er), col: Math.min(sc, ec) };
       }
     }
 
@@ -255,6 +266,7 @@ export function DataValidationDialog(props: DialogProps) {
     setStartCol(sc);
     setEndRow(er);
     setEndCol(ec);
+    setActiveCell(active);
     setInvalidReason("");
 
     // Load existing validation for this range
@@ -263,24 +275,47 @@ export function DataValidationDialog(props: DialogProps) {
       // rendered as text without the names, and rendering one wrong is how the
       // rule used to get destroyed.
       let names: string[] = [];
-      let active: number | null = null;
+      let sheetIndex: number | null = null;
       try {
         const sheets = await getSheets();
         names = [];
         for (const info of sheets.sheets) {
           names[info.index] = info.name;
         }
-        active = sheets.activeIndex;
+        sheetIndex = sheets.activeIndex;
       } catch (error) {
         console.error("[DataValidation] Failed to read the sheet list:", error);
       }
       setSheetNames(names);
-      setActiveSheetIndex(active);
+      setActiveSheetIndex(sheetIndex);
+      const cell = active;
 
       try {
-        const existing = dialogData?.existingValidation ?? (await getDataValidation(sr, sc));
+        // The rule the ACTIVE cell has, and the cell it is written for (its
+        // range's top-left), so its formulas can be stated for the active cell.
+        let existing = dialogData?.existingValidation ?? null;
+        let writtenFor = { row: Math.min(sr, er), col: Math.min(sc, ec) };
+        if (!existing) {
+          const ranges = await getAllDataValidations();
+          const holder = ranges.find(
+            (v) =>
+              cell.row >= Math.min(v.startRow, v.endRow) &&
+              cell.row <= Math.max(v.startRow, v.endRow) &&
+              cell.col >= Math.min(v.startCol, v.endCol) &&
+              cell.col <= Math.max(v.startCol, v.endCol)
+          );
+          if (holder) {
+            existing = holder.validation;
+            writtenFor = { row: Math.min(holder.startRow, holder.endRow), col: Math.min(holder.startCol, holder.endCol) };
+          } else {
+            existing = await getDataValidation(cell.row, cell.col);
+          }
+        }
         if (existing) {
-          populateFromValidation(existing, names, active);
+          await populateFromValidation(existing, names, sheetIndex, {
+            drow: cell.row - writtenFor.row,
+            dcol: cell.col - writtenFor.col,
+          });
         } else {
           resetToDefaults();
         }
@@ -295,10 +330,11 @@ export function DataValidationDialog(props: DialogProps) {
     loadExisting();
   }, [isOpen]);
 
-  function populateFromValidation(
+  async function populateFromValidation(
     dv: DataValidation,
     names: readonly string[],
-    active: number | null
+    active: number | null,
+    offset: { drow: number; dcol: number }
   ) {
     const rule = dv.rule;
 
@@ -321,7 +357,9 @@ export function DataValidationDialog(props: DialogProps) {
       // the old "=1:0:4:0" was re-saved by OK as a literal one-value list.
       // -1 matches no sheet, so an unread sheet list renders the range as #REF!
       // instead of implying it is on this one -- and OK refuses to save that.
-      setListSource(formatListSourceText(rule.list.source, names, active ?? -1));
+      // A relative source is stated for the active cell (`offset` from the
+      // cell it is written for), as Excel's dialog shows it.
+      setListSource(formatListSourceText(rule.list.source, names, active ?? -1, offset));
       setInCellDropdown(rule.list.inCellDropdown);
     } else if ("date" in rule) {
       setValidationType("date");
@@ -340,7 +378,10 @@ export function DataValidationDialog(props: DialogProps) {
       setFormula2(rule.textLength.formula2 != null ? String(rule.textLength.formula2) : "");
     } else if ("custom" in rule) {
       setValidationType("custom");
-      setCustomFormula(rule.custom.formula);
+      // Stated for the active cell; a formula that cannot be (a range whose
+      // ends would wrap apart) is shown as stored.
+      const shown = await moveRuleFormula(rule.custom.formula, offset.drow, offset.dcol).catch(() => null);
+      setCustomFormula(shown ?? rule.custom.formula);
     }
 
     // Populate ignore blanks
@@ -381,6 +422,8 @@ export function DataValidationDialog(props: DialogProps) {
   // Nothing here coerces: a criterion that cannot be represented is REFUSED, so
   // that OK never writes a rule the user did not describe.
   async function buildRule(): Promise<BuiltRule> {
+    // The cell the rule is written for: the range's top-left.
+    const anchor = { row: Math.min(startRow, endRow), col: Math.min(startCol, endCol) };
     if (validationType === "none") {
       return { ok: true, rule: { none: true } };
     }
@@ -399,18 +442,11 @@ export function DataValidationDialog(props: DialogProps) {
       if (parsed.kind === "values") {
         return { ok: true, rule: createListRule(parsed.values, inCellDropdown) };
       }
-      const r = parsed.range;
-      return {
-        ok: true,
-        rule: createListRuleFromRange(
-          r.startRow,
-          r.startCol,
-          r.endRow,
-          r.endCol,
-          r.sheetIndex,
-          inCellDropdown
-        ),
-      };
+      // Typed for the active cell, stored for the range's top-left, with
+      // every part's `$` (BUG-0745: the relative flags were dropped here, so
+      // `=F1:F2` was saved absolute and OK on a relative rule made it so).
+      const range = moveListRange(parsed.range, anchor.row - activeCell.row, anchor.col - activeCell.col);
+      return { ok: true, rule: { list: { source: { range }, inCellDropdown } } };
     }
 
     if (validationType === "custom") {
@@ -420,7 +456,19 @@ export function DataValidationDialog(props: DialogProps) {
         // as "invalid" -- an empty Custom rule rejects every entry.
         return { ok: false, message: "Enter a formula. An empty custom rule rejects every entry." };
       }
-      return { ok: true, rule: createCustomRule(formula) };
+      // Typed for the active cell, stored for the range's top-left.
+      const stored = await moveRuleFormula(formula, anchor.row - activeCell.row, anchor.col - activeCell.col).catch(
+        () => null
+      );
+      if (stored === null) {
+        return {
+          ok: false,
+          message:
+            "The formula refers to a range that would wrap around the edge of the sheet from the range's first cell. " +
+            "Select the range starting from its top-left cell, or change the reference.",
+        };
+      }
+      return { ok: true, rule: createCustomRule(stored) };
     }
 
     if (!typeNeedsCriteria(validationType)) {
@@ -509,7 +557,7 @@ export function DataValidationDialog(props: DialogProps) {
     validationType, operator, formula1, formula2, listSource, customFormula,
     ignoreBlanks, inCellDropdown, showPrompt, promptTitle, promptMessage,
     showAlert, alertStyle, errorTitle, errorMessage,
-    startRow, startCol, endRow, endCol, sheetNames, activeSheetIndex, onClose,
+    startRow, startCol, endRow, endCol, sheetNames, activeSheetIndex, activeCell, onClose,
   ]);
 
   // Clear all validation for the range

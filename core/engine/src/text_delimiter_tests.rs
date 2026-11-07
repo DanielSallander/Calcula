@@ -279,8 +279,10 @@ const EXCEL: &[(&str, &str)] = &[
     ("=TEXTSPLIT(\"a,b;c\",\",\",\";\",,,A6)", "a,b;c,0"),
     ("=TEXTSPLIT(\"a,b;c\",\",\",\";\",FALSE,0,\"z\")", "a,b;c,z"),
     ("=TEXTSPLIT(\",\",\",\")", ","),
-    ("=TEXTSPLIT(\",\",\",\",,TRUE)", "#VALUE!"), // Excel #CALC! (Calcula has no #CALC!)
-    ("=TEXTSPLIT(\";\",\",\",\";\",TRUE)", "#VALUE!"), // Excel #CALC! (Calcula has no #CALC!)
+    // Excel's #CALC! (BUG-0774), which these rows stood in for with #VALUE!
+    // while Calcula had no #CALC!.
+    ("=TEXTSPLIT(\",\",\",\",,TRUE)", "#CALC!"),
+    ("=TEXTSPLIT(\";\",\",\",\";\",TRUE)", "#CALC!"),
     ("=TEXTSPLIT(\"a,b\",\",\",,TRUE,,1/0)", "a,b"),
     ("=TEXTSPLIT(\"ab\",\"b\")", "a,"),
     ("=TEXTSPLIT(TRUE,\"R\")", "T,UE"),

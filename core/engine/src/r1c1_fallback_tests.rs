@@ -219,9 +219,13 @@ fn a_sheet_qualified_cell_spelling_is_that_sheets_name_in_r1c1() {
     }
     assert!(wrong.is_empty(), "NOT EXCEL'S R1C1 READING ({}):\n{}", wrong.len(), wrong.join("\n"));
     // The formula keeps its spelling (the lexer folds a bare sheet name; the
-    // host restamps the workbook's casing).
+    // host restamps the workbook's casing) -- with the NAME quoted behind the
+    // sheet, as Excel shows it (BUG-0739 [LIVE, lane formula p1.json:
+    // `=LET(A1,2,Sheet2!'A1')`]; this asserted the bare spelling while a quote
+    // after `!` did not parse back). The stored text stays bare.
     let cell = entered("=LET(A1,2,Sheet2!A1)", 231).expect("accepted");
-    assert_eq!(cell.formula_string().as_deref(), Some("LET(A1,2,SHEET2!A1)"));
+    assert_eq!(cell.formula_string().as_deref(), Some("LET(A1,2,SHEET2!'A1')"));
+    assert_eq!(cell.formula_string_raw().as_deref(), Some("LET(A1,2,SHEET2!A1)"));
 }
 
 /// NEW-r1c1-leftovers (c), lane formc: R1C1's RELATIVE references are read in
@@ -304,4 +308,66 @@ fn an_r1c1_offset_excel_cannot_hold_is_refused_at_entry() {
     ] {
         assert!(entered(formula, 20).is_none(), "{formula} must be refused at entry, as Excel refuses it");
     }
+}
+
+/// BUG-0739: an R1C1-ONLY spelling (`RC`, `R[-1]C`, `R1C1`, `RC[-9]`) makes
+/// Excel read the WHOLE formula in R1C1, where a plain cell spelling is a NAME
+/// -- shown quoted, and #NAME? -- and `RC4` is R1C1's column 4 of this row.
+/// [LIVE, Excel 16, lane formd p1.json / p2.json and lane formula p1.json,
+/// typed into column J; the rows are re-based onto this file's sheet.]
+/// Calcula read each plain cell as the cell it spells. The STORED text keeps
+/// the names quoted, so the formula loads back the same.
+/// SABOTAGE (formula-r1c1whole): the fallback not triggered by an R1C1-only
+/// spelling -- fails at `=R[-1]C+D5` (D5's value, not #NAME?).
+#[test]
+fn an_r1c1_only_spelling_reads_the_whole_formula_in_r1c1() {
+    let mut wrong = Vec::new();
+    for (row, formula, shown, excel) in [
+        (60, "=R[-1]C+D5", "=J59+'D5'", name()),
+        (60, "=R1C1+D5", "=$A$1+'D5'", name()),
+        (60, "=D5+R[-1]C", "='D5'+J59", name()),
+        (60, "=SUM(R[-1]C:D5)", "=SUM(J59:'D5')", name()),
+        (60, "=R[-1]C+A1:A2", "=J59+'A1':'A2'", name()),
+        (60, "=SUM(R[-1]C,A1)", "=SUM(J59,'A1')", name()),
+        (51, "=SUM(R[-1]C4:D5)", "=SUM($D50:'D5')", name()),
+        (60, "=R[-1]C+Sheet2!D5", "=J59+SHEET2!'D5'", name()),
+        // RC4 is the cell in column 4 of this row once the formula is R1C1.
+        (50, "=RC[-9]+RC4", "=A50+$D50", n(1050.0)),
+        // CONTROLS: no R1C1-only spelling, A1 as before -- `RC:RC` is the
+        // column RC [LIVE `=SUM(RC:RC)` 0], a bound `C` the binding.
+        (60, "=SUM(RC:RC)", "=SUM(RC:RC)", n(0.0)),
+        (60, "=LET(c,5,c+C)", "=LET(c,5,c+c)", n(10.0)),
+        (60, "=D5+1", "=D5+1", n(1006.0)),
+    ] {
+        let Some(cell) = entered(formula, row) else {
+            wrong.push(format!("  J{row} {formula}: refused at entry; Excel holds {shown}"));
+            continue;
+        };
+        let bar = format!("={}", cell.formula_string().expect("a formula"));
+        if bar != shown {
+            wrong.push(format!("  J{row} {formula}: Calcula shows {bar}, Excel {shown}"));
+        }
+        let got = value_of(&cell);
+        if got != excel {
+            wrong.push(format!("  J{row} {formula}: Excel {excel:?}, Calcula {got:?}"));
+        }
+        // The text `.cala` stores loads back to the same value.
+        let stored = format!("={}", cell.formula_string_raw().expect("a formula"));
+        let loaded = value_of(&Cell::new_formula(stored.clone()));
+        if loaded != excel {
+            wrong.push(format!("  J{row} {formula}: stored as {stored}, which loads to {loaded:?}; Excel {excel:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "NOT EXCEL'S WHOLE-FORMULA R1C1 READ ({}):\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// BUG-0739: such a formula cannot hold a `$` reference or a row range either
+/// [LIVE, lane formd p2.json: `=R[-1]C+$D$5` and `=R[-1]C+SUM(1:1)` refused].
+#[test]
+fn an_r1c1_only_formula_refuses_what_r1c1_cannot_spell() {
+    for formula in ["=R[-1]C+$D$5", "=R[-1]C+SUM(1:1)", "=RC+A$1"] {
+        assert!(entered(formula, 20).is_none(), "{formula} must be refused at entry, as Excel refuses it");
+    }
+    // CONTROL: the same references without the R1C1 spelling are A1.
+    assert!(entered("=D1+$D$5", 20).is_some());
 }

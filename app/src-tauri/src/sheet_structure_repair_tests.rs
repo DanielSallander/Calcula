@@ -226,7 +226,10 @@ fn deleting_a_sheet_turns_a_pane_dropdowns_range_source_into_ref() {
         PaneControlConfig::Dropdown { source: DropdownSource::CellRange { reference }, .. } => reference.clone(),
         other => panic!("{:?}", other),
     };
-    assert_eq!(reference_of(&gone_id), "#REF!", "a dropdown still lists the deleted sheet's cells");
+    // Excel's list-source text: the address behind the marker [LIVE, lane
+    // namescalp p5.ps1, `=Data!$A$2:$A$4` -> `=#REF!$A$2:$A$4`]; the
+    // dropdown lists nothing from it (`resolveCellRangeSource`).
+    assert_eq!(reference_of(&gone_id), "#REF!A1:A5", "a dropdown still lists the deleted sheet's cells");
     assert_eq!(reference_of(&kept_id), "Other!A1:A5", "an unrelated dropdown source was rewritten");
 }
 
@@ -295,7 +298,7 @@ fn list_validation(sheet_index: Option<usize>) -> crate::data_validation::Valida
         end_col: 0,
         validation: dv::DataValidation {
             rule: dv::DataValidationRule::List(dv::ListRule {
-                source: dv::ListSource::Range { sheet_index, start_row: 0, start_col: 0, end_row: 4, end_col: 0 },
+                source: dv::ListSource::Range { sheet_index, start_row: 0, start_col: 0, end_row: 4, end_col: 0, relative: Default::default(), sheet_gone: false },
                 in_cell_dropdown: true,
             }),
             ..dv::DataValidation::default()
@@ -315,6 +318,8 @@ fn list_sources(state: &AppState, sheet: usize) -> Vec<crate::data_validation::L
 
 fn source_sheet(source: &crate::data_validation::ListSource) -> Option<Option<usize>> {
     match source {
+        // A source whose sheet is gone (BUG-0750) names no sheet at all.
+        crate::data_validation::ListSource::Range { sheet_gone: true, .. } => None,
         crate::data_validation::ListSource::Range { sheet_index, .. } => Some(*sheet_index),
         crate::data_validation::ListSource::Values(_) => None,
     }
@@ -550,9 +555,11 @@ fn a_rename_carries_a_pane_dropdowns_range_source_and_a_refused_one_does_not() {
 // (`apply_override_value_to_grid`). They now take the cells' rule. The
 // override's BASELINE and conflict UPSTREAM keep the refresh's rule on
 // purpose: they are upstream text, and a refresh compares its own rewrite of
-// the untouched upstream -- which reads a gone endpoint as `#REF!`
-// (`RefreshSheetNames::renames`) -- with the baseline; the cells' spelling
-// there would be a false conflict at every refresh.
+// the untouched upstream (`RefreshSheetNames::renames`) with the baseline.
+// Since BUG-0751 (lane namescalp) the refresh's rule moves a gone endpoint
+// inward too, over the tabs' order [LIVE, Excel 16, namescalp p2.ps1], so all
+// three read alike: `SUM(Mid!B1)` -- it used to read `#REF!` there, which the
+// subscriber's own delete never wrote.
 
 fn same(a: &str, b: &str) -> bool {
     calp::sheet_renames::same_formula_text(a, b)
@@ -636,15 +643,62 @@ fn a_3d_reference_losing_an_endpoint_reads_alike_in_the_cell_and_every_store() {
         "the override's CURRENT text -- written over the cell at the next refresh -- became `{}`",
         current
     );
-    for (what, text) in [
-        ("baseline", formula_text(&ovr.baseline)),
-        ("upstream", formula_text(ovr.upstream_new.as_ref().expect("upstream kept"))),
+    for (what, text, expected) in [
+        ("baseline", formula_text(&ovr.baseline), "SUM(Mid!B1)"),
+        ("upstream", formula_text(ovr.upstream_new.as_ref().expect("upstream kept")), "SUM(Last!B1)"),
     ] {
         assert!(
-            names_ref_not(&text, "Data") && !text.starts_with('='),
-            "the override's {} is UPSTREAM text and follows the refresh's rule (`#REF!`): `{}`",
+            same(&text, expected) && !text.starts_with('='),
+            "the override's {} is UPSTREAM text and follows the refresh's rule, which moves the \
+             gone endpoint inward like the cell (BUG-0751): `{}`, want `{}`",
             what,
-            text
+            text,
+            expected
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// BUG-0750: a chart's NAME-bound string source naming the deleted sheet
+// ---------------------------------------------------------------------------
+
+/// A chart on a SURVIVING sheet whose A1 string sources name the deleted
+/// sheet -- in its own data, a layer and a lookup -- reads `#REF!` from then
+/// on, as Excel's series does [LIVE, Excel 16, 2026-11-06, backmisc
+/// probe1.ps1: the saved series values ref of a chart whose source sheet was
+/// deleted is `#REF!`]. It used to be left naming the sheet by name, so a
+/// sheet ADDED later under that name was charted in its place. A source on
+/// another sheet is untouched.
+///
+/// SABOTAGE: drop the BUG-0750 rewrite in `delete_sheet_impl` -- "the string
+/// source still names the deleted sheet".
+#[test]
+fn a_charts_string_source_naming_a_deleted_sheet_reads_ref() {
+    let (state, file) = book(&["Data", "Keep"]);
+    let spec = serde_json::json!({
+        "chartId": "c1",
+        "spec": {
+            "mark": "bar",
+            "data": "Data!A1:B5",
+            "layers": [ { "mark": "line", "data": "'Data'!C1:C5" }, { "mark": "line", "data": "Keep!A1:A5" } ],
+            "transform": [ { "type": "lookup", "from": "Data!E1:F9" } ]
+        }
+    });
+    state.charts.write(&test_seed_effect()).unwrap().push(crate::api_types::ChartEntry {
+        id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+        sheet_index: 0,
+        spec_json: spec.to_string(),
+    });
+    delete(&state, &file, &crate::pane_control::PaneControlState::new(), index_of(&state, "Data"));
+    let stored: serde_json::Value = serde_json::from_str(&state.charts.read().unwrap()[0].spec_json).unwrap();
+    let inner = &stored["spec"];
+    assert_eq!(inner["data"], "#REF!", "the string source still names the deleted sheet: {stored}");
+    assert_eq!(inner["layers"][0]["data"], "#REF!", "a quoted spelling too");
+    assert_eq!(inner["transform"][0]["from"], "#REF!", "a lookup table too");
+    assert_eq!(inner["layers"][1]["data"], "Keep!A1:A5", "a source on a surviving sheet is untouched");
+
+    // A sheet added later under the deleted name is not charted.
+    add_sheet_inner(&state, &file, Some("Data".to_string()), ::persistence::SheetKind::Worksheet).expect("a new Data");
+    let again: serde_json::Value = serde_json::from_str(&state.charts.read().unwrap()[0].spec_json).unwrap();
+    assert_eq!(again["spec"]["data"], "#REF!");
 }

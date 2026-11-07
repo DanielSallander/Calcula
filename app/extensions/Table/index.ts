@@ -51,6 +51,8 @@ import {
 } from "./lib/tableStore";
 import { drawTableBorder, hitTestTable } from "./lib/tableOverlayRenderer";
 import { registerTableStyleInterceptor } from "./lib/tableStyleInterceptor";
+import { createTableTotalsProvider } from "./lib/tableTotalsProvider";
+import { registerTableTotalsProvider } from "@api/tableTotalsService";
 import { TableEvents } from "./lib/tableEvents";
 import { tableMergeGuard, TABLE_MERGE_GUARDED_COMMANDS } from "./lib/tableMergeGuard";
 
@@ -88,6 +90,10 @@ function activate(context: ExtensionContext): void {
 
   // Register style interceptor for table formatting (header, banded rows, etc.)
   cleanupFunctions.push(registerTableStyleInterceptor());
+
+  // A table's total for AutoSum (BUG-0769): @api/tableTotalsService, so the
+  // totals row's own machinery writes it.
+  cleanupFunctions.push(registerTableTotalsProvider(createTableTotalsProvider()));
 
   // "Select this table" for the ribbon, macros and scripts. The grid keyboard
   // reaches the same geometry through the region's selectionScope instead,

@@ -190,7 +190,7 @@ describe("Edit Name dialog - renaming", () => {
     await typeInto(nameInput(), "GrandTotal");
     await clickOk();
 
-    expect(renameNamedRangeMock).toHaveBeenCalledWith("Total", "GrandTotal");
+    expect(renameNamedRangeMock).toHaveBeenCalledWith("Total", "GrandTotal", null);
     // update_named_range refuses a key it does not hold, so an update sent to
     // "Total" after the rename - or sent first - would fail with "does not
     // exist" and the edit would appear to do nothing.
@@ -260,6 +260,10 @@ describe("Edit Name dialog - renaming", () => {
     await clickOk();
 
     expect(callLog).toEqual([]);
-    expect(errorText()).toContain("Invalid name");
+    // Excel's own text [LIVE, lane namescalp p1.ps1], not the old "only letters,
+    // numbers, underscores, and periods", which stopped being the rule (BUG-0741).
+    expect(errorText()).toContain("The syntax of this name isn't correct.");
+    expect(errorText()).toContain("Doesn't include a space or character that isn't allowed");
+    expect(errorText()).not.toContain("only letters");
   });
 });

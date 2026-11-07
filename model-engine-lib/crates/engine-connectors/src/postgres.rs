@@ -1240,10 +1240,12 @@ mod tests {
         let sql = pg_dialect::expr_to_sql_with_clear(&expr, &table_map, &[]).unwrap();
         // 19_813 days since the Unix epoch is 2024-03-31. PostgreSQL rejects
         // integer→date casts, so the scalar renders as a `DATE '…'` literal.
+        // A BLANK date compares as DATE(1899, 12, 30), as in DAX ([LIVE] Excel
+        // 16's data model; Calcula BUG-0762).
         assert_eq!(
             sql,
-            "CASE WHEN (\"invoice\".\"paid_date\" <= DATE '2024-03-31') \
-             THEN 'Pa''id' ELSE 'Open' END"
+            "CASE WHEN (COALESCE(\"invoice\".\"paid_date\", CAST('1899-12-30' AS DATE)) \
+             <= DATE '2024-03-31') THEN 'Pa''id' ELSE 'Open' END"
         );
         // The apostrophe is doubled (escaped), not left to terminate the literal.
         assert!(sql.contains("'Pa''id'"), "{sql}");

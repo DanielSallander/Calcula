@@ -386,7 +386,72 @@ impl<'a> Parser<'a> {
     /// `=A1[0] B1` and every existing subscript formula mean.
     fn parse_intersection_operand(&mut self) -> ParseResult<Expression> {
         let operand = self.parse_primary()?;
-        self.parse_index_access_chain(operand)
+        let operand = self.parse_index_access_chain(operand)?;
+        self.parse_range_operator_chain(operand)
+    }
+
+    /// Excel's RANGE OPERATOR after an operand that did not take the `:`
+    /// itself (BUG-0737): a function-call half (`INDEX(A1:A5,2):A4`, 9), a
+    /// range continued (`A1:A3:A4`, 10), a parenthesised cell (`(A1):A3`).
+    /// [LIVE, Excel 16, lane formula p1.json / p2.json.] Each was a parse
+    /// error, so the typed formula was kept as text. Which functions may be a
+    /// half is an ENTRY rule (`refuse_value_range_halves`); the evaluator spans
+    /// the references the halves are (`Evaluator::eval_reference_span`).
+    fn parse_range_operator_chain(&mut self, mut left: Expression) -> ParseResult<Expression> {
+        while self.current_token == Token::Colon
+            && matches!(
+                left,
+                Expression::FunctionCall { .. }
+                    | Expression::Range { .. }
+                    | Expression::CellRef { .. }
+                    | Expression::ImplicitIntersection { .. }
+            )
+        {
+            self.advance(); // ':'
+            let right = self.parse_primary()?;
+            let right = self.parse_index_access_chain(right)?;
+            left = Expression::Range {
+                sheet: None,
+                start: Box::new(left),
+                end: Box::new(right),
+                ref_site_id: RefSiteId::ZERO,
+            };
+        }
+        Ok(left)
+    }
+
+    /// The END half of `start:` when it is no plain cell (BUG-0737): a
+    /// function call (`A1:INDEX(A1:A5,3)` 6, `A1:OFFSET(A1,2,0)` 6,
+    /// `A1:LAMBDA(x,x)(A3)` 6), a parenthesised expression (`A1:(A3)` 6) or
+    /// an implicit intersection (`A1:@A3` 6) [LIVE, Excel 16, lane formula
+    /// p1.json / p2.json]; `None` when the current token begins none of these
+    /// (the caller reads a cell). `name` is the identifier already consumed,
+    /// when the end began with one.
+    fn parse_range_operand_half(&mut self, name: Option<&str>) -> ParseResult<Option<Expression>> {
+        let half = match (name, &self.current_token) {
+            // A CALL: the `(` right after the name, and a name that is a
+            // function -- `A1:A3 (A2:C2)` is the range A1:A3 intersected with
+            // A2:C2, never a call of `A3`.
+            (Some(name), Token::LParen)
+                if !self.lexer.last_token_had_leading_whitespace()
+                    && !(is_cell_spelling(name) && matches!(BuiltinFunction::from_name(name), BuiltinFunction::Custom(_))) =>
+            {
+                self.parse_function_call(name.to_string())?
+            }
+            (None, Token::LParen) | (None, Token::At) => self.parse_primary()?,
+            _ => return Ok(None),
+        };
+        Ok(Some(self.parse_index_access_chain(half)?))
+    }
+
+    /// The START half of a range whose end is no plain cell: the cell the
+    /// identifier spells, or -- letters alone, which are no cell -- a name.
+    fn range_start_half(&self, identifier: &str, col_absolute: bool, sheet: &Option<String>) -> ParseResult<Expression> {
+        if identifier.chars().all(|c| c.is_ascii_alphabetic()) && sheet.is_none() && !col_absolute {
+            return Ok(Expression::NamedRef { name: identifier.to_string(), ref_site_id: RefSiteId::ZERO });
+        }
+        let (col, row) = self.split_cell_reference(identifier)?;
+        Ok(Expression::CellRef { sheet: None, col, row, col_absolute, row_absolute: false, ref_site_id: RefSiteId::ZERO })
     }
 
     /// Parses zero or more trailing [index] subscript accesses and (args) invocations.
@@ -1021,6 +1086,22 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_absolute_reference(Some(sheet_name))
             }
+
+            // `Sheet2!'A1'` -- the SHEET's name spelled like a cell, quoted as
+            // Excel's formula bar shows it (BUG-0739 [LIVE, lane formula
+            // p1.json: `=LET(A1,2,Sheet2!A1)` shows `=LET(A1,2,Sheet2!'A1')`,
+            // #NAME?]): the range of that name with itself, the shape
+            // `apply_r1c1_fallback` gives the bare spelling.
+            Token::QuotedIdentifier(name) if is_cell_spelling(&name) => {
+                self.advance();
+                let half = Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO };
+                Ok(Expression::Range {
+                    sheet: Some(sheet_name),
+                    start: Box::new(half.clone()),
+                    end: Box::new(half),
+                    ref_site_id: RefSiteId::ZERO,
+                })
+            }
             
             // Number - must be a row reference like Sheet1!1:5
             Token::Number(n) => {
@@ -1038,11 +1119,23 @@ impl<'a> Parser<'a> {
             Token::Identifier(name) => {
                 self.advance();
 
-                if is_qualified_r1c1_spelling(&name, self.current_token == Token::Colon) {
+                // `Sheet1!C$3` / `Sheet1!R$3` are the A1 column C or R with an
+                // absolute row, never R1C1's `C` / `R` (W2 names lane:
+                // 'Unexpected token after expression: Dollar') [LIVE, Excel 16,
+                // lane formfix p1.json: `=Sheet1!C$3` 300, `=Sheet1!R$3` 0].
+                if self.current_token != Token::Dollar
+                    && is_qualified_r1c1_spelling(&name, self.current_token == Token::Colon)
+                {
                     return self.parse_qualified_r1c1(Some(sheet_name), name);
                 }
                 if self.current_token == Token::Colon {
                     self.parse_range_or_column_ref(Some(sheet_name), name, false)
+                } else if self.current_token != Token::Dollar && is_qualified_name_spelling(&name) {
+                    // `Sheet1!Rate` -- the NAME `Rate` as Sheet1 sees it
+                    // (BUG-0744/0749): held as the range of the name with
+                    // itself behind the sheet, the shape `Sheet2!'A1'` takes,
+                    // and resolved by the host in that sheet's scope.
+                    Ok(qualified_name(sheet_name, name))
                 } else {
                     // FIX: Handle column-only identifier followed by $ (absolute row marker)
                     // e.g., Sheet1!D$2
@@ -1097,6 +1190,14 @@ impl<'a> Parser<'a> {
                 self.parse_absolute_reference(None)
             }
 
+            // `Sheet1:Sheet2!'A1'` -- a cell-shaped NAME behind the span,
+            // quoted as Excel shows it (BUG-0739 [LIVE, lane formula p1.json:
+            // `=LET(A1,2,SUM(Sheet1:Sheet2!A1))` shows `..Sheet2!'A1'))`]).
+            Token::QuotedIdentifier(name) if is_cell_spelling(&name) => {
+                self.advance();
+                Ok(Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO })
+            }
+
             // Number - must be a row reference like 1:5
             Token::Number(n) => {
                 self.advance();
@@ -1113,8 +1214,18 @@ impl<'a> Parser<'a> {
             Token::Identifier(name) => {
                 self.advance();
 
-                if is_qualified_r1c1_spelling(&name, self.current_token == Token::Colon) {
+                if self.current_token != Token::Dollar
+                    && is_qualified_r1c1_spelling(&name, self.current_token == Token::Colon)
+                {
                     return self.parse_qualified_r1c1(None, name);
+                }
+                // `Sheet1:Sheet2!Rate`: a NAME behind a 3-D span, which Excel
+                // takes and answers #NAME? [LIVE, lane formfix p1.json J290].
+                if self.current_token != Token::Colon
+                    && self.current_token != Token::Dollar
+                    && is_qualified_name_spelling(&name)
+                {
+                    return Ok(Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO });
                 }
                 if self.current_token == Token::Colon {
                     self.parse_range_or_column_ref(None, name, false)
@@ -1327,15 +1438,33 @@ impl<'a> Parser<'a> {
             false
         };
 
+        // `A1:(A3)`, `A1:@A3` -- an end that is no identifier (BUG-0737).
+        if !end_col_absolute {
+            if let Some(end) = self.parse_range_operand_half(None)? {
+                let start = self.range_start_half(&start_identifier, start_col_absolute, &sheet)?;
+                return Ok(Expression::Range { sheet, start: Box::new(start), end: Box::new(end), ref_site_id: RefSiteId::ZERO });
+            }
+        }
+
         // Expect another identifier for the end
         let end_identifier = match self.current_token.clone() {
             Token::Identifier(name) => {
                 self.advance();
                 name
             }
-            // `Sheet1!A1:'My Sheet'!A3` -- a quoted second qualifier.
-            Token::QuotedIdentifier(name) if sheet.is_some() && !end_col_absolute => {
+            // `Sheet1!A1:'My Sheet'!A3` -- a quoted second qualifier, after a
+            // qualified first half or an unqualified one (`A1:'Sheet1'!A3`,
+            // shown `A1:Sheet1!A3` [LIVE, lane formula p1.json]).
+            Token::QuotedIdentifier(name) if !end_col_absolute => {
                 self.advance();
+                // `J881:'D5'` -- a NAME spelled like a cell, quoted as Excel's
+                // formula bar shows it (BUG-0739 [LIVE, lane formd p2.json:
+                // `=SUM(R[-1]C:D5)` shows `=SUM(J881:'D5')`]).
+                if self.current_token != Token::Exclamation && is_cell_spelling(&name) {
+                    let start = self.range_start_half(&start_identifier, start_col_absolute, &sheet)?;
+                    let end = Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO };
+                    return Ok(Expression::Range { sheet, start: Box::new(start), end: Box::new(end), ref_site_id: RefSiteId::ZERO });
+                }
                 self.expect(Token::Exclamation)?;
                 let end = self.parse_qualified_range_end(name)?;
                 let (start_col, start_row) = self.split_cell_reference(&start_identifier)?;
@@ -1348,11 +1477,24 @@ impl<'a> Parser<'a> {
             }
         };
 
+        // `A1:INDEX(A1:A5,3)` -- a function-call end (BUG-0737).
+        if !end_col_absolute {
+            if let Some(end) = self.parse_range_operand_half(Some(&end_identifier))? {
+                let start = self.range_start_half(&start_identifier, start_col_absolute, &sheet)?;
+                return Ok(Expression::Range { sheet, start: Box::new(start), end: Box::new(end), ref_site_id: RefSiteId::ZERO });
+            }
+        }
+
         // `Sheet1!A1:Sheet1!A3` -- the second half carries its own qualifier
         // (BUG-0646). [LIVE, Excel 16] it is the range when both halves name
         // one sheet (7 in `=LET(a,1,SUM(Sheet1!A1:Sheet1!A3)+a)`), `#VALUE!`
-        // for two sheets, and the formula bar keeps both qualifiers.
-        if self.current_token == Token::Exclamation && sheet.is_some() && !end_col_absolute {
+        // for two sheets, and the formula bar keeps both qualifiers. An
+        // UNQUALIFIED first half is the formula's own sheet (BUG-0737):
+        // [LIVE, lane formula p1.json] `=SUM(A1:Sheet1!A3)` in Sheet1 is 6,
+        // `=SUM(A1:Sheet2!A3)` #VALUE!, `=ROWS(A1:Sheet1!A3)` 3.
+        if self.current_token == Token::Exclamation && !end_col_absolute
+            && !start_identifier.chars().all(|c| c.is_ascii_alphabetic())
+        {
             self.advance();
             let end = self.parse_qualified_range_end(end_identifier)?;
             let (start_col, start_row) = self.split_cell_reference(&start_identifier)?;
@@ -1501,14 +1643,37 @@ impl<'a> Parser<'a> {
             false
         };
 
+        // `$A$1:(A3)`, `$A$1:@A3` (BUG-0737, see `parse_range_or_column_ref`).
+        let start_cell = |col: &str| Expression::CellRef {
+            sheet: None,
+            col: col.to_uppercase(),
+            row: start_row,
+            col_absolute: start_col_absolute,
+            row_absolute: start_row_absolute,
+            ref_site_id: RefSiteId::ZERO,
+        };
+        if !end_col_absolute {
+            if let Some(end) = self.parse_range_operand_half(None)? {
+                return Ok(Expression::Range { sheet, start: Box::new(start_cell(&start_col)), end: Box::new(end), ref_site_id: RefSiteId::ZERO });
+            }
+        }
+
         let end_identifier = match self.current_token.clone() {
             Token::Identifier(name) => {
                 self.advance();
                 name
             }
-            // `Sheet1!$A$1:'My Sheet'!$A$3` -- a quoted second qualifier.
-            Token::QuotedIdentifier(name) if sheet.is_some() && !end_col_absolute => {
+            // `Sheet1!$A$1:'My Sheet'!$A$3` -- a quoted second qualifier, as
+            // after an unqualified first half (`$A$1:'Sheet1'!A3`).
+            Token::QuotedIdentifier(name) if !end_col_absolute => {
                 self.advance();
+                // `$D1961:'D5'` -- a quoted cell-shaped NAME (BUG-0739 [LIVE,
+                // lane formd p1.json: `=SUM(R[-1]C4:D5)` shows
+                // `=SUM($D1961:'D5')`]).
+                if self.current_token != Token::Exclamation && is_cell_spelling(&name) {
+                    let end = Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO };
+                    return Ok(Expression::Range { sheet, start: Box::new(start_cell(&start_col)), end: Box::new(end), ref_site_id: RefSiteId::ZERO });
+                }
                 self.expect(Token::Exclamation)?;
                 let end = self.parse_qualified_range_end(name)?;
                 return Ok(Self::cell_range(
@@ -1522,8 +1687,16 @@ impl<'a> Parser<'a> {
             }
         };
 
-        // `Sheet1!$A$1:Sheet1!$A$3` -- see `parse_range_or_column_ref`.
-        if self.current_token == Token::Exclamation && sheet.is_some() && !end_col_absolute {
+        // `$A$1:INDEX(A1:A5,3)` -- a function-call end (BUG-0737).
+        if !end_col_absolute {
+            if let Some(end) = self.parse_range_operand_half(Some(&end_identifier))? {
+                return Ok(Expression::Range { sheet, start: Box::new(start_cell(&start_col)), end: Box::new(end), ref_site_id: RefSiteId::ZERO });
+            }
+        }
+
+        // `Sheet1!$A$1:Sheet1!$A$3` -- see `parse_range_or_column_ref`; an
+        // unqualified first half too (`$A$1:Sheet1!A3`, BUG-0737).
+        if self.current_token == Token::Exclamation && !end_col_absolute {
             self.advance();
             let end = self.parse_qualified_range_end(end_identifier)?;
             return Ok(Self::cell_range(
@@ -1694,6 +1867,18 @@ impl<'a> Parser<'a> {
 
         // Expect closing ')'
         self.expect(Token::RParen)?;
+
+        // `SINGLE(x)` IS `@x`: Excel's name for the implicit-intersection
+        // operator, which its formula bar shows as `@` [LIVE, Excel 16, lane
+        // formfix p1.json: `=SUM(A1:SINGLE(A3))` is 6, shown `=SUM(A1:@A3)`,
+        // and both are filed `_xlfn.SINGLE(A3)`]. Calcula had no SINGLE
+        // (#NAME?).
+        if let BuiltinFunction::Custom(custom) = &func {
+            if custom.eq_ignore_ascii_case("SINGLE") && args.len() == 1 {
+                let operand = args.pop().expect("one argument");
+                return Ok(Expression::ImplicitIntersection { operand: Box::new(operand) });
+            }
+        }
 
         Ok(Expression::FunctionCall { func, args, ref_site_id: RefSiteId::ZERO })
     }
@@ -1904,13 +2089,17 @@ pub fn parse(input: &str) -> ParseResult<Expression> {
 /// The checks Excel makes when a formula is TYPED and that a stored formula is
 /// not put through again on load: the arity of a built-in called beside a
 /// LET / LAMBDA name of its own spelling (BUG-0648, see
-/// [`refuse_shadowed_builtin_arity`]), and the spellings a formula read in
-/// R1C1 cannot hold ([`refuse_unspellable_in_r1c1`]). The cell-entry ladder
+/// [`refuse_shadowed_builtin_arity`]), the arity of every other built-in call
+/// (BUG-0738, `crate::excel_arity::refuse_builtin_arity`), and the spellings
+/// a formula read in R1C1 cannot hold ([`refuse_unspellable_in_r1c1`]). The
+/// cell-entry ladder
 /// (`engine::typed_entry`) calls this after [`parse`]; a refusal is what a
 /// parse error is there -- the typed text is kept as text.
 pub fn check_entered_formula(expr: &Expression) -> ParseResult<()> {
     refuse_duplicate_bindings(expr)?;
     refuse_shadowed_builtin_arity(expr, &mut Vec::new())?;
+    crate::excel_arity::refuse_builtin_arity(expr)?;
+    refuse_value_range_halves(expr)?;
     refuse_unspellable_in_r1c1(expr)?;
     refuse_bound_r1c1_offsets(expr)?;
     refuse_deleted_sheet_references(expr)
@@ -1937,7 +2126,7 @@ fn refuse_duplicate_bindings(expr: &Expression) -> ParseResult<()> {
     for slot in binder_slots(expr) {
         let spelling = match slot {
             Expression::NamedRef { name, .. } => Some(name.clone()),
-            other => plain_cell_spelling(other),
+            other => optional_parameter_name(other).map(str::to_string).or_else(|| plain_cell_spelling(other)),
         };
         if let Some(spelling) = spelling {
             let key = identity::defined_name_key(&spelling);
@@ -1953,6 +2142,56 @@ fn refuse_duplicate_bindings(expr: &Expression) -> ParseResult<()> {
     }
     for sub in sub_expressions(expr) {
         refuse_duplicate_bindings(sub)?;
+    }
+    Ok(())
+}
+
+/// A range operator with a HALF that is a call of a function returning VALUES,
+/// never a reference, is a formula Excel will not take (BUG-0737). [LIVE,
+/// Excel 16, lane formula p2.json] typed: `A1:INDEX(..)`, `A1:OFFSET(..)`,
+/// `A1:INDIRECT(..)`, `A1:IF(..)`, `A1:CHOOSE(..)`, `A1:XLOOKUP(..)`,
+/// `A1:IFS(..)`, `A1:SWITCH(..)`, `A1:LET(..)`, `A1:TAKE(..)`, `A1:DROP(..)`,
+/// `A1:TRIMRANGE(..)`, `A1:LAMBDA(x,x)(A3)`; refused (0x800A03EC):
+/// `A1:SUM(A3)`, `A1:MAX(A3)`, `A1:CHOOSECOLS(..)`, `A1:CHOOSEROWS(..)`,
+/// `A1:FILTER(..)`, `A1:SORT(..)`, `A1:IFERROR(..)`, `A1:IFNA(..)`,
+/// `A1:XMATCH(..)`, `A1:VLOOKUP(..)`, `A1:ADDRESS(..)`, `A1:ROW(..)`,
+/// `A1:VSTACK(..)`, `A1:HSTACK(..)`, `A1:EXPAND(..)`, `A1:UNIQUE(..)`,
+/// `A1:TOCOL(..)`, `A1:WRAPROWS(..)`, `A1:T(..)`, `A1:N(..)`. A call of an
+/// unknown name (a LAMBDA invocation, a defined LAMBDA) may return a
+/// reference and is taken. An ENTRY check: a stored formula keeps its text.
+fn refuse_value_range_halves(expr: &Expression) -> ParseResult<()> {
+    fn returns_reference(func: &BuiltinFunction) -> bool {
+        matches!(
+            func,
+            BuiltinFunction::Index
+                | BuiltinFunction::Offset
+                | BuiltinFunction::Indirect
+                | BuiltinFunction::If
+                | BuiltinFunction::Choose
+                | BuiltinFunction::XLookup
+                | BuiltinFunction::Ifs
+                | BuiltinFunction::Switch
+                | BuiltinFunction::Let
+                | BuiltinFunction::Take
+                | BuiltinFunction::Drop
+                | BuiltinFunction::TrimRange
+                | BuiltinFunction::Custom(_)
+        )
+    }
+    if let Expression::Range { start, end, .. } = expr {
+        for half in [start.as_ref(), end.as_ref()] {
+            if let Expression::FunctionCall { func, .. } = half {
+                if !returns_reference(func) {
+                    return Err(ParseError::new(format!(
+                        "There's a problem with this formula. {}() returns a value, not a reference, so it cannot be one half of a range (':').",
+                        func.to_canonical_name()
+                    )));
+                }
+            }
+        }
+    }
+    for sub in sub_expressions(expr) {
+        refuse_value_range_halves(sub)?;
     }
     Ok(())
 }
@@ -1992,6 +2231,8 @@ fn refuse_bound_r1c1_offsets(expr: &Expression) -> ParseResult<()> {
     fn binders(expr: &Expression, out: &mut Vec<String>) {
         for slot in binder_slots(expr) {
             if let Expression::NamedRef { name, .. } = slot {
+                out.push(name.to_ascii_uppercase());
+            } else if let Some(name) = optional_parameter_name(slot) {
                 out.push(name.to_ascii_uppercase());
             }
         }
@@ -2071,18 +2312,86 @@ fn refuse_bound_r1c1_offsets(expr: &Expression) -> ParseResult<()> {
 ///   `Sheet1:Sheet2!A1` the 3-D span of the name: both #NAME? [LIVE] (lane
 ///   formc).
 ///
-/// NOT DONE: a fully RELATIVE R1C1 reference (`RC`, `C`, `RC[-1]`) is stored
-/// in its A1 form (`J20`), which the next load reads as a name. Excel's own
-/// A1 text tells the two apart by quoting the NAME (`'D1'`, `Sheet2!'A1'`)
-/// and leaving the reference bare. The parser reads `'D1'` as that name, and
-/// the formula bar shows it so (`engine::ast_render`, lane shiftnames), but
-/// the persisted text keeps the bare spelling; telling the two apart there
-/// needs the stored text quoted (and the .xlsx writer taught to read the
-/// quote) and this pass moved to entry.
+/// The pass also runs for a formula that holds an unbound R1C1-only spelling
+/// (`=R[-1]C+D5`, [`holds_unbound_r1c1_name`], BUG-0739). Such a formula has
+/// no R1C1 spelling left once entry resolved it (`J825+D5`), so its stored
+/// text quotes the names (`J825+'D5'`, `engine::ast_render::render_formula_raw`)
+/// and the parser reads `'D5'`, `X1:'D5'`, `Sheet2!'D5'` and
+/// `Sheet1:Sheet2!'D5'` back as the names they are.
+///
+/// NOT DONE: in a formula that DECLARES a cell-shaped name, a fully RELATIVE
+/// R1C1 reference (`RC`, `C`, `RC[-1]`) is stored in its A1 form (`J20`),
+/// which the next load -- this pass again -- reads as a name. Telling the two
+/// apart there needs the binders quoted in the stored text too, with this
+/// pass keyed to a BARE binder, and the host's text shifters and the .xlsx
+/// writer taught the quoted form.
 fn apply_r1c1_fallback(expr: &mut Expression) {
-    if declares_cell_shaped_name(expr) {
+    if declares_cell_shaped_name(expr) || holds_unbound_r1c1_name(expr) {
         r1c1_fallback_walk(expr, &mut Vec::new());
     }
+}
+
+/// Whether `expr` holds an R1C1 spelling that is no A1 cell and that no
+/// LET / LAMBDA of the formula binds (`RC`, `R[-1]C`, `RC[-9]`, `R1C1`, a
+/// bare `C` / `R`): Excel cannot read such a formula in A1 notation and reads
+/// ALL of it in R1C1 instead, where a plain cell spelling is a NAME
+/// (BUG-0739). [LIVE, Excel 16, lane formd p2.json and lane formula p1.json,
+/// typed into column J] `=R[-1]C+D5` in J1074 is `=J1073+'D5'`, #NAME?;
+/// `=R1C1+D5` `=$A$1+'D5'`; `=SUM(R[-1]C:D5)` `=SUM(J881:'D5')`;
+/// `=R[-1]C+A1:A2` `=J945+'A1':'A2'`; `=R[-1]C+Sheet2!D5`
+/// `=J857+Sheet2!'D5'`; and `=RC[-9]+RC4` is `=A1090+$D1090` -- `RC4`, the
+/// A1 cell in column RC, is R1C1's column 4 of the row there. Calcula read
+/// each plain cell as the cell it spells.
+pub fn holds_unbound_r1c1_name(expr: &Expression) -> bool {
+    fn walk(expr: &Expression, bound: &mut Vec<String>) -> bool {
+        match expr {
+            Expression::NamedRef { name, .. } => {
+                let upper = name.to_ascii_uppercase();
+                !is_cell_spelling(name)
+                    && !bound.iter().any(|b| *b == upper)
+                    && r1c1_reference(&upper, 0, 0).is_some()
+            }
+            Expression::FunctionCall { func: BuiltinFunction::Let, args, .. } if args.len() >= 3 => {
+                // A LET name is in scope after its own value.
+                let depth = bound.len();
+                let last = args.len() - 1;
+                let mut found = false;
+                let mut pending: Option<String> = None;
+                for (i, arg) in args.iter().enumerate() {
+                    if i < last && i % 2 == 0 {
+                        pending = match arg {
+                            Expression::NamedRef { name, .. } => Some(name.to_ascii_uppercase()),
+                            _ => None,
+                        };
+                    } else {
+                        if walk(arg, bound) {
+                            found = true;
+                            break;
+                        }
+                        bound.extend(pending.take());
+                    }
+                }
+                bound.truncate(depth);
+                found
+            }
+            Expression::FunctionCall { func: BuiltinFunction::Lambda, args, .. } if !args.is_empty() => {
+                let depth = bound.len();
+                let last = args.len() - 1;
+                for arg in &args[..last] {
+                    if let Expression::NamedRef { name, .. } = arg {
+                        bound.push(name.to_ascii_uppercase());
+                    } else if let Some(name) = optional_parameter_name(arg) {
+                        bound.push(name.to_ascii_uppercase());
+                    }
+                }
+                let found = walk(&args[last], bound);
+                bound.truncate(depth);
+                found
+            }
+            other => sub_expressions(other).into_iter().any(|sub| walk(sub, bound)),
+        }
+    }
+    walk(expr, &mut Vec::new())
 }
 
 /// A plain unqualified relative cell reference (`A1`, never `$A$1` or
@@ -2097,7 +2406,7 @@ fn plain_cell_spelling(expr: &Expression) -> Option<String> {
 }
 
 /// Every direct sub-expression of `expr`.
-fn sub_expressions(expr: &Expression) -> Vec<&Expression> {
+pub(crate) fn sub_expressions(expr: &Expression) -> Vec<&Expression> {
     match expr {
         Expression::FunctionCall { args, .. } => args.iter().collect(),
         Expression::Range { start, end, .. } => vec![start.as_ref(), end.as_ref()],
@@ -2132,15 +2441,40 @@ fn binder_slots(expr: &Expression) -> Vec<&Expression> {
     }
 }
 
+/// The name of an OPTIONAL LAMBDA parameter, `[x]` -- which the parser reads
+/// as a structured reference with no table -- or `None`. [LIVE, Excel 16,
+/// lane formfix p1.json: `=LAMBDA([A1],A1)(5)` is 5, filed
+/// `_xlfn.LAMBDA(_xlop.A1,_xlpm.A1)(5)`.]
+pub fn optional_parameter_name(slot: &Expression) -> Option<&str> {
+    match slot {
+        Expression::TableRef { table_name, specifier: crate::ast::TableSpecifier::Column(name), .. }
+            if table_name.is_empty() =>
+        {
+            Some(name.as_str())
+        }
+        _ => None,
+    }
+}
+
 /// Whether a LET / LAMBDA anywhere in `expr` declares a cell-shaped name --
 /// read as a cell by the lexer, or (in a tree this pass already rewrote) a
-/// `NamedRef` spelled like one. Public for the host's text shifters
+/// `NamedRef` spelled like one, or an OPTIONAL parameter spelled like one
+/// (`[A1]`). Public for the host's text shifters
 /// (`commands::structure`), which must hold every name such a formula reads
 /// out of a fill or a structural shift, as Excel leaves them.
+///
+/// An optional parameter counts like any other (W2 xlsx lane): [LIVE, Excel
+/// 16, lane formfix p1.json] `=LAMBDA([A1],SUM(A1:A3))(B1)` is shown
+/// `=LAMBDA([A1],SUM(A1:'A3'))('B1')` and filed
+/// `_xlfn.LAMBDA(_xlop.A1,SUM(_xlpm.A1:_xlnm.A3))(_xlnm.B1)`, #NAME?, and
+/// `=LAMBDA([A1],B1)(5)` is `=LAMBDA([A1],'B1')(5)`, #NAME?.
 pub fn declares_cell_shaped_name(expr: &Expression) -> bool {
     binder_slots(expr).into_iter().any(|slot| match slot {
         Expression::NamedRef { name, .. } => is_cell_spelling(name),
-        other => plain_cell_spelling(other).is_some(),
+        other => match optional_parameter_name(other) {
+            Some(name) => is_cell_spelling(name),
+            None => plain_cell_spelling(other).is_some(),
+        },
     }) || sub_expressions(expr).into_iter().any(declares_cell_shaped_name)
 }
 
@@ -2182,6 +2516,54 @@ fn is_qualified_r1c1_spelling(name: &str, followed_by_colon: bool) -> bool {
 
 fn named(name: String) -> Expression {
     Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO }
+}
+
+/// Whether an identifier after `Sheet!` is a defined NAME rather than a
+/// reference: no A1 cell, no R1C1 reference, and a spelling Excel takes as a
+/// name (`identity::is_valid_defined_name`). `Sheet1!Rate` [LIVE, Excel 16,
+/// lane formfix p1.json: on Sheet2 `=Sheet1!Dup` is Sheet1's own Dup (2),
+/// `=Sheet1!Glob` the workbook's Glob (7), `=Sheet1!LocTwo` -- a name only
+/// Sheet2 has -- #NAME?, `=Sheet1!Nope` #NAME?].
+fn is_qualified_name_spelling(name: &str) -> bool {
+    !is_cell_spelling(name)
+        && r1c1_reference(&name.to_ascii_uppercase(), 0, 0).is_none()
+        && identity::is_valid_defined_name(name)
+}
+
+/// `Sheet1!Rate`, the defined name `Rate` read in Sheet1's scope: the range
+/// of the name with itself behind the sheet (the shape `Sheet2!'A1'` has).
+/// See [`qualified_name_parts`].
+fn qualified_name(sheet: String, name: String) -> Expression {
+    let half = Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO };
+    Expression::Range {
+        sheet: Some(sheet),
+        start: Box::new(half.clone()),
+        end: Box::new(half),
+        ref_site_id: RefSiteId::ZERO,
+    }
+}
+
+/// The sheet and the name of a SHEET-QUALIFIED NAME (`Sheet1!Rate`), or
+/// `None` for any other expression (BUG-0744/0749).
+///
+/// Excel reads `Sheet1!Rate` as the name `Rate` in Sheet1's scope: Sheet1's
+/// own `Rate`, else the workbook's [LIVE, Excel 16, lane formfix p1.json:
+/// `=Sheet1!Dup` on Sheet2 is 2, `=Sheet2!Dup` on Sheet1 -- Sheet2 holding no
+/// Dup -- the workbook's 1, shown `Book1!Dup`], never a LET / LAMBDA binding
+/// (`=LET(Dup,9,Sheet1!Dup)` is 2). The parser holds it as the range of the
+/// name with itself behind the sheet; a cell-shaped spelling there
+/// (`Sheet2!'A1'`, a formula read in R1C1) is the same node, and no defined
+/// name can be spelled like a cell, so it resolves to nothing (#NAME?).
+pub fn qualified_name_parts(expr: &Expression) -> Option<(&str, &str)> {
+    match expr {
+        Expression::Range { sheet: Some(sheet), start, end, .. } => match (start.as_ref(), end.as_ref()) {
+            (Expression::NamedRef { name: a, .. }, Expression::NamedRef { name: b, .. }) if a == b => {
+                Some((sheet.as_str(), a.as_str()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The spelling a bare NAME token keeps until [`respell_bound_names`]: the
@@ -2311,6 +2693,192 @@ fn respell_walk(expr: &mut Expression, scope: &mut Vec<(String, String)>) {
     }
 }
 
+/// The formula with every range HALF that is a LET name -- or the parameter
+/// of a LAMBDA called inline -- bound to a plain reference replaced by that
+/// reference, for PRECEDENT extraction (BUG-0737); `None` when it has none.
+///
+/// `=LET(a,B2,SUM(a:C3))` reads the whole RECTANGLE B2:C3 [LIVE, Excel 16:
+/// 550], so an edit of B3 or C2 must recalculate it -- but an extractor that
+/// knows no LET scope sees only B2 (the LET value) and C3 (the cell half), and
+/// the interior never reached the dependency graph. Likewise
+/// `=LAMBDA(b,SUM(A1:b))(A3)` reads A1:A3 [LIVE: 6]. The tree the EVALUATOR
+/// reads is left alone (it resolves the name through its scope); only the
+/// copy handed to the extractor is rewritten, and only where a name half's
+/// binding is statically a reference (a cell, a range of cells, a whole
+/// column or row, or another such name).
+pub fn bind_range_name_halves(expr: &Expression) -> Option<Expression> {
+    if !has_named_range_half(expr) {
+        return None;
+    }
+    let mut copy = expr.clone();
+    let changed = bind_halves_walk(&mut copy, &mut Vec::new());
+    changed.then_some(copy)
+}
+
+/// Whether some range in `expr` has a NAME half (the cheap pre-check of
+/// [`bind_range_name_halves`]).
+fn has_named_range_half(expr: &Expression) -> bool {
+    if let Expression::Range { start, end, .. } = expr {
+        if matches!(start.as_ref(), Expression::NamedRef { .. }) || matches!(end.as_ref(), Expression::NamedRef { .. }) {
+            return true;
+        }
+    }
+    sub_expressions(expr).into_iter().any(has_named_range_half)
+}
+
+/// The reference a binding's VALUE statically is, with the names in `scope`.
+fn static_reference(value: &Expression, scope: &[(String, Option<Expression>)]) -> Option<Expression> {
+    match value {
+        Expression::CellRef { .. } | Expression::ColumnRef { .. } | Expression::RowRef { .. } => Some(value.clone()),
+        Expression::Range { start, end, .. }
+            if matches!(start.as_ref(), Expression::CellRef { .. }) && matches!(end.as_ref(), Expression::CellRef { .. }) =>
+        {
+            Some(value.clone())
+        }
+        Expression::NamedRef { name, .. } => {
+            let key = identity::sheet_name_key(name);
+            scope.iter().rev().find(|(k, _)| *k == key).and_then(|(_, r)| r.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The rewrite of [`bind_range_name_halves`]; returns whether it changed
+/// anything. `scope` holds each binder in scope and the reference it is.
+fn bind_halves_walk(expr: &mut Expression, scope: &mut Vec<(String, Option<Expression>)>) -> bool {
+    let lookup = |scope: &[(String, Option<Expression>)], name: &str| -> Option<Expression> {
+        let key = identity::sheet_name_key(name);
+        scope.iter().rev().find(|(k, _)| *k == key).and_then(|(_, r)| r.clone())
+    };
+    match expr {
+        Expression::FunctionCall { func: BuiltinFunction::Let, args, .. } if args.len() >= 3 => {
+            let depth = scope.len();
+            let last = args.len() - 1;
+            let mut changed = false;
+            let mut pending: Option<String> = None;
+            for (i, arg) in args.iter_mut().enumerate() {
+                if i == last {
+                    changed |= bind_halves_walk(arg, scope);
+                } else if i % 2 == 0 {
+                    pending = match arg {
+                        Expression::NamedRef { name, .. } => Some(identity::sheet_name_key(name)),
+                        _ => None,
+                    };
+                } else {
+                    changed |= bind_halves_walk(arg, scope);
+                    let reference = static_reference(arg, scope);
+                    if let Some(key) = pending.take() {
+                        scope.push((key, reference));
+                    }
+                }
+            }
+            scope.truncate(depth);
+            changed
+        }
+        // `LAMBDA(b, body)(A3)`: the parameters are the call's arguments.
+        Expression::FunctionCall { func: BuiltinFunction::Custom(marker), args, .. }
+            if marker == "__INVOKE__"
+                && matches!(args.first(), Some(Expression::FunctionCall { func: BuiltinFunction::Lambda, .. })) =>
+        {
+            let mut changed = false;
+            for arg in args.iter_mut().skip(1) {
+                changed |= bind_halves_walk(arg, scope);
+            }
+            let references: Vec<Option<Expression>> = args[1..].iter().map(|a| static_reference(a, scope)).collect();
+            if let Some(Expression::FunctionCall { args: lambda, .. }) = args.first_mut() {
+                if let Some((body, params)) = lambda.split_last_mut() {
+                    let depth = scope.len();
+                    for (i, param) in params.iter().enumerate() {
+                        if let Expression::NamedRef { name, .. } = param {
+                            scope.push((identity::sheet_name_key(name), references.get(i).cloned().flatten()));
+                        }
+                    }
+                    changed |= bind_halves_walk(body, scope);
+                    scope.truncate(depth);
+                }
+            }
+            changed
+        }
+        Expression::FunctionCall { func: BuiltinFunction::Lambda, args, .. } if !args.is_empty() => {
+            let depth = scope.len();
+            let last = args.len() - 1;
+            for param in &args[..last] {
+                if let Expression::NamedRef { name, .. } = param {
+                    scope.push((identity::sheet_name_key(name), None));
+                }
+            }
+            let changed = bind_halves_walk(&mut args[last], scope);
+            scope.truncate(depth);
+            changed
+        }
+        Expression::Range { sheet, start, end, .. } => {
+            // Behind a sheet a name half is that SHEET's name, never a LET /
+            // LAMBDA binding (`Sheet2!A1` in a formula read in R1C1).
+            let qualified = sheet.is_some();
+            let mut changed = false;
+            for half in [start, end] {
+                if let Expression::NamedRef { name, .. } = half.as_ref() {
+                    if let Some(reference) = lookup(scope, name).filter(|_| !qualified) {
+                        **half = reference;
+                        changed = true;
+                        continue;
+                    }
+                }
+                changed |= bind_halves_walk(half, scope);
+            }
+            changed
+        }
+        Expression::FunctionCall { args, .. } => {
+            let mut changed = false;
+            for arg in args {
+                changed |= bind_halves_walk(arg, scope);
+            }
+            changed
+        }
+        Expression::BinaryOp { left, right, .. } => {
+            let a = bind_halves_walk(left, scope);
+            let b = bind_halves_walk(right, scope);
+            a || b
+        }
+        Expression::UnaryOp { operand, .. } | Expression::ImplicitIntersection { operand } => bind_halves_walk(operand, scope),
+        Expression::IndexAccess { target, index } => {
+            let a = bind_halves_walk(target, scope);
+            let b = bind_halves_walk(index, scope);
+            a || b
+        }
+        Expression::ArrayLiteral { rows } => {
+            let mut changed = false;
+            for elem in rows.iter_mut().flatten() {
+                changed |= bind_halves_walk(elem, scope);
+            }
+            changed
+        }
+        Expression::ListLiteral { elements } => {
+            let mut changed = false;
+            for elem in elements {
+                changed |= bind_halves_walk(elem, scope);
+            }
+            changed
+        }
+        Expression::DictLiteral { entries } => {
+            let mut changed = false;
+            for (key, value) in entries {
+                changed |= bind_halves_walk(key, scope);
+                changed |= bind_halves_walk(value, scope);
+            }
+            changed
+        }
+        Expression::SpillRef { cell, .. } => bind_halves_walk(cell, scope),
+        Expression::Sheet3DRef { reference, .. } => bind_halves_walk(reference, scope),
+        Expression::Literal(_)
+        | Expression::CellRef { .. }
+        | Expression::ColumnRef { .. }
+        | Expression::RowRef { .. }
+        | Expression::NamedRef { .. }
+        | Expression::TableRef { .. } => false,
+    }
+}
+
 /// The rewrite of [`apply_r1c1_fallback`]. `bound` holds the binders in scope;
 /// a LET value sees only the names bound before it.
 fn r1c1_fallback_walk(expr: &mut Expression, bound: &mut Vec<String>) {
@@ -2349,6 +2917,8 @@ fn r1c1_fallback_walk(expr: &mut Expression, bound: &mut Vec<String>) {
                     *arg = named(spelling);
                 }
                 if let Expression::NamedRef { name, .. } = arg {
+                    bound.push(name.to_ascii_uppercase());
+                } else if let Some(name) = optional_parameter_name(arg) {
                     bound.push(name.to_ascii_uppercase());
                 }
             }
@@ -2454,13 +3024,16 @@ fn r1c1_fallback_walk(expr: &mut Expression, bound: &mut Vec<String>) {
 /// this row's column 4). Entry only: a stored formula holds the `$` form
 /// [`resolve_r1c1_names`] wrote for an R1C1 reference, and still loads.
 fn refuse_unspellable_in_r1c1(expr: &Expression) -> ParseResult<()> {
-    if !declares_cell_shaped_name(expr) {
+    // Read in R1C1 because it declares a cell-shaped name -- or because it
+    // holds an R1C1-only spelling (BUG-0739 [LIVE, lane formd p2.json:
+    // `=R[-1]C+$D$5` and `=R[-1]C+SUM(1:1)` refused, 0x800A03EC]).
+    if !declares_cell_shaped_name(expr) && !holds_unbound_r1c1_name(expr) {
         return Ok(());
     }
     fn walk(expr: &Expression) -> ParseResult<()> {
         let refuse = |what: &str| {
             Err(ParseError::new(format!(
-                "{} cannot be used in a formula that declares a LET or LAMBDA name spelled like a cell: Excel reads such a formula in R1C1 notation",
+                "{} cannot be used in a formula Excel reads in R1C1 notation (one that declares a LET or LAMBDA name spelled like a cell, or holds an R1C1 reference such as RC or R[-1]C)",
                 what
             )))
         };
@@ -2548,11 +3121,12 @@ fn syntax_arity(syntax: &str) -> Option<(usize, Option<usize>)> {
 /// workbook that already holds such a formula still opens with it (and the
 /// export keeps its value-only fallback for it).
 ///
-/// Scoped to the SHADOWED call on purpose: a plain `ABS(1,2)` is refused by
-/// Excel too [LIVE], but the catalog's syntax strings are not Excel's arity for
-/// every function (it understates `GCD`, `MAP`, `BYROW`, `INDEX`, `SUMIFS`,
-/// `IFS`, `SORTBY`, `GETPIVOTDATA` -- see the xlsx export's live table), so a
-/// general check would refuse formulas Excel types.
+/// The SHADOWED call is checked here, ahead of the general check that refuses
+/// a plain `ABS(1,2)` too (BUG-0738, `crate::excel_arity::refuse_builtin_arity`),
+/// only so that its message can name the binder; both read Excel's arity from
+/// ONE rule, `crate::excel_arity::excel_refuses_arity` -- never the catalog's
+/// syntax strings alone, which understate `GCD`, `MAP`, `BYROW`, `INDEX`,
+/// `SUMIFS`, `IFS`, `SORTBY`, `GETPIVOTDATA` (see the xlsx export's live table).
 fn refuse_shadowed_builtin_arity(expr: &Expression, bound: &mut Vec<String>) -> ParseResult<()> {
     match expr {
         Expression::FunctionCall { func: BuiltinFunction::Let, args, .. } if args.len() >= 3 => {
@@ -2601,7 +3175,7 @@ fn refuse_shadowed_builtin_arity(expr: &Expression, bound: &mut Vec<String>) -> 
                 if bound.iter().any(|b| b.eq_ignore_ascii_case(name)) {
                     if let Some((fewest, most)) = builtin_arity(name) {
                         let given = args.len();
-                        if given < fewest || most.is_some_and(|most| given > most) {
+                        if crate::excel_arity::excel_refuses_arity(name, given) {
                             let takes = match most {
                                 Some(most) if most == fewest => format!("{}", fewest),
                                 Some(most) => format!("{} to {}", fewest, most),
@@ -3352,9 +3926,21 @@ fn r1c1_walk(expr: &mut Expression, row: u32, col: u32, is_defined: &dyn Fn(&str
                 };
                 return;
             }
+            // One half an R1C1 CELL (`R[-1]C`, `R1C4`) beside a name is that
+            // cell, as Excel shows it (BUG-0739 [LIVE, lane formd p1/p2:
+            // `=SUM(R[-1]C:D5)` is `=SUM(J881:'D5')`, `=SUM(R[-1]C4:D5)`
+            // `=SUM($D1961:'D5')`]); a bare `C` / `R` half stays the name
+            // half `a:C` evaluation reads as R1C1's line.
             for half in [start.as_mut(), end.as_mut()] {
-                if !matches!(half, Expression::NamedRef { .. }) {
-                    r1c1_walk(half, row, col, is_defined, bound);
+                match half {
+                    Expression::NamedRef { name, .. } => {
+                        if !bound.iter().any(|b| b.eq_ignore_ascii_case(name)) && !is_defined(name) {
+                            if let Some(cell @ Expression::CellRef { .. }) = r1c1_reference(name, row, col) {
+                                *half = cell;
+                            }
+                        }
+                    }
+                    _ => r1c1_walk(half, row, col, is_defined, bound),
                 }
             }
         }
@@ -3965,6 +4551,47 @@ mod tests {
         assert_eq!(at("=Sheet1!XFD1048576", 0, 0), parse("=Sheet1!XFD1048576").unwrap());
     }
 
+    /// W2 (names lane): `Sheet1!C$3` and `Sheet1!R$3` are A1 cells with an
+    /// absolute row [LIVE, Excel 16, lane formfix p1.json: 300 and 0]; they
+    /// failed with 'Unexpected token after expression: Dollar' because `C` /
+    /// `R` were taken as R1C1 first. BUG-0744/0749: `Sheet1!Dup` is Sheet1's
+    /// NAME Dup [LIVE: on Sheet2 `=Sheet1!Dup` is 2].
+    #[test]
+    fn a_qualified_mixed_reference_on_c_or_r_and_a_qualified_name_parse() {
+        let cell = |f: &str| match parse(f).unwrap_or_else(|e| panic!("{f} must parse: {e}")) {
+            Expression::CellRef { sheet, col, row, col_absolute, row_absolute, .. } => {
+                (sheet.unwrap_or_default().to_ascii_uppercase(), col, row, col_absolute, row_absolute)
+            }
+            other => panic!("{f} is no cell: {other:?}"),
+        };
+        assert_eq!(cell("=Sheet1!C$3"), ("SHEET1".to_string(), "C".to_string(), 3, false, true));
+        assert_eq!(cell("=Sheet1!R$3"), ("SHEET1".to_string(), "R".to_string(), 3, false, true));
+        assert_eq!(cell("='My Sheet'!C$3"), ("MY SHEET".to_string(), "C".to_string(), 3, false, true));
+        for f in ["=SUM(Sheet1!C$1:C$3)", "=SUM(Sheet1!R$1:R$3)", "=SUM(Sheet1:Sheet2!C$3)", "=Sheet1!C$3+1"] {
+            assert!(parse(f).is_ok(), "{f} must parse");
+        }
+        // The R1C1 spellings behind a sheet are still R1C1.
+        for f in ["=Sheet1!RC", "=Sheet1!C", "=SUM(Sheet1!R)", "=Sheet1!R1C1"] {
+            assert!(parse(f).is_ok(), "{f} must still parse");
+        }
+        // A qualified NAME, with the sheet it is read in.
+        for (f, sheet, name) in [
+            ("=Sheet1!Dup", "SHEET1", "DUP"),
+            ("='Sheet 2'!Rate_1", "SHEET 2", "RATE_1"),
+            ("=Sheet1!my.name", "SHEET1", "MY.NAME"),
+        ] {
+            let ast = parse(f).unwrap_or_else(|e| panic!("{f} must parse: {e}"));
+            let (s, n) = qualified_name_parts(&ast).unwrap_or_else(|| panic!("{f} is no qualified name: {ast:?}"));
+            assert_eq!((s.to_ascii_uppercase().as_str(), n.to_ascii_uppercase().as_str()), (sheet, name), "{f}");
+        }
+        let sum = parse("=SUM(Sheet1!RngN)+Sheet2!Dup").expect("parses");
+        assert!(format!("{sum:?}").matches("NamedRef").count() == 4, "{sum:?}");
+        // A cell, a column range and a range are still references.
+        assert!(qualified_name_parts(&parse("=Sheet1!A1").unwrap()).is_none());
+        assert!(qualified_name_parts(&parse("=Sheet1!A1:B2").unwrap()).is_none());
+        assert!(qualified_name_parts(&parse("=Sheet1!D:D").unwrap()).is_none());
+    }
+
     /// BUG-0649: the R1C1 rewrite, at J5 (row 4, col 9, 0-based).
     #[test]
     fn a_bare_r1c1_name_becomes_the_entry_cells_a1_reference() {
@@ -4005,18 +4632,173 @@ mod tests {
             let ast = parse(refused).unwrap_or_else(|e| panic!("{refused} still parses (it loads): {e}"));
             assert!(check_entered_formula(&ast).is_err(), "{refused} must fail the entry check");
         }
+        // (`=ABS(1,2)` was ACCEPTED here, pinning the plain call as outside this
+        // check; BUG-0738 refuses it too, as Excel does -- see
+        // `a_plain_built_in_with_an_arity_excel_refuses_fails_the_entry_check`.)
         for accepted in [
             "=LET(abs,LAMBDA(x,x+1),abs(-3))",
             "=LET(round,LAMBDA(x,x*2),round(3.14159,1))",
             "=LET(if,LAMBDA(x,x*3),if(2,3))",
             "=LET(sum,LAMBDA(x,x*2),sum(3))",
-            "=ABS(1,2)",
+            // The catalog understates GCD; Excel's rule does not refuse it.
+            "=LET(gcd,LAMBDA(x,x),gcd(4))",
         ] {
             assert!(check_entered_formula(&parse(accepted).unwrap()).is_ok(), "{accepted}");
         }
         assert_eq!(builtin_arity("ROUND"), Some((2, Some(2))));
         assert_eq!(builtin_arity("pi"), Some((0, Some(0))));
         assert_eq!(builtin_arity("SUM"), Some((1, None)));
+    }
+
+    /// BUG-0737: the copy of a formula the precedent extractor reads has each
+    /// range half that is a LET name -- or an inline LAMBDA's parameter --
+    /// bound to a plain reference replaced by it, so the span's interior is a
+    /// precedent; a formula with no such half is not copied at all.
+    #[test]
+    fn a_bound_name_half_is_its_reference_for_the_precedents() {
+        let bound = |formula: &str| bind_range_name_halves(&parse(formula).expect("parses"));
+        let cell = |col: &str, row: u32| Expression::CellRef {
+            sheet: None,
+            col: col.to_string(),
+            row,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
+        };
+        let range = |a: Expression, b: Expression| Expression::Range {
+            sheet: None,
+            start: Box::new(a),
+            end: Box::new(b),
+            ref_site_id: RefSiteId::ZERO,
+        };
+        let holds = |tree: &Expression, wanted: &Expression| {
+            fn walk(e: &Expression, wanted: &Expression) -> bool {
+                e == wanted || sub_expressions(e).into_iter().any(|s| walk(s, wanted))
+            }
+            walk(tree, wanted)
+        };
+        let let_span = bound("=LET(a,B2,SUM(a:C3))").expect("a:C3 has a bound name half");
+        assert!(holds(&let_span, &range(cell("B", 2), cell("C", 3))), "{let_span:?}");
+        let lambda_span = bound("=LAMBDA(b,SUM(A1:b))(A3)").expect("A1:b has a bound parameter half");
+        assert!(holds(&lambda_span, &range(cell("A", 1), cell("A", 3))), "{lambda_span:?}");
+        // A name bound to a VALUE, an unbound name, and no name half at all.
+        assert!(bound("=LET(a,1,SUM(a:C3))").is_none());
+        assert!(bound("=SUM(A1:A3)").is_none());
+        // Behind a sheet a name half is the sheet's name, never the binding
+        // (A1 IS bound to a reference here, `$B$2`).
+        assert!(bound("=LET(A1,$B$2,Sheet2!A1)").is_none());
+    }
+
+    /// BUG-0739: the quoted spellings of a cell-shaped NAME the formula bar and
+    /// the stored text use read back as that name -- as a range end, behind a
+    /// sheet and behind a 3-D span -- and an R1C1-only spelling makes every
+    /// plain cell of the formula a name.
+    #[test]
+    fn a_quoted_cell_shaped_name_reads_back_everywhere_the_renderer_writes_it() {
+        let named = |name: &str| Expression::NamedRef { name: name.to_string(), ref_site_id: RefSiteId::ZERO };
+        match parse("=SUM(J881:'D5')").expect("parses") {
+            Expression::FunctionCall { args, .. } => match &args[0] {
+                Expression::Range { end, .. } => assert_eq!(end.as_ref(), &named("D5")),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+        match parse("=$D50:'D5'").expect("parses") {
+            Expression::Range { end, .. } => assert_eq!(end.as_ref(), &named("D5")),
+            other => panic!("{other:?}"),
+        }
+        match parse("=Sheet2!'A1'").expect("parses") {
+            Expression::Range { sheet: Some(_), start, end, .. } => {
+                assert_eq!(start.as_ref(), &named("A1"));
+                assert_eq!(end.as_ref(), &named("A1"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse("=SUM(Sheet1:Sheet2!'A1')").expect("parses") {
+            Expression::FunctionCall { args, .. } => match &args[0] {
+                Expression::Sheet3DRef { reference, .. } => assert_eq!(reference.as_ref(), &named("A1")),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+        // `=R[-1]C+D5`: D5 is a name once the formula is read in R1C1.
+        match parse("=R[-1]C+D5").expect("parses") {
+            Expression::BinaryOp { right, .. } => assert_eq!(right.as_ref(), &named("D5")),
+            other => panic!("{other:?}"),
+        }
+        // CONTROL: without an R1C1 spelling, D5 is the cell.
+        assert!(matches!(parse("=A1+D5").expect("parses"), Expression::BinaryOp { right, .. } if matches!(right.as_ref(), Expression::CellRef { .. })));
+    }
+
+    /// BUG-0738: a PLAIN built-in called with an argument count Excel refuses
+    /// to type fails the entry check, with Excel's message, while it still
+    /// parses (a stored one loads). [LIVE, Excel 16, lane formula p4.json:
+    /// each refused with 0x800A03EC in a cell; the messages are Excel's own,
+    /// `Names.Add` p2.json / p3.json.] Calcula-only functions and unknown
+    /// names are never refused.
+    #[test]
+    fn a_plain_built_in_with_an_arity_excel_refuses_fails_the_entry_check() {
+        let too_many = "You've entered too many arguments for this function.";
+        let too_few = "You've entered too few arguments for this function.";
+        let problem = "There's a problem with this formula.";
+        for (refused, message) in [
+            ("=ABS(1,2)", too_many),
+            ("=ROUND(1,2,3)", too_many),
+            ("=IF(1,2,3,4)", too_many),
+            ("=IFERROR(1,2,3)", too_many),
+            ("=ROUND(1)", too_few),
+            ("=MID(\"a\",1)", too_few),
+            ("=IFS(1,2,3)", too_few),
+            ("=SWITCH(1)", too_few),
+            ("=CHOOSE(1)", too_few),
+            ("=LET(x,1)", too_few),
+            ("=IFERROR(1)", too_few),
+            ("=PI(1)", problem),
+            ("=IF()", problem),
+            ("=SUM()", problem),
+            ("=LAMBDA()", problem),
+            ("=SUMIFS(A1:A5,B1:B5)", problem),
+            ("=ROUND(A1)", problem),
+            ("=ROUND(1+A1)", problem),
+            ("=1+ABS(1,2)", too_many),
+            ("=SUM(1,ROUND(1))", too_few),
+            // Excel's CALL, which Calcula does not have: one argument or more.
+            ("=CALL()", problem),
+        ] {
+            let ast = parse(refused).unwrap_or_else(|e| panic!("{refused} still parses (it loads): {e}"));
+            match check_entered_formula(&ast) {
+                Err(e) => assert!(
+                    e.message.starts_with(message),
+                    "{refused}: Excel says {message:?}, Calcula {:?}",
+                    e.message
+                ),
+                Ok(()) => panic!("{refused} must fail the entry check, as Excel refuses it"),
+            }
+        }
+        for accepted in [
+            "=ABS(1)",
+            "=ROUND(1,2)",
+            "=IF(1,2)",
+            "=IFS(1,2,3,4)",
+            "=GCD(4)",
+            "=LCM(4)",
+            "=INDEX(A1:A5,1,1,1)",
+            "=MAP(A1:A3,A1:A3,LAMBDA(a,b,a))",
+            "=BYROW(A1:A3)",
+            "=SORTBY(A1:A3,A1:A3,1,A1:A3,1)",
+            "=LET(x,1,x)",
+            "=PI()",
+            // Calcula's own functions and unknown names: never refused.
+            "=LPAD(\"a\")",
+            "=POW(2,3,4)",
+            "=COLLECT(1,2,3,4)",
+            "=myFunction(1,2,3,4,5)",
+            "=LAMBDA(x,x)(1,2)",
+            "=CALL(\"a\")",
+        ] {
+            let ast = parse(accepted).unwrap_or_else(|e| panic!("{accepted}: {e}"));
+            assert!(check_entered_formula(&ast).is_ok(), "{accepted} is typed by Excel: {:?}", check_entered_formula(&ast));
+        }
     }
 
     /// BUG-0646: `a#` with `a` bound to a cell becomes `cell#` in the tree the
@@ -4047,11 +4829,15 @@ mod tests {
             "=LET(a,1,SUM(Sheet1!A1:Sheet1!A3)+a)",
             "=SUM(Sheet1!$A$1:'My Sheet'!$A$3)",
             "=ROWS(Table1[[#Headers],[#Data]]:Table1[Col])",
+            // A second qualifier after an UNQUALIFIED first half (BUG-0737):
+            // this was asserted a parse error; [LIVE, Excel 16, lane formula
+            // p1.json] `=SUM(A1:Sheet1!A3)` is 6 in Sheet1.
+            "=SUM(A1:Sheet1!A3)",
+            "=SUM(A1:'Sheet1'!A3)",
+            "=SUM($A$1:Sheet1!A3)",
         ] {
             assert!(parse(formula).is_ok(), "{formula}: {:?}", parse(formula));
         }
-        // Still refused: a second qualifier after an unqualified first half.
-        assert!(parse("=SUM(A1:Sheet1!A3)").is_err());
     }
 
     /// BUG-0643. A SECOND special item is a special item. `[[#Headers],[#Data]]`

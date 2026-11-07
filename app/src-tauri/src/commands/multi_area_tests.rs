@@ -203,6 +203,86 @@ fn bug0394_the_annotation_clears_take_every_area_as_one_step() {
 }
 
 // ---------------------------------------------------------------------------
+// BUG-0736 -- Remove Hyperlinks / Clear Hyperlinks over several areas
+// ---------------------------------------------------------------------------
+
+fn link(wb: &Workbook, row: u32, col: u32) {
+    wb.state
+        .hyperlinks
+        .write(&seed())
+        .unwrap()
+        .entry(0)
+        .or_default()
+        .insert((row, col), crate::hyperlinks::Hyperlink::new_url(row, col, 0, format!("https://example.com/{row}/{col}")));
+}
+
+fn linked(wb: &Workbook) -> Vec<(u32, u32)> {
+    let mut v: Vec<(u32, u32)> =
+        wb.state.hyperlinks.read().unwrap().get(&0).map(|m| m.keys().copied().collect()).unwrap_or_default();
+    v.sort_unstable();
+    v
+}
+
+#[test]
+fn bug0736_remove_hyperlinks_over_several_areas_is_one_call_and_one_step() {
+    let wb = Workbook::new(1);
+    let bold = style_with(&wb, |s| s.font.bold = true);
+    for (r, c) in [(0u32, 0u32), (2, 2), (4, 4)] {
+        wb.set(r, c, "x");
+        restyle(&wb, r, c, bold);
+    }
+    link(&wb, 0, 0);
+    link(&wb, 2, 2);
+    link(&wb, 9, 9);
+    crate::document_effect::mark_saved(&wb.file);
+    let depth = undo_depth(&wb);
+
+    let result = clear_areas(&wb, (0, 0, 0, 0), &[area(2, 2, 2, 2), area(4, 4, 4, 4)], ClearApplyTo::RemoveHyperlinks)
+        .expect("Remove Hyperlinks over three areas is ONE call");
+    assert_eq!(result.count, 2, "two linked cells across the areas");
+    assert_eq!(linked(&wb), vec![(9, 9)], "both areas' links are gone, the link outside stays");
+    let style_at = |r, c| wb.state.grid.read().unwrap().get_cell(r, c).map(|cell| cell.style_index);
+    assert_eq!((style_at(0, 0), style_at(2, 2)), (Some(0), Some(0)), "each linked cell is back to Normal");
+    assert_eq!(style_at(4, 4), Some(bold), "a cell without a link keeps its format");
+    assert_eq!(undo_depth(&wb), depth + 1, "ONE undo step for every area");
+    assert!(wb.file.is_dirty());
+
+    undo(&wb);
+    assert_eq!(linked(&wb), vec![(0, 0), (2, 2), (9, 9)], "one undo puts every area's links back");
+    assert_eq!((style_at(0, 0), style_at(2, 2)), (Some(bold), Some(bold)), "and their formats");
+
+    // Clear Hyperlinks the same way: the links go, the formats stay.
+    let result = clear_areas(&wb, (0, 0, 0, 0), &[area(2, 2, 2, 2)], ClearApplyTo::Hyperlinks).expect("Clear Hyperlinks");
+    assert_eq!(result.count, 2);
+    assert_eq!(linked(&wb), vec![(9, 9)]);
+    assert_eq!((style_at(0, 0), style_at(2, 2)), (Some(bold), Some(bold)));
+}
+
+#[test]
+fn bug0736_remove_hyperlinks_a_refusing_later_area_removes_nothing() {
+    let wb = Workbook::new(1);
+    let bold_unlocked = style_with(&wb, |s| {
+        s.locked = false;
+        s.font.bold = true;
+    });
+    wb.set(0, 0, "a");
+    wb.set(0, 2, "c");
+    restyle(&wb, 0, 0, bold_unlocked);
+    link(&wb, 0, 0);
+    link(&wb, 0, 2);
+    protect_active(&wb);
+    crate::document_effect::mark_saved(&wb.file);
+    let depth = undo_depth(&wb);
+
+    let refused = clear_areas(&wb, (0, 0, 0, 0), &[area(0, 2, 0, 2)], ClearApplyTo::RemoveHyperlinks);
+    assert!(refused.is_err(), "C1 is locked on a protected sheet: the gesture refuses");
+    assert_eq!(linked(&wb), vec![(0, 0), (0, 2)], "A1's link went before C1 refused");
+    assert_eq!(wb.state.grid.read().unwrap().get_cell(0, 0).map(|c| c.style_index), Some(bold_unlocked));
+    assert_eq!(undo_depth(&wb), depth);
+    assert!(!wb.file.is_dirty());
+}
+
+// ---------------------------------------------------------------------------
 // BUG-0394 -- formatting over several areas
 // ---------------------------------------------------------------------------
 

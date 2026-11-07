@@ -166,6 +166,23 @@ const inside = (row: number, col: number, r: SortRange): boolean =>
   row >= r.startRow && row <= r.endRow && col >= r.startCol && col <= r.endCol;
 
 /**
+ * Whether the sheet's one AutoFilter is the TABLE's own (`Table.autoFilterId`
+ * matches the filter's id). Only then does a sort of the table reapply it:
+ * Reapply also re-sorts the filter's data by ITS remembered sort (BUG-0740),
+ * so reapplying a sheet-level filter elsewhere on the sheet would re-sort a
+ * different range -- Excel's table sort never touches another filter.
+ */
+async function tableOwnsTheSheetFilter(autoFilterId: string | undefined): Promise<boolean> {
+  if (!autoFilterId || !getAutoFilterStatus().hasFilter || !hasAutoFilterController()) return false;
+  try {
+    const filter = await requireAutoFilterController().get();
+    return filter !== null && filter.id === autoFilterId;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The block ONE cell sorts: its table's body, else its AutoFilter range, else
  * the current region (with the header guess). Null when the cell sits in no
  * data at all.
@@ -189,7 +206,7 @@ async function blockAround(row: number, col: number): Promise<SortTarget | null>
       },
       sortCol: col,
       hasHeaders: headerRow,
-      reapplyFilter: getAutoFilterStatus().hasFilter,
+      reapplyFilter: await tableOwnsTheSheetFilter(table.autoFilterId),
     };
   }
 

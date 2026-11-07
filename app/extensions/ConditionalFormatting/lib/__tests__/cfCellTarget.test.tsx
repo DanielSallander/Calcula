@@ -178,9 +178,11 @@ describe("Conditional Formatting on a floating grid's cells", () => {
     expect(h.showDialog).toHaveBeenNthCalledWith(1, QUICK_CF_DIALOG_ID, {
       ruleType: "greaterThan",
       selection: FR_RANGE,
+      // The OBJECT's active cell (BUG-0748: a New Rule entry is typed for it).
+      activeCell: { row: 2, col: 1 },
       target: REF,
     });
-    expect(h.showDialog).toHaveBeenNthCalledWith(2, NEW_RULE_DIALOG_ID, { selection: FR_RANGE, target: REF });
+    expect(h.showDialog).toHaveBeenNthCalledWith(2, NEW_RULE_DIALOG_ID, { selection: FR_RANGE, activeCell: { row: 2, col: 1 }, target: REF });
   });
 
   it("Clear Rules from Selected Cells clears the object's range with its target", async () => {
@@ -199,10 +201,12 @@ describe("Conditional Formatting on a floating grid's cells", () => {
 
   it("Manage Rules opens on the object's rules and names the scope", async () => {
     items.get("cf:manageRules")!.action!();
-    expect(h.showDialog).toHaveBeenCalledWith(RULES_MANAGER_DIALOG_ID, {
+    // The selection and its active cell go too, for the Manager's New Rule...
+    expect(h.showDialog).toHaveBeenCalledWith(RULES_MANAGER_DIALOG_ID, expect.objectContaining({
       target: REF,
       scopeLabel: "This floating grid (Float1)",
-    });
+      objectName: "Float1",
+    }));
     const data = h.showDialog.mock.calls[0][1] as Record<string, unknown>;
     h.getAllConditionalFormats.mockResolvedValue([
       {

@@ -424,3 +424,19 @@ it("no selection: nothing is read or written", async () => {
   expect(widthsWritten()).toEqual([]);
   expect(heightsWritten()).toEqual([]);
 });
+
+// BUG-0727: a WRAPPED value is fitted as it wraps at the width the column has
+// NOW, a rotated one at its row's height (Excel [LIVE], 2026-11-06), so the
+// command hands the measurer the column's geometry.
+it("BUG-0727 AutoFit Column Width hands the measurer the column's current width and the rows' heights", async () => {
+  sheet = [[3, 2, "wrapped words"]];
+  dims.columnWidths.set(2, 240);
+  dims.rowHeights.set(3, 60);
+  await runAutoFitColumnWidth(host(sel(3, 2, 3, 2)));
+  const call = measure.measureOptimalColumnWidth.mock.calls.find((c) => c[0] === 2);
+  const layout = call?.[7] as { currentWidth: number; rowHeight: (row: number) => number } | undefined;
+  expect(layout, "no geometry: a wrapped value cannot be fitted").toBeDefined();
+  expect(layout!.currentWidth).toBe(240);
+  expect(layout!.rowHeight(3)).toBe(60);
+  expect(layout!.rowHeight(4), "a row of the standard height").toBe(DEFAULT_H);
+});

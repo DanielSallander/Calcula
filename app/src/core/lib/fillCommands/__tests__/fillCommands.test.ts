@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const api = vi.hoisted(() => ({ fillRange: vi.fn() }));
+const api = vi.hoisted(() => ({ fillRange: vi.fn(), getMergedRegions: vi.fn() }));
 const dialogs = vi.hoisted(() => ({ alertAsync: vi.fn(), confirmAsync: vi.fn() }));
 const emitBatch = vi.hoisted(() => vi.fn());
 
@@ -37,6 +37,8 @@ function sel(startRow: number, startCol: number, endRow: number, endCol: number)
 beforeEach(() => {
   api.fillRange.mockReset();
   api.fillRange.mockResolvedValue([]);
+  api.getMergedRegions.mockReset();
+  api.getMergedRegions.mockResolvedValue([]);
   dialogs.alertAsync.mockReset();
   dialogs.alertAsync.mockReturnValue(Promise.resolve());
   emitBatch.mockReset();
@@ -147,4 +149,60 @@ describe("runFillCommand", () => {
     ]);
     expect(emitBatch).not.toHaveBeenCalled();
   });
+});
+
+// ---------------------------------------------------------------------------
+// BUG-0768: a MERGED source band (Excel 16 COM [LIVE], 2026-11-06, uimisc probe2)
+// ---------------------------------------------------------------------------
+
+const merged = (startRow: number, startCol: number, endRow: number, endCol: number) => ({ startRow, startCol, endRow, endCol });
+
+describe("BUG-0768 fillPlan widens the source band to the merges it holds", () => {
+  it("Fill Down of A1:A6 with A1:A2 merged copies A1:A2 into A3:A6", () => {
+    expect(fillPlan("down", sel(0, 0, 5, 0), ROWS, COLS, [merged(0, 0, 1, 0)])).toEqual({
+      source: { startRow: 0, startCol: 0, endRow: 1, endCol: 0 },
+      target: { startRow: 2, startCol: 0, endRow: 5, endCol: 0 },
+    });
+  });
+
+  it("a merge across the leading row keeps the one-row band (A1:B1 merged, A1:B4)", () => {
+    expect(fillPlan("down", sel(0, 0, 3, 1), ROWS, COLS, [merged(0, 0, 0, 1)])).toEqual({
+      source: { startRow: 0, startCol: 0, endRow: 0, endCol: 1 },
+      target: { startRow: 1, startCol: 0, endRow: 3, endCol: 1 },
+    });
+  });
+
+  it("Fill Up, Fill Left and a one-line Fill Down widen away from the target", () => {
+    expect(fillPlan("up", sel(0, 0, 5, 0), ROWS, COLS, [merged(4, 0, 5, 0)])).toEqual({
+      source: { startRow: 4, startCol: 0, endRow: 5, endCol: 0 },
+      target: { startRow: 0, startCol: 0, endRow: 3, endCol: 0 },
+    });
+    expect(fillPlan("left", sel(0, 0, 0, 5), ROWS, COLS, [merged(0, 4, 0, 5)])).toEqual({
+      source: { startRow: 0, startCol: 4, endRow: 0, endCol: 5 },
+      target: { startRow: 0, startCol: 0, endRow: 0, endCol: 3 },
+    });
+    expect(fillPlan("down", sel(2, 0, 2, 0), ROWS, COLS, [merged(0, 0, 1, 0)])).toEqual({
+      source: { startRow: 0, startCol: 0, endRow: 1, endCol: 0 },
+      target: { startRow: 2, startCol: 0, endRow: 2, endCol: 0 },
+    });
+  });
+
+  it("a merge covering the whole selection leaves nothing to fill", () => {
+    expect(fillPlan("down", sel(0, 0, 1, 0), ROWS, COLS, [merged(0, 0, 1, 0)])).toBeNull();
+  });
+});
+
+it("BUG-0768 runFillCommand reads the merges near the selection and fills from the widened band", async () => {
+  api.getMergedRegions.mockResolvedValue([merged(0, 0, 1, 0)]);
+  api.fillRange.mockResolvedValue([{ row: 2, col: 0 }]);
+  const refreshed = vi.fn();
+  window.addEventListener("grid:refresh", refreshed);
+  try {
+    await runFillCommand("down", { selection: sel(0, 0, 5, 0), totalRows: ROWS, totalCols: COLS });
+  } finally {
+    window.removeEventListener("grid:refresh", refreshed);
+  }
+  expect(api.getMergedRegions).toHaveBeenCalledTimes(1);
+  expect(api.fillRange.mock.calls[0].slice(0, 8)).toEqual([0, 0, 1, 0, 2, 0, 5, 0]);
+  expect(refreshed, "the grid did not re-read the repeated merges").toHaveBeenCalledTimes(1);
 });

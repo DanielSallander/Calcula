@@ -420,10 +420,16 @@ async fn the_two_stage_pre_aggregation_applies_a_keeps_expression_conditions() {
     assert_eq!(all["BikesQtyOver"], None, "{got:?}");
     assert_eq!(all["BikeRowsIn"], Some(2.0), "{got:?}");
     assert_eq!(all["BikeSumByProduct"], Some(10.0), "{got:?}");
-    // Each alone takes the same route.
+    // Each alone takes the same route. A measure that is BLANK in the group
+    // ALONE is no row there (SUMMARIZECOLUMNS drops a row whose every measure
+    // is BLANK, as the main route's HAVING does); this pinned an all-BLANK
+    // "All" row for BikesQtyOver until wave 3 (lane engfix).
     for m in names {
         let got = ask(&e, &[m], group.clone()).await;
-        assert_eq!(got["All"][m], all[m], "{m} alone");
+        match all[m] {
+            None => assert!(!got.contains_key("All"), "{m} alone: {got:?}"),
+            Some(_) => assert_eq!(got["All"][m], all[m], "{m} alone"),
+        }
     }
 }
 

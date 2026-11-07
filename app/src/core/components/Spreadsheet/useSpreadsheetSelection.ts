@@ -442,7 +442,12 @@ export function useSpreadsheetSelection({
         let appliedCount = 0;
         for (const c of columnsToFit) {
           const cells = await getCellsInCols(c, c);
-          const optimalWidth = measureOptimalColumnWidth(c, cells, styles, theme, config.minColumnWidth);
+          // A wrapped value is fitted as it wraps at the current width, a
+          // rotated one at its row's height (BUG-0727, Excel).
+          const optimalWidth = measureOptimalColumnWidth(c, cells, styles, theme, config.minColumnWidth, true, undefined, {
+            currentWidth: dimensions?.columnWidths.get(c) ?? config.defaultCellWidth,
+            rowHeight: (row: number) => dimensions?.rowHeights.get(row) ?? config.defaultCellHeight,
+          });
           // Excel: an empty column keeps its current width
           if (optimalWidth === null) continue;
           dispatch(setColumnWidth(c, optimalWidth));
@@ -473,7 +478,7 @@ export function useSpreadsheetSelection({
 
       canvasRef.current?.redraw();
     },
-    [selection, config.minColumnWidth, dispatch, canvasRef, sheetContext.activeSheetIndex]
+    [selection, config.minColumnWidth, config.defaultCellWidth, config.defaultCellHeight, dimensions, dispatch, canvasRef, sheetContext.activeSheetIndex]
   );
 
   // -------------------------------------------------------------------------

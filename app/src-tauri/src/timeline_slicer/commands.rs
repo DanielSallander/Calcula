@@ -204,7 +204,26 @@ pub(crate) fn update_timeline_slicer_core(
         container.validate()?;
     }
     let mut next = None;
+    let mut refused: Option<String> = None;
     let recorded = update_timeline_with(state, timeline_state, file_state, timeline_id, "Update timeline slicer", |tl| {
+        // ONLY THE CONTAINER FIELDS A TIMELINE PAINTS (BUG-0773), decided
+        // against the record this write replaces (`tl` is still it) and
+        // FIRST: a refusal leaves the copy unchanged, so nothing is written.
+        let container = match &params.container {
+            Some(Some(c)) => match visual_format::check_family_container_write(
+                visual_format::FAMILY_TIMELINE,
+                c,
+                tl.container.as_ref(),
+            ) {
+                Ok(checked) => Some(Some(checked)),
+                Err(e) => {
+                    refused = Some(e);
+                    return;
+                }
+            },
+            Some(None) => Some(None),
+            None => None,
+        };
         if let Some(name) = params.name {
             tl.name = name;
         }
@@ -226,13 +245,16 @@ pub(crate) fn update_timeline_slicer_core(
         if let Some(style_preset) = params.style_preset {
             tl.style_preset = style_preset;
         }
-        if let Some(container) = params.container {
+        if let Some(container) = container {
             // An empty container is no container (no key on save).
             tl.container = container.filter(|c| !c.is_empty());
         }
         next = Some(tl.clone());
     });
     recorded?;
+    if let Some(why) = refused {
+        return Err(why);
+    }
     next.ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))
 }
 

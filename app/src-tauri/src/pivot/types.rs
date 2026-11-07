@@ -209,6 +209,29 @@ pub enum SortBy {
     #[default]
     Ascending,
     Descending,
+    /// Excel's Manual (BUG-0733): keep the order the items have now and let
+    /// them be moved by hand ([`SortPivotFieldRequest::move_item`]).
+    Manual,
+}
+
+/// Where Move puts a pivot item (Excel's item menu Move > Move "X" Up /
+/// Down / to Beginning / to End).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PivotItemMoveTo {
+    Beginning,
+    Up,
+    Down,
+    End,
+}
+
+/// One item moved by hand ([`SortPivotFieldRequest::move_item`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotItemMove {
+    /// The item, by the member id its header cell's `groupPath` carries.
+    pub value_id: u32,
+    pub to: PivotItemMoveTo,
 }
 
 /// Pivot axis for field placement.
@@ -858,6 +881,11 @@ pub struct SortPivotFieldRequest {
     /// for a column field (Excel's PivotLine).
     #[serde(default)]
     pub scope_group_path: Option<Vec<(usize, u32)>>,
+    /// Move ONE item by hand (BUG-0733, Excel's `PivotItem.Position`): the
+    /// field turns Manual, keeping the order its items are shown in now with
+    /// this item moved. `sort_by` and the value-sort settings are ignored.
+    #[serde(default)]
+    pub move_item: Option<PivotItemMove>,
 }
 
 /// Request to set a data hierarchy's aggregation function.
@@ -1204,6 +1232,12 @@ pub struct HeaderFieldSummaryData {
     pub field_name: String,
     /// Whether this field currently has an active filter (hidden items).
     pub has_active_filter: bool,
+    /// The field's sort as the view applied it: "asc", "desc", "manual" or
+    /// "source" (a grouped field's own level sort, BUG-0733).
+    pub sort_order: String,
+    /// The value field (by name) the field is sorted by, when it is sorted by
+    /// value.
+    pub sort_by_value_field: Option<String>,
 }
 
 /// Lightweight row descriptor for windowed responses (no cell data).

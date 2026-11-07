@@ -25,6 +25,16 @@ import { resolveCellTarget, targetRefOf, selectTargetCells, editTargetCell, type
 import { planAutoSumAreas, AUTOSUM_FUNCTIONS, type AutoSumFn, type CellRange } from "./autoSumPlan";
 import { createLiveReader, createTargetReader } from "./liveReader";
 import { openAutoSumEdit } from "./editOpener";
+import { applyTableTotal, type TableTotalFunction } from "@api/tableTotalsService";
+
+/** AutoSum's functions as a table's totals row names them. */
+const TABLE_TOTAL_FUNCTION: Record<AutoSumFn, TableTotalFunction> = {
+  SUM: "sum",
+  AVERAGE: "average",
+  COUNT: "countNumbers",
+  MAX: "max",
+  MIN: "min",
+};
 
 /** AutoSum's closes, read when a close runs (see ownUndoTransaction): a
  *  script's open batch is JOINED and left for the script to close. */
@@ -109,6 +119,22 @@ export async function runAutoSum(args?: unknown): Promise<void> {
   }
   const sel = snapshot?.selection;
   if (!sel) return;
+
+  // A TABLE'S TOTALS CELL (BUG-0769): one cell on a table's totals row, or
+  // just below a table whose totals row is off, takes the table's own total --
+  // Excel [LIVE, 2026-11-06, lane uimisc probe3] writes =SUBTOTAL(109,[H]) and
+  // turns the totals row on. The Table extension owns it (@api/tableTotalsService).
+  if (
+    !(sel.additionalRanges?.length) &&
+    sel.startRow === sel.endRow &&
+    sel.startCol === sel.endCol
+  ) {
+    const tableTotal = await applyTableTotal(sel.endRow, sel.endCol, TABLE_TOTAL_FUNCTION[fn]);
+    if (tableTotal !== null) {
+      if (tableTotal) refreshGridData();
+      return;
+    }
+  }
 
   // Every area, the main one first (Go To Special > Blanks then Alt+= puts a
   // total in every blank -- Excel's well-known subtotal recipe, measured live).

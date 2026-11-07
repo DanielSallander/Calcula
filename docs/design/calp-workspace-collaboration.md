@@ -231,9 +231,64 @@ REFUSED by name, never read silently. The identity of the application itself
 is the signed, TOFU-pinned publisher key per (workspace, application name).
 Pinned clause by clause by
 `the_data_source_identity_contract_holds_clause_by_clause`
-(`app/src-tauri/src/calp_materialize_tests.rs`). The contract is about
-DATA-SOURCE ids; writeback column ids and object ids (charts, ribbon filters)
-carried into a new application are not re-keyed by it.
+(`app/src-tauri/src/calp_materialize_tests.rs`).
+
+**Region and object identity (owner decision, 2026-11-06, BUG-0734).** The
+same contract holds for an application's WRITEBACK REGION ids, CHART ids,
+RIBBON-FILTER ids, and its slicer, timeline, pane-control and saved pivot-layout
+ids. A working copy of A published as a NEW application B (a
+fork: the working-copy link targets another application) carries every one of
+them under `object_key_for_application(family, B, source id)` -- deterministic,
+so B's own working copy (a checkout restores B's regions as designations with
+B's ids) pushes them unchanged; and an object of those families a SUBSCRIPTION
+brought in is re-keyed on any push, derived WITH its source application so it can
+never land on the id the fork derived for its own copy (a carrier that would
+still hold one id twice is refused, `CALP_OBJECT_ID_TAKEN`). A push carries only
+the regions on the sheets it publishes, and a push declaring a region id another
+application in the workspace already declares (a standalone copy, a lost link)
+is refused with a remedy (`CALP_REGION_TAKEN`,
+`refuse_regions_another_application_declares`). The ids are derived from the
+application NAME, not the workspace: a workspace has no identity that is the same
+on every machine (a Dropbox or mapped-drive path differs per user), and a
+derivation that changed with the spelling would re-mint ids on every push from
+another developer. `object_rekeys_for_target` decides,
+`rekey_carried_objects` rewrites the carrier -- the declarations, every object
+store that names those ids, and a formula's string literal, so
+`=GATHER("<region id>")` in B names B's region -- in the one door the publish,
+its preview and the diff share, BEFORE core publish signs anything. A standalone
+workbook's first publish keeps its own ids. Behind it, nothing is guessed on a
+subscriber: a subscribe or a refresh that would declare a region id another
+subscription declares is refused (`CALP_REGION_SHARED`,
+`refuse_region_already_declared`, `refuse_refreshed_regions_already_declared`);
+a submission or read of a shared id is refused at the door
+(`the_one_region_owner`); a GATHER of a shared id reads neither application and
+is `#REF!` on the sheet. The claimants are counted from LOCAL, verified state
+first -- each subscribe and refresh records its version's region ids in the
+subscription's ledger (kind `writebackRegion`) -- so a claimant whose workspace
+is down, backed off or unpinned still counts. An object whose id (or a filter's
+or pane control's name) is already taken, and a ribbon filter whose model is not
+carried, is not added and is named in the pull's or refresh's `objectsNotAdded`.
+MODEL WRITEBACK COLUMN ids follow the same contract (rk3, 2026-11-06): a column's id
+is the `region_id` its entries are routed and filed by, so a data source that is
+re-keyed gives each of its columns an id of its own
+(`model_writeback_id_for_data_source`, from the data source's new key) in the
+declaration, the embedded model -- the column and the `__wb_{id}` store tables a
+measure can name -- and the publisher's baseline; each subscribe and refresh
+records them as ledger rows of kind `modelWriteback`; and a shared column id is
+refused at subscribe and refresh, has no owner at submit, and feeds neither model
+(`CALP_WRITEBACK_COLUMN_SHARED`). Every claim set counts SUBSCRIPTIONS, never
+application names: two applications of one name from two workspaces are two
+claimants. The writeback model-table feed answers a shared region id with an
+empty dataset whose note is the refusal. `CALP_REGION_TAKEN` covers model column
+ids too, refuses when any application's versions cannot be read, and core
+publish asks it again under the workspace lock
+(`calp::publish::refuse_writeback_ids_another_application_declares`); the push
+preview warns of it. At open, a subscription that records no writeback-id rows
+(an earlier build's) gets them from its pinned manifest
+(`backfill_writeback_id_ledgers`; an HTTP workspace is left to its next refresh).
+A standalone copy's chart, filter, slicer, timeline and pane-control ids are NOT
+checked against other applications at publish: they route no answer, and a
+subscriber that already holds one names it in `objectsNotAdded`.
 
 ### 2.3 The three roles a `.cala` can hold
 

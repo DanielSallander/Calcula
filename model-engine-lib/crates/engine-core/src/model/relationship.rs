@@ -35,6 +35,22 @@ impl JoinOperator {
         }
     }
 
+    /// This operator with its operands swapped: `a op b` is `b op.flipped() a`.
+    ///
+    /// A condition reads `from op to`; a caller that renders it with the
+    /// relationship's `to` column first (the fact is the `to` table) must use
+    /// the flipped operator, or a range relationship declared from the
+    /// dimension tests the wrong side of its boundary.
+    pub fn flipped(&self) -> Self {
+        match self {
+            Self::Equal => Self::Equal,
+            Self::GreaterThan => Self::LessThan,
+            Self::GreaterThanOrEqual => Self::LessThanOrEqual,
+            Self::LessThan => Self::GreaterThan,
+            Self::LessThanOrEqual => Self::GreaterThanOrEqual,
+        }
+    }
+
     /// Returns the SQL aggregate function to compute the boundary value
     /// for this operator on the **dimension** side of a non-equi relationship.
     ///
@@ -382,6 +398,13 @@ impl Relationship {
     /// `left_alias` and `right_alias` are the SQL aliases for the two tables.
     /// `left_is_from` indicates whether the left alias corresponds to the "from" table.
     ///
+    /// Each condition reads `from op to`. Rendered with the `to` table on the
+    /// left, the operator is FLIPPED (`a <= b` is `b >= a`), so a range
+    /// relationship declared from either end joins the same rows. Without the
+    /// flip a range declared from the dimension (`Deadlines[due] >=
+    /// Sales[day]`) rendered fact-first tested `Sales[day] >= Deadlines[due]`
+    /// (wave 3 verifier: hard 90 / soft 115 where DAX answers 35 / 10).
+    ///
     /// # Example
     ///
     /// For a BETWEEN-style relationship with conditions `order_date >= start_date`
@@ -400,14 +423,14 @@ impl Relationship {
         self.conditions
             .iter()
             .map(|c| {
-                let (left_col, right_col) = if left_is_from {
-                    (c.from_column(), c.to_column())
+                let (left_col, right_col, operator) = if left_is_from {
+                    (c.from_column(), c.to_column(), c.operator)
                 } else {
-                    (c.to_column(), c.from_column())
+                    (c.to_column(), c.from_column(), c.operator.flipped())
                 };
                 format!(
                     "{left_alias}.\"{left_col}\" {} {right_alias}.\"{right_col}\"",
-                    c.operator.as_sql()
+                    operator.as_sql()
                 )
             })
             .collect::<Vec<_>>()
@@ -480,7 +503,22 @@ impl Relationship {
     /// reference: the referenced table is the "one" side, so joining it onto
     /// the fact never inflates the aggregate.
     pub fn lookup_safe_from(&self, host: &str) -> bool {
-        if !self.is_equi_only() || !self.active {
+        self.active && self.join_safe_from(host)
+    }
+
+    /// [`lookup_safe_from`](Self::lookup_safe_from) without the "active"
+    /// requirement: can the other table be JOINed onto `host` through THIS
+    /// relationship without multiplying `host`'s rows? An equality-only
+    /// relationship on whose many (or one-to-one) side `host` sits.
+    ///
+    /// For a relationship a measure activates with `USERELATIONSHIP` (an
+    /// inactive one), and for routing a GROUP BY: unlike
+    /// [`is_safe_for_direct_join`](Self::is_safe_for_direct_join) it reads the
+    /// declared direction, so a one-to-many declared from the dimension is as
+    /// safe from its fact as the same relationship declared many-to-one, and
+    /// a one-to-many seen from its ONE side is not.
+    pub fn join_safe_from(&self, host: &str) -> bool {
+        if !self.is_equi_only() {
             return false;
         }
         match self.cardinality {
@@ -534,13 +572,16 @@ impl Relationship {
             return None;
         }
 
-        let (fact_col, dim_col) = if fact_is_from {
-            (cond.from_column(), cond.to_column())
+        // The condition reads `from op to`; rendered fact-first, a fact that
+        // is the `to` table needs the operator flipped (`dim <= fact` is
+        // `fact >= dim`, bounded by the MIN, not the MAX).
+        let (fact_col, dim_col, operator) = if fact_is_from {
+            (cond.from_column(), cond.to_column(), cond.operator)
         } else {
-            (cond.to_column(), cond.from_column())
+            (cond.to_column(), cond.from_column(), cond.operator.flipped())
         };
 
-        let agg = cond.operator.boundary_aggregate();
+        let agg = operator.boundary_aggregate();
 
         let dim_where = if dim_filters.is_empty() {
             String::new()
@@ -550,7 +591,7 @@ impl Relationship {
 
         Some(format!(
             "{fact_alias}.\"{fact_col}\" {} (SELECT {agg}(__d.\"{dim_col}\") FROM {dim_table} AS __d{dim_where})",
-            cond.operator.as_sql()
+            operator.as_sql()
         ))
     }
 
@@ -584,14 +625,16 @@ impl Relationship {
             .conditions
             .iter()
             .map(|c| {
-                let (fact_col, dim_col) = if fact_is_from {
-                    (c.from_column(), c.to_column())
+                // Fact-first: a fact that is the `to` table reads the
+                // condition with its operator flipped (see `build_on_clause`).
+                let (fact_col, dim_col, operator) = if fact_is_from {
+                    (c.from_column(), c.to_column(), c.operator)
                 } else {
-                    (c.to_column(), c.from_column())
+                    (c.to_column(), c.from_column(), c.operator.flipped())
                 };
                 format!(
                     "{fact_alias}.\"{fact_col}\" {} __d.\"{dim_col}\"",
-                    c.operator.as_sql()
+                    operator.as_sql()
                 )
             })
             .collect();
@@ -802,6 +845,48 @@ mod tests {
         assert_eq!(
             clause,
             r#"sales."order_date" >= periods."start_date" AND sales."order_date" <= periods."end_date""#
+        );
+    }
+
+    #[test]
+    fn on_and_exists_clauses_flip_a_range_rendered_from_its_to_table() {
+        // `Deadlines[due] >= Sales[day]`, declared from Deadlines, rendered
+        // with Sales (the `to` table) first: `sales.day <= dim.due`.
+        let rel = Relationship::many_to_many(
+            "R",
+            "Deadlines",
+            "Sales",
+            vec![JoinCondition::new("due", "day", JoinOperator::GreaterThanOrEqual)],
+        );
+        assert_eq!(
+            rel.build_on_clause("sales", "deadlines", false),
+            r#"sales."day" <= deadlines."due""#
+        );
+        assert_eq!(
+            rel.build_on_clause("deadlines", "sales", true),
+            r#"deadlines."due" >= sales."day""#
+        );
+        assert_eq!(
+            rel.build_exists_clause("sales", "deadlines", false, &[]),
+            r#"EXISTS (SELECT 1 FROM deadlines AS __d WHERE sales."day" <= __d."due")"#
+        );
+        // A BETWEEN pair declared from the dimension.
+        let rel = Relationship::many_to_many(
+            "R",
+            "Periods",
+            "Sales",
+            vec![
+                JoinCondition::new("start_day", "day", JoinOperator::LessThanOrEqual),
+                JoinCondition::new("end_day", "day", JoinOperator::GreaterThan),
+            ],
+        );
+        assert_eq!(
+            rel.build_on_clause("sales", "periods", false),
+            r#"sales."day" >= periods."start_day" AND sales."day" < periods."end_day""#
+        );
+        assert_eq!(
+            rel.build_exists_clause("sales", "periods", false, &[]),
+            r#"EXISTS (SELECT 1 FROM periods AS __d WHERE sales."day" >= __d."start_day" AND sales."day" < __d."end_day")"#
         );
     }
 
@@ -1042,6 +1127,53 @@ mod tests {
                 r#"sales."order_date" <= (SELECT MAX(__d."datekey") FROM dates AS __d WHERE __d."year" = '2024')"#.to_string()
             )
         );
+    }
+
+    /// A range relationship declared from the DIMENSION (`Deadlines.due >=
+    /// Sales.day`, i.e. `day <= due`): rendered fact-first the operator flips,
+    /// so a sale qualifies when its day is at most the LATEST due date.
+    #[test]
+    fn boundary_clause_flips_a_condition_declared_from_the_dimension() {
+        let rel = Relationship::many_to_many(
+            "Deadlines_Sales",
+            "Deadlines",
+            "Sales",
+            vec![JoinCondition::new(
+                "due",
+                "day",
+                JoinOperator::GreaterThanOrEqual,
+            )],
+        );
+        let clause = rel.build_boundary_clause("sales", "deadlines", false, &[]);
+        assert_eq!(
+            clause,
+            Some(r#"sales."day" <= (SELECT MAX(__d."due") FROM deadlines AS __d)"#.to_string())
+        );
+        assert_eq!(JoinOperator::LessThan.flipped(), JoinOperator::GreaterThan);
+        assert_eq!(JoinOperator::Equal.flipped(), JoinOperator::Equal);
+    }
+
+    /// `join_safe_from` reads the declared direction and ignores "active":
+    /// a one-to-many declared from the dimension is safe from its fact (the
+    /// `to` side) and unsafe from the dimension; a range never is.
+    #[test]
+    fn join_safe_from_follows_the_declared_direction() {
+        let one_to_many = Relationship::new(
+            "Product_Sales",
+            "Product",
+            "id",
+            "Sales",
+            "prod_id",
+            Cardinality::OneToMany,
+        )
+        .with_active(false);
+        assert!(one_to_many.join_safe_from("Sales"));
+        assert!(!one_to_many.join_safe_from("Product"));
+        assert!(!one_to_many.lookup_safe_from("Sales"), "inactive");
+        assert!(!one_to_many.is_safe_for_direct_join(), "direction-blind");
+        let many_to_one = Relationship::many_to_one("S_P", "Sales", "prod_id", "Product", "id");
+        assert!(many_to_one.join_safe_from("Sales"));
+        assert!(!many_to_one.join_safe_from("Product"));
     }
 
     #[test]

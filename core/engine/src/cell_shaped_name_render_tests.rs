@@ -33,11 +33,19 @@ fn the_formula_bar_quotes_a_name_spelled_like_a_cell_as_excel_does() {
         // The binder keeps its typed case ([LIVE] legacystats p2.json J21:
         // `=LET(x,5,x+D1)`; this row pinned Calcula's old upper-casing).
         ("=LET(x,5,x+D1)", "LET(x,5,x+D1)"),
-        // Where a quote would not read back as a range half, the halves stay bare
-        // (the R1C1 fallback reads them as the names they are).
-        ("=LET(X1,1,SUM(X1:D1))", "LET(X1,1,SUM(X1:D1))"),
+        // A free name is quoted as either half of a range (BUG-0739: the
+        // parser reads `X1:'D1'` back now, as Excel shows `SUM(J881:'D5')`
+        // [LIVE, lane formd p2.json]; this row pinned it bare while it could
+        // not). A binder in scope stays bare.
+        ("=LET(X1,1,SUM(X1:D1))", "LET(X1,1,SUM(X1:'D1'))"),
         ("=LET(X1,1,SUM(D1:X1))", "LET(X1,1,SUM('D1':X1))"),
+        // Behind a sheet the halves of a range of names stay bare.
         ("=LET(A1,5,SUM(Sheet2!D1:D2)+A1)", "LET(A1,5,SUM(SHEET2!D1:D2)+A1)"),
+        // One name behind a sheet or a 3-D span is quoted, as Excel shows it
+        // [LIVE, lane formula p1.json: `=LET(A1,2,Sheet2!'A1')`,
+        // `=LET(A1,2,SUM(Sheet1:Sheet2!'A1'))`].
+        ("=LET(A1,2,Sheet2!A1)", "LET(A1,2,SHEET2!'A1')"),
+        ("=LET(A1,2,SUM(Sheet1:Sheet2!A1))", "LET(A1,2,SUM(SHEET1:SHEET2!'A1'))"),
     ] {
         let got = shown(typed);
         if got != excel {
@@ -70,8 +78,9 @@ fn the_quoted_spelling_reads_back_and_never_reaches_the_file() {
         "=LET(E5,E5+1,E5)",
         "=LET(X1,1,SUM(D1:X1))",
         "=LET(A1,SEQUENCE(3),SUM(D1#)+A1)",
-        // Behind a sheet and a 3-D span a name stays bare: a quote after `!`
-        // would not parse back.
+        // Behind a sheet and a 3-D span the display quotes a name (the parser
+        // reads `Sheet2!'D1'` back, BUG-0739); the STORED text of a formula
+        // declaring a cell-shaped name stays bare.
         "=LET(A1,2,Sheet2!D1:D2)",
         "=LET(A1,2,Sheet2!D1+A1)",
         "=LET(A1,2,SUM(Sheet1:Sheet2!D1))",
@@ -85,4 +94,27 @@ fn the_quoted_spelling_reads_back_and_never_reaches_the_file() {
         assert!(!raw.contains('\''), "the persisted text must stay bare: {raw}");
         assert!(!collapse_formula_text(&raw).contains('\''), "the .xlsx writer's text must stay bare");
     }
+}
+
+/// A formula read in R1C1 only for an R1C1 spelling (`=R[-1]C+D5`, no
+/// cell-shaped binder) holds the NAME `D5`, and the collapsed text the .xlsx
+/// writer reads keeps it quoted, as the persisted text does: bare, the writer
+/// wrote `J59+D5`, the CELL D5, where [LIVE, Excel 16, verify-formula p1.json]
+/// Excel writes `J297+_xlnm.D5` (wave-1 verify finding, lane xlsx).
+///
+/// SABOTAGE (xlsx-collapse): `collapse_formula_text` renders with
+/// `quote_cell_names` false again; the quote is lost here.
+#[test]
+fn the_collapse_keeps_a_cell_shaped_name_quoted_where_the_stored_text_does() {
+    for (stored, collapsed) in [
+        ("J59+'D5'", "J59+'D5'"),
+        ("SUM(J59:'D5')", "SUM(J59:'D5')"),
+        ("__INVOKE__(\"Dbl\",LAMBDA(x,x*2),'D5')", "Dbl('D5')"),
+    ] {
+        assert_eq!(collapse_formula_text(stored), collapsed, "for {stored}");
+        let tree = parser::parse(&format!("={stored}")).expect("parses");
+        assert_eq!(collapse_formula_text(&render_formula_raw(&tree)), collapsed, "re-rendered {stored}");
+    }
+    // A formula declaring a cell-shaped name stays bare (read in R1C1).
+    assert_eq!(collapse_formula_text("LET(A1,5,A1)+D1"), "LET(A1,5,A1)+D1");
 }

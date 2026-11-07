@@ -848,6 +848,7 @@ pub(crate) fn format_culture_of(locale: &engine::LocaleSettings) -> bi_engine::F
     }
     let calendar = locale.calendar();
     let symbol = locale.currency_symbol.trim().to_string();
+    let (am, pm) = windows_ampm_designators(&locale.locale_id);
     bi_engine::FormatCulture {
         name: locale.locale_id.clone(),
         decimal_separator: locale.decimal_separator.to_string(),
@@ -866,12 +867,40 @@ pub(crate) fn format_culture_of(locale: &engine::LocaleSettings) -> bi_engine::F
         short_date: locale.date_format.to_lowercase(),
         long_date: locale.long_date_format.clone(),
         long_time: locale.time_format.clone(),
-        am_designator: "AM".to_string(),
-        pm_designator: "PM".to_string(),
+        am_designator: am.to_string(),
+        pm_designator: pm.to_string(),
+        // The app locale carries no negative-currency pattern, "Medium Date"
+        // or boolean words: a leading minus (Windows writes no locale the
+        // app knows but en-US, which is built in, in parentheses), VBA's
+        // default medium date and the English words (BUG-0731).
+        currency_negative_parentheses: false,
+        medium_date: "dd-mmm-yy".to_string(),
+        yes_no: ["Yes".to_string(), "No".to_string()],
+        true_false: ["True".to_string(), "False".to_string()],
+        on_off: ["On".to_string(), "Off".to_string()],
         months: std::array::from_fn(|i| calendar.month_full(i as u32 + 1).to_string()),
         months_short: std::array::from_fn(|i| calendar.month_short(i as u32 + 1).to_string()),
         days: std::array::from_fn(|i| calendar.day_full(i as u32).to_string()),
         days_short: std::array::from_fn(|i| calendar.day_short(i as u32).to_string()),
+    }
+}
+
+/// What DAX's `AMPM` token (and "Medium Time") writes before and after noon
+/// in the app locale `locale_id`: Windows' own designators (`LOCALE_S1159` /
+/// `LOCALE_S2359`, read from this machine's culture tables, 2026-11-06), which
+/// the DAX engine reads -- [LIVE] Excel 16's data model writes sv-SE's empty
+/// designators (BUG-0731). Most European locales have none.
+fn windows_ampm_designators(locale_id: &str) -> (&'static str, &'static str) {
+    match locale_id.to_ascii_lowercase().as_str() {
+        "nb-no" => ("a.m.", "p.m."),
+        "fi-fi" => ("ap.", "ip."),
+        "ja-jp" => ("\u{5348}\u{524d}", "\u{5348}\u{5f8c}"),
+        "zh-cn" => ("\u{4e0a}\u{5348}", "\u{4e0b}\u{5348}"),
+        "ko-kr" => ("\u{c624}\u{c804}", "\u{c624}\u{d6c4}"),
+        "fr-fr" | "da-dk" | "nl-nl" | "it-it" | "es-es" | "pt-br" | "ru-ru" | "sv-se" | "de-de" => {
+            ("", "")
+        }
+        _ => ("AM", "PM"),
     }
 }
 
@@ -881,6 +910,67 @@ pub(crate) fn format_culture_of(locale: &engine::LocaleSettings) -> bi_engine::F
 /// ([`apply_format_culture_to_all_engines`]).
 pub(crate) fn apply_app_format_culture(engine: &mut bi_engine::Engine) {
     engine.set_format_culture(format_culture_of(&crate::app_locale::display_locale()));
+    engine.set_named_format_cultures(app_named_format_cultures());
+}
+
+/// Every locale the app knows, as a culture DAX's 3-argument `FORMAT(value,
+/// format, locale_name)` may name (BUG-0731). Static data: unlike the app
+/// locale's own culture, it never changes with `set_locale`.
+pub(crate) fn app_named_format_cultures() -> Vec<bi_engine::FormatCulture> {
+    engine::LocaleSettings::supported_locales()
+        .iter()
+        .map(|(id, _)| format_culture_of(&engine::LocaleSettings::from_locale_id(id)))
+        .collect()
+}
+
+/// Insert `connection` into the connection map, and give its engine the
+/// FORMAT culture of the app locale as it is NOW -- read inside the map's
+/// lock, the lock the `set_locale` walk takes to list its engines (BUG-0731).
+///
+/// THE RACE THIS CLOSES. An engine takes the culture at birth
+/// ([`build_configured_engine`]), but it is inserted only after its disk
+/// cache loads. A `set_locale` that installed a new locale after the birth
+/// and listed the engines before the insertion missed it, so the new
+/// connection wrote FORMAT in the OLD locale until the next switch. The walk
+/// lists the map under this same lock after installing the locale: either it
+/// lists the engine (and sets it, reading the locale at the engine's lock),
+/// or this insertion comes after the install and reads the new locale.
+///
+/// A fresh engine is never locked here; one reused from the registry and
+/// held by a running query is given the culture when the query lets go
+/// ([`apply_current_format_culture`], which reads the locale at that lock).
+pub(crate) fn insert_connection_with_current_culture(
+    bi_state: &BiState,
+    id: ConnectionId,
+    connection: Connection,
+) {
+    insert_connection_with_culture_of(bi_state, id, connection, crate::app_locale::display_locale);
+}
+
+/// [`insert_connection_with_current_culture`] with the locale source a
+/// parameter, so a test can move the locale between birth and insertion.
+pub(crate) fn insert_connection_with_culture_of(
+    bi_state: &BiState,
+    id: ConnectionId,
+    connection: Connection,
+    current_locale: fn() -> engine::LocaleSettings,
+) {
+    let mut connections = bi_state.connections.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(engine) = connection.engine.clone() {
+        let applied = match engine.try_lock() {
+            Ok(mut ready) => {
+                ready.set_format_culture(format_culture_of(&current_locale()));
+                true
+            }
+            Err(_) => false,
+        };
+        if !applied {
+            tauri::async_runtime::spawn(async move {
+                apply_current_format_culture(&[engine], current_locale).await;
+            });
+        }
+    }
+    connections.insert(id, connection);
 }
 
 /// The Tauri event [`apply_format_culture_to_all_engines`] emits once every
@@ -1350,7 +1440,8 @@ pub(crate) fn restore_local_bi_connections(
                 })
                 .collect(),
         };
-        bi_state.connections.lock().unwrap().insert(conn_id, connection);
+        // The app locale as it is NOW, not at the engine's birth (BUG-0731).
+        insert_connection_with_current_culture(bi_state, conn_id, connection);
         id_map.insert(sc.id.clone(), conn_id);
     }
     // Re-apply workbook-local calculated measures to each restored engine
@@ -2688,8 +2779,10 @@ async fn create_connection_core(
     // NOTE: the dirty flag is NOT set here. This core is shared by the Model Editor's
     // `create_connection_from_json` path, which marks the document itself; the flag
     // belongs to the entry points so it is not set twice and so a caller that is
-    // rebuilding connections during a LOAD can decline it.
-    bi_state.connections.lock().unwrap().insert(id, connection);
+    // rebuilding connections during a LOAD can decline it. The engine takes
+    // the app locale's FORMAT culture as it is NOW, not at its birth before
+    // the disk cache loaded (BUG-0731).
+    insert_connection_with_current_culture(bi_state, id, connection);
 
     log_info!(
         "BI",
@@ -3110,12 +3203,16 @@ pub async fn bi_query(
     bi_state: State<'_, BiState>,
     cap_store: State<'_, crate::scripting::CapabilityStore>,
     app_state: State<'_, crate::AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     connection_id: ConnectionId,
     request: BiQueryRequest,
     script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<BiQueryResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state);
     // Authoritative capability re-check (A3). A broker-routed call on behalf of a
     // sandboxed script carries a script_id and MUST have been granted bi.query
     // (mirrored to the store on consent-grant); a trusted main-window direct
@@ -3124,7 +3221,7 @@ pub async fn bi_query(
     if let Some(sid) = script_id.as_deref() {
         if !cap_store.is_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "bi_query DENIED (bi.query not granted): script={}", sid);
-            crate::net_commands::record_capability_call(&app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"));
+            crate::net_commands::record_capability_call(&audit, "bi.query", sid, false, None, Some("bi.query not granted"));
             return Err("PermissionDenied: bi.query not granted for this script".to_string());
         }
     }
@@ -3145,7 +3242,7 @@ pub async fn bi_query(
         Err(e) => {
             if let Some(sid) = script_id.as_deref() {
                 crate::net_commands::record_capability_call(
-                    &app_state.audit_log,
+                    &audit,
                     "bi.query",
                     sid,
                     false,
@@ -3162,7 +3259,7 @@ pub async fn bi_query(
     // flooding the trail with the app's own feature queries).
     if let Some(sid) = script_id.as_deref() {
         crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            &audit,
             "bi.query",
             sid,
             true,
@@ -3262,12 +3359,16 @@ pub async fn script_bi_sql(
     bi_state: State<'_, BiState>,
     cap_store: State<'_, crate::scripting::CapabilityStore>,
     app_state: State<'_, crate::AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     connection_id: ConnectionId,
     sql: String,
     script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<BiQueryResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state);
     // Authoritative capability re-check (A3): a broker-routed sandboxed call
     // carries a script_id and MUST have been granted the higher-trust bi.sql; a
     // trusted main-window direct call carries none. Defense in depth above the
@@ -3275,7 +3376,7 @@ pub async fn script_bi_sql(
     if let Some(sid) = script_id.as_deref() {
         if !cap_store.is_granted(sid, "bi.sql") {
             crate::log_warn!("SECURITY", "script_bi_sql DENIED (bi.sql not granted): script={}", sid);
-            crate::net_commands::record_capability_call(&app_state.audit_log, "bi.sql", sid, false, None, Some("bi.sql not granted"));
+            crate::net_commands::record_capability_call(&audit, "bi.sql", sid, false, None, Some("bi.sql not granted"));
             return Err("PermissionDenied: bi.sql not granted for this script".to_string());
         }
     }
@@ -3290,7 +3391,7 @@ pub async fn script_bi_sql(
         Err(e) => {
             if let Some(sid) = script_id.as_deref() {
                 crate::net_commands::record_capability_call(
-                    &app_state.audit_log,
+                    &audit,
                     "bi.sql",
                     sid,
                     false,
@@ -3305,7 +3406,7 @@ pub async fn script_bi_sql(
 
     if let Some(sid) = script_id.as_deref() {
         crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            &audit,
             "bi.sql",
             sid,
             true,
@@ -4751,6 +4852,14 @@ mod format_culture_tests {
             bi_engine::format_value(&bi_engine::FormatValue::Number(1234.5), "#,0.00", &gb),
             "1,234.50"
         );
+        // BUG-0731: `AMPM` writes Windows' designators for the locale -- none
+        // in most of Europe ([LIVE] the DAX engine writes sv-SE's empty ones).
+        let fr = format_culture_of(&engine::LocaleSettings::from_locale_id("fr-FR"));
+        assert_eq!((fr.am_designator.as_str(), fr.pm_designator.as_str()), ("", ""));
+        let nb = format_culture_of(&engine::LocaleSettings::from_locale_id("nb-NO"));
+        assert_eq!((nb.am_designator.as_str(), nb.pm_designator.as_str()), ("a.m.", "p.m."));
+        assert_eq!((gb.am_designator.as_str(), gb.pm_designator.as_str()), ("AM", "PM"));
+        assert!(!fr.currency_negative_parentheses, "Windows writes fr-FR's negative currency with a minus");
     }
 
     #[test]
@@ -4759,6 +4868,65 @@ mod format_culture_tests {
             build_configured_engine(bi_engine::DataModel::builder().build().unwrap())
         });
         assert_eq!(engine.format_culture().name, "sv-SE", "a new engine kept the en-US default");
+        // BUG-0731: DAX's 3-argument FORMAT may name every locale the app knows.
+        let named: Vec<&str> = engine.named_format_cultures().iter().map(|c| c.name.as_str()).collect();
+        for (id, _) in engine::LocaleSettings::supported_locales() {
+            assert!(named.contains(&id.as_str()), "{id} is not a culture FORMAT can name: {named:?}");
+        }
+    }
+
+    /// BUG-0731 (the narrow race of BUG-0522): an engine takes the culture at
+    /// birth but enters the connection map only after its disk cache loads. A
+    /// locale switch between the two -- installed after the birth, its walk
+    /// listing the map before the insertion -- never reached it. The
+    /// insertion now reads the app locale as it is then, inside the map's
+    /// lock.
+    ///
+    /// SABOTAGE: insert without re-applying the culture.
+    #[test]
+    fn an_engine_inserted_after_a_locale_switch_takes_the_new_culture() {
+        let born_under = engine::LocaleSettings::from_locale_id("de-DE");
+        let engine = crate::app_locale::with_test_display_locale(born_under, || {
+            build_configured_engine(bi_engine::DataModel::builder().build().unwrap())
+        });
+        assert_eq!(engine.format_culture().name, "de-DE", "premise: born under de-DE");
+        let bi_state = BiState::new();
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let connection = Connection {
+            id,
+            name: "Sales".into(),
+            description: String::new(),
+            connection_type: ConnectionType::PostgreSQL,
+            connection_string: String::new(),
+            server: String::new(),
+            database: String::new(),
+            preferred_auth: "Integrated".into(),
+            model_path: None,
+            engine: Some(Arc::new(TokioMutex::new(engine))),
+            model_key: None,
+            connector_index: None,
+            bindings: vec![],
+            last_refreshed: None,
+            created_at: String::new(),
+            is_connected: false,
+            active_queries: std::collections::HashMap::new(),
+            package_data_source_id: None,
+            active_role: None,
+            base_model: None,
+            calculated_measures: vec![],
+        };
+        // The walk of the switch to sv-SE listed the (empty) map already; the
+        // connection arrives after it.
+        crate::app_locale::with_test_display_locale(engine::LocaleSettings::from_locale_id("sv-SE"), || {
+            insert_connection_with_current_culture(&bi_state, id, connection)
+        });
+        let connections = bi_state.connections.lock().unwrap();
+        let engine = connections[&id].engine.clone().unwrap();
+        assert_eq!(
+            engine.try_lock().unwrap().format_culture().name,
+            "sv-SE",
+            "an engine born before the switch and inserted after its walk kept the old culture"
+        );
     }
 
     /// rev-backend-5 (a): two quick locale switches spawn two walkers. The
@@ -4824,6 +4992,165 @@ mod format_culture_tests {
         assert!(
             locale.contains("crate::bi::commands::apply_format_culture_to_all_engines(&bi_state, app.clone());"),
             "set_locale no longer re-applies the FORMAT culture"
+        );
+    }
+
+    /// BUG-0731 (d): every connection the PRODUCTION code inserts goes through
+    /// `insert_connection_with_current_culture`, which re-applies the app
+    /// locale's FORMAT culture inside the connections lock. A bare insert into
+    /// the locked connection map misses a `set_locale` that ran between the
+    /// engine's birth and the insert -- the application (.calp) data sources
+    /// of `calp_commands::load_embedded_data_sources` did, until wave 3.
+    /// `#[cfg(test)] mod` blocks (brace depth, string and char literals
+    /// skipped) and `*_tests.rs` files may build their fixtures directly.
+    #[test]
+    fn every_production_connection_insert_takes_the_current_culture() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        let mut bare: Vec<String> = Vec::new();
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.ends_with("_tests.rs") || name == "tests.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+            // The file's CODE: comments dropped, string / raw-string / char
+            // literal contents blanked (newlines kept), so neither a brace in
+            // a literal nor a pattern in a doc comment counts.
+            let chars: Vec<char> = text.chars().collect();
+            let mut code = String::with_capacity(text.len());
+            let mut k = 0;
+            while k < chars.len() {
+                let ch = chars[k];
+                let next = chars.get(k + 1).copied();
+                if ch == '/' && next == Some('/') {
+                    while k < chars.len() && chars[k] != '\n' {
+                        k += 1;
+                    }
+                    continue;
+                }
+                if ch == '/' && next == Some('*') {
+                    k += 2;
+                    while k < chars.len() && !(chars[k] == '*' && chars.get(k + 1) == Some(&'/')) {
+                        if chars[k] == '\n' {
+                            code.push('\n');
+                        }
+                        k += 1;
+                    }
+                    k += 2;
+                    continue;
+                }
+                let starts_ident = k == 0 || !(chars[k - 1].is_alphanumeric() || chars[k - 1] == '_') || chars[k - 1] == 'b';
+                if ch == 'r' && starts_ident && (next == Some('"') || next == Some('#')) {
+                    let mut j = k + 1;
+                    let mut hashes = 0;
+                    while chars.get(j) == Some(&'#') {
+                        hashes += 1;
+                        j += 1;
+                    }
+                    if chars.get(j) == Some(&'"') {
+                        j += 1;
+                        while j < chars.len() {
+                            if chars[j] == '"' && (0..hashes).all(|h| chars.get(j + 1 + h) == Some(&'#')) {
+                                j += 1 + hashes;
+                                break;
+                            }
+                            if chars[j] == '\n' {
+                                code.push('\n');
+                            }
+                            j += 1;
+                        }
+                        code.push_str("\"\"");
+                        k = j;
+                        continue;
+                    }
+                }
+                if ch == '"' {
+                    k += 1;
+                    while k < chars.len() {
+                        if chars[k] == '\\' {
+                            k += 2;
+                            continue;
+                        }
+                        if chars[k] == '"' {
+                            k += 1;
+                            break;
+                        }
+                        if chars[k] == '\n' {
+                            code.push('\n');
+                        }
+                        k += 1;
+                    }
+                    code.push_str("\"\"");
+                    continue;
+                }
+                if ch == '\'' {
+                    // A char literal ('x', '\n', '{', '\u{1F600}'), never a lifetime.
+                    if next == Some('\\') {
+                        if let Some(end) = (k + 2..(k + 14).min(chars.len())).find(|&e| chars[e] == '\'') {
+                            code.push_str("' '");
+                            k = end + 1;
+                            continue;
+                        }
+                    } else if chars.get(k + 2) == Some(&'\'') {
+                        code.push_str("' '");
+                        k += 3;
+                        continue;
+                    }
+                }
+                code.push(ch);
+                k += 1;
+            }
+            // Skip every `#[cfg(test)] mod x { ... }` block (brace depth), so a
+            // production function AFTER a test module is still scanned.
+            let lines: Vec<&str> = code.lines().collect();
+            let mut depth: i64 = 0;
+            let mut i = 0;
+            while i < lines.len() {
+                let line = lines[i];
+                if depth == 0
+                    && line.trim() == "#[cfg(test)]"
+                    && lines.get(i + 1).is_some_and(|next| {
+                        let next = next.trim_start();
+                        (next.starts_with("mod ") || next.starts_with("pub mod ") || next.starts_with("pub(crate) mod "))
+                            && next.trim_end().ends_with('{')
+                    })
+                {
+                    depth = 1;
+                    i += 2;
+                    continue;
+                }
+                if depth > 0 {
+                    depth += line.matches('{').count() as i64 - line.matches('}').count() as i64;
+                    i += 1;
+                    continue;
+                }
+                if line.contains("connections.lock()") && line.contains(".insert(") {
+                    bare.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+                i += 1;
+            }
+            assert_eq!(depth, 0, "{}: a test module's braces did not close", path.display());
+        }
+        assert!(bare.is_empty(), "connections inserted without the app culture:\n{}", bare.join("\n"));
+        let calp = include_str!("../calp_commands.rs");
+        let calp = calp.replace("\r\n", "\n");
+        let body = &calp[calp.find("fn load_embedded_data_sources(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            body.contains("crate::bi::commands::insert_connection_with_current_culture(bi_state, conn_id, connection);"),
+            "an application's data source connection must be inserted with the current culture"
         );
     }
 }

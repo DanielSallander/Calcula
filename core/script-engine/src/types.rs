@@ -28,7 +28,8 @@ pub struct AppInfo {
     pub decimal_separator: String,
     /// Locale thousands separator (e.g. "," or ".")
     pub thousands_separator: String,
-    /// Calculation mode: "automatic" or "manual"
+    /// Calculation mode: "automatic", "automaticExceptTables" (Excel's
+    /// Automatic except for data tables) or "manual"
     pub calculation_mode: String,
 }
 

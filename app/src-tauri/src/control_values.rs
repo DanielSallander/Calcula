@@ -687,7 +687,7 @@ fn recalc_control_dependents_body(
         // GETPIVOTDATA's lookup (NEW-getpivotdata-trials), from this pass's
         // pivot store, taken only when one evaluates.
         let lazy_pivots = crate::pivot::operations::LazyPivotLookup::new(Some(pivot_state));
-        let pivot_lookup = |field: &str, sheet: Option<&str>, r: u32, c: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        let pivot_lookup = |field: &str, sheet: Option<&str>, r: u32, c: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
             lazy_pivots.lookup(field, sheet, r, c, pairs)
         };
 

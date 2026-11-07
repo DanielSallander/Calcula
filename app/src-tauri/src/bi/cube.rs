@@ -837,7 +837,7 @@ pub(crate) fn cube_err_message(e: CubeError) -> String {
 /// and because these commands are server-audited the broker deliberately
 /// writes nothing, so this is the only recorder.
 fn audit_cube_call<T>(
-    app_state: &crate::AppState,
+    audit: &crate::machine_audit::WorkbookAudit<'_>,
     script_id: Option<&str>,
     detail: &str,
     result: &Result<T, String>,
@@ -845,7 +845,7 @@ fn audit_cube_call<T>(
     let Some(sid) = script_id else { return };
     match result {
         Ok(_) => crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            audit,
             "bi.query",
             sid,
             true,
@@ -853,7 +853,7 @@ fn audit_cube_call<T>(
             None,
         ),
         Err(e) => crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            audit,
             "bi.query",
             sid,
             false,
@@ -956,12 +956,16 @@ pub async fn cube_udf_value(
     bi_state: tauri::State<'_, BiState>,
     cap_store: tauri::State<'_, crate::scripting::CapabilityStore>,
     app_state: tauri::State<'_, crate::AppState>,
+    file_state: tauri::State<'_, crate::persistence::FileState>,
     connection: String,
     members: Vec<String>,
     script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<Option<f64>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state);
     // A3.4-S2: authoritative server-side re-check. cube.* maps to the bi.query
     // capability, so a sandboxed script (carries a script_id) must have been
     // granted bi.query — a compromised renderer can't bypass the broker check.
@@ -970,7 +974,7 @@ pub async fn cube_udf_value(
         if !cap_store.is_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "cube_udf_value DENIED (bi.query not granted): script={}", sid);
             crate::net_commands::record_capability_call(
-                &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),
+                &audit, "bi.query", sid, false, None, Some("bi.query not granted"),
             );
             return Err("PermissionDenied: bi.query not granted for this script".to_string());
         }
@@ -979,7 +983,7 @@ pub async fn cube_udf_value(
         .await
         .map_err(cube_err_message);
     audit_cube_call(
-        &app_state,
+        &audit,
         script_id.as_deref(),
         &format!("cube.value connection {}", connection),
         &result,
@@ -992,6 +996,7 @@ pub async fn cube_udf_kpi(
     bi_state: tauri::State<'_, BiState>,
     cap_store: tauri::State<'_, crate::scripting::CapabilityStore>,
     app_state: tauri::State<'_, crate::AppState>,
+    file_state: tauri::State<'_, crate::persistence::FileState>,
     connection: String,
     kpi: String,
     property: i64,
@@ -999,11 +1004,14 @@ pub async fn cube_udf_kpi(
     window: tauri::Window,
 ) -> Result<Option<f64>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state);
     if let Some(sid) = script_id.as_deref() {
         if !cap_store.is_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "cube_udf_kpi DENIED (bi.query not granted): script={}", sid);
             crate::net_commands::record_capability_call(
-                &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),
+                &audit, "bi.query", sid, false, None, Some("bi.query not granted"),
             );
             return Err("PermissionDenied: bi.query not granted for this script".to_string());
         }
@@ -1012,7 +1020,7 @@ pub async fn cube_udf_kpi(
         .await
         .map_err(cube_err_message);
     audit_cube_call(
-        &app_state,
+        &audit,
         script_id.as_deref(),
         &format!("cube.kpi connection {} kpi {}", connection, kpi),
         &result,
@@ -1025,17 +1033,21 @@ pub async fn cube_udf_members(
     bi_state: tauri::State<'_, BiState>,
     cap_store: tauri::State<'_, crate::scripting::CapabilityStore>,
     app_state: tauri::State<'_, crate::AppState>,
+    file_state: tauri::State<'_, crate::persistence::FileState>,
     connection: String,
     level: String,
     script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<Vec<String>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state);
     if let Some(sid) = script_id.as_deref() {
         if !cap_store.is_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "cube_udf_members DENIED (bi.query not granted): script={}", sid);
             crate::net_commands::record_capability_call(
-                &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),
+                &audit, "bi.query", sid, false, None, Some("bi.query not granted"),
             );
             return Err("PermissionDenied: bi.query not granted for this script".to_string());
         }
@@ -1044,7 +1056,7 @@ pub async fn cube_udf_members(
         .await
         .map_err(cube_err_message);
     audit_cube_call(
-        &app_state,
+        &audit,
         script_id.as_deref(),
         &format!("cube.members connection {} level {}", connection, level),
         &result,

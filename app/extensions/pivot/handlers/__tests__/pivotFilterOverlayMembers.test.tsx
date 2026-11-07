@@ -41,6 +41,7 @@ vi.mock("../../components/GroupDialog", () => ({ GroupDialog: () => null }));
 vi.mock("../../components/FieldSettingsDialog", () => ({ FieldSettingsDialog: () => null }));
 vi.mock("../../components/PivotOptionsDialog", () => ({ PivotOptionsDialog: () => null }));
 vi.mock("../../components/DrillThroughBehaviorDialog", () => ({ default: () => null }));
+vi.mock("../../components/SortFieldDialog", () => ({ SortFieldDialog: () => null }));
 vi.mock("../../components/PivotHeaderFilterDropdown", () => ({ PivotHeaderFilterDropdown: () => null }));
 vi.mock("../../components/PivotDesignSections", () => ({
   DesignNameSection: () => null,

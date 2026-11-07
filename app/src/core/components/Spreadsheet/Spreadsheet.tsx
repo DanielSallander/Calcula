@@ -1404,7 +1404,13 @@ function SpreadsheetContent({
   // what stops the browser claiming every touch drag for its own panning.
   // (`config` is the header-ruled one above: the touch hit tests ask the same
   // gutters the mouse door does.)
-  useGridTouch(containerRef, () => ({ config, viewport, dimensions, selection, zoom: gridState.zoom, canvas: canvasRef.current?.getCanvas() ?? null }));
+  useGridTouch(containerRef, () => ({
+    config, viewport, dimensions, selection,
+    zoom: gridState.zoom,
+    canvas: canvasRef.current?.getCanvas() ?? null,
+    // A pinch zooms through the zoom slider's own state, Excel's 10%..400%.
+    setZoom: (zoom: number) => dispatch(setZoom(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom)))),
+  }));
 
   // Determine effective cursor: split bar takes priority
   const effectiveCursor = splitDrag

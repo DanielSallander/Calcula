@@ -4645,6 +4645,25 @@ fn numeric_filter(fx: &Fx) -> (Vec<String>, Vec<u32>) {
     (values, hidden)
 }
 
+/// BUG-0732. What a Report Connections save writes a CONNECTED table's
+/// AutoFilter with (`get_slicer_items` with `for_table`): that table's own
+/// (key, display text) pairs, in the app locale and each cell's format --
+/// the texts the click path writes -- one per distinct pair, in row order.
+#[tokio::test]
+async fn a_connected_tables_members_are_its_own_cells_display_texts() {
+    let fx = Fx::new(0).await;
+    set_app_locale(&fx, "de-DE");
+    let (table, _slicer) = seed_numeric_table(&fx, None);
+    let members = crate::slicer::commands::table_column_display_members(&fx.state, table, "Amount").unwrap();
+    let shape: Vec<(String, String)> = members.into_iter().map(|m| (m.key, m.label)).collect();
+    assert_eq!(
+        shape,
+        vec![("1234.5".to_string(), "1.234,5".to_string()), ("99".to_string(), "99,0".to_string())],
+        "invariant keys, de-DE display texts, each pair once"
+    );
+    assert!(crate::slicer::commands::table_column_display_members(&fx.state, table, "Nope").is_err());
+}
+
 /// BUG-0523. A TABLE slicer's items are keyed by the cell's INVARIANT value
 /// and labelled with its display text, so a selection made under one app
 /// locale is still the same selection under another: the item stays

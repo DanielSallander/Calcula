@@ -39,7 +39,7 @@ import {
 
 const hostSrc = fs.readFileSync(path.resolve(__dirname, "../host.ts"), "utf8");
 
-function makeLib(initialMode: "automatic" | "manual" = "automatic") {
+function makeLib(initialMode: "automatic" | "automaticExceptTables" | "manual" = "automatic") {
   let mode: string = initialMode;
   const lib = {
     getCalculationMode: vi.fn(async () => mode),
@@ -66,12 +66,14 @@ beforeEach(() => {
 // ============================================================================
 
 describe("calculation-control validators", () => {
-  it("vCalculationMode accepts exactly the two canonical modes", () => {
-    expect([...SCRIPT_CALCULATION_MODES].sort()).toEqual(["automatic", "manual"]);
+  it("vCalculationMode accepts exactly the three canonical modes", () => {
+    // The third is Excel's Automatic except for data tables (BUG-0754).
+    expect([...SCRIPT_CALCULATION_MODES].sort()).toEqual(["automatic", "automaticExceptTables", "manual"]);
     expect(vCalculationMode(["automatic"])).toBe(true);
+    expect(vCalculationMode(["automaticExceptTables"])).toBe(true);
     expect(vCalculationMode(["manual"])).toBe(true);
-    for (const bad of ["auto", "MANUAL", "xlCalculationManual", 1, undefined, null]) {
-      expect(vCalculationMode([bad]), String(bad)).toContain("automatic, manual");
+    for (const bad of ["auto", "MANUAL", "semiautomatic", "xlCalculationManual", 1, undefined, null]) {
+      expect(vCalculationMode([bad]), String(bad)).toContain("automatic, automaticExceptTables, manual");
     }
   });
 
@@ -149,6 +151,32 @@ describe("releaseManualCalculation (the unmount/fault/debug-stop restore)", () =
     expect(currentMode()).toBe("automatic");
   });
 
+  // Ledger programme 2, wave 3: the release restored "automatic" always, so a
+  // script holding manual under "Automatic except for data tables" handed the
+  // workbook back with every data table eager -- Excel's mode silently lost.
+  // SABOTAGE: restore "automatic" in releaseManualCalculation -- fails at
+  // "WIDENED TO AUTOMATIC".
+  it("gives back EXACTLY the mode the first hold replaced: Automatic except for data tables", async () => {
+    const { lib, currentMode } = makeLib("automaticExceptTables");
+    await executeSetCalculationMode(asLib(lib), "script-a", "manual");
+    await executeSetCalculationMode(asLib(lib), "script-b", "manual");
+    await releaseManualCalculation(asLib(lib), "script-a");
+    expect(currentMode()).toBe("manual");
+    await releaseManualCalculation(asLib(lib), "script-b");
+    expect(currentMode(), "WIDENED TO AUTOMATIC: the release lost Automatic except for data tables").toBe("automaticExceptTables");
+    // ...and a later hold from plain automatic gives back automatic.
+    await executeSetCalculationMode(asLib(lib), "script-c", "automatic");
+    await executeSetCalculationMode(asLib(lib), "script-c", "manual");
+    await releaseManualCalculation(asLib(lib), "script-c");
+    expect(currentMode()).toBe("automatic");
+  });
+
+  it("a script reads and sets the third mode as it is", async () => {
+    const { lib } = makeLib("automatic");
+    expect(await executeSetCalculationMode(asLib(lib), "script-a", "automaticExceptTables")).toBe("automaticExceptTables");
+    expect(scriptsHoldingManualCalculation().size).toBe(0);
+  });
+
   it("is a no-op for a script that never flipped the mode", async () => {
     const { lib } = makeLib("manual");
     await releaseManualCalculation(asLib(lib), "innocent-bystander");
@@ -168,7 +196,10 @@ describe("the restore is WIRED into every way a script ends (source pins)", () =
     const reset = hostSrc.slice(hostSrc.indexOf("export function hostResetAll"));
     const body = reset.slice(0, reset.indexOf("\n}\n"));
     expect(body).toContain("resetManualCalculationTracking()");
-    expect(body).toContain('setCalculationMode("automatic")');
+    // It restores the mode the first hold replaced, read BEFORE the tracking
+    // (which forgets it) is reset.
+    expect(body).toContain("setCalculationMode(restore)");
+    expect(body.indexOf("calculationModeToRestore()")).toBeLessThan(body.indexOf("resetManualCalculationTracking();\n    trackResetRestore"));
   });
 
   it("both crash paths route through hostUnmountScript (which is what covers faults)", () => {

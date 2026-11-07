@@ -1,8 +1,12 @@
 //! FILENAME: app/src-tauri/src/machine_audit.rs
 //! PURPOSE: The MACHINE-scoped, append-only trail of collaboration audit rows
-//!          that belong to NO open workbook -- today: a push (or a model-only
-//!          publish) that LANDED in the workspace after File > Open / New had
-//!          replaced the workbook that made it (BUG-0653).
+//!          that belong to NO open workbook: a push (or a model-only publish)
+//!          that LANDED in the workspace after File > Open / New had replaced
+//!          the workbook that made it (BUG-0653), and every other ALWAYS-
+//!          RECORDED (egress) row whose workbook was replaced while its act was
+//!          in flight -- a capability call (`net.fetch`, `bi.query` / `bi.sql`,
+//!          CUBE, connectors, the model gateway), a model writeback
+//!          submission, a Collect From change (BUG-0735, [`WorkbookAudit`]).
 //! CONTEXT: The collaboration audit trail (`calp::audit`) is DOCUMENT-scoped:
 //!          it is saved inside the `.cala`. A push whose workbook was replaced
 //!          mid-push has no document to go to -- the one on screen never
@@ -202,6 +206,151 @@ pub fn read_trail(profile_dir: &Path) -> MachineAuditTrail {
     trail
 }
 
+/// THE WORKBOOK A ROW BELONGS TO, fixed when the act it records BEGAN
+/// (BUG-0735). An async command -- `net.fetch`, `bi.query` / `bi.sql`, a
+/// CUBE / connector / model-gateway call, a model writeback submission,
+/// Collect From -- runs off the main thread, so File > Open / New (main
+/// thread) can replace the workbook while it awaits. A row written straight
+/// into `state.audit_log` afterwards lands in the trail of the workbook now
+/// on screen, which is saved INSIDE that workbook as if IT had made the call,
+/// while the workbook that did make it never learns of it. Capture this at
+/// the command's entry ([`WorkbookAudit::at_entry`]) and record through
+/// [`WorkbookAudit::record`]: the row reaches the workbook's trail only while
+/// that workbook is still the live one (asked with the document PINNED, so an
+/// open cannot reset the trail between the question and the write), and an
+/// ALWAYS-RECORDED row -- the egress events, `AuditEvent::is_always_recorded`
+/// -- whose workbook is gone lands in THIS COMPUTER's trail instead, with
+/// `reason: documentReplaced`, exactly as a push does
+/// (`calp_commands::record_push_audit_row`). An opt-in row whose workbook is
+/// gone goes to the session log only: whether that workbook had opted in is
+/// no longer knowable, and the workbook on screen must not be credited.
+pub(crate) struct WorkbookAudit<'a> {
+    audit_log: &'a crate::document_effect::Persisted<calp::audit::AuditLog>,
+    /// `None` only for [`WorkbookAudit::while_loading`].
+    pinned: Option<(&'a crate::persistence::FileState, u64)>,
+}
+
+impl<'a> WorkbookAudit<'a> {
+    /// The workbook live NOW: call at the command's entry, holding no guard
+    /// (the settled epoch waits for a File > Open that is still restoring).
+    pub(crate) fn at_entry(
+        audit_log: &'a crate::document_effect::Persisted<calp::audit::AuditLog>,
+        file_state: &'a crate::persistence::FileState,
+    ) -> Self {
+        Self { audit_log, pinned: Some((file_state, file_state.settled_document_epoch())) }
+    }
+
+    /// The workbook of an epoch the caller already read at its entry.
+    pub(crate) fn of_epoch(
+        audit_log: &'a crate::document_effect::Persisted<calp::audit::AuditLog>,
+        file_state: &'a crate::persistence::FileState,
+        epoch: u64,
+    ) -> Self {
+        Self { audit_log, pinned: Some((file_state, epoch)) }
+    }
+
+    /// A row written BY the document load itself (File > Open restoring the
+    /// workbook's scheduled jobs): the load holds the document replacement
+    /// EXCLUSIVE, so pinning would wait for itself, and the trail it writes
+    /// is, by construction, the one of the workbook being opened. Nothing
+    /// else may use this.
+    pub(crate) fn while_loading(audit_log: &'a crate::document_effect::Persisted<calp::audit::AuditLog>) -> Self {
+        Self { audit_log, pinned: None }
+    }
+
+    /// Run `work` with this row's workbook PINNED: `None`, with nothing run,
+    /// when it has been replaced since the entry. For a command that, after an
+    /// await, writes a STORE of the workbook it began in (not only a row): the
+    /// question and the write are one critical section, so a File > Open
+    /// cannot land between them and receive the write. Holding no other guard
+    /// (the pin is outermost).
+    pub(crate) fn while_workbook_live<T>(&self, work: impl FnOnce() -> T) -> Option<T> {
+        match self.pinned {
+            Some((file_state, epoch)) => file_state.with_document_pinned(epoch, work),
+            None => Some(work()),
+        }
+    }
+
+    /// Has the workbook this row belongs to been replaced?
+    pub(crate) fn workbook_replaced(&self) -> bool {
+        self.pinned.is_some_and(|(file_state, epoch)| file_state.document_replaced_since(epoch))
+    }
+
+    /// Record one row (see the type's doc). Returns whether it reached the
+    /// workbook's own trail. Call holding no other guard (the pin is
+    /// outermost). Never fails the act it records.
+    pub(crate) fn record(
+        &self,
+        event: calp::audit::AuditEvent,
+        description: &str,
+        user: &str,
+        now: &str,
+        extra: std::collections::HashMap<String, serde_json::Value>,
+    ) -> bool {
+        let session_copy = extra.clone();
+        let write = || {
+            match self.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(
+                crate::document_effect::CleanReason::AuditTrail,
+            )) {
+                Ok(mut audit) => {
+                    audit.record_with_extra(event.clone(), description, user, now, extra);
+                    true
+                }
+                Err(_) => {
+                    // A poisoned trail: the row cannot be persisted, but it
+                    // must not be invisible either.
+                    crate::log_warn!(
+                        "AUDIT",
+                        "audit row NOT recorded (audit log lock poisoned): {} by {} at {}",
+                        description,
+                        user,
+                        now
+                    );
+                    false
+                }
+            }
+        };
+        let recorded = match self.pinned {
+            Some((file_state, epoch)) => file_state.with_document_pinned(epoch, write),
+            None => Some(write()),
+        };
+        match recorded {
+            Some(reached) => reached,
+            None => {
+                if event.is_always_recorded() {
+                    let mut machine_extra = session_copy.clone();
+                    machine_extra.insert(
+                        "reason".to_string(),
+                        serde_json::Value::String(REASON_DOCUMENT_REPLACED.to_string()),
+                    );
+                    record(
+                        &crate::profile_dir::resolve(),
+                        &calp::audit::AuditEntry {
+                            timestamp: now.to_string(),
+                            event,
+                            description: description.to_string(),
+                            user: user.to_string(),
+                            extra: machine_extra,
+                        },
+                    );
+                }
+                let mut fields: Vec<String> = session_copy.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                fields.sort();
+                crate::log_warn!(
+                    "AUDIT",
+                    "AUDIT (session): {} by {} at {} -- the workbook it belongs to was replaced by File > Open / \
+                     New before the row could be written, so no workbook's trail holds it [{}]",
+                    description,
+                    user,
+                    now,
+                    fields.join(", ")
+                );
+                false
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +451,71 @@ mod tests {
             reported.contains("not-a-directory"),
             "a later success cleared the failure of an append whose row is missing: {reported:?}"
         );
+    }
+
+    /// BUG-0735: an EGRESS row whose workbook was replaced while the act was
+    /// in flight (an async `net.fetch` awaiting the network, then File > Open)
+    /// was written straight into `state.audit_log` -- the trail of the workbook
+    /// opened meanwhile, saved inside it as if IT had made the call. Through
+    /// `WorkbookAudit` (which `record_capability_call` now requires) it lands
+    /// in this computer's trail with `reason: documentReplaced`, and never in
+    /// the next workbook's. Positive control: a call whose workbook is still
+    /// live stays in that workbook's trail and is not copied. An OPT-IN row
+    /// whose workbook is gone goes to neither (whether that workbook opted in
+    /// is unknowable).
+    ///
+    /// SABOTAGE: `WorkbookAudit::record` writes without the pin (`Some(write())`
+    /// for a pinned target) -- "the next workbook's trail holds the call".
+    #[test]
+    fn a_capability_call_whose_workbook_was_replaced_lands_in_this_computers_trail() {
+        let profile = tempfile::TempDir::new().unwrap();
+        crate::profile_dir::with_test_profile(profile.path(), || {
+            let log = crate::document_effect::Persisted::new(calp::audit::AuditLog::default());
+            let file = crate::persistence::FileState::default();
+            let calls = |log: &crate::document_effect::Persisted<calp::audit::AuditLog>| {
+                log.read()
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .filter(|e| matches!(e.event, calp::audit::AuditEvent::CapabilityCall))
+                    .count()
+            };
+
+            // Positive control: the workbook still on screen keeps its row.
+            let live = WorkbookAudit::at_entry(&log, &file);
+            crate::net_commands::record_capability_call(&live, "net.fetch", "s1", true, Some("https://a.example"), None);
+            assert_eq!(calls(&log), 1, "a call from the live workbook is audited in it");
+            assert!(read_trail(profile.path()).entries.is_empty(), "a row that reached its workbook is not copied");
+
+            // The fetch starts on A; File > Open replaces A before it returns.
+            let started = WorkbookAudit::at_entry(&log, &file);
+            file.note_document_replaced();
+            log.write(&crate::document_effect::DocumentEffect::deliberately_clean(
+                crate::document_effect::CleanReason::AuditTrail,
+            ))
+            .unwrap()
+            .clear();
+            assert!(started.workbook_replaced());
+            crate::net_commands::record_capability_call(&started, "net.fetch", "s1", true, Some("https://a.example"), None);
+            assert_eq!(calls(&log), 0, "the next workbook's trail holds the call its predecessor made");
+            let rows = read_trail(profile.path()).entries;
+            assert_eq!(rows.len(), 1, "this computer's trail must hold the replaced workbook's call");
+            assert!(matches!(rows[0].event, calp::audit::AuditEvent::CapabilityCall));
+            assert_eq!(rows[0].extra["capability"], serde_json::json!("net.fetch"));
+            assert_eq!(rows[0].extra["detail"], serde_json::json!("https://a.example"));
+            assert_eq!(rows[0].extra["reason"], serde_json::json!(REASON_DOCUMENT_REPLACED));
+
+            // An opt-in row of a replaced workbook: neither trail.
+            let opt_in = WorkbookAudit::of_epoch(&log, &file, 0);
+            assert!(!opt_in.record(
+                calp::audit::AuditEvent::Subscribe,
+                "Subscribed",
+                "u",
+                "2026-11-06T10:00:00Z",
+                std::collections::HashMap::new(),
+            ));
+            assert_eq!(log.read().unwrap().entries.len(), 0);
+            assert_eq!(read_trail(profile.path()).entries.len(), 1, "an opt-in row is not egress");
+        });
     }
 }

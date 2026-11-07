@@ -62,6 +62,15 @@ pub struct FilterPredicate {
     /// Value to compare against (string representation). For a [dynamic](Self::dynamic)
     /// predicate this is a placeholder; the engine substitutes the resolved
     /// identity here before the predicate is rendered.
+    ///
+    /// Its TYPE is the column's: every renderer types it from the model
+    /// column ([`format_filter_value`](crate::compute::context::format_filter_value)
+    /// -- physical, calculated or context column, names matched
+    /// case-insensitively; BUG-0758) or leaves it quoted where the source
+    /// types an unknown literal by the column (the PostgreSQL pushdown). A
+    /// BLANK column value never satisfies the predicate, even `= 0`: DAX's
+    /// BLANK-as-0 comparison is NOT applied to this type, which is also the
+    /// row-level-security predicate (owner decision BUG-0759).
     pub value: String,
     /// When `Some`, the predicate compares against a **runtime identity** (the
     /// current `USERNAME()` / `CUSTOMDATA()`) resolved at query time, instead of

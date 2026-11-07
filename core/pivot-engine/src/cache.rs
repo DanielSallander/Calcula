@@ -188,7 +188,11 @@ impl From<&CellValue> for CacheValue {
             CellValue::Number(n) => CacheValue::Number(OrderedFloat(*n)),
             CellValue::Text(s) => CacheValue::Text(s.clone()),
             CellValue::Boolean(b) => CacheValue::Boolean(*b),
-            CellValue::Error(e) => CacheValue::Error(format!("{:?}", e)),
+            // The error's BARE Excel code ("DIV/0!", "N/A"), the convention a
+            // calculated field's `CalcValue::Error` uses; every reader adds
+            // the `#`, so a member and its label read "#DIV/0!" as Excel's
+            // do. It was the Rust variant name, "#Div0" (BUG-0761).
+            CellValue::Error(e) => CacheValue::Error(e.as_literal().trim_start_matches('#').to_string()),
             CellValue::List(items) => CacheValue::Text(format!("[List({})]", items.len())),
             CellValue::Dict(entries) => CacheValue::Text(format!("[Dict({})]", entries.len())),
         }
@@ -545,6 +549,43 @@ impl GroupKey {
 // AGGREGATE ACCUMULATOR
 // ============================================================================
 
+/// The bare error codes (no `#`, as [`CacheValue::Error`] stores them) an
+/// accumulator can carry, indexed by the `u8` it stores. An unknown code is
+/// kept as `VALUE!`.
+const ACCUMULATOR_ERROR_CODES: &[&str] = &[
+    "VALUE!", "DIV/0!", "N/A", "NUM!", "REF!", "NAME?", "NULL!", "SPILL!", "CALC!",
+    "CIRCULAR!", "CONFLICT!", "BLOCKED!", "LIMIT!", "GETTING_DATA", "FIELD!", "CONNECT!", "BUSY!",
+];
+
+/// The accumulator index of a bare error code (`"DIV/0!"`); `VALUE!` for one
+/// the table does not hold.
+pub fn accumulator_error_index(code: &str) -> u8 {
+    let code = code.trim_start_matches('#');
+    ACCUMULATOR_ERROR_CODES
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case(code))
+        .unwrap_or(0) as u8
+}
+
+/// The bare error code an accumulator error index stands for.
+pub fn accumulator_error_code(index: u8) -> &'static str {
+    ACCUMULATOR_ERROR_CODES.get(index as usize).copied().unwrap_or("VALUE!")
+}
+
+/// What one source record contributes to one value field (BUG-0760
+/// follow-up): Excel's pivot counts text and errors, sums only numbers, and an
+/// error in the source makes every numeric summary over it that error.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SourceContribution {
+    /// An empty source cell: counted by nothing.
+    Empty,
+    Number(f64),
+    /// Text or a boolean: counted by Count, ignored by every numeric summary.
+    Other,
+    /// A source error (an [`accumulator_error_index`]).
+    Error(u8),
+}
+
 /// Accumulator for computing aggregates incrementally.
 /// Stores intermediate state needed for all aggregation types.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -560,6 +601,17 @@ pub struct AggregateAccumulator {
     pub m2: f64,
     pub mean: f64,
     pub has_product: bool,
+    /// The FIRST source error added, in record order ([`accumulator_error_code`]).
+    /// Excel [LIVE, piv4 probe5]: a group holding #DIV/0! then #N/A shows
+    /// #DIV/0! in every numeric summary (Sum, Average, Max, Min, Product,
+    /// StdDev, Var); Count counts the error row and Count Numbers ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_error: Option<u8>,
+    /// The LAST source error added: what a CALCULATED field over this field
+    /// reads (Excel [LIVE, piv4 probe5]: `=Amount*2` over #DIV/0! then #N/A
+    /// shows #N/A where Sum of Amount shows #DIV/0!).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<u8>,
 }
 
 impl AggregateAccumulator {
@@ -574,9 +626,57 @@ impl AggregateAccumulator {
             m2: 0.0,
             mean: 0.0,
             has_product: false,
+            first_error: None,
+            last_error: None,
         }
     }
-    
+
+    /// Adds a source error (an [`accumulator_error_index`]): counted by
+    /// Count, and the result of every numeric summary.
+    pub fn add_error(&mut self, error: u8) {
+        self.count += 1;
+        if self.first_error.is_none() {
+            self.first_error = Some(error);
+        }
+        self.last_error = Some(error);
+    }
+
+    /// Adds one record's contribution.
+    pub(crate) fn add_contribution(&mut self, contribution: SourceContribution) {
+        match contribution {
+            SourceContribution::Empty => {}
+            SourceContribution::Number(n) => self.add_number(n),
+            SourceContribution::Other => self.add_non_number(),
+            SourceContribution::Error(e) => self.add_error(e),
+        }
+    }
+
+    /// The error a summary of this accumulator shows instead of a number, as
+    /// a bare code (`"DIV/0!"`), or `None` when it shows [`Self::compute`]'s
+    /// number. Excel [LIVE, piv4 probe4]: a source error is the result of
+    /// every summary but Count and Count Numbers; with no NUMBER at all
+    /// Average is #DIV/0!, and StdDev / Var need two numbers (StdDevP / VarP
+    /// one), else #DIV/0! -- while Sum, Max, Min and Product of no numbers
+    /// read 0. An accumulator nothing reached (`count == 0`) is the empty
+    /// cell, never an error.
+    pub fn error_code(&self, aggregation: AggregationType) -> Option<&'static str> {
+        if self.count == 0 {
+            return None;
+        }
+        if matches!(aggregation, AggregationType::Count | AggregationType::CountNumbers) {
+            return None;
+        }
+        if let Some(e) = self.first_error {
+            return Some(accumulator_error_code(e));
+        }
+        let too_few = match aggregation {
+            AggregationType::Average | AggregationType::VarP | AggregationType::StdDevP => self.count_numbers == 0,
+            AggregationType::Var | AggregationType::StdDev => self.count_numbers < 2,
+            _ => false,
+        };
+        too_few.then_some("DIV/0!")
+    }
+
     /// Adds a numeric value to the accumulator.
     pub fn add_number(&mut self, value: f64) {
         // Count
@@ -686,6 +786,12 @@ impl AggregateAccumulator {
         self.sum += other.sum;
         self.count += other.count;
         self.count_numbers = combined_count;
+        if self.first_error.is_none() {
+            self.first_error = other.first_error;
+        }
+        if other.last_error.is_some() {
+            self.last_error = other.last_error;
+        }
         
         if let Some(other_min) = other.min {
             self.min = Some(self.min.map_or(other_min, |m| m.min(other_min)));
@@ -846,6 +952,33 @@ impl ColumnLayout {
     pub fn slot_len(&self) -> usize {
         self.total_combinations * self.value_count
     }
+
+    /// The grain level of flat column index `idx`: how many column fields
+    /// (outermost first) it names a member of, every later one being the
+    /// subtotal. `None` for the void combination and any index that is not
+    /// such a prefix.
+    fn col_level(&self, idx: usize) -> Option<usize> {
+        if self.cardinalities.is_empty() {
+            return (idx == 0).then_some(0);
+        }
+        if idx >= self.void_index() {
+            return None;
+        }
+        let mut level = 0;
+        let mut in_totals = false;
+        for i in 0..self.cardinalities.len() {
+            let total_slot = self.cardinalities[i] + usize::from(self.has_blank.get(i).copied().unwrap_or(false));
+            let digit = (idx / self.strides[i]) % (total_slot + 1);
+            if digit == total_slot {
+                in_totals = true;
+            } else if in_totals {
+                return None;
+            } else {
+                level += 1;
+            }
+        }
+        Some(level)
+    }
 }
 
 /// The main pivot cache structure.
@@ -881,6 +1014,17 @@ pub struct PivotCache {
     /// Whether aggregates need recomputation.
     aggregates_dirty: bool,
 
+    /// Whether the last aggregate computation added any source error (see
+    /// [`PivotCache::rederive_total_errors`]).
+    #[serde(default, skip)]
+    source_errors_seen: bool,
+
+    /// Whether the last aggregate computation left some subtotal of a
+    /// GROUPED level EMPTY for a value field whose totals are not the sum of
+    /// its leaves (see [`PivotCache::grouped_totals_withheld`]).
+    #[serde(default, skip)]
+    grouped_totals_withheld: bool,
+
     /// Bitmap of which records pass the current filters.
     /// Length = records.len(), true = included.
     pub filter_mask: Vec<bool>,
@@ -894,15 +1038,240 @@ pub struct PivotCache {
     /// virtual_records[virtual_field_index][record_index] = ValueId
     pub virtual_records: Vec<Vec<ValueId>>,
 
+    /// The SOURCE field each virtual field was made from
+    /// (`virtual_origins[virtual_field_index]` = a base field index): the
+    /// field a grouped item's sort or filter belongs to
+    /// ([`PivotCache::virtual_field_origin`], BUG-0733). Rebuilt with the
+    /// virtual fields on every render.
+    #[serde(default)]
+    pub virtual_origins: Vec<FieldIndex>,
+
+    /// Per virtual field, parallel to `virtual_origins`: the grouping LEVEL
+    /// it is (`definition::LevelSort::level`) when it is a field of its own
+    /// -- a manual group's parent, a date level above the finest -- whose
+    /// sort is kept apart from its origin's; `None` when it stands for the
+    /// origin field itself (a number bin, the finest date level).
+    #[serde(default)]
+    pub virtual_levels: Vec<Option<String>>,
+
     /// Statistics for optimization decisions.
     pub stats: CacheStats,
 
     /// Engine-evaluated totals installed by the host for BI-backed pivots.
     /// Applied (accumulator-slot overwrite) at the end of
-    /// `compute_aggregates`; only valid for the unfiltered record set.
+    /// `compute_aggregates`; only valid for the unfiltered record set (a
+    /// filtered state has its own, in [`PivotCache::mask_overlays`]).
     /// See [`TotalOverride`].
     #[serde(default)]
     pub total_overrides: Vec<TotalOverride>,
+
+    /// Engine-evaluated values for FILTERED states of a BI-backed pivot
+    /// (BUG-0108), newest first, at most [`MAX_MASK_OVERLAYS`]. Each is keyed
+    /// by exactly the filter mask and field layout it was evaluated for and
+    /// applies only to that state -- see [`MaskOverlay`]. It describes THESE
+    /// records, so it travels with every clone and undo snapshot of the cache;
+    /// a BI cache is never written to a workbook file, so it is never saved.
+    #[serde(default)]
+    pub mask_overlays: Vec<MaskOverlay>,
+
+    /// Which value columns of these records a host-side filter mask can get
+    /// wrong (BUG-0108), decided by the host from the model when it fetched
+    /// them. `None` for a cache nobody classified (a range pivot, a
+    /// calculation group): its masked values are never re-evaluated.
+    #[serde(default)]
+    pub mask_sensitivity: Option<MaskSensitivity>,
+
+    /// The identity of these records: [`PivotCache::new`] mints a fresh one for
+    /// every cache, and clones and undo snapshots keep it. A host that
+    /// evaluates an overlay ASYNCHRONOUSLY checks it before installing the
+    /// answer, so an overlay computed for records a concurrent re-query has
+    /// since replaced is dropped instead of being laid over the new ones. `0`
+    /// (a snapshot written before the field existed) names no records.
+    #[serde(default)]
+    pub build_id: u64,
+}
+
+/// How many filtered states' overlays one cache keeps
+/// ([`PivotCache::mask_overlays`]): a slicer clicked back and forth, or an undo
+/// and redo of one, finds its overlay again without another engine query.
+pub const MAX_MASK_OVERLAYS: usize = 8;
+
+/// The source of [`PivotCache::build_id`]: process-wide, never reused.
+static NEXT_CACHE_BUILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The engine-evaluated values of ONE filtered state of a BI-backed pivot
+/// (BUG-0108).
+///
+/// A BI pivot's records are pre-aggregated per leaf group WITHOUT the pivot's
+/// own level-1 filters -- slicers, header filters, the filter area -- because
+/// filtering is a host-side mask over them: a click re-queries nothing. For an
+/// additive measure that is exact. For a measure whose value depends on rows
+/// the mask hides (a share of the visible total, `ALLSELECTED` /
+/// `CLEAR_INNER`; a window) or whose total is not the sum of its leaves (a
+/// ratio, an average) it is not: the engine chose those numbers over a filter
+/// context with no filter in it. The host evaluates them again over the
+/// members the mask leaves VISIBLE and installs the answer here.
+///
+/// An overlay is keyed by EXACTLY the filter mask (one bit per record) and the
+/// effective field layout it was evaluated for, and `compute_aggregates`
+/// splices it only over that state ([`MaskOverlay::matches`]). A later filter,
+/// an unfilter, an undo or a redo that leaves a different mask finds no
+/// overlay and gets the masked roll-up -- never another state's numbers; one
+/// that returns to this mask finds it again. The records are never touched.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MaskOverlay {
+    /// The filter mask evaluated for, one bit per record ([`pack_filter_mask`]).
+    pub mask: Vec<u64>,
+    /// How many records `mask` covers.
+    pub record_count: usize,
+    /// The effective row field indices the overrides' row keys are over.
+    pub row_fields: Vec<FieldIndex>,
+    /// The effective column field indices the column keys are over.
+    pub col_fields: Vec<FieldIndex>,
+    /// The value field source indices, in definition order: what each
+    /// override's `values` are parallel to.
+    pub value_fields: Vec<FieldIndex>,
+    /// The engine's cells -- leaf, subtotal and grand-total slots alike --
+    /// keyed and applied exactly as a [`TotalOverride`] is. May be EMPTY: the
+    /// engine refused this state, and remembering that keeps the next click on
+    /// it from asking again.
+    pub overrides: Vec<TotalOverride>,
+    /// The grains (and, per grain, the value fields) the engine ANSWERED.
+    /// Its answer at such a grain is the whole truth: every cell of the grain
+    /// a value field's answer does not name is BLANK -- the engine leaves out
+    /// a row whose measures are all BLANK (`IF(ISFILTERED(..), BLANK(), ..)`
+    /// under a slicer), and an override can only carry a number. The masked
+    /// roll-up used to stand in such a cell (W1 pivotmask verifier,
+    /// `an_overlay_blanks_what_the_engine_answers_blank`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answered: Vec<AnsweredGrain>,
+}
+
+/// One grain a [`MaskOverlay`] holds the engine's whole answer for.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnsweredGrain {
+    /// How many row fields (outermost first) the grain groups by.
+    pub row_depth: usize,
+    /// How many column fields the grain groups by.
+    pub col_depth: usize,
+    /// The value fields (definition order) the engine answered there.
+    pub value_fields: Vec<usize>,
+}
+
+impl MaskOverlay {
+    /// Whether this overlay was evaluated for exactly `filter_mask` over this
+    /// field layout.
+    pub fn matches(
+        &self,
+        filter_mask: &[bool],
+        row_fields: &[FieldIndex],
+        col_fields: &[FieldIndex],
+        value_fields: &[FieldIndex],
+    ) -> bool {
+        self.record_count == filter_mask.len()
+            && self.row_fields == row_fields
+            && self.col_fields == col_fields
+            && self.value_fields == value_fields
+            && mask_bits_equal(&self.mask, filter_mask)
+    }
+}
+
+/// Which value columns of a BI cache a filter mask can get wrong (see
+/// [`PivotCache::mask_sensitivity`]). Columns are CACHE field indices -- the
+/// `source_index` of the value fields that show them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MaskSensitivity {
+    /// Columns whose subtotals and grand totals under a mask are not the sum
+    /// of the visible records' values (a ratio, an average, a share).
+    pub total_fields: Vec<FieldIndex>,
+    /// The subset whose LEAF values also depend on rows the mask hides (a
+    /// share of the visible total, a window, `ISFILTERED`).
+    pub leaf_fields: Vec<FieldIndex>,
+}
+
+/// `mask` packed one bit per record, record `i` at bit `i % 64` of word
+/// `i / 64` (set = included).
+pub fn pack_filter_mask(mask: &[bool]) -> Vec<u64> {
+    let mut bits = vec![0u64; mask.len().div_ceil(64)];
+    for (i, &included) in mask.iter().enumerate() {
+        if included {
+            bits[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+    bits
+}
+
+/// Overwrites accumulator slots with `overrides` (see [`TotalOverride`]): each
+/// `Some` value REPLACES its slot (a fresh accumulator holding that one
+/// number), a missing row slot is created, and an entry whose key shape does
+/// not match the current axis layout -- or names a column member the layout
+/// has no slot for -- is skipped (a stale entry: writing it would fill the
+/// void every missing key reads).
+fn splice_overrides(
+    aggregates: &mut FxHashMap<GroupKey, Vec<AggregateAccumulator>>,
+    col_layout: &ColumnLayout,
+    overrides: &[TotalOverride],
+    row_count: usize,
+    col_count: usize,
+    value_count: usize,
+    slot_len: usize,
+) {
+    for ov in overrides {
+        if ov.row_key.len() != row_count || ov.col_key.len() != col_count {
+            continue;
+        }
+        let col_index = if col_count == 0 {
+            0
+        } else {
+            match col_layout.try_col_index_at_level(&ov.col_key, col_count) {
+                Some(idx) => idx,
+                None => continue,
+            }
+        };
+        let base = col_index * value_count;
+        let slot = aggregates
+            .entry(GroupKey::from_slice(&ov.row_key))
+            .or_insert_with(|| vec![AggregateAccumulator::new(); slot_len]);
+        for (vi, value) in ov.values.iter().enumerate().take(value_count) {
+            if let Some(n) = value {
+                if let Some(acc) = slot.get_mut(base + vi) {
+                    let mut replacement = AggregateAccumulator::new();
+                    replacement.add_number(*n);
+                    *acc = replacement;
+                }
+            }
+        }
+    }
+}
+
+/// Whether a data-model pivot's value at an axis grain of `depth` levels (of
+/// `count`) is one the engine evaluated, when the levels at `grouped` are
+/// GROUPED (virtual) ones: a grain naming no grouped member (the host's
+/// totals override it), or a LEAF with a source field below its last grouped
+/// level (the main query's own value -- a manual group's detail). Any other
+/// -- a group's subtotal, a date level or a bin, which replace the source
+/// field -- is a roll-up nothing evaluated (see `withhold_grouped_totals`).
+fn grain_is_evaluated(depth: usize, count: usize, grouped: &[usize]) -> bool {
+    let Some(&last_grouped) = grouped.iter().filter(|&&j| j < depth).max() else {
+        return true;
+    };
+    depth == count && (last_grouped + 1..count).any(|k| !grouped.contains(&k))
+}
+
+/// Whether `bits` ([`pack_filter_mask`]) packs exactly `mask`.
+fn mask_bits_equal(bits: &[u64], mask: &[bool]) -> bool {
+    if bits.len() != mask.len().div_ceil(64) {
+        return false;
+    }
+    mask.chunks(64).zip(bits.iter()).all(|(chunk, &word)| {
+        let mut packed = 0u64;
+        for (i, &included) in chunk.iter().enumerate() {
+            if included {
+                packed |= 1u64 << i;
+            }
+        }
+        packed == word
+    })
 }
 
 /// One engine-evaluated total cell for a BI-backed pivot.
@@ -915,7 +1284,7 @@ pub struct PivotCache {
 /// installs the results via `set_total_overrides`; `compute_aggregates`
 /// overwrites the corresponding accumulator slots after rolling up, so every
 /// read path (data cells, show-values-as, visual calcs) sees them unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TotalOverride {
     /// Full-length row key over the effective row fields; positions beyond the
     /// grain's depth are VALUE_ID_EMPTY (matching subtotal/grand-total keys),
@@ -952,11 +1321,18 @@ impl PivotCache {
             aggregates: FxHashMap::default(),
             col_layout: ColumnLayout::default(),
             aggregates_dirty: true,
+            source_errors_seen: false,
+            grouped_totals_withheld: false,
             filter_mask: Vec::new(),
             virtual_fields: Vec::new(),
             virtual_records: Vec::new(),
+            virtual_origins: Vec::new(),
+            virtual_levels: Vec::new(),
             stats: CacheStats::default(),
             total_overrides: Vec::new(),
+            mask_overlays: Vec::new(),
+            mask_sensitivity: None,
+            build_id: NEXT_CACHE_BUILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
     
@@ -1289,6 +1665,54 @@ impl PivotCache {
         &self.col_layout
     }
 
+    /// Whether the last aggregate computation saw a source error.
+    pub fn source_errors_seen(&self) -> bool {
+        self.source_errors_seen
+    }
+
+    /// Whether the last aggregate computation WITHHELD (left empty) some
+    /// subtotal of a grouped level -- a manual group, a date level, a bin --
+    /// for a value field `mask_sensitivity` marks as non-additive. The host
+    /// evaluates a data-model pivot's totals per SOURCE member, so nothing
+    /// evaluates a group's own total, and the rolled-up sum of its items is a
+    /// wrong number for an average, a ratio or a distinct count (wave-3
+    /// verify). The host tells the user so (a notice) rather than show it.
+    pub fn grouped_totals_withheld(&self) -> bool {
+        self.grouped_totals_withheld
+    }
+
+    /// Re-derives the errors of the total at `parent_key` from its children
+    /// (`child_keys`, in DISPLAY order), slot by slot: its first error is the
+    /// first child's that has one, its last error the last child's. Excel
+    /// [LIVE, piv4 probe5] combines a total's errors from its items as they
+    /// are shown -- the grand total over Aa #NUM!, Mm #DIV/0!, Zz #N/A reads
+    /// #NUM! sorted ascending and #N/A sorted descending -- while one item's
+    /// own cell takes the first error of its records in source order.
+    pub fn rederive_total_errors(&mut self, parent_key: &[ValueId], child_keys: &[Vec<ValueId>]) {
+        let slot_len = self.col_layout.slot_len();
+        let mut derived: Vec<(Option<u8>, Option<u8>)> = vec![(None, None); slot_len];
+        for key in child_keys {
+            let Some(slot) = self.aggregates.get(key.as_slice()) else { continue };
+            for (i, acc) in slot.iter().enumerate().take(slot_len) {
+                if derived[i].0.is_none() {
+                    derived[i].0 = acc.first_error;
+                }
+                if acc.last_error.is_some() {
+                    derived[i].1 = acc.last_error;
+                }
+            }
+        }
+        let Some(parent) = self.aggregates.get_mut(parent_key) else { return };
+        for (acc, (first, last)) in parent.iter_mut().zip(derived) {
+            if acc.first_error.is_some() && first.is_some() {
+                acc.first_error = first;
+            }
+            if acc.last_error.is_some() && last.is_some() {
+                acc.last_error = last;
+            }
+        }
+    }
+
     /// Read-only value→id lookup on field `field_index` (`None` when the value
     /// was never interned there). Used by the host to translate engine query
     /// results into cache keys without mutating the interning tables.
@@ -1311,6 +1735,37 @@ impl PivotCache {
         }
     }
 
+    /// Installs the engine-evaluated values of one filtered state (see
+    /// [`MaskOverlay`]) as the NEWEST overlay: one already installed for the
+    /// same mask and layout is replaced, and beyond [`MAX_MASK_OVERLAYS`] the
+    /// oldest is dropped. Marks aggregates dirty so the next computation
+    /// splices it in.
+    pub fn install_mask_overlay(&mut self, overlay: MaskOverlay) {
+        self.mask_overlays.retain(|o| {
+            !(o.mask == overlay.mask
+                && o.record_count == overlay.record_count
+                && o.row_fields == overlay.row_fields
+                && o.col_fields == overlay.col_fields
+                && o.value_fields == overlay.value_fields)
+        });
+        self.mask_overlays.insert(0, overlay);
+        self.mask_overlays.truncate(MAX_MASK_OVERLAYS);
+        self.aggregates_dirty = true;
+    }
+
+    /// The overlay evaluated for exactly the CURRENT filter mask over this
+    /// field layout, if one is installed.
+    pub fn mask_overlay_for(
+        &self,
+        row_fields: &[FieldIndex],
+        col_fields: &[FieldIndex],
+        value_fields: &[FieldIndex],
+    ) -> Option<&MaskOverlay> {
+        self.mask_overlays
+            .iter()
+            .find(|o| o.matches(&self.filter_mask, row_fields, col_fields, value_fields))
+    }
+
     /// Computes all aggregates using a two-level row/column split.
     ///
     /// Row keys stay in a HashMap (high cardinality). Column combinations
@@ -1324,6 +1779,8 @@ impl PivotCache {
         value_field_indices: &[FieldIndex],
     ) {
         self.aggregates.clear();
+        self.source_errors_seen = false;
+        self.grouped_totals_withheld = false;
 
         let value_count = value_field_indices.len();
         let row_count = row_field_indices.len();
@@ -1360,7 +1817,7 @@ impl PivotCache {
         // Reusable buffers
         let mut row_buf = vec![VALUE_ID_EMPTY; row_count];
         let mut col_buf = vec![VALUE_ID_EMPTY; col_count];
-        let mut value_buf: Vec<Option<f64>> = vec![None; value_count];
+        let mut value_buf: Vec<SourceContribution> = vec![SourceContribution::Empty; value_count];
         let mut row_key_buf = vec![VALUE_ID_EMPTY; row_count];
 
         // Helper: accumulate values into a row slot at a given column index
@@ -1369,23 +1826,19 @@ impl PivotCache {
             aggregates: &mut FxHashMap<GroupKey, Vec<AggregateAccumulator>>,
             row_key: &[ValueId],
             col_index: usize,
-            value_buf: &[Option<f64>],
+            value_buf: &[SourceContribution],
             value_count: usize,
             slot_len: usize,
         ) {
             let base = col_index * value_count;
             if let Some(slot) = aggregates.get_mut(row_key) {
-                for (vi, &numeric_value) in value_buf.iter().enumerate() {
-                    if let Some(n) = numeric_value {
-                        slot[base + vi].add_number(n);
-                    }
+                for (vi, &contribution) in value_buf.iter().enumerate() {
+                    slot[base + vi].add_contribution(contribution);
                 }
             } else {
                 let mut slot = vec![AggregateAccumulator::new(); slot_len];
-                for (vi, &numeric_value) in value_buf.iter().enumerate() {
-                    if let Some(n) = numeric_value {
-                        slot[base + vi].add_number(n);
-                    }
+                for (vi, &contribution) in value_buf.iter().enumerate() {
+                    slot[base + vi].add_contribution(contribution);
                 }
                 aggregates.insert(GroupKey::from_slice(row_key), slot);
             }
@@ -1426,15 +1879,22 @@ impl PivotCache {
                 });
             }
 
-            // Fill value data buffer
+            // Fill value data buffer. Text and booleans are COUNTED and a
+            // source error poisons every numeric summary over it (Excel [LIVE,
+            // piv4 probe4]; numbers alone used to reach the accumulator, so
+            // Count of a text field read 0 and a Sum over #DIV/0! read the sum
+            // of the other rows).
             for (slot, &field_idx) in value_buf.iter_mut().zip(value_field_indices.iter()) {
                 let value_id = record.values.get(field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
-                *slot = self.fields.get(field_idx).and_then(|fc| {
-                    fc.get_value(value_id).and_then(|cv| match cv {
-                        CacheValue::Number(n) => Some(n.0),
-                        _ => None,
-                    })
-                });
+                *slot = match self.fields.get(field_idx).and_then(|fc| fc.get_value(value_id)) {
+                    Some(CacheValue::Number(n)) => SourceContribution::Number(n.0),
+                    Some(CacheValue::Error(e)) => {
+                        self.source_errors_seen = true;
+                        SourceContribution::Error(accumulator_error_index(e))
+                    }
+                    Some(CacheValue::Text(_)) | Some(CacheValue::Boolean(_)) => SourceContribution::Other,
+                    Some(CacheValue::Empty) | None => SourceContribution::Empty,
+                };
             }
 
             // For each row subtotal level × each column subtotal level:
@@ -1477,7 +1937,10 @@ impl PivotCache {
         // subtotal/grand-total slots. Rolled-up totals are only correct for
         // additive measures; pre-aggregated BI measures (ratios, averages,
         // distinct counts) need per-grain evaluation by the BI engine.
-        self.apply_total_overrides(row_count, col_count, value_count, slot_len);
+        self.apply_total_overrides(row_field_indices, col_field_indices, value_field_indices, slot_len);
+        // And, for a FILTERED state, the overlay evaluated for exactly that
+        // state (BUG-0108), over leaf and total slots alike.
+        self.apply_mask_overlay(row_field_indices, col_field_indices, value_field_indices, slot_len);
 
         self.stats.aggregate_groups = self.aggregates.len();
         self.aggregates_dirty = false;
@@ -1485,55 +1948,169 @@ impl PivotCache {
 
     /// Overwrites aggregate slots with engine-evaluated totals (see
     /// [`TotalOverride`]). No-op when no overrides are installed, when any
-    /// record is filtered out (overrides describe the UNFILTERED set — active
-    /// local filters fall back to rolled-up totals until cleared), or — per
-    /// entry — when an override's key shape doesn't match the current axis
-    /// layout (stale entry from an older field configuration).
+    /// record is filtered out (overrides describe the UNFILTERED set — a
+    /// filtered state's values come from its own [`MaskOverlay`], or are the
+    /// rolled-up totals when it has none), or — per entry — when an
+    /// override's key shape doesn't match the current axis layout (stale entry
+    /// from an older field configuration).
+    ///
+    /// A GROUPED level (a virtual field: number bins, a date level, a manual
+    /// group) is keyed by the grouping's own ids, while the host keys every
+    /// override by the SOURCE column's members (`totals::
+    /// overrides_from_grain_result`). An entry naming a member at a grouped
+    /// position is therefore a raw id that can equal some bin's id -- it would
+    /// overwrite that bin's subtotal with one source value's (wave 1 pivotmask
+    /// lane, CONFIRMED by `a_raw_keyed_override_never_lands_on_a_grouped_level`)
+    /// -- so it is skipped; an entry padding every grouped position (the grand
+    /// total, a total over the other levels) still applies.
     fn apply_total_overrides(
         &mut self,
-        row_count: usize,
-        col_count: usize,
-        value_count: usize,
+        row_field_indices: &[FieldIndex],
+        col_field_indices: &[FieldIndex],
+        value_field_indices: &[FieldIndex],
         slot_len: usize,
     ) {
+        let value_count = value_field_indices.len();
         if self.total_overrides.is_empty() {
             return;
         }
         if self.filter_mask.iter().any(|&included| !included) {
             return;
         }
+        let base = self.fields.len();
+        let grouped_rows: Vec<usize> =
+            row_field_indices.iter().enumerate().filter(|(_, &fi)| fi >= base).map(|(j, _)| j).collect();
+        let grouped_cols: Vec<usize> =
+            col_field_indices.iter().enumerate().filter(|(_, &fi)| fi >= base).map(|(j, _)| j).collect();
+        if !grouped_rows.is_empty() || !grouped_cols.is_empty() {
+            self.withhold_grouped_totals(row_field_indices.len(), &grouped_rows, &grouped_cols, value_field_indices, value_count);
+        }
+        let applicable: Vec<TotalOverride> = if grouped_rows.is_empty() && grouped_cols.is_empty() {
+            self.total_overrides.clone()
+        } else {
+            self.total_overrides
+                .iter()
+                .filter(|ov| {
+                    grouped_rows.iter().all(|&j| ov.row_key.get(j).is_none_or(|&id| id == VALUE_ID_EMPTY))
+                        && grouped_cols.iter().all(|&j| ov.col_key.get(j).is_none_or(|&id| id == VALUE_ID_EMPTY))
+                })
+                .cloned()
+                .collect()
+        };
+        splice_overrides(
+            &mut self.aggregates,
+            &self.col_layout,
+            &applicable,
+            row_field_indices.len(),
+            col_field_indices.len(),
+            value_count,
+            slot_len,
+        );
+    }
 
-        let overrides = std::mem::take(&mut self.total_overrides);
-        for ov in &overrides {
-            if ov.row_key.len() != row_count || ov.col_key.len() != col_count {
-                continue;
-            }
-            // A column member the layout has no slot for (a stale entry) is
-            // skipped: writing it would fill the void every missing key reads.
-            let col_index = if col_count == 0 {
-                0
-            } else {
-                match self.col_layout.try_col_index_at_level(&ov.col_key, col_count) {
-                    Some(idx) => idx,
-                    None => continue,
+    /// Empties every subtotal slot below a GROUPED level (see
+    /// [`Self::grouped_totals_withheld`]) for the value fields
+    /// `mask_sensitivity` marks non-additive, at every row key and column
+    /// combination `grain_is_evaluated` refuses. A total ABOVE every grouped
+    /// level (the grand total) is the engine's and keeps its override; a
+    /// manual group's detail leaf is the main query's own value.
+    fn withhold_grouped_totals(
+        &mut self,
+        row_count: usize,
+        grouped_rows: &[usize],
+        grouped_cols: &[usize],
+        value_field_indices: &[FieldIndex],
+        value_count: usize,
+    ) {
+        let Some(sensitivity) = self.mask_sensitivity.as_ref() else { return };
+        let fields: Vec<usize> = (0..value_count)
+            .filter(|&vi| {
+                value_field_indices.get(vi).is_some_and(|fi| sensitivity.total_fields.contains(fi))
+            })
+            .collect();
+        if fields.is_empty() {
+            return;
+        }
+        let col_count = self.col_layout.cardinalities.len();
+        let withheld_cols: Vec<usize> = (0..self.col_layout.total_combinations)
+            .filter(|&ci| {
+                self.col_layout
+                    .col_level(ci)
+                    .is_some_and(|level| !grain_is_evaluated(level, col_count, grouped_cols))
+            })
+            .collect();
+        let combos = self.col_layout.total_combinations;
+        let mut withheld = false;
+        for (key, slot) in self.aggregates.iter_mut() {
+            let depth = key.values.iter().take_while(|&&id| id != VALUE_ID_EMPTY).count();
+            let row_withheld = !grain_is_evaluated(depth, row_count, grouped_rows);
+            for ci in 0..combos {
+                if !row_withheld && !withheld_cols.contains(&ci) {
+                    continue;
                 }
-            };
-            let base = col_index * value_count;
-            let slot = self
-                .aggregates
-                .entry(GroupKey::from_slice(&ov.row_key))
-                .or_insert_with(|| vec![AggregateAccumulator::new(); slot_len]);
-            for (vi, value) in ov.values.iter().enumerate().take(value_count) {
-                if let Some(n) = value {
-                    if let Some(acc) = slot.get_mut(base + vi) {
-                        let mut replacement = AggregateAccumulator::new();
-                        replacement.add_number(*n);
-                        *acc = replacement;
+                for &vi in &fields {
+                    if let Some(acc) = slot.get_mut(ci * value_count + vi) {
+                        if acc.count > 0 {
+                            *acc = AggregateAccumulator::new();
+                            withheld = true;
+                        }
                     }
                 }
             }
         }
-        self.total_overrides = overrides;
+        self.grouped_totals_withheld |= withheld;
+    }
+
+    /// Overwrites aggregate slots with the [`MaskOverlay`] evaluated for
+    /// exactly the current filter mask and this field layout, when one is
+    /// installed. Spliced AFTER the totals overrides, so an overlay for the
+    /// unfiltered state (the host evaluates one when the cache has no totals
+    /// of its own) wins over nothing at all.
+    fn apply_mask_overlay(
+        &mut self,
+        row_field_indices: &[FieldIndex],
+        col_field_indices: &[FieldIndex],
+        value_field_indices: &[FieldIndex],
+        slot_len: usize,
+    ) {
+        let Some(i) = self.mask_overlays.iter().position(|o| {
+            o.matches(&self.filter_mask, row_field_indices, col_field_indices, value_field_indices)
+        }) else {
+            return;
+        };
+        // An answered grain is the engine's whole answer: blank its cells
+        // first, so a cell the answer leaves out reads BLANK, then splice.
+        let value_count = value_field_indices.len();
+        let row_count = row_field_indices.len();
+        for grain in &self.mask_overlays[i].answered {
+            let cols: Vec<usize> = (0..self.col_layout.total_combinations)
+                .filter(|&ci| self.col_layout.col_level(ci) == Some(grain.col_depth))
+                .collect();
+            for (key, slot) in self.aggregates.iter_mut() {
+                let at_depth = key.values.len() == row_count
+                    && key.values.iter().take(grain.row_depth).all(|&id| id != VALUE_ID_EMPTY)
+                    && key.values.iter().skip(grain.row_depth).all(|&id| id == VALUE_ID_EMPTY);
+                if !at_depth {
+                    continue;
+                }
+                for &ci in &cols {
+                    for &vi in grain.value_fields.iter().filter(|&&vi| vi < value_count) {
+                        if let Some(acc) = slot.get_mut(ci * value_count + vi) {
+                            *acc = AggregateAccumulator::new();
+                        }
+                    }
+                }
+            }
+        }
+        splice_overrides(
+            &mut self.aggregates,
+            &self.col_layout,
+            &self.mask_overlays[i].overrides,
+            row_field_indices.len(),
+            col_field_indices.len(),
+            value_field_indices.len(),
+            slot_len,
+        );
     }
     
     /// Updates aggregates for a single group key.
@@ -1612,7 +2189,8 @@ impl PivotCache {
             CacheValue::Number(n) => format!("{}", n.0),
             CacheValue::Text(s) => s.clone(),
             CacheValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-            CacheValue::Error(e) => e.clone(),
+            // "#DIV/0!", as every other label of an error member (BUG-0761).
+            CacheValue::Error(e) => format!("#{}", e),
         })
     }
 
@@ -1660,14 +2238,44 @@ impl PivotCache {
     pub fn clear_virtual_fields(&mut self) {
         self.virtual_fields.clear();
         self.virtual_records.clear();
+        self.virtual_origins.clear();
+        self.virtual_levels.clear();
     }
 
-    /// Adds a virtual field and returns its "virtual index" (0-based within virtual_fields).
+    /// The grouping level (`virtual_levels`) the field at EFFECTIVE index
+    /// `field_index` is, when it is a grouped field of its own.
+    pub fn virtual_field_level(&self, field_index: FieldIndex) -> Option<&str> {
+        let vi = field_index.checked_sub(self.fields.len())?;
+        self.virtual_levels.get(vi)?.as_deref()
+    }
+
+    /// Marks virtual field `vf_index` as grouping level `level`.
+    pub fn set_virtual_level(&mut self, vf_index: usize, level: &str) {
+        if let Some(slot) = self.virtual_levels.get_mut(vf_index) {
+            *slot = Some(level.to_string());
+        }
+    }
+
+    /// The base field the field at EFFECTIVE index `field_index` belongs to:
+    /// itself for a base field, the field a grouping made it from for a
+    /// virtual one (a date level, a number bin, a manual group). `None` for
+    /// an index no field has.
+    pub fn virtual_field_origin(&self, field_index: FieldIndex) -> Option<FieldIndex> {
+        if field_index < self.fields.len() {
+            return Some(field_index);
+        }
+        self.virtual_origins.get(field_index - self.fields.len()).copied()
+    }
+
+    /// Adds a virtual field made from base field `origin` and returns its
+    /// "virtual index" (0-based within virtual_fields).
     /// The effective field index for lookups is `self.fields.len() + virtual_index`.
-    pub fn add_virtual_field(&mut self, name: String) -> usize {
+    pub fn add_virtual_field(&mut self, name: String, origin: FieldIndex) -> usize {
         let vf_index = self.virtual_fields.len();
         let source_index = self.fields.len() + vf_index;
         self.virtual_fields.push(FieldCache::new(source_index, name));
+        self.virtual_origins.push(origin);
+        self.virtual_levels.push(None);
         // Pre-allocate record mapping for this virtual field
         self.virtual_records.push(vec![VALUE_ID_EMPTY; self.records.len()]);
         vf_index
@@ -2125,6 +2733,308 @@ mod total_override_tests {
             .compute(AggregationType::Sum);
         assert_eq!(gt_pct, 0.1 + 0.2);
     }
+
+    // ---- BUG-0108: the mask overlay ----------------------------------------
+
+    /// W1 pivotmask verifier: an overlay could never BLANK a cell. The engine
+    /// leaves out a row whose measures are all BLANK, and an override carries
+    /// only a number, so such a cell kept its masked roll-up. A grain the
+    /// overlay records as ANSWERED reads BLANK wherever its answer is silent;
+    /// a grain it does not record (refused) keeps the roll-up.
+    ///
+    /// SABOTAGE (piv4-sabB): `apply_mask_overlay` skips the answered grains.
+    #[test]
+    fn an_overlay_blanks_what_the_engine_answers_blank() {
+        let mut cache = bi_style_cache();
+        let definition = bi_style_definition();
+        let mut overlay = north_only_overlay(&mut cache, &definition);
+        // The engine answered the leaf grain for value field 1 with nothing
+        // for North (its measure is BLANK there), and the grand total.
+        overlay.overrides.retain(|ov| ov.row_key == vec![VALUE_ID_EMPTY]);
+        overlay.answered = vec![
+            AnsweredGrain { row_depth: 1, col_depth: 0, value_fields: vec![1] },
+            AnsweredGrain { row_depth: 0, col_depth: 0, value_fields: vec![1] },
+        ];
+        cache.install_mask_overlay(overlay);
+        let view = calculate_pivot(&south_hidden(&definition), &mut cache);
+        assert_eq!(cell_value(&view, Some("North"), 1), None, "North's value 1 is the engine's BLANK");
+        assert_eq!(cell_value(&view, None, 1), Some(1.0), "the grand total is the engine's answer");
+        // Value field 0 was not answered at any grain: its roll-up stands.
+        assert!(cell_value(&view, Some("North"), 0).is_some(), "an unanswered value field keeps its roll-up");
+    }
+
+    /// The numeric value of the cell for `value_field_index` on the row whose
+    /// label is `label` (a data row) or on the grand-total row (`None`).
+    fn cell_value(view: &PivotView, label: Option<&str>, value_field_index: usize) -> Option<f64> {
+        let row = match label {
+            Some(label) => view.cells.iter().position(|cells| {
+                cells.first().is_some_and(|c| c.formatted_value == label)
+            })?,
+            None => view.rows.iter().position(|r| matches!(r.row_type, PivotRowType::GrandTotal))?,
+        };
+        view.cells[row].iter().find_map(|c| match (c.value_field_index, &c.value) {
+            (Some(i), PivotCellValue::Number(n)) if i == value_field_index => Some(*n),
+            _ => None,
+        })
+    }
+
+    /// `definition` with South hidden on the Region row field.
+    fn south_hidden(definition: &PivotDefinition) -> PivotDefinition {
+        let mut def = definition.clone();
+        def.row_fields[0].hidden_items = vec!["South".to_string()];
+        def
+    }
+
+    /// The overlay a host would evaluate for "South hidden": North is the only
+    /// visible region, so its share of the visible total -- and that total --
+    /// is exactly 1. Revenue is additive and left to the roll-up (`None`).
+    fn north_only_overlay(cache: &mut PivotCache, definition: &PivotDefinition) -> MaskOverlay {
+        let masked = south_hidden(definition);
+        crate::engine::apply_definition_filters(&masked, cache);
+        assert_eq!(cache.filter_mask, vec![true, false], "fixture: South is masked");
+        let id_north = cache
+            .find_value_id(0, &CacheValue::from(&CellValue::Text("North".to_string())))
+            .expect("id for North");
+        MaskOverlay {
+            mask: pack_filter_mask(&cache.filter_mask),
+            record_count: cache.records.len(),
+            row_fields: vec![0],
+            col_fields: vec![],
+            value_fields: vec![1, 2],
+            overrides: vec![
+                TotalOverride { row_key: vec![id_north], col_key: vec![], values: vec![None, Some(1.0)] },
+                TotalOverride { row_key: vec![VALUE_ID_EMPTY], col_key: vec![], values: vec![None, Some(1.0)] },
+            ],
+            answered: vec![],
+        }
+    }
+
+    /// THE MECHANISM. An overlay replaces the masked LEAF value and the total
+    /// for exactly the state it was evaluated for; the same records under any
+    /// other mask -- here, unfiltered -- render the plain roll-up, and the
+    /// overlay applies again the moment the mask comes back (an undo and redo,
+    /// a slicer clicked back and forth). Revenue's `None` keeps its roll-up.
+    #[test]
+    fn a_mask_overlay_applies_to_its_own_mask_only_and_again_when_it_returns() {
+        let mut cache = bi_style_cache();
+        let definition = bi_style_definition();
+        let overlay = north_only_overlay(&mut cache, &definition);
+        cache.install_mask_overlay(overlay);
+        let masked = south_hidden(&definition);
+
+        let view = calculate_pivot(&masked, &mut cache);
+        assert_eq!(cell_value(&view, Some("North"), 1), Some(1.0), "the masked leaf takes the overlay");
+        assert_eq!(cell_value(&view, None, 1), Some(1.0), "and so does the total");
+        assert_eq!(cell_value(&view, Some("North"), 0), Some(100.0), "an additive column keeps its roll-up");
+        assert_eq!(cell_value(&view, None, 0), Some(100.0));
+
+        let view = calculate_pivot(&definition, &mut cache);
+        assert_eq!(cell_value(&view, Some("North"), 1), Some(0.1), "unfiltered: the record's own value");
+        assert_eq!(cell_value(&view, None, 1), Some(0.1 + 0.2), "unfiltered: the roll-up, not the overlay");
+
+        let view = calculate_pivot(&masked, &mut cache);
+        assert_eq!(cell_value(&view, Some("North"), 1), Some(1.0), "the mask came back, and so did its overlay");
+        assert_eq!(cell_value(&view, None, 1), Some(1.0));
+    }
+
+    /// An overlay is keyed by its mask AND its field layout: one evaluated for
+    /// another mask, or with the value fields in another order (its values are
+    /// parallel to them), is never laid over this view.
+    #[test]
+    fn an_overlay_for_another_mask_or_another_layout_never_applies() {
+        let mut cache = bi_style_cache();
+        let definition = bi_style_definition();
+        let masked = south_hidden(&definition);
+
+        let mut swapped = north_only_overlay(&mut cache, &definition);
+        swapped.value_fields = vec![2, 1];
+        cache.install_mask_overlay(swapped);
+        let view = calculate_pivot(&masked, &mut cache);
+        assert_eq!(cell_value(&view, Some("North"), 1), Some(0.1), "another value layout: not applied");
+
+        let mut other_mask = north_only_overlay(&mut cache, &definition);
+        other_mask.mask = pack_filter_mask(&[false, true]);
+        cache.mask_overlays.clear();
+        cache.install_mask_overlay(other_mask);
+        let view = calculate_pivot(&masked, &mut cache);
+        assert_eq!(cell_value(&view, Some("North"), 1), Some(0.1), "another mask: not applied");
+        assert_eq!(cell_value(&view, None, 1), Some(0.1), "the masked roll-up stands");
+    }
+
+    /// The overlays describe THESE records, so a JSON undo snapshot of the
+    /// cache keeps them (and the sensitivity and identity beside them);
+    /// re-installing a state replaces its entry; the list keeps the newest
+    /// `MAX_MASK_OVERLAYS`.
+    #[test]
+    fn overlays_survive_the_undo_snapshot_and_the_list_keeps_the_newest() {
+        let mut cache = bi_style_cache();
+        let definition = bi_style_definition();
+        let overlay = north_only_overlay(&mut cache, &definition);
+        cache.install_mask_overlay(overlay.clone());
+        cache.mask_sensitivity = Some(MaskSensitivity { total_fields: vec![2], leaf_fields: vec![2] });
+
+        let back: PivotCache = serde_json::from_slice(&serde_json::to_vec(&cache).unwrap()).unwrap();
+        assert_eq!(back.mask_overlays, vec![overlay.clone()], "the snapshot keeps the overlay");
+        assert_eq!(back.mask_sensitivity, cache.mask_sensitivity, "and the sensitivity");
+        assert_eq!(back.build_id, cache.build_id, "and the records' identity");
+
+        cache.install_mask_overlay(overlay.clone());
+        assert_eq!(cache.mask_overlays.len(), 1, "the same state replaces its entry");
+
+        for n in 0..(MAX_MASK_OVERLAYS + 3) {
+            let mut o = overlay.clone();
+            o.mask = vec![n as u64 + 7];
+            cache.install_mask_overlay(o);
+        }
+        assert_eq!(cache.mask_overlays.len(), MAX_MASK_OVERLAYS, "capped");
+        assert_eq!(cache.mask_overlays[0].mask, vec![(MAX_MASK_OVERLAYS + 2) as u64 + 7], "newest first");
+    }
+
+    /// Every cache names its own records; a clone shares the name (same
+    /// records), a new build never does.
+    #[test]
+    fn every_new_cache_has_its_own_build_id_and_a_clone_keeps_it() {
+        let a = bi_style_cache();
+        let b = bi_style_cache();
+        assert_ne!(a.build_id, 0, "0 names no records");
+        assert_ne!(a.build_id, b.build_id, "two builds, two identities");
+        assert_eq!(a.clone().build_id, a.build_id);
+    }
+
+    /// The packed mask is exact, beyond one 64-record word too.
+    #[test]
+    fn a_packed_mask_matches_only_its_own_mask() {
+        let mask: Vec<bool> = (0..130).map(|i| i % 3 != 0).collect();
+        let bits = pack_filter_mask(&mask);
+        assert_eq!(bits.len(), 3);
+        assert!(mask_bits_equal(&bits, &mask));
+        let mut flipped = mask.clone();
+        flipped[129] = !flipped[129];
+        assert!(!mask_bits_equal(&bits, &flipped), "the last record's bit counts");
+        // The record count is the overlay's own check.
+        let overlay = MaskOverlay {
+            mask: bits,
+            record_count: mask.len(),
+            row_fields: vec![0],
+            col_fields: vec![],
+            value_fields: vec![1],
+            overrides: vec![],
+            answered: vec![],
+        };
+        assert!(overlay.matches(&mask, &[0], &[], &[1]));
+        assert!(!overlay.matches(&mask[..129], &[0], &[], &[1]), "and so does the length");
+        assert!(!overlay.matches(&mask, &[0], &[], &[2]), "and the layout");
+    }
+
+    /// Wave 1 pivotmask lane, verified here: a BI pivot's engine totals are
+    /// keyed by the SOURCE column's members, but a number-binned row field is
+    /// aggregated under its BINS' ids. Size (1, 2, 11) binned 1-10 / 11-20 by
+    /// Region: the override for Size = 2's subtotal (raw id 1) has the same
+    /// key shape as the 11-20 bin's subtotal (bin id 1) and overwrote it with
+    /// 999. A raw-keyed entry never lands on a grouped level; the grand total,
+    /// which pads it, still applies.
+    ///
+    /// SABOTAGE (pivotfix-sabL): no grouped-position filter -- fails at
+    /// "BIN SUBTOTAL" with 999.
+    #[test]
+    fn a_raw_keyed_override_never_lands_on_a_grouped_level() {
+        let mut cache = PivotCache::new(test_pivot_id(), 3);
+        cache.set_field_name(0, "Size".to_string());
+        cache.set_field_name(1, "Region".to_string());
+        cache.set_field_name(2, "Amount".to_string());
+        for (i, (size, region, amount)) in
+            [(1.0, "East", 10.0), (2.0, "West", 20.0), (11.0, "East", 100.0)].iter().enumerate()
+        {
+            cache.add_record(
+                i as u32,
+                &[CellValue::Number(*size), CellValue::Text(region.to_string()), CellValue::Number(*amount)],
+            );
+        }
+        let raw_size_two = cache
+            .find_value_id(0, &CacheValue::Number(OrderedFloat(2.0)))
+            .expect("fixture: Size 2's raw id");
+        let mut def = PivotDefinition::new(test_pivot_id(), (0, 0), (3, 2));
+        let mut size = PivotField::new(0, "Size".to_string());
+        size.grouping = crate::definition::FieldGrouping::NumberBinning { start: 1.0, end: 20.0, interval: 10.0 };
+        def.row_fields.push(size);
+        def.row_fields.push(PivotField::new(1, "Region".to_string()));
+        def.value_fields.push(ValueField::new(2, "[Amount]".to_string(), AggregationType::Sum));
+        cache.set_total_overrides(vec![
+            TotalOverride { row_key: vec![raw_size_two, VALUE_ID_EMPTY], col_key: vec![], values: vec![Some(999.0)] },
+            TotalOverride { row_key: vec![VALUE_ID_EMPTY, VALUE_ID_EMPTY], col_key: vec![], values: vec![Some(130.0)] },
+        ]);
+        let view = calculate_pivot(&def, &mut cache);
+        let numbers: Vec<f64> = view
+            .cells
+            .iter()
+            .flatten()
+            .filter(|c| c.value_field_index == Some(0))
+            .filter_map(|c| match c.value {
+                PivotCellValue::Number(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        assert!(!numbers.contains(&999.0), "BIN SUBTOTAL: a source member's total landed on a bin: {numbers:?}");
+        assert!(numbers.contains(&100.0), "the 11-20 bin's own subtotal: {numbers:?}");
+        assert_eq!(grand_total_value(&view, 0), Some(130.0), "the padded grand total still applies");
+    }
+
+    /// Wave 3 verifier: with the raw-keyed override skipped, a grouped
+    /// level's subtotal of a NON-ADDITIVE measure (an average) was the
+    /// rolled-up SUM of its items -- a wrong number, with no notice. Nothing
+    /// evaluates a group made in the PivotTable, so that subtotal is now left
+    /// EMPTY and the cache says so (`grouped_totals_withheld`, which the host
+    /// turns into a notice); a manual group's detail leaves (the main query's
+    /// own values) and the engine's grand total stand, and an additive
+    /// measure keeps its exact roll-up.
+    ///
+    /// SABOTAGE (piv4-sabW): `withhold_grouped_totals` returns at once.
+    #[test]
+    fn a_grouped_levels_non_additive_subtotal_is_withheld_not_summed() {
+        let build = |sensitive: bool| {
+            let mut cache = PivotCache::new(test_pivot_id(), 2);
+            cache.set_field_name(0, "Region".to_string());
+            cache.set_field_name(1, "Avg".to_string());
+            for (i, (region, avg)) in [("A", 10.0), ("B", 20.0), ("C", 5.0)].iter().enumerate() {
+                cache.add_record(i as u32, &[CellValue::Text(region.to_string()), CellValue::Number(*avg)]);
+            }
+            if sensitive {
+                cache.mask_sensitivity = Some(MaskSensitivity { total_fields: vec![1], leaf_fields: vec![] });
+            }
+            let mut def = PivotDefinition::new(test_pivot_id(), (0, 0), (3, 1));
+            let mut region = PivotField::new(0, "Region".to_string());
+            region.grouping = crate::definition::FieldGrouping::ManualGrouping {
+                groups: vec![crate::definition::ManualGroup { name: "G".into(), members: vec!["A".into(), "B".into()] }],
+                ungrouped_name: "Other".into(),
+            };
+            def.row_fields.push(region);
+            def.value_fields.push(ValueField::new(1, "[Avg]".to_string(), AggregationType::Sum));
+            cache.set_total_overrides(vec![TotalOverride {
+                row_key: vec![VALUE_ID_EMPTY, VALUE_ID_EMPTY],
+                col_key: vec![],
+                values: vec![Some(11.0)],
+            }]);
+            let view = calculate_pivot(&def, &mut cache);
+            let numbers: Vec<f64> = view
+                .cells
+                .iter()
+                .flatten()
+                .filter(|c| c.value_field_index == Some(0))
+                .filter_map(|c| match c.value {
+                    PivotCellValue::Number(n) => Some(n),
+                    _ => None,
+                })
+                .collect();
+            (numbers, cache.grouped_totals_withheld(), grand_total_value(&view, 0))
+        };
+        let (numbers, withheld, gt) = build(true);
+        assert!(withheld, "the cache reports the withheld subtotals");
+        assert!(!numbers.contains(&30.0), "GROUP SUBTOTAL: G's subtotal is not the sum 10 + 20: {numbers:?}");
+        assert!(numbers.contains(&10.0) && numbers.contains(&20.0), "the group's items stand: {numbers:?}");
+        assert_eq!(gt, Some(11.0), "the engine's grand total stands");
+        let (numbers, withheld, _) = build(false);
+        assert!(!withheld && numbers.contains(&30.0), "an additive measure keeps its roll-up: {numbers:?}");
+    }
 }
 #[cfg(test)]
 mod model_key_tests {
@@ -2168,5 +3078,30 @@ mod model_key_tests {
         assert!(!json.contains("model_key"), "an absent key must not be written: {json}");
         let back: PivotCache = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.fields[0].model_key, None);
+    }
+}
+
+#[cfg(test)]
+mod error_member_tests {
+    use super::*;
+
+    /// BUG-0761: a source error member is named as Excel names it -- the
+    /// item label, the member key and the filter list all read "#DIV/0!" /
+    /// "#N/A" -- never the Rust variant name ("#Div0", "#NA").
+    #[test]
+    fn a_source_error_member_reads_as_its_excel_literal() {
+        let mut cache = PivotCache::new(identity::EntityId::ZERO, 1);
+        cache.add_record(0, &[CellValue::Error(engine::CellError::Div0)]);
+        cache.add_record(1, &[CellValue::Error(engine::CellError::NA)]);
+        cache.add_record(2, &[CellValue::Error(engine::CellError::Name)]);
+        let listed = cache.get_unique_values_for_filter(0);
+        let labels: Vec<&str> = listed.iter().map(|(_, l)| l.as_str()).collect();
+        for want in ["#DIV/0!", "#N/A", "#NAME?"] {
+            assert!(labels.contains(&want), "the filter list names {want}: {labels:?}");
+        }
+        for (id, label) in &listed {
+            assert_eq!(cache.get_value_label(0, *id).as_deref(), Some(label.as_str()), "the item label");
+            assert_eq!(&cache.get_field(0).unwrap().member_key(*id), label, "the member key");
+        }
     }
 }

@@ -27,6 +27,17 @@ export const FLOATING_HANDLE_PAINT_SIZE = 7;
  */
 export const FLOATING_HANDLE_HIT_HALF = 6;
 
+/**
+ * How far a RIGHT-edge handle (ne, e, se) may be grabbed past the object's
+ * right edge with a finger or a pen, in logical px. The 44 px touch target
+ * (BUG-0729) grows a hit square 22 px each way, which on the right covered a
+ * selected chart's quick-access buttons (8 px right of the edge) -- and the
+ * resize scan runs first, so a tap on a button resized the chart instead. The
+ * square still grows left, up and down; past the edge it stops short of 8,
+ * the mouse's own rule above.
+ */
+export const FLOATING_HANDLE_TOUCH_OUTER_REACH = 7;
+
 /** Shortest edge, in logical px, that gets a MIDPOINT handle. */
 export const FLOATING_HANDLE_MIDPOINT_MIN_EDGE = 48;
 

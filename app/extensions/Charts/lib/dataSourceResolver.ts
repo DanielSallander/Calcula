@@ -21,8 +21,10 @@
 //              store stamps the id at create and at load).
 //
 //          A sheet-qualified A1 string keeps resolving BY NAME, as before; an
-//          unqualified one means the ACTIVE sheet, which is what the reader
-//          used to read for every chart before it learned to read by sheet.
+//          unqualified one, and a defined name, are read from the ASKING sheet:
+//          the sheet the chart is placed on (`askingSheet`, which every chart
+//          reader passes from the chart's maintained placement), else -- a
+//          preview or an export with no placed chart -- the active sheet.
 
 import {
   getNamedRange,
@@ -101,15 +103,23 @@ function activeSheetIndexFallback(): number {
  * - A `DataRangeRef` object -- its sheet resolved id-first (see
  *   {@link resolveRangeRefSheet}).
  * - An A1 reference string like `"Sheet1!A1:D10"` -- parsed to coordinates; the
- *   sheet by NAME, or the active sheet when unqualified.
- * - A named range name like `"SalesData"` -- resolved via the backend.
+ *   sheet by NAME, or the asking sheet when unqualified.
+ * - A named range name like `"SalesData"` -- resolved via the backend, asked
+ *   from the asking sheet.
+ *
+ * `askingSheet` is the sheet the CHART is on (`ChartDefinition.sheetIndex`,
+ * the placement the store keeps current through sheet moves and deletes). Left
+ * out -- a preview, a dialog with no placed chart -- it is the active sheet.
+ * A chart read while another sheet is active (the AI's series snapshot, a
+ * raster, a SERIES formula) used to ask from THAT sheet, and so plotted a
+ * Copy Sheet's sheet-scoped Sales instead of its own sheet's.
  *
  * @throws Error if the reference cannot be resolved (including a DataRangeRef
  *   whose source sheet was deleted).
  */
 export async function resolveDataSource(
   source: DataSource,
-  fallbackSheetIndex?: number,
+  askingSheet?: number,
 ): Promise<DataRangeRef> {
   if (isDataRangeRef(source)) {
     return resolveRangeRefSheet(source);
@@ -129,11 +139,11 @@ export async function resolveDataSource(
   // Try parsing as A1 reference first
   const parsed = parseA1Reference(ref);
   if (parsed) {
-    // Resolve sheet name to index if present. Unqualified means the ACTIVE
-    // sheet -- the sheet every chart read before reads learned their sheet.
+    // Resolve sheet name to index if present. Unqualified means the ASKING
+    // sheet (the chart's own), else the active one.
     const sheetIndex = parsed.sheetName
       ? await resolveSheetIndex(parsed.sheetName)
-      : (fallbackSheetIndex ?? activeSheetIndexFallback());
+      : (askingSheet ?? activeSheetIndexFallback());
 
     return {
       sheetIndex,
@@ -144,14 +154,22 @@ export async function resolveDataSource(
     };
   }
 
-  // Try resolving as a named range
-  const namedRange = await getNamedRange(ref);
+  // Try resolving as a named range. ASKED FROM THE CHART'S SHEET first (the
+  // caller's sheet, else the active one): a chart's series is a Range, and
+  // Excel's Range("Sales") is the asking sheet's own Sales, else the
+  // workbook's [LIVE, Excel 16, 2026-11-06, lane namescalp p1.ps1]. Failing
+  // that, the backend's no-scope answer, Excel's Names("Sales") (see
+  // `addressed_key`, named_ranges.rs), so a chart drawing another sheet's
+  // local name keeps drawing it, and a Copy Sheet that makes a second Sales no
+  // longer leaves every such chart with nothing (BUG-0744 follow-up).
+  const askedFrom = askingSheet ?? activeSheetIndexFallback();
+  const namedRange = (await getNamedRange(ref, askedFrom)) ?? (await getNamedRange(ref));
   if (namedRange) {
     const rangeCoords = parseRefersToFormula(namedRange.refersTo);
     if (rangeCoords) {
       const sheetIndex = rangeCoords.sheetName
         ? await resolveSheetIndex(rangeCoords.sheetName)
-        : (namedRange.sheetIndex ?? fallbackSheetIndex ?? activeSheetIndexFallback());
+        : (namedRange.sheetIndex ?? askedFrom);
 
       return {
         sheetIndex,
@@ -312,7 +330,7 @@ export async function locateParamCell(
     hostIsCanvas = false;
   }
   if (!hostIsCanvas) return { kind: "cell", sheetIndex: host.sheetIndex, ...target };
-  const dataSheet = await specReferenceSheet(host.spec);
+  const dataSheet = await specReferenceSheet(host.spec, host.sheetIndex);
   if (typeof dataSheet !== "number" || dataSheet === host.sheetIndex) return { kind: "noSheet" };
   return { kind: "cell", sheetIndex: dataSheet, ...target };
 }
@@ -358,10 +376,10 @@ export function parseParamCellTarget(cellRef: string): { row: number; col: numbe
  * `chart_data_sheet`.) Undefined for an aggregated source, or when the data
  * cannot resolve -- the data read reports that failure itself.
  */
-async function specReferenceSheet(spec: ChartSpec): Promise<number | undefined> {
+async function specReferenceSheet(spec: ChartSpec, askingSheet: number): Promise<number | undefined> {
   if (!isDataRangeRef(spec.data) && typeof spec.data !== "string") return undefined;
   try {
-    return (await resolveDataSource(spec.data)).sheetIndex;
+    return (await resolveDataSource(spec.data, askingSheet)).sheetIndex;
   } catch {
     return undefined;
   }

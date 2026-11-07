@@ -2681,14 +2681,15 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
 
     // ---- Calculation control (Wave 3, item 7) ----
     getCalculationMode: () =>
-      call(rt, "api.getCalculationMode", []) as Promise<"automatic" | "manual">,
+      call(rt, "api.getCalculationMode", []) as Promise<"automatic" | "automaticExceptTables" | "manual">,
     /**
      * If your script sets "manual" and then stops for any reason (unmount, a
      * fault, being stopped mid-session, workbook swap), the host restores
-     * "automatic" — a dead script can never leave the workbook uncalculating.
+     * the mode it replaced ("automatic", or "automaticExceptTables") — a dead
+     * script can never leave the workbook uncalculating.
      */
-    setCalculationMode: (mode: "automatic" | "manual") =>
-      call(rt, "api.setCalculationMode", [mode]) as Promise<"automatic" | "manual">,
+    setCalculationMode: (mode: "automatic" | "automaticExceptTables" | "manual") =>
+      call(rt, "api.setCalculationMode", [mode]) as Promise<"automatic" | "automaticExceptTables" | "manual">,
     recalculate: (options?: { full?: boolean }) =>
       call(rt, "api.recalculate", [options]) as Promise<{ cellsUpdated: number }>,
 

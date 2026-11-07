@@ -377,6 +377,10 @@ export type {
 // ============================================================================
 
 export { showToast } from "./notifications";
+
+// Excel's defined-name and table-name rule, whole (BUG-0741): the mirror of
+// the backend's identity::is_valid_defined_name every name door asks.
+export { isValidDefinedName, isValidTableName, MAX_DEFINED_NAME_CHARS } from "./definedNameSyntax";
 export type { ToastOptions, ToastHandle } from "./notifications";
 export { registerSelectionOwner, isSelectionOwned, refuseIfSelectionOwned, type SelectionOwner } from "./selectionOwner";
 
@@ -1995,6 +1999,7 @@ export type {
   EvaluateCFResult,
   AddCFParams,
   UpdateCFParams,
+  CFWriteOptions,
 } from "./lib";
 
 // ============================================================================

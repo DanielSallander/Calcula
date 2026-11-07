@@ -196,7 +196,8 @@ describe("special characters in name validation", () => {
   it("reserved words are rejected", () => {
     expect(isValidName("TRUE")).toBe(false);
     expect(isValidName("FALSE")).toBe(false);
-    expect(isValidName("NULL")).toBe(false);
+    // NULL is a name in Excel [LIVE, lane miscb] (BUG-0741).
+    expect(isValidName("NULL")).toBe(true);
     expect(isValidName("true")).toBe(false);
   });
 

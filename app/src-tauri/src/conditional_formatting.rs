@@ -789,14 +789,38 @@ fn cf_target_sheet(
     Ok(t.backing_index)
 }
 
-/// Add a conditional format rule
+/// The sheet a CF write acts on: an OBJECT's backing sheet (`target`), a
+/// sheet named by index (`sheet_index`: the Rules Manager's "Show formatting
+/// rules for" another worksheet, which edits that sheet's rules as Excel's
+/// does), or the active sheet. A named sheet must exist and, being formatted,
+/// is asked its protection's Format Cells. Call holding nothing.
+fn cf_write_sheet(
+    state: &AppState,
+    target: Option<&crate::api_types::CellTargetRef>,
+    sheet_index: Option<usize>,
+    ranges: &[ConditionalFormatRange],
+) -> Result<usize, String> {
+    if let Some(target) = target {
+        return cf_target_sheet(state, target, ranges, true);
+    }
+    let active = *state.active_sheet.read().unwrap();
+    let sheet = resolve_cf_sheet(state, sheet_index)?;
+    if sheet != active {
+        crate::protection::check_sheet_action(state, sheet, "formatCells", "change conditional formatting")?;
+    }
+    Ok(sheet)
+}
+
+/// Add a conditional format rule (on `sheet_index` when given, see
+/// [`cf_write_sheet`]).
 #[tauri::command]
 pub fn add_conditional_format(
     state: State<AppState>,
     file_state: State<FileState>,
     params: AddCFParams,
+    sheet_index: Option<usize>,
 ) -> CFResult {
-    add_conditional_format_impl(&state, &file_state, params)
+    add_conditional_format_in(&state, &file_state, params, sheet_index)
 }
 
 /// Command body over plain references, so the dirty-flag contract is unit-testable
@@ -806,6 +830,16 @@ pub(crate) fn add_conditional_format_impl(
     file_state: &FileState,
     params: AddCFParams,
 ) -> CFResult {
+    add_conditional_format_in(state, file_state, params, None)
+}
+
+/// [`add_conditional_format_impl`] on a sheet named by index ([`cf_write_sheet`]).
+pub(crate) fn add_conditional_format_in(
+    state: &AppState,
+    file_state: &FileState,
+    params: AddCFParams,
+    sheet_index: Option<usize>,
+) -> CFResult {
     // A structured reference in any of the rule's formulas: Excel's refusal,
     // before any lock or effect (NEW-cfdv-structured-refs).
     if let Some(refusal) = rule_entry_refusal(&params.rule) {
@@ -813,12 +847,9 @@ pub(crate) fn add_conditional_format_impl(
     }
     // An OBJECT's cells (P3): the rule lives on its backing sheet. Every gate
     // runs before the effect below, so a refusal leaves the document clean.
-    let active_sheet = match &params.target {
-        Some(target) => match cf_target_sheet(state, target, &params.ranges, true) {
-            Ok(sheet) => sheet,
-            Err(e) => return CFResult::err(e),
-        },
-        None => *state.active_sheet.read().unwrap(),
+    let active_sheet = match cf_write_sheet(state, params.target.as_ref(), sheet_index, &params.ranges) {
+        Ok(sheet) => sheet,
+        Err(e) => return CFResult::err(e),
     };
     // Rules live in `workbook.conditional_formats` and are written only by the save
     // path, so adding one changes what a save would write.
@@ -871,8 +902,9 @@ pub fn update_conditional_format(
     state: State<AppState>,
     file_state: State<FileState>,
     params: UpdateCFParams,
+    sheet_index: Option<usize>,
 ) -> CFResult {
-    update_conditional_format_impl(&state, &file_state, params)
+    update_conditional_format_in(&state, &file_state, params, sheet_index)
 }
 
 /// Command body over plain references, so the undo contract is unit-testable
@@ -882,19 +914,24 @@ pub(crate) fn update_conditional_format_impl(
     file_state: &FileState,
     params: UpdateCFParams,
 ) -> CFResult {
+    update_conditional_format_in(state, file_state, params, None)
+}
+
+/// [`update_conditional_format_impl`] on a sheet named by index ([`cf_write_sheet`]).
+pub(crate) fn update_conditional_format_in(
+    state: &AppState,
+    file_state: &FileState,
+    params: UpdateCFParams,
+    sheet_index: Option<usize>,
+) -> CFResult {
     // The same entry refusal as `add` (NEW-cfdv-structured-refs), first.
     if let Some(refusal) = params.rule.as_ref().and_then(rule_entry_refusal) {
         return CFResult::err(refusal);
     }
-    let active_sheet = match &params.target {
-        Some(target) => {
-            let ranges = params.ranges.clone().unwrap_or_default();
-            match cf_target_sheet(state, target, &ranges, true) {
-                Ok(sheet) => sheet,
-                Err(e) => return CFResult::err(e),
-            }
-        }
-        None => *state.active_sheet.read().unwrap(),
+    let ranges = params.ranges.clone().unwrap_or_default();
+    let active_sheet = match cf_write_sheet(state, params.target.as_ref(), sheet_index, &ranges) {
+        Ok(sheet) => sheet,
+        Err(e) => return CFResult::err(e),
     };
     // Gate and mutation in ONE critical section (`lock_pending` then
     // `authorize`), and the effect only AFTER every refusal below
@@ -963,8 +1000,9 @@ pub fn delete_conditional_format(
     file_state: State<FileState>,
     rule_id: u64,
     target: Option<crate::api_types::CellTargetRef>,
+    sheet_index: Option<usize>,
 ) -> CFResult {
-    delete_conditional_format_on(&state, &file_state, rule_id, target.as_ref())
+    delete_conditional_format_in(&state, &file_state, rule_id, target.as_ref(), sheet_index)
 }
 
 /// Command body over plain references, so the undo contract is unit-testable
@@ -985,12 +1023,20 @@ pub(crate) fn delete_conditional_format_on(
     rule_id: u64,
     target: Option<&crate::api_types::CellTargetRef>,
 ) -> CFResult {
-    let active_sheet = match target {
-        Some(target) => match cf_target_sheet(state, target, &[], true) {
-            Ok(sheet) => sheet,
-            Err(e) => return CFResult::err(e),
-        },
-        None => *state.active_sheet.read().unwrap(),
+    delete_conditional_format_in(state, file_state, rule_id, target, None)
+}
+
+/// [`delete_conditional_format_on`] on a sheet named by index ([`cf_write_sheet`]).
+pub(crate) fn delete_conditional_format_in(
+    state: &AppState,
+    file_state: &FileState,
+    rule_id: u64,
+    target: Option<&crate::api_types::CellTargetRef>,
+    sheet_index: Option<usize>,
+) -> CFResult {
+    let active_sheet = match cf_write_sheet(state, target, sheet_index, &[]) {
+        Ok(sheet) => sheet,
+        Err(e) => return CFResult::err(e),
     };
     // The refusals first, in the same critical section as the delete, and the
     // effect only after them: a refusal leaves the document clean.
@@ -1027,8 +1073,9 @@ pub fn reorder_conditional_formats(
     file_state: State<FileState>,
     rule_ids: Vec<u64>,
     target: Option<crate::api_types::CellTargetRef>,
+    sheet_index: Option<usize>,
 ) -> CFResult {
-    reorder_conditional_formats_on(&state, &file_state, rule_ids, target.as_ref())
+    reorder_conditional_formats_in(&state, &file_state, rule_ids, target.as_ref(), sheet_index)
 }
 
 /// Command body over plain references, so the undo contract is unit-testable
@@ -1049,12 +1096,20 @@ pub(crate) fn reorder_conditional_formats_on(
     rule_ids: Vec<u64>,
     target: Option<&crate::api_types::CellTargetRef>,
 ) -> CFResult {
-    let active_sheet = match target {
-        Some(target) => match cf_target_sheet(state, target, &[], true) {
-            Ok(sheet) => sheet,
-            Err(e) => return CFResult::err(e),
-        },
-        None => *state.active_sheet.read().unwrap(),
+    reorder_conditional_formats_in(state, file_state, rule_ids, target, None)
+}
+
+/// [`reorder_conditional_formats_on`] on a sheet named by index ([`cf_write_sheet`]).
+pub(crate) fn reorder_conditional_formats_in(
+    state: &AppState,
+    file_state: &FileState,
+    rule_ids: Vec<u64>,
+    target: Option<&crate::api_types::CellTargetRef>,
+    sheet_index: Option<usize>,
+) -> CFResult {
+    let active_sheet = match cf_write_sheet(state, target, sheet_index, &[]) {
+        Ok(sheet) => sheet,
+        Err(e) => return CFResult::err(e),
     };
     // The refusal first, in the same critical section as the reorder, and the
     // effect only after it: a sheet with no rules leaves the document clean.
@@ -1206,11 +1261,18 @@ pub(crate) fn resolve_icons(
     rules: &[ConditionalFormatDefinition],
     cells: &[(u32, u32)],
     surface: crate::eval_budget::EvalSurface,
+    // The workbook's names, tables and spill map (BUG-0748): without them a
+    // rule naming one answered #NAME? here while the screen formatted it, so a
+    // sort or filter by its icon matched nothing. `None` only in tests.
+    names: Option<crate::name_resolution::NameTables<'_>>,
 ) -> HashMap<(u32, u32), Option<IconRef>> {
     let _governor = crate::eval_budget::install(surface);
     // Each rule formula parsed once for the pass, evaluated per cell relative
     // to its rule's anchor (NEW-cf-relative-eval).
-    let formulas = RuleFormulas::new(grids, sheet_names, sheet_index, None);
+    let formulas = match names {
+        Some(tables) => RuleFormulas::resolved(grids, sheet_names, sheet_index, tables),
+        None => RuleFormulas::new(grids, sheet_names, sheet_index, None),
+    };
 
     // Priority order, explicitly. Lower priority value = higher precedence.
     let mut ordered: Vec<&ConditionalFormatDefinition> =
@@ -1354,6 +1416,8 @@ pub(crate) fn get_range_icons_on(
     if rules.is_empty() {
         return Ok(Vec::new());
     }
+    // Names and tables, snapshotted before the grid guards (BUG-0748).
+    let names = snapshot_rule_names(state);
 
     let grids = state.grids.read().unwrap();
     if let Some(t) = &resolved {
@@ -1381,6 +1445,7 @@ pub(crate) fn get_range_icons_on(
         &rules,
         &cells,
         crate::eval_budget::EvalSurface::Interactive,
+        Some(names.tables(&sheet_names)),
     );
 
     // Distinct, and ordered by set then by the icon's own position within it, so
@@ -1409,6 +1474,11 @@ pub(crate) fn get_range_icons_on(
 ///
 /// Takes plain refs and acquires no locks, so a caller may already hold the grid
 /// guards it passes in.
+///
+/// TEST-ONLY since BUG-0748: it resolves no defined name, table or spill
+/// reference, so a production path through it formatted differently from the
+/// screen. Production callers use [`evaluate_conditional_formats_resolved`].
+#[cfg(test)]
 pub(crate) fn evaluate_conditional_formats_for(
     grid: &Grid,
     grids: &[Grid],
@@ -1440,13 +1510,47 @@ pub(crate) fn evaluate_conditional_formats_with_names(
     start_col: u32,
     end_col: u32,
 ) -> Vec<CellConditionalFormat> {
+    // Each rule formula parsed once for the pass, evaluated per cell relative
+    // to its rule's anchor (NEW-cf-relative-eval).
+    let formulas = RuleFormulas::new(grids, sheet_names, sheet_index, named_ranges);
+    evaluate_conditional_formats_over(grid, &formulas, rules, start_row, end_row, start_col, end_col)
+}
+
+/// The production evaluation: rule formulas resolved through the workbook's
+/// names, tables and live spill map (`tables`), exactly as a cell's formula is
+/// (BUG-0748). The painter, the floating-grid painter and every test of them
+/// go through here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_conditional_formats_resolved(
+    grid: &Grid,
+    grids: &[Grid],
+    sheet_names: &[String],
+    sheet_index: usize,
+    tables: crate::name_resolution::NameTables<'_>,
+    rules: &[ConditionalFormatDefinition],
+    start_row: u32,
+    end_row: u32,
+    start_col: u32,
+    end_col: u32,
+) -> Vec<CellConditionalFormat> {
+    let formulas = RuleFormulas::resolved(grids, sheet_names, sheet_index, tables);
+    evaluate_conditional_formats_over(grid, &formulas, rules, start_row, end_row, start_col, end_col)
+}
+
+/// The shared body of the two above, over a built [`RuleFormulas`].
+fn evaluate_conditional_formats_over(
+    grid: &Grid,
+    formulas: &RuleFormulas,
+    rules: &[ConditionalFormatDefinition],
+    start_row: u32,
+    end_row: u32,
+    start_col: u32,
+    end_col: u32,
+) -> Vec<CellConditionalFormat> {
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
     let min_col = start_col.min(end_col);
     let max_col = start_col.max(end_col);
-    // Each rule formula parsed once for the pass, evaluated per cell relative
-    // to its rule's anchor (NEW-cf-relative-eval).
-    let formulas = RuleFormulas::new(grids, sheet_names, sheet_index, named_ranges);
     let anchors: Vec<Option<(u32, u32)>> = rules.iter().map(|r| rule_anchor(&r.ranges)).collect();
 
     // One RangeStats per rule for the whole pass, never per cell: the stats are a
@@ -1474,7 +1578,7 @@ pub(crate) fn evaluate_conditional_formats_with_names(
                 }
                 if let Some(cf) = evaluate_rule(
                     grid,
-                    &formulas,
+                    formulas,
                     anchors[idx].unwrap_or((row, col)),
                     &rule_def.rule,
                     &rule_def.format,
@@ -1513,7 +1617,9 @@ pub fn evaluate_conditional_formats(
     let active_sheet = *state.active_sheet.read().unwrap();
     // The defined names a rule formula may read, taken and released BEFORE the
     // grid guards (a snapshot: no names guard is ever held across them).
-    let named_ranges = state.named_ranges.read().map(|n| (*n).clone()).unwrap_or_default();
+    // Names and tables included (BUG-0748): a rule's table or spill reference
+    // resolves as in a cell.
+    let names = snapshot_rule_names(&state);
     // CANONICAL LOCK ORDER: `grids` FIRST, then everything else.
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
@@ -1530,12 +1636,12 @@ pub fn evaluate_conditional_formats(
     };
 
     // ONE implementation, shared with the sort/filter paths and with the tests.
-    let result = evaluate_conditional_formats_with_names(
+    let result = evaluate_conditional_formats_resolved(
         grid,
         &grids,
         &sheet_names,
         active_sheet,
-        Some(&named_ranges),
+        names.tables(&sheet_names),
         rules,
         start_row,
         end_row,
@@ -1696,10 +1802,10 @@ pub(crate) fn clear_conditional_formats_in_range_impl(
 //     validation's source `=$F$1:$F$5` (-> `$F$2:$F$6`, `$G$1:$G$5`, `#REF!`
 //     when every row of it goes) follow the same rule, and so does a custom
 //     validation `=H2>$D$1` (-> `=H3>$D$2`).
-// The one case not reproduced: when the edit leaves SOME cells' relative
-// references deleted and others not (`=B12>0` on B2:B10, delete row 12),
-// Excel splits the rule in two (B2 `=#REF!>0`, B3:B10 `=B12>0`); the rule
-// here keeps one formula, its anchor's (`=#REF!>0`).
+// When the edit leaves SOME cells' relative references deleted or moved and
+// others not (`=B12>0` on B2:B10, delete row 12), Excel splits the rule (B2
+// `=#REF!>0`, B3:B10 `=B12>0`); so does this, by `split_rule_by_meaning`
+// (BUG-0743).
 
 /// Whether `band` is a whole-line edit (Insert/Delete Sheet Rows/Columns).
 fn is_whole_lines(band: &crate::commands::structure::structure_cells::BandEdit) -> bool {
@@ -1792,6 +1898,531 @@ pub(crate) fn rebase_rule_formula(
     shift_rule_formula(&translated, formula_sheet, edited_sheet, band)
 }
 
+/// `formula` moved by (`drow`, `dcol`) the way Excel moves a rule or
+/// validation formula to a new anchor: relative parts move, absolute ones
+/// stay, and a part pushed past an edge WRAPS round the sheet -- never
+/// `#REF!` (BUG-0743). [LIVE, Excel 16, 2026-11-06, cfdvb/probe1.ps1 B1-B4]
+/// `=A1048576>0` on A1:A10, clear A1 -> A2:A10 `=A1>0`; `=XFD1>0` on A1:C1,
+/// clear A1 -> B1:C1 `=A1>0`; ModifyAppliesToRange(A3:A10) -> `=A2>0`.
+///
+/// The fill shifter keeps the text as written whenever it can (no reference
+/// crosses an edge); only a crossing re-renders the formula from its parse.
+pub(crate) fn move_rule_formula_wrapping(formula: &str, drow: i64, dcol: i64) -> String {
+    if drow == 0 && dcol == 0 {
+        return formula.to_string();
+    }
+    let fits = |d: i64| d.abs() <= i32::MAX as i64;
+    let shifted = if fits(drow) && fits(dcol) {
+        let s = crate::commands::structure::shift_formula_internal(formula, drow as i32, dcol as i32);
+        if s.matches("#REF!").count() <= formula.matches("#REF!").count() {
+            return s;
+        }
+        Some(s)
+    } else {
+        None
+    };
+    match parser::parse(formula) {
+        Ok(ast) => format!("={}", engine::ast_render::render_formula(&shift_relative_refs(&ast, drow, dcol))),
+        Err(_) => shifted.unwrap_or_else(|| formula.to_string()),
+    }
+}
+
+/// Whether a structural edit on `edited_sheet` reaches the cells a rule's
+/// formulas name -- Excel's test for re-stating a rule cell by cell
+/// ([`split_rule_by_meaning`]; [LIVE] cfdvfix/probe1-6.ps1, verify-cfdvfix
+/// vprobe1-2.ps1). Each reference covers a rectangle, over the rule's rows
+/// `old_rows` and columns `old_cols`:
+///   * COLUMNS: an absolute column part's own column; a relative part's
+///     columns moved by its offset from the anchor when that offset is zero or
+///     more. A relative column part LEFT of the anchor takes the whole
+///     reference out (`=K8` on M2:M6 never counts, `=O8` and `=$K8` do:
+///     R9/W1/X1; `=A2` on C2:G2 through Delete Column B keeps one rule, XB),
+///     and so does either END of a range or column range being one
+///     (`=SUM(K8:O8)>0` on M2:M6, delete row 10, keeps ONE rule, V13). A row
+///     reference (`2:2`) names every column.
+///   * ROWS: an absolute row part's own row; a relative part's rows moved by
+///     its offset, above the anchor included (WE: `=G1` on B2:F2, Delete
+///     Column H, splits). A column reference names every row.
+/// The edit covers, for a row edit, the band's columns and every row at or
+/// below the edit (the rows it deletes or moves); for a column edit, every
+/// column at or right of the edit and the band's rows (every row for Delete
+/// Sheet Columns). So `=AND(K8>0,O1>0)` on M2:M6, delete row 10, keeps ONE
+/// rule -- O1 reads O1:O5, above row 10 (V1) -- where `=AND(O8>0,K8>0)` splits,
+/// O8:O12 reaching it (V11). Only references that name the edited sheet count
+/// (an unqualified one names `formula_sheet`).
+#[allow(clippy::too_many_arguments)]
+fn edit_reaches_formula_columns(
+    formulas: &[String],
+    old_anchor: (u32, u32),
+    old_rows: (u32, u32),
+    old_cols: (u32, u32),
+    formula_sheet: &str,
+    edited_sheet: &str,
+    band: &crate::commands::structure::structure_cells::BandEdit,
+) -> bool {
+    use engine::Expression as E;
+    let (max_r, max_c) = (SHEET_ROWS - 1, SHEET_COLS - 1);
+    // The edit's rectangle: (rows, columns).
+    let edit: ((i64, i64), (i64, i64)) = if band.moves_rows() {
+        ((band.at() as i64, max_r), (band.band_start as i64, band.band_end as i64))
+    } else {
+        ((band.band_start as i64, band.band_end as i64), (band.at() as i64, max_c))
+    };
+    type Extent = ((i64, i64), (i64, i64));
+    struct Ctx<'a> {
+        anchor: (i64, i64),
+        rows: (i64, i64),
+        cols: (i64, i64),
+        formula_sheet: &'a str,
+        edited_sheet: &'a str,
+        max_r: i64,
+        max_c: i64,
+    }
+    fn names_edited(ctx: &Ctx, sheet: Option<&str>) -> bool {
+        identity::sheet_names_equal(sheet.unwrap_or(ctx.formula_sheet), ctx.edited_sheet)
+    }
+    /// A column part's columns; `None` when it takes the reference out (a
+    /// relative part left of the anchor, or no column at all).
+    fn col_part(ctx: &Ctx, col: &str, absolute: bool) -> Option<(i64, i64)> {
+        if col.is_empty() || !col.chars().all(|c| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        let c = engine::col_to_index(col) as i64;
+        if absolute {
+            return Some((c, c));
+        }
+        let d = c - ctx.anchor.1;
+        if d < 0 {
+            return None;
+        }
+        Some((ctx.cols.0 + d, (ctx.cols.1 + d).min(ctx.max_c)))
+    }
+    /// A row part's rows (`row` is 1-based); `None` for no row at all.
+    fn row_part(ctx: &Ctx, row: u32, absolute: bool) -> Option<(i64, i64)> {
+        if row == 0 {
+            return None;
+        }
+        let r = row as i64 - 1;
+        if absolute {
+            return Some((r, r));
+        }
+        let d = r - ctx.anchor.0;
+        let (lo, hi) = ((ctx.rows.0 + d).max(0), (ctx.rows.1 + d).min(ctx.max_r));
+        (lo <= hi).then_some((lo, hi))
+    }
+    fn both(a: Option<(i64, i64)>, b: Option<(i64, i64)>) -> Option<(i64, i64)> {
+        Some((a?.0.min(b?.0), a?.1.max(b?.1)))
+    }
+    fn walk(e: &E, ctx: &Ctx, inherited: Option<&str>, out: &mut Vec<Extent>) {
+        match e {
+            E::CellRef { sheet, col, row, col_absolute, row_absolute, .. } => {
+                let sheet = sheet.as_deref().or(inherited);
+                if names_edited(ctx, sheet) {
+                    if let (Some(c), Some(r)) = (col_part(ctx, col, *col_absolute), row_part(ctx, *row, *row_absolute)) {
+                        out.push((r, c));
+                    }
+                }
+            }
+            E::Range { sheet, start, end, .. } => {
+                let sheet = sheet.as_deref().or(inherited);
+                match (start.as_ref(), end.as_ref()) {
+                    (
+                        E::CellRef { col: c0, row: r0, col_absolute: ca0, row_absolute: ra0, sheet: s0, .. },
+                        E::CellRef { col: c1, row: r1, col_absolute: ca1, row_absolute: ra1, .. },
+                    ) => {
+                        if names_edited(ctx, s0.as_deref().or(sheet)) {
+                            let cols = both(col_part(ctx, c0, *ca0), col_part(ctx, c1, *ca1));
+                            let rows = both(row_part(ctx, *r0, *ra0), row_part(ctx, *r1, *ra1));
+                            if let (Some(c), Some(r)) = (cols, rows) {
+                                out.push((r, c));
+                            }
+                        }
+                    }
+                    _ => {
+                        walk(start, ctx, sheet, out);
+                        walk(end, ctx, sheet, out);
+                    }
+                }
+            }
+            E::ColumnRef { sheet, start_col, end_col, start_absolute, end_absolute, .. } => {
+                if names_edited(ctx, sheet.as_deref().or(inherited)) {
+                    if let Some(c) = both(col_part(ctx, start_col, *start_absolute), col_part(ctx, end_col, *end_absolute)) {
+                        out.push(((0, ctx.max_r), c));
+                    }
+                }
+            }
+            E::RowRef { sheet, start_row, end_row, start_absolute, end_absolute, .. } => {
+                if names_edited(ctx, sheet.as_deref().or(inherited)) {
+                    if let Some(r) = both(row_part(ctx, *start_row, *start_absolute), row_part(ctx, *end_row, *end_absolute)) {
+                        out.push((r, (0, ctx.max_c)));
+                    }
+                }
+            }
+            // A 3-D reference may span the edited sheet: counted.
+            E::Sheet3DRef { reference, .. } => {
+                let mut inner = Vec::new();
+                let all = Ctx { edited_sheet: ctx.formula_sheet, ..*ctx };
+                walk(reference, &all, None, &mut inner);
+                out.extend(inner);
+            }
+            E::BinaryOp { left, right, .. } => {
+                walk(left, ctx, inherited, out);
+                walk(right, ctx, inherited, out);
+            }
+            E::UnaryOp { operand, .. } => walk(operand, ctx, inherited, out),
+            E::FunctionCall { args, .. } => args.iter().for_each(|a| walk(a, ctx, inherited, out)),
+            E::IndexAccess { target, index } => {
+                walk(target, ctx, inherited, out);
+                walk(index, ctx, inherited, out);
+            }
+            E::ArrayLiteral { rows } => rows.iter().flatten().for_each(|x| walk(x, ctx, inherited, out)),
+            E::ListLiteral { elements } => elements.iter().for_each(|x| walk(x, ctx, inherited, out)),
+            E::DictLiteral { entries } => entries.iter().for_each(|(k, v)| {
+                walk(k, ctx, inherited, out);
+                walk(v, ctx, inherited, out);
+            }),
+            E::SpillRef { cell, .. } => walk(cell, ctx, inherited, out),
+            E::ImplicitIntersection { operand } => walk(operand, ctx, inherited, out),
+            E::Literal(_) | E::NamedRef { .. } | E::TableRef { .. } => {}
+        }
+    }
+    let ctx = Ctx {
+        anchor: (old_anchor.0 as i64, old_anchor.1 as i64),
+        rows: (old_rows.0 as i64, old_rows.1 as i64),
+        cols: (old_cols.0 as i64, old_cols.1 as i64),
+        formula_sheet,
+        edited_sheet,
+        max_r,
+        max_c,
+    };
+    let mut extents = Vec::new();
+    for f in formulas {
+        if let Ok(ast) = parser::parse(f) {
+            walk(&ast, &ctx, None, &mut extents);
+        }
+    }
+    let meets = |a: (i64, i64), b: (i64, i64)| a.0 <= b.1 && a.1 >= b.0;
+    extents.iter().any(|&(rows, cols)| meets(rows, edit.0) && meets(cols, edit.1))
+}
+
+/// Every RELATIVE row and column part of `expr` as an offset from `anchor`
+/// (target line minus anchor line), for [`split_rule_by_meaning`].
+fn collect_relative_offsets(expr: &engine::Expression, anchor: (u32, u32), rows: &mut Vec<i64>, cols: &mut Vec<i64>) {
+    use engine::Expression as E;
+    let mut walk = |e: &E, rows: &mut Vec<i64>, cols: &mut Vec<i64>| collect_relative_offsets(e, anchor, rows, cols);
+    match expr {
+        E::CellRef { col, row, col_absolute, row_absolute, .. } => {
+            if !*row_absolute && *row > 0 {
+                rows.push(*row as i64 - 1 - anchor.0 as i64);
+            }
+            if !*col_absolute && !col.is_empty() && col.chars().all(|c| c.is_ascii_alphabetic()) {
+                cols.push(engine::col_to_index(col) as i64 - anchor.1 as i64);
+            }
+        }
+        E::Range { start, end, .. } => {
+            walk(start, rows, cols);
+            walk(end, rows, cols);
+        }
+        E::ColumnRef { start_col, end_col, start_absolute, end_absolute, .. } => {
+            for (c, abs) in [(start_col, start_absolute), (end_col, end_absolute)] {
+                if !*abs && !c.is_empty() && c.chars().all(|ch| ch.is_ascii_alphabetic()) {
+                    cols.push(engine::col_to_index(c) as i64 - anchor.1 as i64);
+                }
+            }
+        }
+        E::RowRef { start_row, end_row, start_absolute, end_absolute, .. } => {
+            for (r, abs) in [(start_row, start_absolute), (end_row, end_absolute)] {
+                if !*abs && *r > 0 {
+                    rows.push(*r as i64 - 1 - anchor.0 as i64);
+                }
+            }
+        }
+        E::BinaryOp { left, right, .. } => {
+            walk(left, rows, cols);
+            walk(right, rows, cols);
+        }
+        E::UnaryOp { operand, .. } => walk(operand, rows, cols),
+        E::FunctionCall { args, .. } => args.iter().for_each(|a| walk(a, rows, cols)),
+        E::Sheet3DRef { reference, .. } => walk(reference, rows, cols),
+        E::IndexAccess { target, index } => {
+            walk(target, rows, cols);
+            walk(index, rows, cols);
+        }
+        E::ArrayLiteral { rows: r } => r.iter().flatten().for_each(|e| walk(e, rows, cols)),
+        E::ListLiteral { elements } => elements.iter().for_each(|e| walk(e, rows, cols)),
+        E::DictLiteral { entries } => entries.iter().for_each(|(k, v)| {
+            walk(k, rows, cols);
+            walk(v, rows, cols);
+        }),
+        E::SpillRef { cell, .. } => walk(cell, rows, cols),
+        E::ImplicitIntersection { operand } => walk(operand, rows, cols),
+        E::Literal(_) | E::NamedRef { .. } | E::TableRef { .. } => {}
+    }
+}
+
+/// The cells of a rule (or validation) that a structural edit leaves meaning
+/// DIFFERENT things, grouped (BUG-0743).
+///
+/// A rule's formula is its anchor's; every other cell reads it moved by its
+/// own offset. When an edit deletes (or moves past) the cells only SOME
+/// cells' relative references point to, those cells' formulas change in a
+/// way the others' do not, and one anchored formula can no longer say what
+/// each cell tests. Excel SPLITS the rule: [LIVE, Excel 16, 2026-11-06,
+/// cfdvb/probe1.ps1 A1-A12, probe2.ps1 I1-I7, V1]
+///   * `=B12>0` on B2:B10, delete row 12 -> B2 `=#REF!>0`, B3:B10 `=B12>0`;
+///   * `=B1>0` on B2:B10, delete row 5 -> B2:B4,B6:B9 `=B1>0`, B5 `=#REF!>0`
+///     (cells meaning the same thing share ONE rule, over several areas);
+///   * `=G2>0` on B2:F2, delete column H -> B2 `=G2>0`, C2 `=#REF!>0`,
+///     D2:F2 `=H2>0`; delete row 14 under `=B12>0` -> three rules;
+///   * inserts split too: `=B1>0` on B2:B10, insert row 5 -> B2:B5,B7:B11
+///     `=B1>0`, B6 `=B4>0` (the inserted row continues the row above it);
+///     `=B12>0`, insert row 5 -> B2:B5 `=B13>0`, B6:B11 `=B16>0`;
+///   * a custom VALIDATION splits the same way (V1).
+///
+/// `formulas` are the rule's formulas written for `old_anchor` (the rule's
+/// cells' top-left before the edit), `pieces` its ranges AFTER the edit
+/// (`BandEdit::rule_range_pieces`). Returns `None` when every cell still means
+/// the same thing (the common case: the caller keeps its one re-stated rule);
+/// otherwise the groups, each its ranges and its formulas written for the
+/// sheet's top-left cell (A1) -- place them at a group's own anchor with
+/// [`move_rule_formula_wrapping`]. The anchor's group comes first, then the
+/// rest in reading order.
+///
+/// COST: the formula is re-stated once per SEGMENT, not per cell. A cell's
+/// meaning can only change where the cell, or one of its relative targets,
+/// crosses the edit's lines or the band's edges (or the sheet's edge), so the
+/// pieces are cut at the images of those lines and one representative cell
+/// decides each sub-rectangle. A whole-column rule costs a handful of
+/// re-statements, never a million.
+///
+/// WHEN EXCEL LOOKS AT THE TARGETS AT ALL (cfdvfix, [LIVE] Excel 16,
+/// 2026-11-06, cfdvfix/probe1-6.ps1). Excel splits by meaning only when the
+/// edit reaches the COLUMNS the formula's references name
+/// ([`edit_reaches_formula_columns`]), and a relative column part to the LEFT
+/// of the anchor never counts: `=K8<>""` on M2:M6, delete row 10, keeps ONE
+/// rule and M4 reads `=K10` (the old K11) where `=O8<>""` splits M4 off as
+/// `#REF!` (R9/W1, the same for a rule, UE/WB); `=$K8` splits (X1). Otherwise
+/// the rule is cut only where its OWN cells were cut by the edit, and each
+/// piece keeps what its own first cell reads: `=K1` on M2:M6, delete row 3,
+/// gives M2 `=K1` and M3:M5 `=#REF!` (R1, a rule the same, T1);
+/// `=COUNTA(K1:K2)=2` on M2:M4, delete row 1, stays one rule `=COUNTA(K1:K1)=2`
+/// (Q2/R13). A data validation and a conditional format follow the same rule.
+///
+/// `edited_sheet` is the sheet the edit happened on and `cells_move` whether
+/// the rule's own cells are on it (false for a rule on ANOTHER sheet that
+/// refers to the edited one: its cells stay where they are and only the
+/// references qualified with the edited sheet move, [LIVE] verify-cfdvb
+/// P1-P3). `old_rows` and `old_cols` are the row and column spans of the rule's
+/// ranges before the edit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn split_rule_by_meaning(
+    formulas: &[String],
+    old_anchor: (u32, u32),
+    old_rows: (u32, u32),
+    old_cols: (u32, u32),
+    pieces: &[crate::commands::coord_shift::CellRange],
+    formula_sheet: &str,
+    edited_sheet: &str,
+    cells_move: bool,
+    band: &crate::commands::structure::structure_cells::BandEdit,
+) -> Option<Vec<(Vec<crate::commands::coord_shift::CellRange>, Vec<String>)>> {
+    use crate::commands::coord_shift::CellRange;
+    if formulas.is_empty() || pieces.is_empty() {
+        return None;
+    }
+    let by_meaning = edit_reaches_formula_columns(formulas, old_anchor, old_rows, old_cols, formula_sheet, edited_sheet, band);
+    if !by_meaning && !cells_move {
+        // Nothing of the rule was cut: one formula, re-stated from its anchor.
+        return None;
+    }
+    let (mut drows, mut dcols) = (Vec::new(), Vec::new());
+    if by_meaning {
+        for f in formulas {
+            if let Ok(ast) = parser::parse(f) {
+                collect_relative_offsets(&ast, old_anchor, &mut drows, &mut dcols);
+            }
+        }
+        if drows.is_empty() && dcols.is_empty() {
+            return None;
+        }
+    }
+    let rows_move = band.moves_rows();
+    let (at, count) = (band.at() as i64, band.count() as i64);
+    let (along_offsets, perp_offsets, along_size, perp_size) = if rows_move {
+        (&drows, &dcols, SHEET_ROWS, SHEET_COLS)
+    } else {
+        (&dcols, &drows, SHEET_COLS, SHEET_ROWS)
+    };
+    // Old-coordinate lines where a cell's meaning may change, on each axis.
+    let mut along_old: Vec<i64> = if cells_move { vec![at, at + count] } else { Vec::new() };
+    for &d in along_offsets {
+        along_old.extend([at - d, at + count - d, along_size - d, -d]);
+    }
+    let (bs, be) = (band.band_start as i64, band.band_end as i64 + 1);
+    let mut perp_cuts: Vec<i64> = if cells_move { vec![bs, be] } else { Vec::new() };
+    for &d in perp_offsets {
+        perp_cuts.extend([bs - d, be - d, perp_size - d, -d]);
+    }
+    // Their images in NEW coordinates; an insertion's own block is a segment
+    // when meaning decides, and joins the line before it when only the
+    // rule's own cut does (Excel's inserted line continues the one above).
+    // A rule on another sheet does not move: its lines are its own.
+    let mut along_cuts: Vec<i64> = Vec::new();
+    for b in along_old {
+        let b = b.rem_euclid(along_size);
+        along_cuts.push(if !cells_move {
+            b
+        } else if band.inserting() {
+            if b < at { b } else { b + count }
+        } else if b < at {
+            b
+        } else if b < at + count {
+            at
+        } else {
+            b - count
+        });
+    }
+    if !by_meaning {
+        // Only the rule's own cut: the moved part starts at `at` after a
+        // delete, after the inserted block (which joins the part before it)
+        // after an insert.
+        along_cuts = vec![if band.inserting() { at + count } else { at }];
+    } else if cells_move && band.inserting() {
+        along_cuts.extend([at, at + count]);
+    }
+    let clean = |v: &mut Vec<i64>, size: i64| {
+        v.retain(|&x| x > 0 && x < size);
+        v.sort_unstable();
+        v.dedup();
+    };
+    clean(&mut along_cuts, along_size);
+    let mut perp_cuts: Vec<i64> = perp_cuts.into_iter().map(|x| x.rem_euclid(perp_size)).collect();
+    clean(&mut perp_cuts, perp_size);
+    let segments = |lo: u32, hi: u32, cuts: &[i64]| -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        let mut start = lo as i64;
+        for &c in cuts {
+            if c > start && c <= hi as i64 {
+                out.push((start as u32, (c - 1) as u32));
+                start = c;
+            }
+        }
+        out.push((start as u32, hi));
+        out
+    };
+    // One canonical text per sub-rectangle: the formula its top-left cell
+    // reads after the edit, moved to A1 (so equal texts mean equal meaning).
+    let canonical_at = |row: u32, col: u32| -> Vec<String> {
+        // The cell this one was before the edit; an inserted cell continues
+        // the line before the insertion (Excel's Format Same As Above / Left).
+        let (origin, origin_now) = if cells_move {
+            let origin = band_origin(band, row, col).unwrap_or((row, col));
+            (origin, band.shift_cell(origin.0, origin.1).unwrap_or((row, col)))
+        } else {
+            ((row, col), (row, col))
+        };
+        formulas
+            .iter()
+            .map(|f| {
+                let at_origin = move_rule_formula_wrapping(
+                    f,
+                    origin.0 as i64 - old_anchor.0 as i64,
+                    origin.1 as i64 - old_anchor.1 as i64,
+                );
+                let after = shift_rule_formula(&at_origin, formula_sheet, edited_sheet, band);
+                let here = move_rule_formula_wrapping(
+                    &after,
+                    row as i64 - origin_now.0 as i64,
+                    col as i64 - origin_now.1 as i64,
+                );
+                let canonical = move_rule_formula_wrapping(&here, -(row as i64), -(col as i64));
+                // One spelling per meaning, whichever path each step took.
+                match parser::parse(&canonical) {
+                    Ok(ast) => format!("={}", engine::ast_render::render_formula(&ast)),
+                    Err(_) => canonical,
+                }
+            })
+            .collect()
+    };
+    let mut groups: Vec<(Vec<CellRange>, Vec<String>)> = Vec::new();
+    for p in pieces {
+        let (along_lo, along_hi, perp_lo, perp_hi) = if rows_move {
+            (p.start_row, p.end_row, p.start_col, p.end_col)
+        } else {
+            (p.start_col, p.end_col, p.start_row, p.end_row)
+        };
+        for (q0, q1) in segments(perp_lo, perp_hi, &perp_cuts) {
+            // Without meaning, only cells the edit MOVED are cut from the
+            // rest: outside the band nothing moved ([LIVE] R4: `=K3` on
+            // M2:M6, Delete Cells K3 up, stays one rule, all `#REF!`).
+            let moved = q0 >= band.band_start && q1 <= band.band_end;
+            let along = if by_meaning || moved { segments(along_lo, along_hi, &along_cuts) } else { vec![(along_lo, along_hi)] };
+            for (a0, a1) in along {
+                let sub = if rows_move {
+                    CellRange { start_row: a0, end_row: a1, start_col: q0, end_col: q1 }
+                } else {
+                    CellRange { start_row: q0, end_row: q1, start_col: a0, end_col: a1 }
+                };
+                let key = canonical_at(sub.start_row, sub.start_col);
+                match groups.iter_mut().find(|(_, k)| *k == key) {
+                    Some((ranges, _)) => ranges.push(sub),
+                    None => groups.push((vec![sub], key)),
+                }
+            }
+        }
+    }
+    if groups.len() < 2 {
+        return None;
+    }
+    for (ranges, _) in groups.iter_mut() {
+        *ranges = merge_adjacent_ranges(std::mem::take(ranges));
+    }
+    // The group holding the anchor's own image first, the rest in reading
+    // order (Excel's list order is cosmetic: the groups never share a cell).
+    let anchor_now = if cells_move { band.shift_cell(old_anchor.0, old_anchor.1) } else { Some(old_anchor) };
+    groups.sort_by_key(|(ranges, _)| {
+        let holds_anchor = anchor_now.map_or(false, |(r, c)| {
+            ranges.iter().any(|g| r >= g.start_row && r <= g.end_row && c >= g.start_col && c <= g.end_col)
+        });
+        let first = ranges.iter().map(|g| (g.start_row, g.start_col)).min().unwrap_or((0, 0));
+        (!holds_anchor, first)
+    });
+    Some(groups)
+}
+
+/// Rectangles joined where two share a full edge (same columns and touching
+/// rows, or same rows and touching columns), until none do.
+fn merge_adjacent_ranges(mut ranges: Vec<crate::commands::coord_shift::CellRange>) -> Vec<crate::commands::coord_shift::CellRange> {
+    loop {
+        let mut merged = false;
+        'outer: for i in 0..ranges.len() {
+            for j in 0..ranges.len() {
+                if i == j {
+                    continue;
+                }
+                let (a, b) = (ranges[i], ranges[j]);
+                let vertical = a.start_col == b.start_col && a.end_col == b.end_col && a.end_row as u64 + 1 == b.start_row as u64;
+                let horizontal = a.start_row == b.start_row && a.end_row == b.end_row && a.end_col as u64 + 1 == b.start_col as u64;
+                if vertical || horizontal {
+                    ranges[i] = crate::commands::coord_shift::CellRange {
+                        start_row: a.start_row,
+                        end_row: b.end_row,
+                        start_col: a.start_col,
+                        end_col: b.end_col,
+                    };
+                    ranges.remove(j);
+                    merged = true;
+                    break 'outer;
+                }
+            }
+        }
+        if !merged {
+            ranges.sort_by_key(|g| (g.start_row, g.start_col));
+            return ranges;
+        }
+    }
+}
+
 /// Every formula of a rule ON THE EDITED SHEET, rebased from `old_anchor` to
 /// `new_anchor`. Returns whether any changed.
 pub(crate) fn rebase_rule_formulas(
@@ -1835,13 +2466,73 @@ pub(crate) fn shift_other_sheets_rule_formulas(
             let Some(formula_sheet) = sheet_names.get(sheet) else { continue };
             let previous = rules.clone();
             let mut changed = false;
-            for rule in rules.iter_mut() {
+            let mut split_any = false;
+            let mut kept: Vec<ConditionalFormatDefinition> = Vec::with_capacity(rules.len());
+            for mut rule in std::mem::take(rules) {
+                // BUG-0743 (verify-cfdvb P1/P2, [LIVE]): an edit on the sheet a
+                // rule REFERS to splits it as an edit on its own sheet does --
+                // `=S2!B12>0` on B2:B10, delete S2 row 12 -> B2 `='S2'!#REF!>0`,
+                // B3:B10 `='S2'!B12>0` -- though its cells stay where they are.
+                let mut probe = rule.rule.clone();
+                let formulas: Vec<String> = rule_formulas_mut(&mut probe).into_iter().map(|f| f.clone()).collect();
+                if let Some(old) = rule_anchor(&rule.ranges).filter(|_| formulas.iter().any(|f| f.contains('!'))) {
+                    let pieces: Vec<crate::commands::coord_shift::CellRange> = rule
+                        .ranges
+                        .iter()
+                        .map(|r| crate::commands::coord_shift::CellRange {
+                            start_row: r.start_row.min(r.end_row),
+                            end_row: r.start_row.max(r.end_row),
+                            start_col: r.start_col.min(r.end_col),
+                            end_col: r.start_col.max(r.end_col),
+                        })
+                        .collect();
+                    if let Some(groups) = split_rule_by_meaning(
+                        &formulas,
+                        old,
+                        rule_row_span(&rule.ranges),
+                        rule_column_span(&rule.ranges),
+                        &pieces,
+                        formula_sheet,
+                        edited_name,
+                        false,
+                        band,
+                    ) {
+                        changed = true;
+                        split_any = true;
+                        for (index, (ranges, canonical)) in groups.into_iter().enumerate() {
+                            let mut piece = rule.clone();
+                            if index > 0 {
+                                let mut next_id = state.next_cf_rule_id.lock().unwrap();
+                                piece.id = *next_id;
+                                *next_id += 1;
+                            }
+                            piece.ranges = ranges
+                                .iter()
+                                .map(|p| ConditionalFormatRange { start_row: p.start_row, start_col: p.start_col, end_row: p.end_row, end_col: p.end_col })
+                                .collect();
+                            if let Some(anchor) = rule_anchor(&piece.ranges) {
+                                for (slot, text) in rule_formulas_mut(&mut piece.rule).into_iter().zip(canonical) {
+                                    *slot = move_rule_formula_wrapping(&text, anchor.0 as i64, anchor.1 as i64);
+                                }
+                            }
+                            kept.push(piece);
+                        }
+                        continue;
+                    }
+                }
                 for formula in rule_formulas_mut(&mut rule.rule) {
                     let next = shift_rule_formula(formula, formula_sheet, edited_name, band);
                     if next != *formula {
                         *formula = next;
                         changed = true;
                     }
+                }
+                kept.push(rule);
+            }
+            *rules = kept;
+            if split_any {
+                for (index, rule) in rules.iter_mut().enumerate() {
+                    rule.priority = index as u32 + 1;
                 }
             }
             if changed {
@@ -1861,6 +2552,53 @@ pub(crate) fn shift_other_sheets_rule_formulas(
             let Some(formula_sheet) = sheet_names.get(sheet) else { continue };
             let previous = ranges.clone();
             let mut changed = false;
+            let mut split: Vec<crate::data_validation::ValidationRange> = Vec::new();
+            ranges.retain(|range| {
+                // BUG-0743 (verify-cfdvb P3, [LIVE]): a custom validation (or a
+                // relative list source) on another sheet splits as a rule does.
+                let formulas = crate::data_validation::validation_formulas(&range.validation, sheet, sheet_names);
+                if !formulas.iter().any(|f| f.contains('!')) {
+                    return true;
+                }
+                let rect = crate::commands::coord_shift::CellRange {
+                    start_row: range.start_row,
+                    end_row: range.end_row,
+                    start_col: range.start_col,
+                    end_col: range.end_col,
+                };
+                let Some(groups) = split_rule_by_meaning(
+                    &formulas,
+                    (range.start_row, range.start_col),
+                    (range.start_row.min(range.end_row), range.start_row.max(range.end_row)),
+                    (range.start_col, range.end_col),
+                    &[rect],
+                    formula_sheet,
+                    edited_name,
+                    false,
+                    band,
+                ) else {
+                    return true;
+                };
+                for (rects, canonical) in groups {
+                    for p in rects {
+                        let mut piece = range.clone();
+                        piece.start_row = p.start_row;
+                        piece.end_row = p.end_row;
+                        piece.start_col = p.start_col;
+                        piece.end_col = p.end_col;
+                        let placed: Vec<String> = canonical
+                            .iter()
+                            .map(|text| move_rule_formula_wrapping(text, p.start_row as i64, p.start_col as i64))
+                            .collect();
+                        crate::data_validation::set_validation_formulas(&mut piece.validation, &placed);
+                        split.push(piece);
+                    }
+                }
+                false
+            });
+            if !split.is_empty() {
+                changed = true;
+            }
             for range in ranges.iter_mut() {
                 let anchor = (range.start_row, range.start_col);
                 changed |= crate::data_validation::rebase_validation_formulas(
@@ -1871,9 +2609,11 @@ pub(crate) fn shift_other_sheets_rule_formulas(
                     anchor,
                     formula_sheet,
                     edited_name,
+                    sheet_names,
                     band,
                 );
             }
+            ranges.extend(split);
             if changed {
                 undo_stack.record_custom_restore(
                     "obj_validation".to_string(),
@@ -2226,6 +2966,22 @@ pub(crate) fn rule_anchor(ranges: &[ConditionalFormatRange]) -> Option<(u32, u32
     Some((row, col))
 }
 
+/// The rows a rule's ranges span, first to last (`(0, 0)` for none), for
+/// [`split_rule_by_meaning`].
+pub(crate) fn rule_row_span(ranges: &[ConditionalFormatRange]) -> (u32, u32) {
+    let lo = ranges.iter().map(|r| r.start_row.min(r.end_row)).min().unwrap_or(0);
+    let hi = ranges.iter().map(|r| r.start_row.max(r.end_row)).max().unwrap_or(0);
+    (lo, hi)
+}
+
+/// The columns a rule's ranges span, first to last (`(0, 0)` for none), for
+/// [`split_rule_by_meaning`].
+pub(crate) fn rule_column_span(ranges: &[ConditionalFormatRange]) -> (u32, u32) {
+    let lo = ranges.iter().map(|r| r.start_col.min(r.end_col)).min().unwrap_or(0);
+    let hi = ranges.iter().map(|r| r.start_col.max(r.end_col)).max().unwrap_or(0);
+    (lo, hi)
+}
+
 /// A rule whose ranges change from `old` to `new` KEEPS ITS MEANING: when the
 /// anchor moves, every formula is re-stated for the new anchor, the way a copy
 /// to it would move it. [LIVE, Excel 16, cfeval/probe1.ps1] clearing A1:A2 of
@@ -2240,10 +2996,11 @@ pub(crate) fn restate_rule_for_ranges(
     if from == to {
         return false;
     }
-    let (drow, dcol) = (to.0 as i32 - from.0 as i32, to.1 as i32 - from.1 as i32);
+    let (drow, dcol) = (to.0 as i64 - from.0 as i64, to.1 as i64 - from.1 as i64);
     let mut changed = false;
     for formula in rule_formulas_mut(rule) {
-        let next = crate::commands::structure::shift_formula_internal(formula, drow, dcol);
+        // Wrapping at the sheet's edge, never `#REF!` (BUG-0743).
+        let next = move_rule_formula_wrapping(formula, drow, dcol);
         if next != *formula {
             *formula = next;
             changed = true;
@@ -2383,7 +3140,78 @@ pub(crate) struct RuleFormulas<'a> {
     pub sheet_names: &'a [String],
     pub sheet_index: usize,
     pub named_ranges: Option<&'a HashMap<String, crate::named_ranges::NamedRange>>,
+    /// The workbook's names, tables and LIVE spill map (BUG-0748): when
+    /// present a rule formula is expanded by the ONE resolver a cell's formula
+    /// uses (`name_resolution::eval_ast`), so `=A1#`, a bare table name and a
+    /// name whose definition is a table or a spill all resolve as in a cell.
+    /// `None` keeps the names-only path above (tests, positionless callers).
+    tables: Option<crate::name_resolution::NameTables<'a>>,
+    /// The rule's own sheet as it WOULD be (BUG-0746): a pending entry
+    /// judged before it is committed is read through this grid in place of
+    /// `grids[sheet_index]`, by every reference that reaches it.
+    current_override: Option<&'a Grid>,
+    /// OTHER sheets as they would be (cfdvfix): the cells there that read a
+    /// pending entry, re-evaluated before a custom rule is judged.
+    other_overrides: Vec<(usize, &'a Grid)>,
     parsed: std::cell::RefCell<HashMap<String, Option<std::rc::Rc<engine::Expression>>>>,
+}
+
+/// The workbook's defined names and tables, taken and released one store at a
+/// time (never held across a grid guard), plus the live spill map a rule's
+/// `A1#` reads -- everything [`RuleFormulas::resolved`] needs (BUG-0748).
+///
+/// Every production CF / validation evaluation path builds its formulas from
+/// one of these: the painter, the floating-grid painter, sort-by-icon,
+/// filter-by-icon, the Sort dialog's icon list and the validation checks. A
+/// path that evaluated with `named_ranges: None` answered `#NAME?` for a rule
+/// the screen formatted, so a sort or filter by its icon matched no rows.
+pub(crate) struct RuleNames<'s> {
+    named_ranges: HashMap<String, crate::named_ranges::NamedRange>,
+    tables: crate::tables::TableStorage,
+    table_names: crate::tables::TableNameRegistry,
+    spill_ranges: &'s crate::document_effect::Persisted<crate::SpillRangeMap>,
+}
+
+/// Snapshot the name and table stores for rule formulas ([`RuleNames`]).
+/// Takes each read lock and releases it at once; the spill map is read per
+/// evaluated cell, inside `eval_ast`, so the caller must NOT hold
+/// `spill_ranges`. A FREE function with a name of its own, not an associated
+/// `RuleNames::take`, so the lock-order censuses
+/// (`state_digest_lock_order_tests.rs`) see every caller take the three name
+/// stores: call it BEFORE any grid or undo guard (verify-cfdvb finding 4).
+pub(crate) fn snapshot_rule_names(state: &AppState) -> RuleNames<'_> {
+    RuleNames {
+        named_ranges: state.named_ranges.read().map(|n| (*n).clone()).unwrap_or_default(),
+        tables: state.tables.read().map(|t| (*t).clone()).unwrap_or_default(),
+        table_names: state.table_names.read().map(|t| (*t).clone()).unwrap_or_default(),
+        spill_ranges: &state.spill_ranges,
+    }
+}
+
+impl<'s> RuleNames<'s> {
+
+    /// For a test: these stores, with `spill_ranges` as the live spill map.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        named_ranges: HashMap<String, crate::named_ranges::NamedRange>,
+        spill_ranges: &'s crate::document_effect::Persisted<crate::SpillRangeMap>,
+    ) -> Self {
+        RuleNames { named_ranges, tables: Default::default(), table_names: Default::default(), spill_ranges }
+    }
+
+    /// The tables pointed at this workbook's `sheet_names`.
+    pub(crate) fn tables<'a>(&'a self, sheet_names: &'a [String]) -> crate::name_resolution::NameTables<'a>
+    where
+        's: 'a,
+    {
+        crate::name_resolution::NameTables {
+            named_ranges: &self.named_ranges,
+            tables: &self.tables,
+            table_names: &self.table_names,
+            sheet_names,
+            spill_ranges: self.spill_ranges,
+        }
+    }
 }
 
 impl<'a> RuleFormulas<'a> {
@@ -2393,7 +3221,88 @@ impl<'a> RuleFormulas<'a> {
         sheet_index: usize,
         named_ranges: Option<&'a HashMap<String, crate::named_ranges::NamedRange>>,
     ) -> Self {
-        RuleFormulas { grids, sheet_names, sheet_index, named_ranges, parsed: Default::default() }
+        RuleFormulas {
+            grids,
+            sheet_names,
+            sheet_index,
+            named_ranges,
+            tables: None,
+            current_override: None,
+            other_overrides: Vec::new(),
+            parsed: Default::default(),
+        }
+    }
+
+    /// Formulas resolved through `tables` exactly as a cell's formula is:
+    /// defined names (relative ones at the evaluated cell), structured and bare
+    /// table references, and spill references (`A1#`) against the live map.
+    pub(crate) fn resolved(
+        grids: &'a [Grid],
+        sheet_names: &'a [String],
+        sheet_index: usize,
+        tables: crate::name_resolution::NameTables<'a>,
+    ) -> Self {
+        RuleFormulas {
+            grids,
+            sheet_names,
+            sheet_index,
+            named_ranges: Some(tables.named_ranges),
+            tables: Some(tables),
+            current_override: None,
+            other_overrides: Vec::new(),
+            parsed: Default::default(),
+        }
+    }
+
+    /// These formulas read `grid` as the rule's own sheet (see
+    /// `current_override`): a validation judging a value not yet entered.
+    pub(crate) fn reading_sheet_as(mut self, grid: &'a Grid) -> Self {
+        self.current_override = Some(grid);
+        self
+    }
+
+    /// These formulas read each (sheet, grid) pair as that sheet: other sheets
+    /// as a pending entry would leave them (see `other_overrides`).
+    pub(crate) fn reading_other_sheets_as(mut self, overrides: Vec<(usize, &'a Grid)>) -> Self {
+        self.other_overrides = overrides;
+        self
+    }
+
+    /// The grid sheet `i` is read as: its override when it has one.
+    fn grid_for(&self, i: usize) -> Option<&'a Grid> {
+        if i == self.sheet_index {
+            if let Some(current) = self.current_override {
+                return Some(current);
+            }
+        }
+        self.other_overrides.iter().find(|(s, _)| *s == i).map(|(_, g)| *g).or_else(|| self.grids.get(i))
+    }
+
+    /// Evaluate a resolved AST on the rule's sheet, through the override
+    /// when there is one (also for a reference QUALIFIED with this sheet).
+    fn evaluate_resolved(&self, ast: &engine::Expression, ctx: engine::EvalContext) -> CellValue {
+        if self.current_override.is_none() && self.other_overrides.is_empty() {
+            return crate::evaluate_formula_with_context(self.grids, self.sheet_names, self.sheet_index, ast, ctx, None);
+        }
+        let grid_of = |i: usize| self.grid_for(i);
+        if self.sheet_index >= self.grids.len() || self.sheet_index >= self.sheet_names.len() {
+            return CellValue::Error(engine::CellError::Ref);
+        }
+        let Some(current) = grid_of(self.sheet_index) else {
+            return CellValue::Error(engine::CellError::Ref);
+        };
+        let mut context = engine::MultiSheetContext::new(self.sheet_names[self.sheet_index].clone());
+        for i in 0..self.grids.len() {
+            if i < self.sheet_names.len() {
+                if let Some(grid) = grid_of(i) {
+                    context.add_grid(self.sheet_names[i].clone(), grid);
+                }
+            }
+        }
+        context.sheet_order = self.sheet_names.to_vec();
+        let mut evaluator = engine::Evaluator::with_context(current, context, ctx);
+        crate::eval_budget::apply(&mut evaluator);
+        evaluator.evaluate(ast).to_cell_value()
     }
 
     /// How many distinct formulas this pass has parsed (tests pin "once per
@@ -2419,6 +3328,20 @@ impl<'a> RuleFormulas<'a> {
     /// (Excel [LIVE, round E namese p1]: `=ROW(rel)=21` on F20:F22 colours F21
     /// only). A positionless threshold passes (0, 0), the name as written.
     fn with_names<'e>(&self, ast: std::borrow::Cow<'e, engine::Expression>, at: (u32, u32)) -> std::borrow::Cow<'e, engine::Expression> {
+        use std::borrow::Cow;
+        if let Some(tables) = &self.tables {
+            let ctx = tables.at(self.sheet_index, at.0, at.1);
+            return match ast {
+                Cow::Borrowed(stored) => crate::name_resolution::eval_ast(stored, &ctx),
+                Cow::Owned(stored) => {
+                    let expanded = match crate::name_resolution::eval_ast(&stored, &ctx) {
+                        Cow::Owned(e) => Some(e),
+                        Cow::Borrowed(_) => None,
+                    };
+                    Cow::Owned(expanded.unwrap_or(stored))
+                }
+            };
+        }
         match self.named_ranges {
             Some(names) if crate::name_resolution::needs_name_resolution(&ast, names) => {
                 let mut visited = std::collections::HashSet::new();
@@ -2441,7 +3364,16 @@ impl<'a> RuleFormulas<'a> {
         };
         let resolved = self.with_names(moved, (row, col));
         let ctx = engine::EvalContext { current_row: Some(row), current_col: Some(col), ..Default::default() };
-        crate::evaluate_formula_with_context(self.grids, self.sheet_names, self.sheet_index, &resolved, ctx, None)
+        self.evaluate_resolved(&resolved, ctx)
+    }
+
+    /// The value of a CELL's own stored formula `ast` at (`row`, `col`), its
+    /// names resolved there -- how a validation re-evaluates the cells that
+    /// depend on an entry not yet committed (BUG-0746).
+    pub(crate) fn value_of_cell_formula(&self, ast: &engine::Expression, row: u32, col: u32) -> CellValue {
+        let resolved = self.with_names(std::borrow::Cow::Borrowed(ast), (row, col));
+        let ctx = engine::EvalContext { current_row: Some(row), current_col: Some(col), ..Default::default() };
+        self.evaluate_resolved(&resolved, ctx)
     }
 
     /// The value of `formula`, written for `anchor`, at the cell (`row`, `col`).
@@ -2460,6 +3392,9 @@ impl<'a> RuleFormulas<'a> {
             return CellValue::Error(engine::CellError::Value);
         };
         let resolved = self.with_names(std::borrow::Cow::Borrowed(&*ast), (0, 0));
+        if self.current_override.is_some() || !self.other_overrides.is_empty() {
+            return self.evaluate_resolved(&resolved, engine::EvalContext::default());
+        }
         crate::evaluate_formula_multi_sheet_with_ast(self.grids, self.sheet_names, self.sheet_index, &resolved)
     }
 
@@ -3443,3 +4378,7 @@ mod cfdv_structural_tests;
 #[cfg(test)]
 #[path = "cfeval_tests.rs"]
 mod cfeval_tests;
+
+#[cfg(test)]
+#[path = "cfdvb_tests.rs"]
+mod cfdvb_tests;

@@ -62,6 +62,7 @@ import { editPivotValueField } from "../lib/valueFieldEdits";
 import { requestValueFieldDialog, type ValueFieldDialogKind } from "../lib/valueFieldDialogRequest";
 import { NEEDS_BASE_FIELD, SHOW_VALUES_AS_OPTIONS } from "../lib/showValuesAsOptions";
 import type { AggregationType } from "../components/types";
+import type { PivotItemMoveTo } from "@api/pivotTypes";
 
 import {
   deletePivotTable,
@@ -87,6 +88,7 @@ import {
   PIVOT_FIELD_SETTINGS_DIALOG_ID,
   PIVOT_OPTIONS_DIALOG_ID,
   PIVOT_DRILL_BEHAVIOR_DIALOG_ID,
+  PIVOT_SORT_FIELD_DIALOG_ID,
   PIVOT_PANE_ID,
 } from "../manifest";
 import { confirmAsync, promptAsync } from "@api/dialogs";
@@ -253,6 +255,48 @@ export function valueSortTarget(ctx: GridMenuContext): ValueSortTarget | string 
     ? cellPath.slice(rowPath.length)
     : cellPath.filter(([f]) => !rowFields.has(f));
   return { pivotId, fieldIndex: rowPath[rowPath.length - 1][0], valuesHierarchy, scopeGroupPath };
+}
+
+/**
+ * What Sort > More Sort Options... opens Excel's "Sort (<field>)" dialog with
+ * (BUG-0733): the clicked item's field, its name as the pivot's header
+ * summaries give it, and the PivotTable's value fields by name.
+ */
+export function sortFieldDialogData(
+  ctx: GridMenuContext,
+  pivotId: string,
+  fieldIndex: number,
+): {
+  pivotId: string;
+  fieldIndex: number;
+  fieldName: string;
+  valueFieldNames: string[];
+  currentOrder?: "ascending" | "descending" | "manual";
+  currentBy?: string;
+} {
+  const view = getCachedCellData(ctx)?.view;
+  const summaries = [...(view?.rowFieldSummaries ?? []), ...(view?.columnFieldSummaries ?? [])];
+  const summary = summaries.find((s) => s.fieldIndex === fieldIndex);
+  const fieldName = summary?.fieldName ?? "";
+  // The field's current sort, which Excel's dialog opens on (its
+  // AutoSortOrder and AutoSortField): a grouped field's own level sort.
+  const currentOrder =
+    summary?.sortOrder === "desc" ? "descending" : summary?.sortOrder === "manual" ? "manual" : summary?.sortOrder === "asc" ? "ascending" : undefined;
+  const currentBy = summary?.sortByValueField ?? undefined;
+  return { pivotId, fieldIndex, fieldName, valueFieldNames: [...(view?.valueFieldNames ?? [])], currentOrder, currentBy };
+}
+
+/**
+ * Excel's item menu Move (BUG-0733): moves the clicked item and turns its
+ * field Manual -- the backend keeps the order the items are shown in, with
+ * this one moved (Excel's `PivotItem.Position`).
+ */
+async function moveItem(ctx: GridMenuContext, to: PivotItemMoveTo): Promise<void> {
+  const { pivotInfo, cell, fieldIndex } = await clickedHeader(ctx);
+  const valueId = cell.groupPath?.[cell.groupPath.length - 1]?.[1];
+  if (valueId === undefined) throw new Error("the PivotTable item under the pointer names no item");
+  await sortPivotField({ pivotId: pivotInfo.pivotId, fieldIndex, sortBy: "manual", moveItem: { valueId, to } });
+  window.dispatchEvent(new Event("pivot:refresh"));
 }
 
 /** Sort the clicked value cell's row field by its value field (BUG-0459). */
@@ -716,11 +760,10 @@ export function registerPivotContextMenuItems(): () => void {
         {
           id: "pivot:sort:more",
           label: "More Sort Options...",
-          disabled: true,
-          disabledReason: "More sort options are not available yet.",
-          onClick: () => {
-            console.warn("[PivotMenu] More Sort Options dialog is not yet implemented.");
-          },
+          onClick: menuAction("More Sort Options", async (ctx) => {
+            const { pivotInfo, fieldIndex } = await clickedHeader(ctx);
+            showDialog(PIVOT_SORT_FIELD_DIALOG_ID, sortFieldDialogData(ctx, pivotInfo.pivotId, fieldIndex));
+          }),
         },
       ],
       onClick: () => {}, // Parent item - no direct action
@@ -948,7 +991,7 @@ export function registerPivotContextMenuItems(): () => void {
     },
 
     // ------------------------------------------------------------------
-    // 11. Move (sub-menu, stubs)
+    // 11. Move (sub-menu): the clicked item, by hand (BUG-0733)
     // ------------------------------------------------------------------
     {
       id: "pivot:move",
@@ -967,11 +1010,7 @@ export function registerPivotContextMenuItems(): () => void {
             const itemLabel = getItemLabelForCell(ctx);
             return itemLabel ? `Move "${itemLabel}" to Beginning` : "Move to Beginning";
           },
-          disabled: true,
-          disabledReason: "Moving items by hand is not available yet.",
-          onClick: () => {
-            console.warn("[PivotMenu] Move to Beginning requires manual sort backend support.");
-          },
+          onClick: menuAction("Move to Beginning", (ctx) => moveItem(ctx, "beginning")),
         },
         {
           id: "pivot:move:up",
@@ -979,11 +1018,7 @@ export function registerPivotContextMenuItems(): () => void {
             const itemLabel = getItemLabelForCell(ctx);
             return itemLabel ? `Move "${itemLabel}" Up` : "Move Up";
           },
-          disabled: true,
-          disabledReason: "Moving items by hand is not available yet.",
-          onClick: () => {
-            console.warn("[PivotMenu] Move Up requires manual sort backend support.");
-          },
+          onClick: menuAction("Move Up", (ctx) => moveItem(ctx, "up")),
         },
         {
           id: "pivot:move:down",
@@ -991,11 +1026,7 @@ export function registerPivotContextMenuItems(): () => void {
             const itemLabel = getItemLabelForCell(ctx);
             return itemLabel ? `Move "${itemLabel}" Down` : "Move Down";
           },
-          disabled: true,
-          disabledReason: "Moving items by hand is not available yet.",
-          onClick: () => {
-            console.warn("[PivotMenu] Move Down requires manual sort backend support.");
-          },
+          onClick: menuAction("Move Down", (ctx) => moveItem(ctx, "down")),
         },
         {
           id: "pivot:move:end",
@@ -1003,11 +1034,7 @@ export function registerPivotContextMenuItems(): () => void {
             const itemLabel = getItemLabelForCell(ctx);
             return itemLabel ? `Move "${itemLabel}" to End` : "Move to End";
           },
-          disabled: true,
-          disabledReason: "Moving items by hand is not available yet.",
-          onClick: () => {
-            console.warn("[PivotMenu] Move to End requires manual sort backend support.");
-          },
+          onClick: menuAction("Move to End", (ctx) => moveItem(ctx, "end")),
         },
       ],
       onClick: () => {}, // Parent item - no direct action

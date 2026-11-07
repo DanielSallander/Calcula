@@ -389,7 +389,8 @@ describe("Name Box -- the NAME LIST asks the external owner first, as a typed en
     registerExternalAddressResolver(() => null);
     await paint();
     await pickFromList("Totals");
-    expect(h.resolveCoords).toHaveBeenCalledWith("Totals");
+    // Asked FROM the active sheet and cell (BUG-0749: a relative name is read there).
+    expect(h.resolveCoords).toHaveBeenCalledWith("Totals", expect.objectContaining({ sheetIndex: expect.any(Number) }));
     expect(h.showToast).not.toHaveBeenCalled();
   });
 });

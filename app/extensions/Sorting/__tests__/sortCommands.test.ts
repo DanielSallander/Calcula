@@ -322,6 +322,33 @@ describe("Sort A to Z / Z to A", () => {
     expect(h.sorts).toEqual([[0, 0, 2, 1, 1, true, true]]);
   });
 
+  // Reapply re-SORTS the filter's data by its remembered sort (BUG-0740), so a
+  // table sort that reapplied a sheet filter it does not own re-sorted that
+  // other range (wave-4 verifier finding). Only the table's OWN filter.
+  it("a TABLE sort reapplies the sheet's filter only when the table owns it", async () => {
+    put(0, 0, [["Name", "City"], ["d", "x"], ["b", "y"]]);
+    const table = {
+      id: "t", name: "T1", sheetIndex: 0, startRow: 0, startCol: 0, endRow: 2, endCol: 1, columns: [],
+      styleOptions: { headerRow: true, totalRow: false }, styleName: "",
+    };
+    // A sheet filter elsewhere (id "af"); the table's button is off.
+    h.filter = { startRow: 10, startCol: 4, endRow: 20, endCol: 6 };
+    h.table = { ...table };
+    select(1, 1, 1, 1);
+    await CommandRegistry.execute(ExtensionCommands.SORT_ASCENDING);
+    expect(h.sorts).toEqual([[0, 0, 2, 1, 1, true, true]]);
+    expect(h.reapplied).toBe(0);
+    // A table whose autoFilterId names another filter: still not reapplied.
+    h.table = { ...table, autoFilterId: "someone-else" };
+    await CommandRegistry.execute(ExtensionCommands.SORT_ASCENDING);
+    expect(h.reapplied).toBe(0);
+    // The table's own filter: reapplied, inside the sort's step.
+    h.filter = { startRow: 0, startCol: 0, endRow: 2, endCol: 1 };
+    h.table = { ...table, autoFilterId: "af" };
+    await CommandRegistry.execute(ExtensionCommands.SORT_ASCENDING);
+    expect(h.reapplied).toBe(1);
+  });
+
   it("inside an AutoFilter range: that range with its header, then the filter is reapplied", async () => {
     put(0, 0, [["Name", "City"], ["d", "x"], ["b", "y"]]);
     h.filter = { startRow: 0, startCol: 0, endRow: 2, endCol: 1 };

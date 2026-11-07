@@ -906,7 +906,7 @@ async function applyTableFilterForSource(
     const isBlank = (v: string) => v === "" || v === "(Blanks)";
     await autoFilter.setColumn(colIndex, {
       kind: "values",
-      values: await displayTextsOfKeys(slicerId, selectedItems.filter((v) => !isBlank(v))),
+      values: await displayTextsOfKeys(slicerId, tableId, selectedItems.filter((v) => !isBlank(v))),
       includeBlanks: selectedItems.some(isBlank),
     });
   }
@@ -917,13 +917,24 @@ async function applyTableFilterForSource(
  * (BUG-0523): a table slicer keys its items by the cell's invariant value
  * (`1234.5`) and shows the display text (`1 234,5`); an AutoFilter value
  * list matches display text (Excel's semantics), so each key is written as
- * its item's LABEL. A key the slicer no longer lists is written as itself.
- * (The click path does this in the backend, per cell of the target table:
- * `table_display_texts_for_keys` in slicer/commands.rs.)
+ * every text the cells of THE TABLE BEING FILTERED show for it -- in the app
+ * locale, each cell's own number format (`get_slicer_items` with
+ * `forTable`, the texts the click path's `table_display_texts_for_keys`
+ * writes). A key no cell of that table holds contributes nothing.
+ * (BUG-0732: this read the slicer's OWN items, so a connected table that is
+ * not the slicer's source was filtered by another table's texts, and a key
+ * the slicer did not list was written as its raw invariant spelling.)
  */
-async function displayTextsOfKeys(slicerId: string, keys: string[]): Promise<string[]> {
+export async function displayTextsOfKeys(slicerId: string, tableId: string, keys: string[]): Promise<string[]> {
   if (keys.length === 0) return [];
-  const items = await slicerBackend.invoke<Array<{ key: string; label: string }>>("get_slicer_items", { slicerId });
-  const labelOf = new Map((items ?? []).map((item) => [item.key, item.label] as const));
-  return keys.map((key) => labelOf.get(key) ?? key);
+  const items = await slicerBackend.invoke<Array<{ key: string; label: string }>>("get_slicer_items", {
+    slicerId,
+    forTable: tableId,
+  });
+  const wanted = new Set(keys);
+  const out: string[] = [];
+  for (const item of items ?? []) {
+    if (wanted.has(item.key) && !out.includes(item.label)) out.push(item.label);
+  }
+  return out;
 }

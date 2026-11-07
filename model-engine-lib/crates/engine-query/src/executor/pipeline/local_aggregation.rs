@@ -9,11 +9,11 @@ use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use tokio_util::sync::CancellationToken;
 
-use engine_connectors::{FilterCondition, FilterOperator, InFilterCondition};
+use engine_connectors::{FilterCondition, InFilterCondition};
 use engine_core::compute::context::ContextResolver;
 use engine_core::compute::expression::{
     expand_global_variables, expand_measure_refs, expr_literal_from_scalar, has_measure_ref,
-    infer_fact_table, ComparisonOp, Expression, FilterPredicate,
+    infer_fact_table, Expression, FilterPredicate,
 };
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
@@ -59,18 +59,6 @@ use super::sql::{
     GroupColumn, OverrideJoinEntry,
 };
 use super::QueryExecutor;
-
-/// Map an engine-core [`ComparisonOp`] to a connector [`FilterOperator`].
-fn role_comparison_to_operator(op: ComparisonOp) -> FilterOperator {
-    match op {
-        ComparisonOp::Equal => FilterOperator::Equal,
-        ComparisonOp::NotEqual => FilterOperator::NotEqual,
-        ComparisonOp::GreaterThan => FilterOperator::GreaterThan,
-        ComparisonOp::GreaterThanOrEqual => FilterOperator::GreaterThanOrEqual,
-        ComparisonOp::LessThan => FilterOperator::LessThan,
-        ComparisonOp::LessThanOrEqual => FilterOperator::LessThanOrEqual,
-    }
-}
 
 /// Render a contested IN-list filter as a typed `Expression::InList` over the
 /// qualified column, for conditional aggregation. Values are typed by the
@@ -217,11 +205,13 @@ fn in_list_expression(
             )
         };
     }
-    let needs_quoting = model
-        .table(table)
-        .ok()
-        .and_then(|t| t.column(column).ok())
-        .map(|c| c.data_type().needs_sql_quoting())
+    // Typed by the column's model type through the same lookup a KEEP's
+    // literal takes (BUG-0758: physical, calculated or context column, names
+    // matched as the engine matches them). Today only a PHYSICAL column
+    // reaches here (a scoped filter on any other is refused up front,
+    // `resolve_scoped_owners`); the shared lookup keeps the two from drifting.
+    let needs_quoting = engine_core::compute::context::filter_column_type(table, column, model)
+        .map(|t| t.needs_sql_quoting())
         .unwrap_or(true);
     let literals: Vec<Expression> = values
         .iter()
@@ -257,18 +247,104 @@ fn in_list_expression(
 
 /// Convert a role [`FilterPredicate`] into a connector [`FilterCondition`]
 /// (column / op / value — placed on the fetch of the predicate's own table).
+///
+/// Delegates to THE one RLS conversion ([`crate::security_filter`]), which
+/// keeps BLANK strict and never meets the KEEP renderers (BUG-0759).
 fn role_filter_condition(predicate: &FilterPredicate) -> FilterCondition {
-    FilterCondition::new(
-        predicate.column.clone(),
-        role_comparison_to_operator(predicate.operator),
-        predicate.value.clone(),
-    )
+    crate::security_filter::role_filter_condition(predicate)
 }
 
 /// Whether two [`FilterCondition`]s are identical (column, operator, value).
 /// Used to make the defense-in-depth role re-sealing idempotent.
 fn filter_conditions_equal(a: &FilterCondition, b: &FilterCondition) -> bool {
     a.column == b.column && a.operator == b.operator && a.value == b.value
+}
+
+/// The row-level-security part of one fetch: the active role's conditions on
+/// its table and, under a multi-role union, the fetch's OR groups (the union
+/// the `bi-engine` facade rewrote the roles into).
+struct SealedRestriction {
+    /// The fetch restricted by the role ONLY: no slicer, no IN-list.
+    request: engine_connectors::FetchRequest,
+    /// Does the fetch carry nothing but its role restriction (the usual
+    /// shape: a table the planner pulled in for RLS)? Then its own rows ARE
+    /// the role's rows and no second read is needed.
+    same_as_full: bool,
+}
+
+/// The [`SealedRestriction`] of the fetch of `table_name`, or `None` when no
+/// role restricts it. `role_union` says the fetch's OR groups are the
+/// multi-role union (the facade refuses a user OR slicer beside one).
+fn sealed_restriction(
+    table_name: &str,
+    request: &engine_connectors::FetchRequest,
+    role_filters: &[FilterPredicate],
+    role_union: bool,
+) -> Option<SealedRestriction> {
+    let conditions: Vec<FilterCondition> = role_filters
+        .iter()
+        .filter(|p| p.table == table_name)
+        .map(role_filter_condition)
+        .collect();
+    let or_groups = if role_union {
+        request.or_groups.clone()
+    } else {
+        Vec::new()
+    };
+    if conditions.is_empty() && or_groups.is_empty() {
+        return None;
+    }
+    let same_as_full = request.in_filters.is_empty()
+        && (role_union || request.or_groups.is_empty())
+        && request
+            .filters
+            .iter()
+            .all(|f| conditions.iter().any(|c| filter_conditions_equal(f, c)));
+    let mut role_request = request.clone();
+    role_request.filters = conditions;
+    role_request.in_filters = Vec::new();
+    role_request.or_groups = or_groups;
+    Some(SealedRestriction {
+        request: role_request,
+        same_as_full,
+    })
+}
+
+/// Which of a filtered table's restrictions reach a measure table through
+/// one relationship (the fetch's key propagation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyPropagation {
+    /// Every filter of the table: its slicers follow the relationship's
+    /// cross-filter direction and this is that direction.
+    AllFilters,
+    /// Only its row-level-security restriction: against the cross-filter
+    /// direction a slicer stops, but a role filter never does.
+    RoleOnly,
+}
+
+/// How the filters of a table reach `fact` through `rel`, or `None` when
+/// nothing does. The shape gate is THE one RLS gate the planner's
+/// `rls_relevance` also uses
+/// ([`crate::security_filter::role_restriction_propagates`]), so a role
+/// restriction propagates exactly where the planner counts on it; a slicer
+/// additionally needs the cross-filter direction
+/// ([`super::pre_aggregate::filter_reaches_fact`]).
+fn key_propagation(
+    rel: &engine_core::model::Relationship,
+    fact: &str,
+    sealed: Option<&SealedRestriction>,
+) -> Option<KeyPropagation> {
+    if !crate::security_filter::role_restriction_propagates(rel) {
+        return None;
+    }
+    if super::pre_aggregate::filter_reaches_fact(rel, fact) {
+        return Some(KeyPropagation::AllFilters);
+    }
+    match sealed {
+        Some(s) if s.same_as_full => Some(KeyPropagation::AllFilters),
+        Some(_) => Some(KeyPropagation::RoleOnly),
+        None => None,
+    }
 }
 
 /// A typed error for a context-driven calculated column on the group-by axis
@@ -320,6 +396,15 @@ impl QueryExecutor {
     /// (idempotently) as a defense-in-depth guard so that even a plan
     /// assembled without them cannot leak rows past the role.
     ///
+    /// `role_union` says every fetch's `or_groups` are the multi-role
+    /// row-level-security union (`bi-engine`'s `build_role_union_request`,
+    /// which refuses a user OR slicer beside it): sealed security, like
+    /// `role_filters`. A role restriction reaches every table it is related
+    /// to by a single-column equality in EITHER direction, while a slicer
+    /// follows the relationship's cross-filter direction (owner decision
+    /// 2026-11-06: a security filter never widens; see
+    /// [`crate::security_filter::role_restriction_propagates`]).
+    ///
     /// `token` enables cooperative cancellation: it is checked at phase
     /// boundaries and raced against the connector fetches and the final
     /// DataFusion execution (see
@@ -342,6 +427,7 @@ impl QueryExecutor {
         max_inline_in_values: Option<usize>,
         udfs: Option<&engine_core::compute::udf::UdfRegistry>,
         role_filters: &[FilterPredicate],
+        role_union: bool,
         mut plan: Option<&mut PlanNode>,
         token: &CancellationToken,
     ) -> QueryResult<Vec<RecordBatch>> {
@@ -668,9 +754,62 @@ impl QueryExecutor {
             tables
         };
 
+        // THE GROUP DOMAIN OF AN AXIS TABLE (DAX SUMMARIZECOLUMNS). A filter
+        // argument on ANOTHER table does not shrink the values a GROUP BY
+        // column of a table takes: only that table's own filters do (and,
+        // owner rule, row-level security, which never widens). Then every
+        // group whose measures are all BLANK is dropped. [LIVE] Excel 16 Data
+        // Model: `SUMMARIZECOLUMNS(S[cat], TREATAS({"Helmets"}, P[name]),
+        // "Total", SUM(S[amount]), "PC", COUNTROWS(P))` answers A 20 / 1 AND
+        // B BLANK / 1 (wave 5, eng5 probe-sc1.log). A measure table receives
+        // the keys a slicer on another table propagates into it, so its
+        // REGISTERED rows are narrower than its group domain: on the
+        // multi-fact route the domain of such an axis table is registered
+        // apart (`AxisDomains`) and the groups are combined onto it
+        // (`multi_group`, `pre_aggregate`). Single-fact needs none: every
+        // measure reads the same fact rows the group values come from, so a
+        // value outside them is all-BLANK and dropped either way. Only a
+        // measure table on the axis of a multi-fact query can need one, and
+        // only when a slicer's key reached it, so no other query reads more.
+        let domain_candidates: std::collections::HashSet<String> = if measure_table_names.len() > 1
+        {
+            group_by
+                .iter()
+                .filter(|c| {
+                    measure_table_names
+                        .iter()
+                        .any(|m| m.eq_ignore_ascii_case(&c.table))
+                })
+                .map(|c| c.table.to_lowercase())
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        // Per candidate: the IN filters its DOMAIN keeps (the role-only
+        // ones), and whether a slicer-derived key restricts its registered rows.
+        let mut domain_in_filters: std::collections::HashMap<String, Vec<InFilterCondition>> =
+            std::collections::HashMap::new();
+        let mut domain_tainted: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        // A slicer-derived propagation from a table that ALSO carries a role
+        // restriction: the domain keeps that role's keys, read role-only.
+        // (fetch index, dim_join_col, fact_table_name, fact_join_col).
+        let mut domain_role_info: Vec<(usize, String, String, String)> = Vec::new();
+        // Propagations whose keys are the role's alone (the source carries
+        // nothing else): the domain keeps them as they are.
+        // (fetch index, fact table lowercase).
+        let mut domain_pure: Vec<(usize, String)> = Vec::new();
+
         let mut pre_fetch_indices: Vec<usize> = Vec::new();
         // (pre_fetch_index, dim_join_col, fact_table_name, fact_join_col)
         let mut propagation_info: Vec<(usize, String, String, String)> = Vec::new();
+        // A role restriction that must cross a relationship against its
+        // cross-filter direction, on a fetch that also carries slicers: its
+        // keys come from a second read restricted by the role alone.
+        // (fetch index, role-only request), each index once, and
+        // (fetch index, dim_join_col, fact_table_name, fact_join_col).
+        let mut role_fetches: Vec<(usize, engine_connectors::FetchRequest)> = Vec::new();
+        let mut role_propagation_info: Vec<(usize, String, String, String)> = Vec::new();
 
         for (i, (table_name, request)) in fetches.iter().enumerate() {
             // Skip in-memory tables (already resolved) and tables with no
@@ -684,29 +823,69 @@ impl QueryExecutor {
             {
                 continue;
             }
-            // Skip if this table is itself a measure table.
-            if measure_table_names
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(table_name))
-            {
-                continue;
-            }
-            // Check for a relationship to each measure table.
+            // Check for a relationship to each OTHER measure table. A
+            // filtered table that is itself a measure table (the second
+            // "fact" of [Total, COUNTROWS(Product)] under a Product slicer)
+            // still filters the facts it reaches: it was skipped outright, so
+            // the slicer never reached Sales for Total (wave 3 verifier). A
+            // slicer reaches a measure table only in the relationship's
+            // cross-filter direction; a ROLE restriction in either direction
+            // (`key_propagation`).
             // IN-list optimization only works for single-condition equi-joins.
+            let sealed = sealed_restriction(table_name, request, role_filters, role_union);
             for &mt in &measure_table_names {
+                if mt.eq_ignore_ascii_case(table_name) {
+                    continue;
+                }
                 if let Ok(rel) = model.find_relationship(mt, table_name) {
-                    if rel.conditions().len() != 1 || !rel.is_equi_only() {
+                    let Some(how) = key_propagation(rel, mt, sealed.as_ref()) else {
                         continue;
-                    }
+                    };
                     let (fact_col, dim_col) = if rel.from_table() == mt {
                         (rel.from_column().to_string(), rel.to_column().to_string())
                     } else {
                         (rel.to_column().to_string(), rel.from_column().to_string())
                     };
-                    if !pre_fetch_indices.contains(&i) {
-                        pre_fetch_indices.push(i);
+                    let for_domain = domain_candidates.contains(&mt.to_lowercase());
+                    match (how, sealed.as_ref()) {
+                        (KeyPropagation::RoleOnly, Some(s)) => {
+                            if !role_fetches.iter().any(|(j, _)| *j == i) {
+                                role_fetches.push((i, s.request.clone()));
+                            }
+                            role_propagation_info.push((i, dim_col, mt.to_string(), fact_col));
+                        }
+                        _ => {
+                            if !pre_fetch_indices.contains(&i) {
+                                pre_fetch_indices.push(i);
+                            }
+                            if for_domain {
+                                match sealed.as_ref() {
+                                    // Nothing but the role: the keys ARE the role's.
+                                    Some(s) if s.same_as_full => {
+                                        domain_pure.push((i, mt.to_lowercase()));
+                                    }
+                                    // Slicers beside a role: the domain keeps
+                                    // the role's keys alone (a role-only read).
+                                    Some(s) => {
+                                        domain_tainted.insert(mt.to_lowercase());
+                                        if !role_fetches.iter().any(|(j, _)| *j == i) {
+                                            role_fetches.push((i, s.request.clone()));
+                                        }
+                                        domain_role_info.push((
+                                            i,
+                                            dim_col.clone(),
+                                            mt.to_string(),
+                                            fact_col.clone(),
+                                        ));
+                                    }
+                                    None => {
+                                        domain_tainted.insert(mt.to_lowercase());
+                                    }
+                                }
+                            }
+                            propagation_info.push((i, dim_col, mt.to_string(), fact_col));
+                        }
                     }
-                    propagation_info.push((i, dim_col, mt.to_string(), fact_col));
                 }
             }
         }
@@ -757,15 +936,85 @@ impl QueryExecutor {
                     // IN as a false predicate; the in-memory path filters to
                     // zero). Skipping it would leave the fact unrestricted — a
                     // zero-match correctness bug and an RLS leak.
+                    let condition = InFilterCondition {
+                        column: fact_col.clone(),
+                        values,
+                        kind,
+                        include_null: false,
+                    };
+                    if domain_pure
+                        .iter()
+                        .any(|(j, t)| j == idx && *t == fact_table.to_lowercase())
+                    {
+                        domain_in_filters
+                            .entry(fact_table.to_lowercase())
+                            .or_default()
+                            .push(condition.clone());
+                    }
                     in_filters_by_table
                         .entry(fact_table.to_lowercase())
                         .or_default()
-                        .push(InFilterCondition {
+                        .push(condition);
+                }
+            }
+        }
+
+        // The role-only reads (a role restriction crossing a relationship
+        // against its cross-filter direction, beside a slicer that must not):
+        // their keys restrict the measure table exactly as the role does. An
+        // empty key set is pushed too (the role permits no row there).
+        if !role_fetches.is_empty() {
+            let role_fetch_futures: Vec<_> = role_fetches
+                .iter()
+                .map(|(i, role_request)| {
+                    let table_name = &fetches[*i].0;
+                    async move {
+                        let connector = registry.connector_for(table_name)?;
+                        let batches = connector.fetch_data(role_request).await?;
+                        Ok::<_, crate::error::QueryError>((*i, batches))
+                    }
+                })
+                .collect();
+            let role_results =
+                race_cancelled(token, futures::future::try_join_all(role_fetch_futures)).await?;
+            for (idx, batches) in &role_results {
+                for (pi, dim_col, fact_table, fact_col) in &role_propagation_info {
+                    if pi == idx {
+                        let (values, kind) = extract_column_values(batches, dim_col);
+                        let condition = InFilterCondition {
                             column: fact_col.clone(),
                             values,
                             kind,
                             include_null: false,
-                        });
+                        };
+                        // Role-only keys: the domain keeps them too.
+                        if domain_candidates.contains(&fact_table.to_lowercase()) {
+                            domain_in_filters
+                                .entry(fact_table.to_lowercase())
+                                .or_default()
+                                .push(condition.clone());
+                        }
+                        in_filters_by_table
+                            .entry(fact_table.to_lowercase())
+                            .or_default()
+                            .push(condition);
+                    }
+                }
+                // A role beside slicers: its keys restrict the DOMAIN only
+                // (the registered rows took the slicers' keys as well).
+                for (pi, dim_col, fact_table, fact_col) in &domain_role_info {
+                    if pi == idx {
+                        let (values, kind) = extract_column_values(batches, dim_col);
+                        domain_in_filters
+                            .entry(fact_table.to_lowercase())
+                            .or_default()
+                            .push(InFilterCondition {
+                                column: fact_col.clone(),
+                                values,
+                                kind,
+                                include_null: false,
+                            });
+                    }
                 }
             }
         }
@@ -783,23 +1032,92 @@ impl QueryExecutor {
             {
                 continue;
             }
-            // Skip if this table is itself a measure table.
-            if measure_table_names
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(table_name))
-            {
-                continue;
-            }
+            // Every OTHER measure table it reaches: its slicers in the
+            // relationship's cross-filter direction, its role restriction in
+            // either (see the connector branch above).
+            let sealed = sealed_restriction(table_name, request, role_filters, role_union);
+            // The cached rows restricted by the role ALONE, read once.
+            let mut role_rows: Option<Vec<RecordBatch>> = None;
             for &mt in &measure_table_names {
+                if mt.eq_ignore_ascii_case(table_name) {
+                    continue;
+                }
                 if let Ok(rel) = model.find_relationship(mt, table_name) {
-                    if rel.conditions().len() != 1 || !rel.is_equi_only() {
+                    let Some(how) = key_propagation(rel, mt, sealed.as_ref()) else {
                         continue;
-                    }
+                    };
                     let (fact_col, dim_col) = if rel.from_table() == mt {
                         (rel.from_column().to_string(), rel.to_column().to_string())
                     } else {
                         (rel.to_column().to_string(), rel.from_column().to_string())
                     };
+                    let for_domain = domain_candidates.contains(&mt.to_lowercase());
+                    let role_only = matches!((how, sealed.as_ref()), (KeyPropagation::RoleOnly, Some(_)));
+                    // Slicers beside a role, into a domain candidate: the
+                    // domain keeps the role's keys alone (see the connector
+                    // branch above).
+                    let domain_role = for_domain
+                        && !role_only
+                        && sealed.as_ref().is_some_and(|s| !s.same_as_full);
+                    if let (true, Some(s)) = (role_only || domain_role, sealed.as_ref()) {
+                        if role_rows.is_none() {
+                            let batch = cache.and_then(|c| c.get(table_name)).ok_or_else(|| {
+                                crate::error::QueryError::Engine(EngineError::TableNotCached(
+                                    table_name.clone(),
+                                ))
+                            })?;
+                            let mut rows = if s.request.filters.is_empty() {
+                                vec![batch.clone()]
+                            } else {
+                                vec![filter_cached_batch(batch, &s.request.filters).await?]
+                            };
+                            if !s.request.or_groups.is_empty() {
+                                let mut next = Vec::with_capacity(rows.len());
+                                for b in &rows {
+                                    next.push(
+                                        filter_cached_batch_or_groups(b, &s.request.or_groups)
+                                            .await?,
+                                    );
+                                }
+                                rows = next;
+                            }
+                            role_rows = Some(rows);
+                        }
+                        let rows = role_rows.as_deref().unwrap_or(&[]);
+                        let (values, kind) = extract_column_values(rows, &dim_col);
+                        let condition = InFilterCondition {
+                            column: fact_col.clone(),
+                            values,
+                            kind,
+                            include_null: false,
+                        };
+                        if role_only {
+                            if for_domain {
+                                domain_in_filters
+                                    .entry(mt.to_lowercase())
+                                    .or_default()
+                                    .push(condition.clone());
+                            }
+                            in_filters_by_table
+                                .entry(mt.to_lowercase())
+                                .or_default()
+                                .push(condition);
+                            continue;
+                        }
+                        // The role's keys restrict the domain only.
+                        domain_tainted.insert(mt.to_lowercase());
+                        domain_in_filters
+                            .entry(mt.to_lowercase())
+                            .or_default()
+                            .push(condition);
+                    }
+                    // Nothing but the role on this table: its keys are the
+                    // role's, and the domain keeps them; any other filter
+                    // without a role is a slicer's, kept from the domain.
+                    let pure = sealed.as_ref().is_some_and(|s| s.same_as_full);
+                    if for_domain && sealed.is_none() {
+                        domain_tainted.insert(mt.to_lowercase());
+                    }
                     // Find the cached batch for this table.
                     if let Some((_, batches, _, _)) =
                         inmemory_results.iter().find(|(n, _, _, _)| n == table_name)
@@ -809,17 +1127,46 @@ impl QueryExecutor {
                         // pre-fetch branch above): a zero-key in-memory
                         // dimension must restrict the fact to zero rows, not
                         // leave it unrestricted.
+                        let condition = InFilterCondition {
+                            column: fact_col,
+                            values,
+                            kind,
+                            include_null: false,
+                        };
+                        if for_domain && pure {
+                            domain_in_filters
+                                .entry(mt.to_lowercase())
+                                .or_default()
+                                .push(condition.clone());
+                        }
                         in_filters_by_table
                             .entry(mt.to_lowercase())
                             .or_default()
-                            .push(InFilterCondition {
-                                column: fact_col,
-                                values,
-                                kind,
-                                include_null: false,
-                            });
+                            .push(condition);
                     }
                 }
+            }
+        }
+
+        // The domain candidates a slicer's key restricts keep their OWN rows
+        // (their fetch's filters, role predicates sealed in) before any
+        // propagated key is applied: the registration below derives both the
+        // registered rows and the group domain from them. A connector table
+        // fetched in phase 2 is read without the propagated keys and
+        // filtered locally instead (one fetch, not two).
+        let mut domain_own: std::collections::HashMap<String, Vec<RecordBatch>> =
+            std::collections::HashMap::new();
+        for t in &domain_tainted {
+            if let Some((_, b, _, _)) = inmemory_results
+                .iter()
+                .find(|(n, _, _, _)| n.to_lowercase() == *t)
+            {
+                domain_own.insert(t.clone(), b.clone());
+            } else if let Some((_, _, b, _, _)) = pre_fetch_results
+                .iter()
+                .find(|(_, n, _, _, _)| n.to_lowercase() == *t)
+            {
+                domain_own.insert(t.clone(), b.clone());
             }
         }
 
@@ -832,6 +1179,17 @@ impl QueryExecutor {
         // here), and it equally fixes forward propagation to any cached fact.
         if !in_filters_by_table.is_empty() {
             for (table_name, batches, row_count, _) in inmemory_results.iter_mut() {
+                if let Some(in_filters) = in_filters_by_table.get(&table_name.to_lowercase()) {
+                    for in_filter in in_filters {
+                        *batches = filter_batches_by_in_filter(batches, in_filter)?;
+                    }
+                    *row_count = batches.iter().map(|b| b.num_rows()).sum();
+                }
+            }
+            // A measure table pre-fetched in phase 1 (it filters another
+            // fact) is never fetched again in phase 2, so the IN-filters it
+            // receives itself are applied in place here.
+            for (_, table_name, batches, row_count, _) in pre_fetch_results.iter_mut() {
                 if let Some(in_filters) = in_filters_by_table.get(&table_name.to_lowercase()) {
                     for in_filter in in_filters {
                         *batches = filter_batches_by_in_filter(batches, in_filter)?;
@@ -861,6 +1219,13 @@ impl QueryExecutor {
             token,
         )
         .await?;
+
+        // A domain candidate a reverse (Both) filter reaches keeps no domain
+        // of its own: that filter may carry a role's keys from a table two
+        // relationships away, which the domain could not tell from a
+        // slicer's -- and a security filter never widens.
+        domain_tainted.retain(|t| !bidirectional_filters.contains_key(t));
+        domain_own.retain(|t, _| domain_tainted.contains(t));
 
         // Apply reverse filters to dimensions that are already materialized
         // locally: cache-served tables (their batches never see remote IN
@@ -900,10 +1265,18 @@ impl QueryExecutor {
             .enumerate()
             .filter(|(i, _)| !skip_set.contains(i))
             .map(|(_, (table_name, request))| {
-                let in_filters = in_filters_by_table
-                    .get(&table_name.to_lowercase())
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
+                // A domain candidate is read with its own filters only; the
+                // propagated keys are applied at registration (see above).
+                let in_filters: &[InFilterCondition] = if domain_tainted
+                    .contains(&table_name.to_lowercase())
+                {
+                    &[]
+                } else {
+                    in_filters_by_table
+                        .get(&table_name.to_lowercase())
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[])
+                };
                 // Reverse (Both) filters targeting this table, if any.
                 let reverse_filters = bidirectional_filters
                     .get(&table_name.to_lowercase())
@@ -939,10 +1312,33 @@ impl QueryExecutor {
 
         let main_fetch_results =
             race_cancelled(token, futures::future::try_join_all(main_fetch_futures)).await?;
+        // A domain candidate read in phase 2: those rows are its own.
+        for (table_name, batches, _, _) in &main_fetch_results {
+            let t = table_name.to_lowercase();
+            if domain_tainted.contains(&t) && !domain_own.contains_key(&t) {
+                domain_own.insert(t, batches.clone());
+            }
+        }
 
         // Cancellation checkpoint: all source data fetched, before DataFusion
         // registration and local evaluation.
         check_cancelled(token)?;
+
+        // The tables whose registered rows the request restricts (their own
+        // fetch filters and slicers, role predicates sealed into them, keys
+        // propagated into them either way). A USERELATIONSHIP over an unsafe
+        // relationship restricts its measure only through such a table.
+        let request_filtered: super::semi_join::RequestFiltered = fetches
+            .iter()
+            .filter(|(_, request)| {
+                !request.filters.is_empty()
+                    || !request.in_filters.is_empty()
+                    || !request.or_groups.is_empty()
+            })
+            .map(|(name, _)| name.to_lowercase())
+            .chain(in_filters_by_table.keys().cloned())
+            .chain(bidirectional_filters.keys().cloned())
+            .collect();
 
         // Combine all fetch results for plan reporting and DataFusion registration.
         let mut all_fetch_results: Vec<(String, Vec<RecordBatch>, usize, std::time::Duration)> =
@@ -977,6 +1373,8 @@ impl QueryExecutor {
         // columns by name like any physical column.
         let empty_udfs = engine_core::compute::udf::UdfRegistry::new();
         let materialize_udfs = udfs.unwrap_or(&empty_udfs);
+        // The group domains registered apart (see `domain_candidates`).
+        let mut axis_domains: super::multi_group::AxisDomains = super::multi_group::AxisDomains::new();
 
         for (table_name, batches, _, _) in &all_fetch_results {
             if batches.is_empty() {
@@ -994,6 +1392,58 @@ impl QueryExecutor {
                 .filter(|cc| !cc.is_cross_table())
                 .cloned()
                 .collect();
+
+            // A domain candidate (see `domain_candidates`): one base from its
+            // own rows, so the registered rows and the domain share every
+            // column type -- the registered rows take every propagated key,
+            // the domain the role-only ones.
+            if let Some(own) = domain_own.get(&df_name).filter(|b| !b.is_empty()) {
+                let schema = own[0].schema();
+                let combined = concat_batches(&schema, own)?;
+                let combined = if calc_cols.is_empty() {
+                    combined
+                } else {
+                    engine_core::compute::materialize_calculated_columns_with_udfs(
+                        &combined,
+                        &calc_cols,
+                        materialize_udfs,
+                    )
+                    .await?
+                };
+                let base = if cache_served_tables.contains(table_name) {
+                    combined
+                } else {
+                    let (optimized, stats) =
+                        engine_core::optimize::optimize_batch(&combined, &opt_config)?;
+                    if stats.any_applied() {
+                        opt_stats_by_table.push((table_name.clone(), stats));
+                    }
+                    optimized
+                };
+                let mut registered = vec![base.clone()];
+                for f in in_filters_by_table.get(&df_name).into_iter().flatten() {
+                    registered = filter_batches_by_in_filter(&registered, f)?;
+                }
+                let mut domain = vec![base];
+                for f in domain_in_filters.get(&df_name).into_iter().flatten() {
+                    domain = filter_batches_by_in_filter(&domain, f)?;
+                }
+                let domain_schema = domain
+                    .first()
+                    .map(|b| b.schema())
+                    .unwrap_or_else(|| schema.clone());
+                register_partitioned_table(&ctx, &df_name, registered)?;
+                let axis_present = group_by
+                    .iter()
+                    .filter(|c| c.table.eq_ignore_ascii_case(table_name))
+                    .all(|c| domain_schema.fields().iter().any(|f| f.name() == &c.column));
+                if axis_present && domain.iter().any(|b| b.num_columns() > 0) {
+                    let domain_name = format!("__axis_domain_{df_name}");
+                    register_partitioned_table(&ctx, &domain_name, domain)?;
+                    axis_domains.insert(df_name.clone(), domain_name);
+                }
+                continue;
+            }
 
             if cache_served_tables.contains(table_name) && calc_cols.is_empty() {
                 // Cache-served batches were already optimized and sorted at
@@ -1457,6 +1907,7 @@ impl QueryExecutor {
                 max_inline_in_values,
                 udfs,
                 role_filters,
+                role_union,
                 None,
                 token,
             ))
@@ -1497,7 +1948,15 @@ impl QueryExecutor {
             // Cancellation checkpoint: before multi-fact-table evaluation.
             check_cancelled(token)?;
             let batches =
-                Self::execute_multi_group_aggregation(&ctx, &measure_groups, group_by, model, plan)
+                Self::execute_multi_group_aggregation(
+                    &ctx,
+                    &measure_groups,
+                    group_by,
+                    model,
+                    &request_filtered,
+                    &axis_domains,
+                    plan,
+                )
                     .await?;
             return apply_order_and_limit(batches, order_by, limit);
         }
@@ -1507,16 +1966,13 @@ impl QueryExecutor {
         let fact_model_name = measures[0].table();
 
         // A contested filter's condition is rendered per measure over the
-        // JOINed dimension — the join must be a safe direct join (an EXISTS
-        // fallback would land in the statement's WHERE and apply to every
-        // measure, silently un-clearing the clearing measures). Fail closed
-        // for unsafe relationships.
+        // JOINed dimension — the join must be KEY-SAFE from the fact (each
+        // fact row meets at most one dimension row; a one-to-many seen from
+        // its one side would multiply them). Fail closed for every other
+        // relationship.
         for cf in contested_filters {
             if !cf.table.eq_ignore_ascii_case(fact_model_name) {
-                let safe = model
-                    .find_relationship(fact_model_name, &cf.table)
-                    .map(|rel| rel.is_safe_for_direct_join())
-                    .unwrap_or(false);
+                let safe = super::semi_join::is_key_safe(model, fact_model_name, &cf.table);
                 if !safe {
                     return Err(crate::error::QueryError::InvalidQuery(format!(
                         "a measure clears request filter '{}[{}]' (level {}), but '{}' is not \
@@ -1536,10 +1992,7 @@ impl QueryExecutor {
                 if table.eq_ignore_ascii_case(fact_model_name) {
                     continue;
                 }
-                let safe = model
-                    .find_relationship(fact_model_name, table)
-                    .map(|rel| rel.is_safe_for_direct_join())
-                    .unwrap_or(false);
+                let safe = super::semi_join::is_key_safe(model, fact_model_name, table);
                 if !safe {
                     return Err(crate::error::QueryError::InvalidQuery(format!(
                         "a multi-column selection names '{table}[{column}]' (level {}), but \
@@ -1553,15 +2006,19 @@ impl QueryExecutor {
             }
         }
 
-        // Detect GROUP BY dimensions with unsafe relationships (ManyToMany,
-        // non-equi). These require pre-aggregation to avoid row explosion.
+        // Detect GROUP BY dimensions a JOIN would multiply the fact's rows
+        // through: many-to-many, non-equi, or the MANY side of a one-to-many
+        // seen from the fact's ONE side. These go through pre-aggregation's
+        // key mapping. Direction-aware (`lookup_safe_from`): a one-to-many
+        // declared from the dimension is a many-to-one from the fact, a
+        // direct join.
         let unsafe_group_by_dims: Vec<&ColumnRef> = group_by
             .iter()
             .filter(|dim| {
-                dim.table != fact_model_name
+                !dim.table.eq_ignore_ascii_case(fact_model_name)
                     && model
                         .find_relationship(fact_model_name, &dim.table)
-                        .map(|rel| !rel.is_safe_for_direct_join())
+                        .map(|rel| !rel.lookup_safe_from(fact_model_name))
                         .unwrap_or(false)
             })
             .collect();
@@ -1598,6 +2055,8 @@ impl QueryExecutor {
                 fact_table,
                 fact_model_name,
                 &unsafe_group_by_dims,
+                &request_filtered,
+                &axis_domains,
             )
             .await?;
             return apply_order_and_limit(batches, order_by, limit);
@@ -1709,7 +2168,10 @@ impl QueryExecutor {
                             } else {
                                 return false;
                             };
-                            !rel.is_safe_for_direct_join() && group_by_tables.contains(dim_table)
+                            // Direction-aware: a one-to-many declared from the
+                            // dimension is JOIN-safe from the fact.
+                            !rel.join_safe_from(fact_model_name)
+                                && group_by_tables.contains(dim_table)
                         })
                         .unwrap_or(false)
                 });
@@ -1780,6 +2242,12 @@ impl QueryExecutor {
         let mut having_measures: Vec<String> = Vec::new();
         // Aliased JOINs from USERELATIONSHIP overrides.
         let mut override_joins: Vec<OverrideJoinEntry> = Vec::new();
+        // Per-measure semi-joins: a KEEP on a table that is not key-safe from
+        // the fact (BUG-0763, `semi_join`).
+        let mut semi_joins: Vec<super::semi_join::SemiJoin> = Vec::new();
+        // The GROUP BY tables, which the statement joins itself: a KEEP on one
+        // reads the joined row, never a semi-join.
+        let axis_tables: Vec<&str> = group_by.iter().map(|d| d.table.as_str()).collect();
         // One-row CROSS JOINs carrying the grand totals of compound measures
         // (`hoist_clear_scalars`, BUG-0444), appended after every other JOIN.
         let mut clear_scalar_joins: Vec<String> = Vec::new();
@@ -1831,6 +2299,8 @@ impl QueryExecutor {
                     &group_columns,
                     &mut context_join_tables,
                     &mut override_joins,
+                    &mut semi_joins,
+                    &request_filtered,
                     &mut hoist_cols,
                 )?;
                 outer_measures.push((name.to_string(), outer));
@@ -1849,6 +2319,8 @@ impl QueryExecutor {
                     &group_columns,
                     &mut context_join_tables,
                     &mut override_joins,
+                    &mut semi_joins,
+                    &request_filtered,
                 )?;
                 format!(
                     "{} AS {}",
@@ -1922,20 +2394,38 @@ impl QueryExecutor {
                     }
                 }
 
+                // Measure KEEP conditions plus surviving contested IN-lists.
+                let mut merged_conditions: Vec<Expression> = eval_ctx
+                    .conditions
+                    .iter()
+                    .cloned()
+                    .chain(contested_conditions)
+                    .collect();
+                // A KEEP on a table that is not key-safe from the fact (a
+                // many-to-many bridge, a range, the many side of a
+                // one-to-many): a semi-join of THIS measure. It used to add a
+                // predicate-free EXISTS to the statement's WHERE, filtering
+                // every measure, while the condition named the unjoined
+                // table (BUG-0763).
+                let semi_flags = super::semi_join::take_semi_joins(
+                    &mut effective,
+                    &mut merged_conditions,
+                    &eval_ctx,
+                    model,
+                    fact_table,
+                    fact_model_name,
+                    &axis_tables,
+                    &request_filtered,
+                    &mut semi_joins,
+                )?;
+
                 // Record tables that need JOINs from resolved filters.
                 for f in &effective {
                     if f.table != fact_model_name {
                         context_join_tables.push(f.table.clone());
                     }
                 }
-                // Record tables from expression conditions (measure KEEP
-                // conditions plus surviving contested IN-lists).
-                let merged_conditions: Vec<Expression> = eval_ctx
-                    .conditions
-                    .iter()
-                    .cloned()
-                    .chain(contested_conditions)
-                    .collect();
+                // Record tables from expression conditions.
                 for cond in &merged_conditions {
                     collect_qualified_tables(cond, fact_model_name, &mut context_join_tables);
                 }
@@ -1951,7 +2441,8 @@ impl QueryExecutor {
 
                 let has_case = !effective.is_empty()
                     || !merged_conditions.is_empty()
-                    || !in_conditions.is_empty();
+                    || !in_conditions.is_empty()
+                    || !semi_flags.is_empty();
 
                 // Inner aggregate SQL: CASE WHEN when KEEP filters/conditions are
                 // present, else the plain aggregate.
@@ -1968,7 +2459,7 @@ impl QueryExecutor {
                     } else {
                         String::new()
                     };
-                    for c in &in_conditions {
+                    for c in in_conditions.iter().chain(semi_flags.iter()) {
                         if condition.is_empty() {
                             condition = c.clone();
                         } else {
@@ -1977,7 +2468,9 @@ impl QueryExecutor {
                     }
                     // Use the measure's own table for column qualification.
                     let measure_table = &measure.table().to_lowercase();
-                    stripped_expr.to_case_when_sql(&condition, measure_table)?
+                    stripped_expr.to_case_when_sql_with_classes(&condition, measure_table, &|t, c| {
+                        super::sql::model_column_class(model, measure.table(), t, c)
+                    })?
                 } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
                     let fact = measure.table().to_lowercase();
                     // A count answers BLANK, never 0 (DAX).
@@ -1986,7 +2479,9 @@ impl QueryExecutor {
                         &format!("{fact}.{}", quote_ident_double(col)),
                     )
                 } else {
-                    stripped_expr.to_sql_string()?
+                    stripped_expr.to_sql_string_with_classes(&|t, c| {
+                        super::sql::model_column_class(model, measure.table(), t, c)
+                    })?
                 };
 
                 // A measure that clears the group-by axis re-aggregates over the
@@ -2240,17 +2735,18 @@ impl QueryExecutor {
             }
         }
 
-        // Add JOINs for tables referenced by context filters (KEEP, etc.).
-        // For unsafe relationships (ManyToMany, non-equi), use EXISTS subquery
-        // instead of JOIN to avoid row explosion.
-        let mut exists_conditions: Vec<String> = Vec::new();
+        // Add LEFT JOINs for tables referenced by context filters (KEEP,
+        // etc.). Only a table KEY-SAFE from the fact gets here: a KEEP on any
+        // other table (many-to-many, range, the many side of a one-to-many)
+        // became a per-measure semi-join above (BUG-0763), and contested /
+        // tuple filters on one were refused.
         for dim_table in &context_join_tables {
             let dim_lower = dim_table.to_lowercase();
             if joined_tables.contains(&dim_lower) {
                 continue;
             }
             if let Ok(rel) = model.find_relationship(fact_model_name, dim_table) {
-                if rel.is_safe_for_direct_join() {
+                if rel.lookup_safe_from(fact_model_name) {
                     // A LEFT JOIN: the table is read only by a measure's own
                     // CASE WHEN condition (a NULL dimension row is FALSE
                     // there), so a fact row with no dimension row still
@@ -2263,20 +2759,16 @@ impl QueryExecutor {
                     join_descriptions.push(on_clause);
                     joined_tables.insert(dim_lower);
                 } else {
-                    // Unsafe relationship: prefer scalar boundary check,
-                    // fall back to EXISTS subquery.
-                    let fact_is_from = rel.from_table() == fact_model_name;
-                    if let Some(boundary) =
-                        rel.build_boundary_clause(fact_table, &dim_lower, fact_is_from, &[])
-                    {
-                        exists_conditions.push(boundary);
-                    } else {
-                        let exists =
-                            rel.build_exists_clause(fact_table, &dim_lower, fact_is_from, &[]);
-                        exists_conditions.push(exists);
-                    }
-                    // Mark as handled so we don't try to JOIN it again.
-                    joined_tables.insert(dim_lower);
+                    // Joining it would multiply fact rows, and a statement-wide
+                    // EXISTS would filter EVERY measure (BUG-0763): refuse
+                    // rather than answer either wrong number.
+                    return Err(crate::error::QueryError::InvalidQuery(format!(
+                        "'{dim_table}' is reached from '{fact_model_name}' through a many-to-many, \
+                         range or one-to-many relationship, so it cannot be joined onto \
+                         '{fact_model_name}' without multiplying its rows, and its filter could \
+                         not be applied to the measure that carries it alone; filter it with a \
+                         KEEP predicate of its own"
+                    )));
                 }
             } else {
                 // Fallback: try to add as JOIN (existing behavior).
@@ -2294,8 +2786,12 @@ impl QueryExecutor {
         // different ON clause so that measures using the override see the
         // rows matched by the inactive relationship.
         //
-        // For unsafe relationships (ManyToMany, non-equi), use EXISTS
-        // subquery instead of JOIN to avoid row explosion.
+        // Only an override through a relationship JOIN-safe from the fact
+        // gets an entry (`build_override_alias_map`): an override through a
+        // many-to-many, range or one-to-many-from-its-one-side relationship is
+        // a per-measure semi-join (`semi_join::take_semi_joins`). It used to
+        // be a statement-wide EXISTS / boundary in the WHERE, which filtered
+        // EVERY measure of the query.
         //
         // Override joins are for measure context (USERELATIONSHIP), NOT for
         // GROUP BY. The GROUP BY is served by the primary join. So we never
@@ -2304,47 +2800,23 @@ impl QueryExecutor {
             if joined_tables.contains(&entry.alias) {
                 continue;
             }
-            if entry.is_safe {
-                // Safe (ManyToOne equi): direct JOIN won't cause row explosion.
-                sql.push_str(&format!(
-                    " JOIN {} AS {} ON {}",
-                    entry.source_table, entry.alias, entry.on_clause
-                ));
-                join_descriptions.push(entry.on_clause.clone());
-                joined_tables.insert(entry.alias.clone());
-            } else if let Some(ref boundary) = entry.boundary_clause {
-                // Single-condition inequality: use scalar boundary check
-                // instead of expensive correlated EXISTS.
-                exists_conditions.push(boundary.clone());
-                joined_tables.insert(entry.alias.clone());
-            } else {
-                // Unsafe (ManyToMany, non-equi): use EXISTS subquery.
-                // Rewrite the ON clause as an EXISTS condition.
-                // The ON clause references fact_table and alias columns;
-                // for EXISTS we need to reference the source table inside a subquery.
-                let exists = format!(
-                    "EXISTS (SELECT 1 FROM {} AS __d WHERE {})",
-                    entry.source_table,
-                    entry
-                        .on_clause
-                        .replace(&format!("{}.", entry.alias), "__d.")
-                );
-                exists_conditions.push(exists);
-                joined_tables.insert(entry.alias.clone());
-            }
+            sql.push_str(&format!(
+                " JOIN {} AS {} ON {}",
+                entry.source_table, entry.alias, entry.on_clause
+            ));
+            join_descriptions.push(entry.on_clause.clone());
+            joined_tables.insert(entry.alias.clone());
         }
+
+        // The per-measure semi-joins: each a DISTINCT key set (LEFT JOIN) or a
+        // one-row boundary (CROSS JOIN), so none can multiply a fact row.
+        sql.push_str(&super::semi_join::semi_join_sql(&semi_joins));
 
         // Grand totals of compound measures: one-row derived tables, after
         // every JOIN that references the fact table (BUG-0444).
         for join in &clear_scalar_joins {
             sql.push(' ');
             sql.push_str(join);
-        }
-
-        // WHERE clause for EXISTS/boundary semi-join conditions (unsafe relationships).
-        if !exists_conditions.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&exists_conditions.join(" AND "));
         }
 
         // GROUP BY clause — `GROUP BY ROLLUP (...)` when totals are

@@ -18,25 +18,54 @@ import {
   overlayGetColHeaderHeight,
   getGridRegions,
 } from "@api";
-import { getEvaluationForCell } from "../lib/cfStore";
+import { getEvaluationForCell, getIconAlignForCell } from "../lib/cfStore";
 import { drawIcon } from "./iconShapes";
 
-const ICON_SIZE = 14;
-/** Inset of the icon from the cell's left edge, in px. */
-const ICON_INSET_X = 2;
+export const ICON_SIZE = 14;
+/** Inset of the icon from the cell's edge it sits against, in px. */
+export const ICON_INSET_X = 2;
+
+/** Where a glyph sits across its cell. */
+export type IconPlacement = "left" | "center" | "right";
 
 /**
- * Paint one icon-set glyph into `box`: at the left edge, vertically centred.
- * `iconSet` and `index` are the backend's resolved pair (BUG-0107: both come
- * from the ONE rule that produced them, never re-derived here).
+ * Where Excel puts an icon-set glyph in its cell (BUG-0728) [LIVE, Excel 16,
+ * 2026-11-06, lane uiforms probe2/probe3 PDFs]: at the LEFT while the value
+ * shows, whatever the alignment; with Show Icon Only, by the cell's horizontal
+ * alignment -- CENTRED under Center, at the RIGHT under Right, at the left
+ * under everything else (General, Left, Fill, Justify, Center Across
+ * Selection, Distributed), the indent ignored. (The ledger's "Excel centres the
+ * icon when the value is hidden" held only for a centred cell: a General cell's
+ * icon stays at the left.)
+ */
+export function iconPlacementFor(hideValue: boolean, textAlign: string | null | undefined): IconPlacement {
+  if (!hideValue) return "left";
+  if (textAlign === "center") return "center";
+  if (textAlign === "right") return "right";
+  return "left";
+}
+
+/** The glyph's left edge in `box` for a placement. */
+export function iconXIn(box: CellBox, placement: IconPlacement): number {
+  if (placement === "center") return box.x + (box.width - ICON_SIZE) / 2;
+  if (placement === "right") return box.x + box.width - ICON_INSET_X - ICON_SIZE;
+  return box.x + ICON_INSET_X;
+}
+
+/**
+ * Paint one icon-set glyph into `box`, vertically centred, across the cell as
+ * `placement` says (left by default). `iconSet` and `index` are the backend's
+ * resolved pair (BUG-0107: both come from the ONE rule that produced them,
+ * never re-derived here).
  */
 export function paintIconSetIcon(
   ctx: CanvasRenderingContext2D,
   box: CellBox,
   iconSet: IconSetType,
   index: number,
+  placement: IconPlacement = "left",
 ): void {
-  const iconX = box.x + ICON_INSET_X;
+  const iconX = iconXIn(box, placement);
   const iconY = box.y + (box.height - ICON_SIZE) / 2;
   ctx.save();
   drawIcon(ctx, iconSet, index, iconX, iconY, ICON_SIZE);
@@ -98,11 +127,23 @@ export function renderIconSets(context: OverlayRenderContext): void {
     if (!iconCf || iconCf.iconIndex == null || iconCf.iconSet == null) continue;
     const iconSetType: IconSetType = iconCf.iconSet;
 
+    // Show Icon Only places the glyph by the cell's alignment (Excel), which
+    // the store reads for such cells (getIconAlignForCell).
+    const placement = iconPlacementFor(iconCf.hideValue === true, getIconAlignForCell(row, col));
+    const top = Math.max(cellY, chh);
+    if (placement !== "left") {
+      // Centred / right-aligned across the WHOLE cell, as Excel lays it out; a
+      // glyph that would land under the row header is not drawn over it.
+      const box = { x: cellX, y: top, width: cellW, height: cellH };
+      if (iconXIn(box, placement) < rhw) continue;
+      paintIconSetIcon(ctx, box, iconSetType, iconCf.iconIndex, placement);
+      continue;
+    }
+
     // The box starts at the VISIBLE cell's top-left (never under a header) and
     // keeps the cell's full height, which reproduces this overlay's geometry
     // from before the painter was factored out, unchanged.
     const left = Math.max(cellX, rhw);
-    const top = Math.max(cellY, chh);
     paintIconSetIcon(
       ctx,
       { x: left, y: top, width: Math.max(0, cellX + cellW - left), height: cellH },

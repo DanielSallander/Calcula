@@ -47,6 +47,8 @@ interface DimCall { index: number; size: number }
 function makeLib(opts: {
   cols?: Record<number, CellData[]>;
   rows?: Record<number, CellData[]>;
+  styles?: unknown[];
+  columnWidths?: DimCall[];
 } = {}) {
   const colWidths: DimCall[] = [];
   const rowHeights: DimCall[] = [];
@@ -57,11 +59,12 @@ function makeLib(opts: {
       sheets: [0, 1].map((i) => ({ index: i, name: `Sheet${i + 1}` })),
       activeIndex: 0,
     })),
-    getAllStyles: vi.fn(async () => []),
+    getAllStyles: vi.fn(async () => opts.styles ?? []),
     getCellsInCols: vi.fn(async (start: number) => opts.cols?.[start] ?? []),
     getCellsInRows: vi.fn(async (start: number) => opts.rows?.[start] ?? []),
     getDefaultDimensions: vi.fn(async () => ({ defaultRowHeight: 20, defaultColumnWidth: 64 })),
-    getAllColumnWidths: vi.fn(async () => []),
+    getAllColumnWidths: vi.fn(async () => opts.columnWidths ?? []),
+    getAllRowHeights: vi.fn(async () => []),
     setColumnWidth: vi.fn(async (index: number, size: number) => { colWidths.push({ index, size }); }),
     setRowHeight: vi.fn(async (index: number, size: number) => { rowHeights.push({ index, size }); }),
     getUndoState: vi.fn(async () => ({ transactionOpen: false })),
@@ -102,6 +105,24 @@ describe("autoFitFromScript — columns", () => {
     } finally {
       unregister();
     }
+  });
+
+  // W2 uimisc: the script passed no geometry, so a WRAPPED cell sized nothing
+  // and a script's AutoFit left a wrapped column as it was; the double-click
+  // fits it as it wraps at the current width (BUG-0727, Excel).
+  // SABOTAGE: drop the layout argument in autoFitFromScript -> no width set.
+  it("fits a WRAPPED value as it wraps at the column's current width, like the double-click", async () => {
+    const base = { bold: false, italic: false, fontSize: 0, fontFamily: "", wrapText: false };
+    const wrapped = { ...cell(0, 0, "aaaa bbbb cccc"), styleIndex: 1 } as CellData;
+    const { lib, colWidths } = makeLib({
+      cols: { 0: [wrapped] },
+      styles: [base, { ...base, wrapText: true }],
+      columnWidths: [{ index: 0, size: 100 }],
+    });
+    await autoFitFromScript(lib, "columns", 0, 0, undefined);
+    // 100px column, 94px of room: "aaaa bbbb" | "cccc" -- the widest line is
+    // 90px, + 2x3 padding + 2 fit margin (autoFitWrapped.test.ts).
+    expect(colWidths).toEqual([{ index: 0, size: 98 }]);
   });
 
   it("leaves EMPTY columns untouched (Excel) and opens no undo step for them", async () => {

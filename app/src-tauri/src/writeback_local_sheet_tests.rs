@@ -1235,3 +1235,46 @@ fn a_planted_answer_in_a_copy_of_the_workspace_never_seeds_my_cells() {
         assert_eq!(value_at(&state, 1, 4, 1), None, "the replayed 888 never seeds my cell");
     });
 }
+
+// ---------------------------------------------------------------------------
+// BUG-0734. One region id, two applications
+// ---------------------------------------------------------------------------
+
+/// A working copy of application A published as a NEW application B keeps
+/// A's writeback region ids, so a subscriber to both holds two verified
+/// declarations of one id. The owner used to be whichever subscription
+/// answered first: the answers typed into B's region were signed and written
+/// into A's workspace. Every subscriber-side door resolves the owner through
+/// `the_one_region_owner`, which refuses a shared id by name (fail closed).
+///
+/// SABOTAGE (namescalp-region): make `the_one_region_owner` answer the first
+/// owner whenever there is one -- fails at "A SHARED REGION ID".
+#[test]
+fn a_region_id_two_applications_declare_is_refused_never_guessed() {
+    let owner = |package: &str| crate::calp_commands::OwningSubscription {
+        package_name: package.to_string(),
+        resolved_version: "1.0.0".to_string(),
+        registry_path: WORKSPACE.to_string(),
+        environment: String::new(),
+        publisher_key: format!("key-{package}"),
+        declaration: region("r", identity::SheetId::from_bytes(identity::generate_uuid_v7())),
+        identity_policy: Default::default(),
+    };
+    let one = crate::calp_commands::the_one_region_owner(vec![owner("A")], "r").expect("one owner");
+    assert_eq!(one.package_name, "A");
+    let err = match crate::calp_commands::the_one_region_owner(vec![owner("A"), owner("B")], "r") {
+        Ok(o) => panic!("A SHARED REGION ID was resolved to '{}'", o.package_name),
+        Err(e) => e,
+    };
+    assert!(err.starts_with("CALP_REGION_SHARED:"), "{err}");
+    assert!(err.contains("'A'") && err.contains("'B'"), "names both applications: {err}");
+    let none = crate::calp_commands::the_one_region_owner(Vec::new(), "r").err().unwrap_or_default();
+    assert!(none.contains("No subscription declares writeback region 'r'"), "{none}");
+
+    // The owner lookup asks every subscription and leaves the choice to it.
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/calp_commands.rs")).unwrap();
+    let start = src.find("pub(crate) fn owning_subscription_for_region(").expect("the lookup");
+    let body = &src[start..start + src[start..].find("\n}\n").expect("its end")];
+    assert!(body.contains("the_one_region_owner(owners, region_id)"), "the lookup decides through the one rule");
+    assert!(!body.contains("return Ok(OwningSubscription"), "no first-answer return is left");
+}

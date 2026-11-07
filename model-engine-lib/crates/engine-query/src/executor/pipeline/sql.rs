@@ -15,6 +15,8 @@ use engine_core::model::DataModel;
 
 use crate::error::QueryResult;
 
+use super::semi_join::{take_semi_joins, RequestFiltered, SemiJoin};
+
 /// The alias `resolve_compound_sql` gives the aggregate of a grand-total
 /// (RESET / full-axis CLEAR) scalar subquery -- the mark
 /// [`hoist_clear_scalars`] finds it by.
@@ -131,17 +133,27 @@ pub(super) fn hoist_clear_scalars(sql: &str, joins: &mut Vec<String>) -> String 
 /// SQL alias that should be used in filter conditions for this measure.
 /// Entry for an override JOIN from USERELATIONSHIP.
 ///
-/// Contains the alias, ON clause, source table name, and whether the
-/// relationship is safe for a direct JOIN.
+/// Contains the alias, ON clause and source table name. Only a relationship
+/// that can be JOINed onto the fact without multiplying its rows
+/// (`Relationship::join_safe_from`) gets one; any other override is a
+/// per-measure semi-join.
 pub(super) struct OverrideJoinEntry {
     pub(super) alias: String,
     pub(super) on_clause: String,
     pub(super) source_table: String,
-    pub(super) is_safe: bool,
-    /// Pre-computed scalar boundary clause for single-condition inequality
-    /// relationships. `Some(clause)` when the expensive correlated EXISTS can
-    /// be replaced by a cheap scalar subquery (e.g., `col <= (SELECT MAX(...))`).
-    pub(super) boundary_clause: Option<String>,
+}
+
+/// The kind of `table[column]` in `model` (a bare reference is a column of
+/// `host`, the measure's table), for the renderers' DAX BLANK comparisons and
+/// date arithmetic (`dax_semantics::value_class_in`).
+pub(super) fn model_column_class(
+    model: &DataModel,
+    host: &str,
+    table: Option<&str>,
+    column: &str,
+) -> Option<engine_core::compute::dax_semantics::ValueClass> {
+    engine_core::compute::context::filter_column_type(table.unwrap_or(host), column, model)
+        .map(|t| engine_core::compute::dax_semantics::ValueClass::of_data_type(&t))
 }
 
 pub(super) fn build_override_alias_map(
@@ -174,18 +186,16 @@ pub(super) fn build_override_alias_map(
                 .to_lowercase()
                 .replace(|c: char| !c.is_alphanumeric(), "_")
         );
-        let left_is_from = rel.from_table() == fact_model_name;
+        // An override through a relationship that cannot be JOINed onto the
+        // fact (many-to-many, range, a one-to-many seen from its one side) is
+        // a per-measure semi-join (`semi_join::take_semi_joins`), never an
+        // aliased join or a statement-wide EXISTS: no alias for it.
+        if !rel.join_safe_from(fact_model_name) {
+            continue;
+        }
+        let left_is_from = rel.from_table().eq_ignore_ascii_case(fact_model_name);
         let on_clause = rel.build_on_clause(fact_table, &alias, left_is_from);
-        let is_safe = rel.is_safe_for_direct_join();
         let source_table = dim_table.to_lowercase();
-
-        // Pre-compute boundary clause for single-condition inequality
-        // relationships. This avoids the expensive correlated EXISTS.
-        let boundary_clause = if !is_safe {
-            rel.build_boundary_clause(fact_table, &source_table, left_is_from, &[])
-        } else {
-            None
-        };
 
         // Check if this alias is already queued.
         if !override_joins.iter().any(|e| e.alias == alias) {
@@ -193,8 +203,6 @@ pub(super) fn build_override_alias_map(
                 alias: alias.clone(),
                 on_clause,
                 source_table,
-                is_safe,
-                boundary_clause,
             });
         }
         alias_map.insert(dim_table.to_string(), alias);
@@ -311,9 +319,10 @@ fn qualify_condition_sql(expr: &Expression) -> QueryResult<String> {
 ///
 /// NOT unified into [`SqlRenderer`]: this is not a pure expression renderer —
 /// each recursion step may run the `ContextResolver` and accumulate side
-/// effects (`context_join_tables`, `override_joins`) that drive JOIN
-/// construction. Leaf rendering already delegates to the unified renderer via
-/// `to_sql_string`/`to_case_when_sql`.
+/// effects (`context_join_tables`, `override_joins`, and the `semi_joins` a
+/// KEEP on a table that is not key-safe from the fact becomes) that drive
+/// JOIN construction. Leaf rendering already delegates to the unified
+/// renderer via `to_sql_string`/`to_case_when_sql`.
 /// Fail closed when a resolved context carries `KEEP(... IN variable[column])`
 /// membership filters (`eval_ctx.in_filters`) that the local aggregation render
 /// cannot apply.
@@ -575,6 +584,7 @@ fn logical_sql(expr: &Expression, l: &str, r: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_compound_sql(
     expr: &Expression,
     model: &DataModel,
@@ -583,94 +593,55 @@ pub(super) fn resolve_compound_sql(
     group_columns: &[GroupColumn],
     context_join_tables: &mut Vec<String>,
     override_joins: &mut Vec<OverrideJoinEntry>,
+    semi_joins: &mut Vec<SemiJoin>,
+    request_filtered: &RequestFiltered,
 ) -> QueryResult<String> {
+    macro_rules! recurse {
+        ($e:expr) => {
+            resolve_compound_sql(
+                $e,
+                model,
+                fact_table,
+                fact_model_name,
+                group_columns,
+                context_join_tables,
+                override_joins,
+                semi_joins,
+                request_filtered,
+            )
+        };
+    }
     match expr {
         // Compound expressions: recurse into each operand independently, with
         // DAX BLANK arithmetic (`engine_core::compute::dax_semantics`).
-        Expression::BinaryOp { .. } => dax_semantics::render_binary(
-            expr,
-            DivideStyle::Ieee,
-            &mut |e| {
-                resolve_compound_sql(
-                    e,
-                    model,
-                    fact_table,
-                    fact_model_name,
-                    group_columns,
-                    context_join_tables,
-                    override_joins,
-                )
-            },
-        ),
+        Expression::BinaryOp { .. } => {
+            dax_semantics::render_binary_in(expr, DivideStyle::Ieee, &|t, c| model_column_class(model, fact_model_name, t, c), &mut |e| recurse!(e))
+        }
         Expression::SafeDivide {
             numerator,
             denominator,
             alternate,
         } => {
-            let n = resolve_compound_sql(
-                numerator,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
-            let d = resolve_compound_sql(
-                denominator,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
+            let n = recurse!(numerator)?;
+            let d = recurse!(denominator)?;
             let alt = match alternate {
-                Some(a) => resolve_compound_sql(
-                    a,
-                    model,
-                    fact_table,
-                    fact_model_name,
-                    group_columns,
-                    context_join_tables,
-                    override_joins,
-                )?,
+                Some(a) => recurse!(a)?,
                 None => "NULL".to_string(),
             };
             Ok(dax_semantics::safe_divide_sql(&n, &d, &alt, "DOUBLE"))
         }
         Expression::ScalarFunc { function, args } => {
-            let mapped = args
-                .iter()
-                .map(|a| {
-                    resolve_compound_sql(
-                        a,
-                        model,
-                        fact_table,
-                        fact_model_name,
-                        group_columns,
-                        context_join_tables,
-                        override_joins,
-                    )
-                })
-                .collect::<QueryResult<Vec<_>>>()?;
+            let mut mapped = Vec::with_capacity(args.len());
+            for a in args {
+                mapped.push(recurse!(a)?);
+            }
             Ok(function.to_sql_strs(&mapped))
         }
         Expression::Coalesce(exprs) => {
-            let mapped = exprs
-                .iter()
-                .map(|e| {
-                    resolve_compound_sql(
-                        e,
-                        model,
-                        fact_table,
-                        fact_model_name,
-                        group_columns,
-                        context_join_tables,
-                        override_joins,
-                    )
-                })
-                .collect::<QueryResult<Vec<_>>>()?;
+            let mut mapped = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                mapped.push(recurse!(e)?);
+            }
             Ok(format!("COALESCE({})", mapped.join(", ")))
         }
         Expression::If {
@@ -678,58 +649,18 @@ pub(super) fn resolve_compound_sql(
             then_expr,
             else_expr,
         } => {
-            let c = resolve_compound_sql(
-                condition,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
-            let t = resolve_compound_sql(
-                then_expr,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
-            let e = resolve_compound_sql(
-                else_expr,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
+            let c = recurse!(condition)?;
+            let t = recurse!(then_expr)?;
+            let e = recurse!(else_expr)?;
             let c = null_is_false_condition(&c, condition.is_boolean_predicate());
             Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
         }
         Expression::IsBlank(inner) => {
-            let i = resolve_compound_sql(
-                inner,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
+            let i = recurse!(inner)?;
             Ok(format!("({i} IS NULL)"))
         }
         Expression::Not(inner) => {
-            let i = resolve_compound_sql(
-                inner,
-                model,
-                fact_table,
-                fact_model_name,
-                group_columns,
-                context_join_tables,
-                override_joins,
-            )?;
+            let i = recurse!(inner)?;
             Ok(format!("(NOT {i})"))
         }
         // A measure-level comparison / AND / OR / XOR: each operand resolves
@@ -738,35 +669,13 @@ pub(super) fn resolve_compound_sql(
         // reached the conditional renderer's comparison fallback and was
         // dropped (NEW-keep-in-if-condition, open-ledger round E).
         Expression::Comparison { left, op, right } => {
-            let mut recurse = |e: &Expression| {
-                resolve_compound_sql(
-                    e,
-                    model,
-                    fact_table,
-                    fact_model_name,
-                    group_columns,
-                    context_join_tables,
-                    override_joins,
-                )
-            };
-            let l = dax_semantics::comparison_operand(recurse(left)?, left, right);
-            let r = dax_semantics::comparison_operand(recurse(right)?, right, left);
+            let l = dax_semantics::comparison_operand_in(recurse!(left)?, left, right, &|t, c| model_column_class(model, fact_model_name, t, c));
+            let r = dax_semantics::comparison_operand_in(recurse!(right)?, right, left, &|t, c| model_column_class(model, fact_model_name, t, c));
             Ok(format!("({l} {} {r})", op.as_sql()))
         }
         Expression::And(left, right) | Expression::Or(left, right) | Expression::Xor(left, right) => {
-            let mut recurse = |e: &Expression| {
-                resolve_compound_sql(
-                    e,
-                    model,
-                    fact_table,
-                    fact_model_name,
-                    group_columns,
-                    context_join_tables,
-                    override_joins,
-                )
-            };
-            let l = recurse(left)?;
-            let r = recurse(right)?;
+            let l = recurse!(left)?;
+            let r = recurse!(right)?;
             Ok(logical_sql(expr, &l, &r))
         }
 
@@ -775,7 +684,25 @@ pub(super) fn resolve_compound_sql(
             let resolver = ContextResolver::new(model);
             let (stripped, ctx) = resolver.resolve(expr)?;
             reject_unconsumed_in_filters("a compound context expression", &ctx)?;
-            let effective = ctx.effective_filters(&[]);
+            let mut effective = ctx.effective_filters(&[]);
+            let mut conditions = ctx.conditions.clone();
+            // A KEEP on a table that is not key-safe from the fact (a
+            // many-to-many bridge, a range, the many side of a one-to-many)
+            // is a semi-join of THIS sub-aggregate, never a join every
+            // measure reads (BUG-0763).
+            let axis_tables: Vec<&str> =
+                group_columns.iter().map(|g| g.table_lc.as_str()).collect();
+            let semi_flags = take_semi_joins(
+                &mut effective,
+                &mut conditions,
+                &ctx,
+                model,
+                fact_table,
+                fact_model_name,
+                &axis_tables,
+                request_filtered,
+                semi_joins,
+            )?;
 
             for f in &effective {
                 if f.table != fact_model_name {
@@ -784,7 +711,7 @@ pub(super) fn resolve_compound_sql(
             }
             // A KEEP's expression conditions (`IN {...}`, column-vs-column)
             // filter the aggregate too; they were ignored here.
-            for cond in &ctx.conditions {
+            for cond in &conditions {
                 collect_qualified_tables(cond, fact_model_name, context_join_tables);
             }
 
@@ -794,27 +721,31 @@ pub(super) fn resolve_compound_sql(
 
             // Inner aggregate SQL: CASE WHEN when KEEP filters are present, else
             // the plain aggregate (recurse into the stripped expression).
-            let inner_sql = if effective.is_empty() && ctx.conditions.is_empty() {
-                resolve_compound_sql(
-                    &stripped,
-                    model,
-                    fact_table,
-                    fact_model_name,
-                    group_columns,
-                    context_join_tables,
-                    override_joins,
-                )?
+            let unfiltered = effective.is_empty() && conditions.is_empty() && semi_flags.is_empty();
+            let inner_sql = if unfiltered {
+                recurse!(&stripped)?
             } else {
-                let condition = build_condition_sql_with_conditions(
-                    &effective,
-                    &ctx.conditions,
-                    fact_table,
-                    fact_model_name,
-                    model,
-                    &alias_map,
-                )?;
+                let mut condition = if effective.is_empty() && conditions.is_empty() {
+                    String::new()
+                } else {
+                    build_condition_sql_with_conditions(
+                        &effective,
+                        &conditions,
+                        fact_table,
+                        fact_model_name,
+                        model,
+                        &alias_map,
+                    )?
+                };
+                for flag in &semi_flags {
+                    if condition.is_empty() {
+                        condition = flag.clone();
+                    } else {
+                        condition.push_str(&format!(" AND {flag}"));
+                    }
+                }
                 let measure_table = &fact_model_name.to_lowercase();
-                stripped.to_case_when_sql(&condition, measure_table)?
+                stripped.to_case_when_sql_with_classes(&condition, measure_table, &|t, c| model_column_class(model, fact_model_name, t, c))?
             };
 
             // If the context clears the group-by axis, it must re-aggregate over
@@ -828,16 +759,12 @@ pub(super) fn resolve_compound_sql(
                 // empty partition) over a fact-only aggregate: an UNCORRELATED
                 // scalar subquery gives the same total and DataFusion CAN nest
                 // it inside the surrounding expression. Restricted to the
-                // no-extra-JOIN case (effective/conditions empty) so the
+                // no-extra-JOIN case (no filter, condition or semi-join) so the
                 // subquery's `FROM <fact>` has every column it references; the
                 // registered fact batch is already slicer/RLS-filtered, so RESET
                 // still cannot strip RLS (correct) and Step A guarantees no
                 // report slicer remains to clear.
-                Some(partition)
-                    if partition.is_empty()
-                        && effective.is_empty()
-                        && ctx.conditions.is_empty() =>
-                {
+                Some(partition) if partition.is_empty() && unfiltered => {
                     // Alias the subquery's aggregate to a name the outer query
                     // does not use — otherwise DataFusion's scalar-subquery
                     // decorrelation sees two `sum(...)` columns and reports an
@@ -891,7 +818,7 @@ pub(super) fn resolve_compound_sql(
         }
 
         // Leaf expressions: generate plain SQL.
-        _ => Ok(expr.to_sql_string()?),
+        _ => Ok(expr.to_sql_string_with_classes(&|t, c| model_column_class(model, fact_model_name, t, c))?),
     }
 }
 
@@ -968,6 +895,8 @@ pub(super) fn hoist_measure_sql(
     group_columns: &[GroupColumn],
     context_join_tables: &mut Vec<String>,
     override_joins: &mut Vec<OverrideJoinEntry>,
+    semi_joins: &mut Vec<SemiJoin>,
+    request_filtered: &RequestFiltered,
     hoist: &mut Vec<(String, String)>,
 ) -> QueryResult<String> {
     macro_rules! recurse {
@@ -980,15 +909,15 @@ pub(super) fn hoist_measure_sql(
                 group_columns,
                 context_join_tables,
                 override_joins,
+                semi_joins,
+                request_filtered,
                 hoist,
             )?
         };
     }
     match expr {
-        Expression::BinaryOp { .. } => dax_semantics::render_binary(
-            expr,
-            DivideStyle::Ieee,
-            &mut |e| {
+        Expression::BinaryOp { .. } => {
+            dax_semantics::render_binary_in(expr, DivideStyle::Ieee, &|t, c| model_column_class(model, fact_model_name, t, c), &mut |e| {
                 hoist_measure_sql(
                     e,
                     model,
@@ -997,10 +926,12 @@ pub(super) fn hoist_measure_sql(
                     group_columns,
                     context_join_tables,
                     override_joins,
+                    semi_joins,
+                    request_filtered,
                     hoist,
                 )
-            },
-        ),
+            })
+        }
         Expression::SafeDivide {
             numerator,
             denominator,
@@ -1050,8 +981,8 @@ pub(super) fn hoist_measure_sql(
         // Each operand of a measure-level comparison / AND / OR / XOR keeps
         // its own context (mirrors `resolve_compound_sql`).
         Expression::Comparison { left, op, right } => {
-            let l = dax_semantics::comparison_operand(recurse!(left), left, right);
-            let r = dax_semantics::comparison_operand(recurse!(right), right, left);
+            let l = dax_semantics::comparison_operand_in(recurse!(left), left, right, &|t, c| model_column_class(model, fact_model_name, t, c));
+            let r = dax_semantics::comparison_operand_in(recurse!(right), right, left, &|t, c| model_column_class(model, fact_model_name, t, c));
             Ok(format!("({l} {} {r})", op.as_sql()))
         }
         Expression::And(left, right) | Expression::Or(left, right) | Expression::Xor(left, right) => {
@@ -1065,38 +996,68 @@ pub(super) fn hoist_measure_sql(
         _ if expr.has_context_ops() => {
             let (stripped, ctx) = ContextResolver::new(model).resolve(expr)?;
             reject_unconsumed_in_filters("a compound context expression", &ctx)?;
-            let effective = ctx.effective_filters(&[]);
+            let mut effective = ctx.effective_filters(&[]);
+            let mut conditions = ctx.conditions.clone();
+            // A KEEP on a table that is not key-safe from the fact is a
+            // semi-join of this sub-aggregate (BUG-0763).
+            let axis_tables: Vec<&str> =
+                group_columns.iter().map(|g| g.table_lc.as_str()).collect();
+            let semi_flags = take_semi_joins(
+                &mut effective,
+                &mut conditions,
+                &ctx,
+                model,
+                fact_table,
+                fact_model_name,
+                &axis_tables,
+                request_filtered,
+                semi_joins,
+            )?;
             for f in &effective {
                 if f.table != fact_model_name {
                     context_join_tables.push(f.table.clone());
                 }
             }
-            for cond in &ctx.conditions {
+            for cond in &conditions {
                 collect_qualified_tables(cond, fact_model_name, context_join_tables);
             }
             let alias_map =
                 build_override_alias_map(&ctx, model, fact_model_name, fact_table, override_joins);
-            let inner_sql = if effective.is_empty() && ctx.conditions.is_empty() {
-                resolve_compound_sql(
-                    &stripped,
-                    model,
-                    fact_table,
-                    fact_model_name,
-                    group_columns,
-                    context_join_tables,
-                    override_joins,
-                )?
-            } else {
-                let condition = build_condition_sql_with_conditions(
-                    &effective,
-                    &ctx.conditions,
-                    fact_table,
-                    fact_model_name,
-                    model,
-                    &alias_map,
-                )?;
-                stripped.to_case_when_sql(&condition, &fact_model_name.to_lowercase())?
-            };
+            let inner_sql =
+                if effective.is_empty() && conditions.is_empty() && semi_flags.is_empty() {
+                    resolve_compound_sql(
+                        &stripped,
+                        model,
+                        fact_table,
+                        fact_model_name,
+                        group_columns,
+                        context_join_tables,
+                        override_joins,
+                        semi_joins,
+                        request_filtered,
+                    )?
+                } else {
+                    let mut condition = if effective.is_empty() && conditions.is_empty() {
+                        String::new()
+                    } else {
+                        build_condition_sql_with_conditions(
+                            &effective,
+                            &conditions,
+                            fact_table,
+                            fact_model_name,
+                            model,
+                            &alias_map,
+                        )?
+                    };
+                    for flag in &semi_flags {
+                        if condition.is_empty() {
+                            condition = flag.clone();
+                        } else {
+                            condition.push_str(&format!(" AND {flag}"));
+                        }
+                    }
+                    stripped.to_case_when_sql_with_classes(&condition, &fact_model_name.to_lowercase(), &|t, c| model_column_class(model, fact_model_name, t, c))?
+                };
             let col_sql = match axis_clear_partition(&ctx, group_columns) {
                 Some(partition) => wrap_axis_clear(
                     inner_sql,
@@ -1118,11 +1079,13 @@ pub(super) fn hoist_measure_sql(
                 group_columns,
                 context_join_tables,
                 override_joins,
+                semi_joins,
+                request_filtered,
             )?;
             Ok(push_hoist(hoist, sql))
         }
         // Leaves (literals, etc.): inline into the outer expression.
-        _ => Ok(expr.to_sql_string()?),
+        _ => Ok(expr.to_sql_string_with_classes(&|t, c| model_column_class(model, fact_model_name, t, c))?),
     }
 }
 

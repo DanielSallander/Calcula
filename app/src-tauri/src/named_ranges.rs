@@ -3,7 +3,7 @@
 //! CONTEXT: Allows users to define names for cell ranges that can be used in formulas.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 use crate::api_types::CellData;
@@ -66,6 +66,388 @@ impl NamedRange {
     #[cfg(test)]
     fn looks_like_cell_reference(s: &str) -> bool {
         identity::defined_name_syntax::looks_like_a1_cell(s)
+    }
+
+    /// The key this name is held under in the registry: [`registry_key`].
+    pub(crate) fn registry_key(&self) -> String {
+        registry_key(self.sheet_index, &self.name)
+    }
+}
+
+/// The refusal of a name Excel's rule does not take (`NamedRange::is_valid_name`):
+/// Excel's own text [LIVE, Excel 16, 2026-11-06, lane namescalp p1.ps1 --
+/// `Names.Add("1abc")`, `"a b"` and `"A1"` each raise exactly it], naming the
+/// name, since a script or the MCP door has no dialog showing what was typed.
+/// It said a name may hold "only letters, numbers, underscores, and periods",
+/// which stopped being the rule when `\` and `?` became name characters
+/// (BUG-0741); the New Name and New Function dialogs show the same lines
+/// (`DefinedNames/lib/invalidNameMessage.ts`).
+pub(crate) fn invalid_name_message(name: &str) -> String {
+    format!(
+        "The syntax of the name '{}' isn't correct.\n\nVerify that the name:\n\
+         -Starts with a letter or underscore (_)\n\
+         -Doesn't include a space or character that isn't allowed\n\
+         -Doesn't conflict with an existing name in the workbook.",
+        name
+    )
+}
+
+// ============================================================================
+// THE REGISTRY IS KEYED BY (SCOPE, NAME)  (BUG-0744 -- Excel parity)
+// ============================================================================
+
+/// The key a defined name is held under in `AppState::named_ranges`: its
+/// SCOPE and its defined-name key (`identity::defined_name_key`).
+///
+/// Excel holds one name per (scope, spelling): a workbook `Rate` beside a
+/// `Sheet1!Rate` beside a `Sheet2!Rate` [LIVE, Excel 16, 2026-11-06, lane
+/// names q1.ps1: `Names.Add("Dup", "=1")` and `Sheet1.Names.Add("Dup", "=2")`
+/// both stand; `=Dup` on Sheet1 is 2, on Sheet2 1, and `=Sheet1!Dup` on Sheet2
+/// is 2], and Copy Sheet makes exactly that state. The registry was keyed by
+/// the spelling alone, so a second scope of one spelling could not be held.
+///
+/// A WORKBOOK name keeps the plain key, so every reader that asks "is there a
+/// workbook name spelled so" (the table/name namespace check among them) asks
+/// it as before. A SHEET name is `"{sheet index}!{key}"` -- `!` is in no
+/// defined name, so the two kinds cannot collide -- and is re-keyed whenever
+/// sheet indices move ([`rekey_registry`]).
+pub(crate) fn registry_key(sheet_index: Option<usize>, name: &str) -> String {
+    let key = identity::defined_name_key(name);
+    match sheet_index {
+        None => key,
+        Some(sheet) => format!("{}!{}", sheet, key),
+    }
+}
+
+/// The defined-name key part of a registry key (the key itself for a
+/// workbook name). Allocation-free, for the hot "is this spelling defined in
+/// any scope" questions.
+pub(crate) fn name_part_of_registry_key(registry_key: &str) -> &str {
+    match registry_key.split_once('!') {
+        Some((_, name)) => name,
+        None => registry_key,
+    }
+}
+
+/// The name a bare `name` means in a formula on `sheet`, by Excel's order: the
+/// name scoped to that sheet shadows the workbook's [LIVE, q1.ps1].
+/// `sheet` `None` asks for the workbook name only.
+pub(crate) fn resolve_in_scope<'a>(
+    names: &'a HashMap<String, NamedRange>,
+    name: &str,
+    sheet: Option<usize>,
+) -> Option<&'a NamedRange> {
+    // Each hit is checked against the scope it was asked for: an entry filed
+    // under the wrong key (a direct insert that skipped `registry_key`) must
+    // never widen a sheet's name to the whole workbook.
+    if let Some(sheet) = sheet {
+        if let Some(local) = names.get(&registry_key(Some(sheet), name)).filter(|nr| nr.sheet_index == Some(sheet)) {
+            return Some(local);
+        }
+    }
+    names.get(&registry_key(None, name)).filter(|nr| nr.sheet_index.is_none())
+}
+
+/// The name a QUALIFIED or bare reference text means on `sheet`: `Sheet2!Rate`
+/// is the name scoped to Sheet2 (and only that one -- Excel reads a qualified
+/// name in its sheet's scope, falling back to the workbook name of that
+/// spelling, as a formula `=Sheet2!Rate` does), `Rate` is
+/// [`resolve_in_scope`]. `None` when nothing of that spelling is defined there.
+pub(crate) fn resolve_reference_text<'a>(
+    names: &'a HashMap<String, NamedRange>,
+    sheet_names: &[String],
+    text: &str,
+    sheet: Option<usize>,
+) -> Option<&'a NamedRange> {
+    let text = text.trim();
+    if let Some((qualifier, bare)) = text.rsplit_once('!') {
+        let qualifier = qualifier.trim();
+        let unquoted = qualifier
+            .strip_prefix('\'')
+            .and_then(|q| q.strip_suffix('\''))
+            .map(|q| q.replace("''", "'"))
+            .unwrap_or_else(|| qualifier.to_string());
+        let target = sheet_names.iter().position(|n| identity::sheet_names_equal(n, &unquoted))?;
+        return resolve_in_scope(names, bare, Some(target));
+    }
+    resolve_in_scope(names, text, sheet)
+}
+
+/// Is `key` (a defined-name key) defined in ANY scope?
+pub(crate) fn defined_in_any_scope(names: &HashMap<String, NamedRange>, key: &str) -> bool {
+    names.contains_key(key) || names.keys().any(|k| name_part_of_registry_key(k) == key)
+}
+
+/// The entry of spelling `key` (a defined-name key) to read a DISPLAY fact
+/// from (its spelling): the workbook name, else the first scoped one in key
+/// order. Never a resolution -- for that see [`resolve_in_scope`].
+pub(crate) fn any_scope_entry<'a>(names: &'a HashMap<String, NamedRange>, key: &str) -> Option<&'a NamedRange> {
+    if let Some(entry) = names.get(key) {
+        return Some(entry);
+    }
+    let mut scoped: Vec<(&String, &NamedRange)> =
+        names.iter().filter(|(k, _)| name_part_of_registry_key(k) == key).collect();
+    scoped.sort_by(|a, b| a.0.cmp(b.0));
+    scoped.first().map(|(_, nr)| *nr)
+}
+
+/// Excel's `Workbook.Names("Sales")` -- the registry key of the name a caller
+/// with NO scope at all means (an MCP tool, a script's `names.X`): the name
+/// is read as the FIRST sheet would read it -- that sheet's own `Sales`, else
+/// the workbook's -- and a name scoped only to a later sheet is not found.
+///
+/// [LIVE, Excel 16, 2026-11-06, lane obj4 n1.ps1 / n2.ps1; tabs Zed, Abc,
+/// Third] a workbook `Sales` with a sheet-scoped `Sales` on Abc (tab 2):
+/// `Names("Sales")` is the WORKBOOK's; add one on Zed (tab 1): Zed's, ahead of
+/// the workbook's; with ONLY Abc's (or Abc's and Third's) it raises
+/// 0x800A03EC; move Third to the front and it is Third's. None of it depends
+/// on the active sheet or on which name was defined first (with lane
+/// namescalp's p1/p3/p4 and the verifier's v3/v4). The rule here used to be
+/// "the workbook's, else the lowest sheet index's", which is right only when
+/// the first tab holds none.
+pub(crate) fn names_item_key(names: &HashMap<String, NamedRange>, name: &str) -> Option<String> {
+    let first = registry_key(Some(0), name);
+    if names.get(&first).is_some_and(|nr| nr.sheet_index == Some(0)) {
+        return Some(first);
+    }
+    let workbook = registry_key(None, name);
+    names.get(&workbook).is_some_and(|nr| nr.sheet_index.is_none()).then_some(workbook)
+}
+
+/// The registry key a COMMAND addressed by `name` in `scope` means: the entry
+/// of exactly that scope. `None` on the command wire also SPELLS the workbook
+/// scope -- the Name Manager sends a workbook name's `sheetIndex` as null -- so
+/// it is the workbook's name when one exists; failing that, Excel's
+/// `Names(name)` ([`names_item_key`]): the first sheet's own. That differs from
+/// Excel's `Names()` in one case only -- the first sheet AND the workbook both
+/// hold the spelling -- where the Name Manager's workbook row must not delete
+/// or rename the sheet's name. A caller that means `Names()` exactly (the MCP
+/// door) asks [`names_item_key`] and passes the scope it found.
+///
+/// The old "the ONE name of that spelling, else nothing" left every caller
+/// asking with no scope empty-handed after a Copy Sheet made two (BUG-0744
+/// follow-up, lane namescalp).
+pub(crate) fn addressed_key(names: &HashMap<String, NamedRange>, name: &str, scope: Option<usize>) -> Option<String> {
+    let exact = registry_key(scope, name);
+    if names.contains_key(&exact) {
+        return Some(exact);
+    }
+    if scope.is_some() {
+        return None;
+    }
+    names_item_key(names, name)
+}
+
+// ============================================================================
+// A RELATIVE NAME DOES NOT FOLLOW A STRUCTURAL EDIT  (BUG-0749 -- Excel parity)
+// ============================================================================
+
+/// The name's definition after a row (`rows_axis`) or column edit shifted
+/// `before` into `after`, with every RELATIVE part put back as it was.
+///
+/// [LIVE, Excel 16, 2026-11-06, lane names q9.ps1, names defined at A1] a
+/// relative reference in a name is an OFFSET from the cell that uses it, so a
+/// structural edit neither moves it nor kills it: `nRel` = `=Alpha!C3`
+/// (R[2]C[2]) and `nRng` = `=Alpha!C3:D4` read the same after inserting row
+/// 1, inserting column A, deleting row 4 and deleting column D, while `nAbs`
+/// = `=Alpha!$C$3` became `$C$4`, `$D$4`, then `#REF!`; a MIXED reference
+/// follows in its absolute part only (`$C3` -> `$C3` on the row insert,
+/// `$D3` on the column insert, `#REF!` when column D went). Calcula shifted
+/// the relative parts like absolute ones (and turned them `#REF!`), so a
+/// relative name meant a different offset after every insert above it.
+///
+/// `after` is the shifter's text; when no relative part moved it is returned
+/// unchanged. A reference the shifter turned `#REF!` whose part on the edited
+/// axis is relative comes back whole (the other axis is not touched by this
+/// edit). Rendered through the raw renderer with the workbook's sheet casing.
+pub(crate) fn keep_relative_name_parts(before: &str, after: &str, rows_axis: bool, sheet_names: &[String]) -> String {
+    if before == after {
+        return after.to_string();
+    }
+    let (Ok(old), Ok(mut new)) = (parser::parse(before), parser::parse(after)) else {
+        return after.to_string();
+    };
+    let mut changed = false;
+    if !restore_relative_parts(&old, &mut new, rows_axis, &mut changed) || !changed {
+        return after.to_string();
+    }
+    crate::sheet_names::restamp_sheet_casing(&mut new, sheet_names);
+    // The lexer folds a bare identifier, so the re-render would write every
+    // OTHER name of the definition upper-cased (`myRate` -> `MYRATE`). Each
+    // name takes back the spelling `before` gave it (lane namescalp; the
+    // caller holds the registry mutably, so the definition's own text is the
+    // spelling source).
+    crate::name_resolution::restamp_name_casing(&mut new, &spellings_in(before));
+    format!("={}", engine::ast_render::render_formula_raw(&new))
+}
+
+/// Every identifier-shaped word of a formula TEXT outside its string literals
+/// and quoted sheet names, as a spelling table for
+/// `name_resolution::restamp_name_casing`: key -> the word as written.
+fn spellings_in(text: &str) -> HashMap<String, NamedRange> {
+    let mut out = HashMap::new();
+    let mut chars = text.chars().peekable();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut HashMap<String, NamedRange>| {
+        if !word.is_empty() {
+            out.entry(registry_key(None, word)).or_insert_with(|| NamedRange {
+                name: word.clone(),
+                sheet_index: None,
+                refers_to: String::new(),
+                comment: None,
+                folder: None,
+            });
+            word.clear();
+        }
+    };
+    while let Some(c) = chars.next() {
+        if c == '"' || c == '\'' {
+            flush(&mut word, &mut out);
+            // Skip to the closing quote; a doubled quote is an escaped one.
+            while let Some(d) = chars.next() {
+                if d == c {
+                    if chars.peek() == Some(&c) {
+                        chars.next();
+                        continue;
+                    }
+                    break;
+                }
+            }
+        } else if c.is_alphanumeric() || matches!(c, '_' | '.' | '\\' | '?') {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// Is `expr` a reference whose part on the edited axis is relative (so the
+/// edit cannot have touched it)? A range: both of its ends.
+fn relative_on_axis(expr: &parser::ast::Expression, rows_axis: bool) -> bool {
+    use parser::ast::Expression as E;
+    match expr {
+        E::CellRef { row_absolute, col_absolute, .. } => {
+            if rows_axis {
+                !*row_absolute
+            } else {
+                !*col_absolute
+            }
+        }
+        E::Range { start, end, .. } => relative_on_axis(start, rows_axis) && relative_on_axis(end, rows_axis),
+        E::RowRef { start_absolute, end_absolute, .. } => rows_axis && !*start_absolute && !*end_absolute,
+        E::ColumnRef { start_absolute, end_absolute, .. } => !rows_axis && !*start_absolute && !*end_absolute,
+        _ => false,
+    }
+}
+
+/// Walk `old` and `new` in step, putting each relative part of `new` back to
+/// `old`'s. `false` when the two trees differ in a way this cannot pair.
+fn restore_relative_parts(
+    old: &parser::ast::Expression,
+    new: &mut parser::ast::Expression,
+    rows_axis: bool,
+    changed: &mut bool,
+) -> bool {
+    use parser::ast::Expression as E;
+    if std::mem::discriminant(old) != std::mem::discriminant(new) {
+        // The shifter turned the reference into something else (`#REF!`): a
+        // reference relative on the edited axis was never the edit's to kill.
+        if relative_on_axis(old, rows_axis) {
+            *new = old.clone();
+            *changed = true;
+            return true;
+        }
+        return matches!(new, E::Literal(_));
+    }
+    match (old, new) {
+        (
+            E::CellRef { col: oc, row: or, col_absolute: oca, row_absolute: ora, .. },
+            E::CellRef { col, row, col_absolute, row_absolute, .. },
+        ) => {
+            if oca != col_absolute || ora != row_absolute {
+                return false;
+            }
+            if !*ora && row != or {
+                *row = *or;
+                *changed = true;
+            }
+            if !*oca && col != oc {
+                *col = oc.clone();
+                *changed = true;
+            }
+            true
+        }
+        (E::Range { start: os, end: oe, .. }, E::Range { start, end, .. }) => {
+            restore_relative_parts(os, start, rows_axis, changed) && restore_relative_parts(oe, end, rows_axis, changed)
+        }
+        (
+            E::RowRef { start_row: osr, end_row: oer, start_absolute: osa, end_absolute: oea, .. },
+            E::RowRef { start_row, end_row, start_absolute, end_absolute, .. },
+        ) => {
+            if osa != start_absolute || oea != end_absolute {
+                return false;
+            }
+            if !*osa && start_row != osr {
+                *start_row = *osr;
+                *changed = true;
+            }
+            if !*oea && end_row != oer {
+                *end_row = *oer;
+                *changed = true;
+            }
+            true
+        }
+        (
+            E::ColumnRef { start_col: osc, end_col: oec, start_absolute: osa, end_absolute: oea, .. },
+            E::ColumnRef { start_col, end_col, start_absolute, end_absolute, .. },
+        ) => {
+            if osa != start_absolute || oea != end_absolute {
+                return false;
+            }
+            if !*osa && start_col != osc {
+                *start_col = osc.clone();
+                *changed = true;
+            }
+            if !*oea && end_col != oec {
+                *end_col = oec.clone();
+                *changed = true;
+            }
+            true
+        }
+        (E::BinaryOp { left: ol, right: or, .. }, E::BinaryOp { left, right, .. }) => {
+            restore_relative_parts(ol, left, rows_axis, changed) && restore_relative_parts(or, right, rows_axis, changed)
+        }
+        (E::UnaryOp { operand: oo, .. }, E::UnaryOp { operand, .. }) => restore_relative_parts(oo, operand, rows_axis, changed),
+        (E::ImplicitIntersection { operand: oo }, E::ImplicitIntersection { operand }) => {
+            restore_relative_parts(oo, operand, rows_axis, changed)
+        }
+        (E::SpillRef { cell: oc, .. }, E::SpillRef { cell, .. }) => restore_relative_parts(oc, cell, rows_axis, changed),
+        (E::Sheet3DRef { reference: or, .. }, E::Sheet3DRef { reference, .. }) => {
+            restore_relative_parts(or, reference, rows_axis, changed)
+        }
+        (E::IndexAccess { target: ot, index: oi }, E::IndexAccess { target, index }) => {
+            restore_relative_parts(ot, target, rows_axis, changed) && restore_relative_parts(oi, index, rows_axis, changed)
+        }
+        (E::FunctionCall { args: oa, .. }, E::FunctionCall { args, .. }) => {
+            oa.len() == args.len()
+                && oa.iter().zip(args.iter_mut()).all(|(o, n)| restore_relative_parts(o, n, rows_axis, changed))
+        }
+        // Literals, names, tables, array literals: no reference to restore.
+        _ => true,
+    }
+}
+
+/// Re-key every entry by its CURRENT scope, after a sheet renumbering
+/// rewrote the `sheet_index` fields (move, delete, insert, copy).
+pub(crate) fn rekey_registry(names: &mut HashMap<String, NamedRange>) {
+    if names.iter().all(|(k, nr)| *k == nr.registry_key()) {
+        return;
+    }
+    let entries: Vec<NamedRange> = names.drain().map(|(_, nr)| nr).collect();
+    for nr in entries {
+        names.insert(nr.registry_key(), nr);
     }
 }
 
@@ -299,9 +681,22 @@ fn refers_to_entry_refusal(refers_to: &str) -> Option<String> {
             NAME_FORMULA_REFUSAL
         ));
     }
-    parser::check_entered_formula(&ast)
-        .err()
-        .map(|e| format!("{} {}", NAME_FORMULA_REFUSAL, e.message))
+    parser::check_entered_formula(&ast).err().map(|e| name_formula_refusal_text(&e.message))
+}
+
+/// The Name Manager's message for an entry check's refusal: a message that IS
+/// one of Excel's own is shown alone, as Excel shows it [LIVE, Excel 16, lane
+/// formfix p1.json, `Names.Add`: `=ROUND(1)` "You've entered too few
+/// arguments for this function.", `=PI(1)`, `=SUM()`, `=SUM(A1:SUM(A3))`
+/// "There's a problem with this formula."]; it was prefixed with "There's a
+/// problem with this formula.", which doubled the second. Any other text gets
+/// Excel's generic sentence in front of Calcula's explanation.
+fn name_formula_refusal_text(message: &str) -> String {
+    if message.starts_with(NAME_FORMULA_REFUSAL) || message.starts_with("You've entered too") {
+        message.to_string()
+    } else {
+        format!("{} {}", NAME_FORMULA_REFUSAL, message)
+    }
 }
 
 /// Command body over plain references, so the dirty-flag contract is unit-testable
@@ -320,7 +715,7 @@ pub(crate) fn create_named_range_impl(
         return NamedRangeResult {
             success: false,
             named_range: None,
-            error: Some(format!("Invalid name '{}'. Names must start with a letter or underscore, contain only letters, numbers, underscores, and periods, and cannot be cell references.", name)),
+            error: Some(invalid_name_message(&name)),
         };
     }
     // The formula's own entry checks, before any lock or effect (Excel
@@ -330,7 +725,10 @@ pub(crate) fn create_named_range_impl(
         return NamedRangeResult { success: false, named_range: None, error: Some(error) };
     }
 
+    // The NAME key (the table/name namespace) and the REGISTRY key (scope +
+    // name, BUG-0744): a sheet-scoped `Rate` may stand beside the workbook's.
     let key = identity::defined_name_key(&name);
+    let reg_key = registry_key(sheet_index, &name);
 
     // THE LOCKS, IN THE RENAME'S EXACT ORDER (rev3B#6, rev5C#1): `grid`, then
     // `grids`, then the registry, then the undo stack. All three are held
@@ -398,8 +796,9 @@ pub(crate) fn create_named_range_impl(
         };
     };
 
-    // Check for duplicate name (case-insensitive)
-    if pending.contains_key(&key) {
+    // Check for duplicate name (case-insensitive) IN THIS SCOPE: Excel holds a
+    // workbook `Dup` and a `Sheet1!Dup` side by side [LIVE, q1.ps1].
+    if pending.contains_key(&reg_key) {
         return NamedRangeResult {
             success: false,
             named_range: None,
@@ -419,11 +818,11 @@ pub(crate) fn create_named_range_impl(
     // Every gate above has passed, so a refusal leaves the document clean.
     let effect = DocumentEffect::mutates(file_state);
     let mut named_ranges = pending.authorize(&effect);
-    named_ranges.insert(key.clone(), named_range.clone());
+    named_ranges.insert(reg_key.clone(), named_range.clone());
 
     // BUG-0007 (user decision: undo-everything): name creation is undoable.
     // Recorded UNDER the registry and grid holds (see the lock note above).
-    crate::undo_commands::record_named_range_undo(state, &key, None, "Define name");
+    crate::undo_commands::record_named_range_undo(state, &reg_key, None, "Define name");
     drop(named_ranges);
     drop(grids_hold);
     drop(grid_hold);
@@ -487,8 +886,7 @@ pub(crate) fn update_named_range_core(
     if let Some(error) = refers_to_entry_refusal(&refers_to) {
         return NamedRangeResult { success: false, named_range: None, error: Some(error) };
     }
-    let key = identity::defined_name_key(&name);
-    let named_range = NamedRange {
+    let mut named_range = NamedRange {
         name: name.clone(),
         sheet_index,
         refers_to,
@@ -525,17 +923,47 @@ pub(crate) fn update_named_range_core(
             };
         };
         let pending = state.named_ranges.lock_pending().unwrap();
-        if !pending.contains_key(&key) {
+        // THE NAME OF THIS SCOPE (BUG-0744): the entry held at (scope, name).
+        // Failing that, Excel's `Names(name)` ([`addressed_key`]) is
+        // MOVED to the scope asked for -- the MCP tool's `sheet_index` edit,
+        // which Excel's Name Manager does not offer; never onto a name that
+        // scope already holds.
+        let new_key = registry_key(sheet_index, &name);
+        let old_key = if pending.contains_key(&new_key) {
+            Some(new_key.clone())
+        } else {
+            addressed_key(&pending, &name, None)
+        };
+        let Some(old_key) = old_key else {
             return NamedRangeResult {
                 success: false,
                 named_range: None,
                 error: Some(format!("Named range '{}' does not exist.", name)),
             };
-        }
+        };
+        named_range.sheet_index = sheet_index;
         let effect = DocumentEffect::mutates(file_state);
         let mut named_ranges = pending.authorize(&effect);
-        let previous = named_ranges.insert(key.clone(), named_range.clone());
-        crate::undo_commands::record_named_range_undo(state, &key, previous, "Edit name");
+        if old_key == new_key {
+            let previous = named_ranges.insert(new_key.clone(), named_range.clone());
+            crate::undo_commands::record_named_range_undo(state, &new_key, previous, "Edit name");
+        } else {
+            let previous = named_ranges.remove(&old_key);
+            named_ranges.insert(new_key.clone(), named_range.clone());
+            let opened = {
+                let mut undo_stack = state.undo_stack.lock().unwrap();
+                let opened = !undo_stack.has_open_transaction();
+                if opened {
+                    undo_stack.begin_transaction("Edit name".to_string());
+                }
+                opened
+            };
+            crate::undo_commands::record_named_range_undo(state, &new_key, None, "Edit name");
+            crate::undo_commands::record_named_range_undo(state, &old_key, previous, "Edit name");
+            if opened {
+                state.undo_stack.lock().unwrap().commit_transaction();
+            }
+        }
         drop(named_ranges);
         drop(grids_hold);
         drop(grid_hold);
@@ -588,8 +1016,11 @@ pub fn delete_named_range(
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     name: String,
+    // The SCOPE of the name to delete (BUG-0744): `None` is the workbook's
+    // name, else the first sheet's own (`addressed_key`).
+    sheet_index: Option<usize>,
 ) -> NamedRangeResult {
-    delete_named_range_core(
+    delete_named_range_scoped(
         &state,
         &file_state,
         &user_files_state,
@@ -597,11 +1028,13 @@ pub fn delete_named_range(
         &pane_control_state,
         &ribbon_filter_state,
         name,
+        sheet_index,
     )
 }
 
 /// `delete_named_range` over plain references, for the same reason as
-/// [`update_named_range_core`].
+/// [`update_named_range_core`], addressing the name with no scope
+/// ([`addressed_key`]).
 pub(crate) fn delete_named_range_core(
     state: &AppState,
     file_state: &FileState,
@@ -610,6 +1043,30 @@ pub(crate) fn delete_named_range_core(
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     name: String,
+) -> NamedRangeResult {
+    delete_named_range_scoped(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        name,
+        None,
+    )
+}
+
+/// [`delete_named_range_core`] for the name of one SCOPE.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn delete_named_range_scoped(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    name: String,
+    sheet_index: Option<usize>,
 ) -> NamedRangeResult {
     // Decided under the held lock, AFTER the "does not exist" refusal: a
     // delete of a name that is not there changes nothing and must leave the
@@ -620,7 +1077,6 @@ pub(crate) fn delete_named_range_core(
     // are `create_named_range_impl`'s): released before the record, a rename
     // could land its "Rename name" step between this delete and its own. The
     // block ENDS every guard before the recalculation.
-    let key = identity::defined_name_key(&name);
     // The ids of the scripts the prune took, announced once every guard is
     // released (see `rename_named_range_impl`'s announcement).
     let mut pruned_ids: Vec<String> = Vec::new();
@@ -640,16 +1096,19 @@ pub(crate) fn delete_named_range_core(
             };
         };
         let pending = state.named_ranges.lock_pending().unwrap();
-        if !pending.contains_key(&key) {
+        let Some(key) = addressed_key(&pending, &name, sheet_index) else {
             return NamedRangeResult {
                 success: false,
                 named_range: None,
                 error: Some(format!("Named range '{}' does not exist.", name)),
             };
-        }
+        };
         let effect = DocumentEffect::mutates(file_state);
         let mut named_ranges = pending.authorize(&effect);
         let removed = named_ranges.remove(&key);
+        // A script is bound to a name by its TEXT, so it is the name's while
+        // ANY scope still holds that spelling: only the last one takes them.
+        let spelling_remains = defined_in_any_scope(&named_ranges, &identity::defined_name_key(&name));
 
         if let Some(removed) = &removed {
             // C10 cleanup: prune any object scripts attached to this name so a
@@ -659,6 +1118,7 @@ pub(crate) fn delete_named_range_core(
             // before the undo stack is taken (a structural shift holds the
             // stack while it takes `object_scripts`).
             let pruned = match state.object_scripts.write(&effect) {
+                Ok(_) if spelling_remains => Vec::new(),
                 Ok(mut scripts) => crate::undo_commands::take_object_scripts(&mut scripts, |s| {
                     s.object_type == persistence::ScriptableObjectType::NamedRange
                         && s.instance_id
@@ -757,10 +1217,30 @@ pub(crate) fn delete_named_range_core(
 pub fn get_named_range(
     state: State<AppState>,
     name: String,
+    // The sheet the name is ASKED FROM (the Name Box's and Go To's active
+    // sheet): its own scoped name shadows the workbook's, as in a formula.
+    sheet_index: Option<usize>,
 ) -> Option<NamedRange> {
-    let named_ranges = state.named_ranges.read().unwrap();
-    let key = identity::defined_name_key(&name);
-    named_ranges.get(&key).cloned()
+    get_named_range_in(&state, &name, sheet_index)
+}
+
+/// `get_named_range` over a plain reference (BUG-0744). `Sheet2!Rate` is the
+/// name scoped to Sheet2 (else the workbook `Rate`); a bare `Rate` asked from
+/// `sheet` is that sheet's own `Rate`, else the workbook's; asked from no
+/// sheet it is the workbook's, else the first sheet's own ([`addressed_key`];
+/// Excel's `Names(name)` would put the first sheet's ahead of the workbook's,
+/// but a null scope is also how the Name Manager spells a workbook name).
+pub(crate) fn get_named_range_in(state: &AppState, name: &str, sheet_index: Option<usize>) -> Option<NamedRange> {
+    // `sheet_names` before `named_ranges` (BUG-0045).
+    let sheet_names = state.sheet_names.read().ok()?.clone();
+    let named_ranges = state.named_ranges.read().ok()?;
+    if let Some(found) = resolve_reference_text(&named_ranges, &sheet_names, name, sheet_index) {
+        return Some(found.clone());
+    }
+    if sheet_index.is_none() && !name.contains('!') {
+        return addressed_key(&named_ranges, name, None).and_then(|k| named_ranges.get(&k).cloned());
+    }
+    None
 }
 
 /// Get all named ranges.
@@ -934,18 +1414,46 @@ fn resolve_ref_to_coords(
 pub fn resolve_named_range_coords(
     state: State<AppState>,
     name: String,
+    // WHERE THE NAME IS ASKED FROM -- the Name Box's and Go To's active sheet
+    // and active cell (0-based). Both optional: a script's `names.X` asks from
+    // nowhere, and reads the name as written (BUG-0749, see
+    // [`resolve_named_range_coords_at`]).
+    sheet_index: Option<usize>,
+    row: Option<u32>,
+    col: Option<u32>,
+) -> Result<NamedRangeCoords, String> {
+    let at = match (row, col) {
+        (Some(r), Some(c)) => Some((r, c)),
+        _ => None,
+    };
+    resolve_named_range_coords_at(&state, &name, sheet_index, at)
+}
+
+/// `resolve_named_range_coords` over a plain reference.
+///
+/// THE SCOPE (BUG-0744): the name the text means on `sheet` --
+/// [`get_named_range_in`]'s rule, `Sheet2!Rate` included.
+///
+/// A RELATIVE NAME IS READ AT THE ACTIVE CELL when one is given (BUG-0749).
+/// [LIVE, Excel 16, 2026-11-06, lane names q1.ps1] with `relN` = `=Sheet2!B2`
+/// (defined at A1), `Application.Goto "relN"` from D5 selects E6 and from A1
+/// selects B2 -- Go To and the Name Box read a relative name from the cell
+/// you are on, as a formula in that cell would -- while the object model's
+/// `Range("relN")` is B2 from D5 too: a script reads the name as written,
+/// anchored at A1, which is what `at` `None` does. Calcula's Name Box read it
+/// literally, so `relN` always went to B2.
+pub(crate) fn resolve_named_range_coords_at(
+    state: &AppState,
+    name: &str,
+    sheet_index: Option<usize>,
+    at: Option<(u32, u32)>,
 ) -> Result<NamedRangeCoords, String> {
     // `sheet_names` before `named_ranges` — see `get_named_range_for_selection`
     // and BUG-0045.
-    let sheet_names = state.sheet_names.read().unwrap();
-    let named_ranges = state.named_ranges.read().unwrap();
-
-    let key = identity::defined_name_key(&name);
-    let nr = named_ranges
-        .get(&key)
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let nr = get_named_range_in(state, name, sheet_index)
         .ok_or_else(|| format!("Named range '{}' does not exist.", name))?;
-
-    named_range_coords_in(&sheet_names, nr, &name)
+    named_range_coords_at(&sheet_names, &nr, name, at.unwrap_or((0, 0)))
 }
 
 /// The pure half of `resolve_named_range_coords`: `nr`'s rectangle on the
@@ -960,13 +1468,29 @@ pub fn resolve_named_range_coords(
 /// old fallback to the name's scope sheet, or sheet 0, sent a script's
 /// `names.Rate` write to `Sheet1!B1` with no error, over the user's data; Excel
 /// evaluates a name whose sheet is gone to `#REF!` and selects nothing.
+#[cfg(test)]
 fn named_range_coords_in(
     sheet_names: &[String],
     nr: &NamedRange,
     name: &str,
 ) -> Result<NamedRangeCoords, String> {
-    let parsed = parser::parse(&nr.refers_to)
+    named_range_coords_at(sheet_names, nr, name, (0, 0))
+}
+
+/// [`named_range_coords_in`] for the name read AT the 0-based cell `at`: its
+/// relative references are anchored there (`parser::anchor_name_references`,
+/// the rule a formula in that cell reads it by).
+fn named_range_coords_at(
+    sheet_names: &[String],
+    nr: &NamedRange,
+    name: &str,
+    at: (u32, u32),
+) -> Result<NamedRangeCoords, String> {
+    let mut parsed = parser::parse(&nr.refers_to)
         .map_err(|_| format!("Named range '{}' does not refer to a parseable range.", name))?;
+    if at != (0, 0) {
+        parser::anchor_name_references(&mut parsed, at.0, at.1);
+    }
 
     let (sheet_ref, start_row, start_col, end_row, end_col) = resolve_ref_to_coords(&parsed)
         .ok_or_else(|| {
@@ -1053,8 +1577,10 @@ pub fn rename_named_range(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     old_name: String,
     new_name: String,
+    // The SCOPE of the name to rename (BUG-0744); `None` as for a delete.
+    sheet_index: Option<usize>,
 ) -> NamedRangeResult {
-    rename_named_range_core(
+    rename_named_range_scoped_core(
         &state,
         &file_state,
         &user_files_state,
@@ -1063,6 +1589,7 @@ pub fn rename_named_range(
         &ribbon_filter_state,
         &old_name,
         &new_name,
+        sheet_index,
     )
 }
 
@@ -1089,7 +1616,33 @@ pub(crate) fn rename_named_range_core(
     old_name: &str,
     new_name: &str,
 ) -> NamedRangeResult {
-    let result = rename_named_range_impl(state, file_state, old_name, new_name);
+    rename_named_range_scoped_core(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        old_name,
+        new_name,
+        None,
+    )
+}
+
+/// [`rename_named_range_core`] for the name of one SCOPE (BUG-0744).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rename_named_range_scoped_core(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    old_name: &str,
+    new_name: &str,
+    sheet_index: Option<usize>,
+) -> NamedRangeResult {
+    let result = rename_named_range_scoped_impl(state, file_state, old_name, new_name, sheet_index);
     if result.success {
         // PHASE B, holding nothing: both helpers take their own locks.
         //
@@ -1138,6 +1691,20 @@ pub(crate) fn rename_named_range_impl(
     old_name: &str,
     new_name: &str,
 ) -> NamedRangeResult {
+    rename_named_range_scoped_impl(state, file_state, old_name, new_name, None)
+}
+
+/// [`rename_named_range_impl`] for the name of one SCOPE (BUG-0744): the
+/// name keeps its scope, and its new spelling must be free IN that scope --
+/// a sheet's `Rate` may be renamed `Tax` beside a workbook `Tax`, as Excel's
+/// Name Manager allows a second scope of a spelling.
+pub(crate) fn rename_named_range_scoped_impl(
+    state: &AppState,
+    file_state: &FileState,
+    old_name: &str,
+    new_name: &str,
+    scope: Option<usize>,
+) -> NamedRangeResult {
     fn refuse(message: String) -> NamedRangeResult {
         NamedRangeResult {
             success: false,
@@ -1148,7 +1715,7 @@ pub(crate) fn rename_named_range_impl(
 
     // ---- GATE 1: the new name has to be a name. ----------------------------
     if !NamedRange::is_valid_name(new_name) {
-        return refuse(format!("Invalid name '{}'. Names must start with a letter or underscore, contain only letters, numbers, underscores, and periods, and cannot be cell references.", new_name));
+        return refuse(invalid_name_message(new_name));
     }
 
     let old_key = identity::defined_name_key(old_name);
@@ -1235,10 +1802,16 @@ pub(crate) fn rename_named_range_impl(
         Err(_) => return refuse("Named ranges are unavailable.".to_string()),
     };
 
-    let Some(existing) = pending.get(&old_key).cloned() else {
+    // THE REGISTRY KEYS (scope + name, BUG-0744); `old_key` / `new_key` stay
+    // the NAME keys the formulas are matched by.
+    let Some(old_reg) = addressed_key(&pending, old_name, scope) else {
         return refuse(format!("Named range '{}' does not exist.", old_name));
     };
-    if old_key != new_key && pending.contains_key(&new_key) {
+    let Some(existing) = pending.get(&old_reg).cloned() else {
+        return refuse(format!("Named range '{}' does not exist.", old_name));
+    };
+    let new_reg = registry_key(existing.sheet_index, new_name);
+    if old_reg != new_reg && pending.contains_key(&new_reg) {
         return refuse(format!("A named range '{}' already exists.", new_name));
     }
     // Renaming a name to exactly what it is already called changes nothing, and
@@ -1259,10 +1832,21 @@ pub(crate) fn rename_named_range_impl(
     // case-only rename ("total" -> "Total") would restamp its own work straight
     // back to the old spelling.
     let mut after_map = (*pending).clone();
-    after_map.remove(&old_key);
-    after_map.insert(new_key.clone(), renamed.clone());
+    after_map.remove(&old_reg);
+    after_map.insert(new_reg.clone(), renamed.clone());
 
-    let nested = match plan_nested_renames(&after_map, &sheet_names, &new_key, &old_key, new_name, &renamed)
+    // The sheets whose OWN name of the old spelling shadows a workbook name
+    // being renamed: a formula there reads its sheet's name [LIVE, q1.ps1],
+    // so it is not repointed (BUG-0744).
+    let shadowed: Vec<usize> = if existing.sheet_index.is_none() {
+        pending.values().filter(|nr| nr.sheet_index.is_some() && identity::defined_name_key(&nr.name) == old_key).filter_map(|nr| nr.sheet_index).collect()
+    } else {
+        Vec::new()
+    };
+    // Another scope still holding the old spelling keeps the scripts bound to it.
+    let old_spelling_remains = defined_in_any_scope(&after_map, &old_key);
+
+    let nested = match plan_nested_renames(&after_map, &sheet_names, &new_reg, &old_key, new_name, &renamed, &shadowed)
     {
         Ok(planned) => planned,
         Err(message) => return refuse(message),
@@ -1274,19 +1858,24 @@ pub(crate) fn rename_named_range_impl(
     let mut grids = pending_grids.authorize(&effect);
     let mut named_ranges = pending.authorize(&effect);
 
-    named_ranges.remove(&old_key);
-    named_ranges.insert(new_key.clone(), renamed.clone());
+    named_ranges.remove(&old_reg);
+    named_ranges.insert(new_reg.clone(), renamed.clone());
     for entry in &nested {
         named_ranges.insert(entry.key.clone(), entry.after.clone());
     }
 
     // ---- THE REPOINT, under the same grid hold. ---------------------------
-    let touched = rename_name_in_grids(&mut grid, &mut grids, active_sheet, existing.sheet_index, &old_key, new_name);
+    let touched =
+        rename_name_in_grids(&mut grid, &mut grids, active_sheet, &sheet_names, existing.sheet_index, &shadowed, &old_key, new_name);
 
     // ---- THE NAME'S OBJECT SCRIPTS FOLLOW IT, in the same critical section.
     // Bound by the name's TEXT, so without this every route's rename orphaned
     // them (see `repoint_named_range_scripts`).
-    let rebound = repoint_named_range_scripts(state, &effect, &existing.name, new_name);
+    let rebound = if old_spelling_remains {
+        Vec::new()
+    } else {
+        repoint_named_range_scripts(state, &effect, &existing.name, new_name)
+    };
     let rebound_scripts: Vec<crate::undo_commands::ScriptRebind> = rebound
         .iter()
         .map(|r| crate::undo_commands::ScriptRebind { id: r.id.clone(), instance_id: r.from.clone() })
@@ -1295,7 +1884,7 @@ pub(crate) fn rename_named_range_impl(
     // The undo stack after the grid locks (every cell writer's order), and
     // still under the registry, so no name writer's step can land below or
     // inside this one (see the lock note above).
-    record_rename_undo(state, touched, &old_key, &new_key, &existing, &nested, rebound_scripts);
+    record_rename_undo(state, touched, &old_reg, &new_reg, &existing, &nested, rebound_scripts);
     drop(named_ranges);
     drop(grids);
     drop(grid);
@@ -1329,7 +1918,11 @@ pub(crate) fn rename_named_range_impl(
 /// falls back to the workbook-scoped one), so a workbook-scoped rename reaches
 /// every definition while a sheet-scoped one reaches only definitions with the
 /// same scope. Rewriting more than that would repoint text that never denoted
-/// this name.
+/// this name. And a workbook-scoped rename skips a definition scoped to a
+/// sheet that holds its OWN name of the old spelling (`shadowed`, the sheets
+/// the grid repoint skips too): there the old spelling reads that sheet's own
+/// name [LIVE, Excel 16, 2026-11-06, lane names q1.ps1], so rewriting it would
+/// move a definition off the name it reads.
 ///
 /// The two RESTAMPS are the load path's, for the load path's reason: the text
 /// goes back through the lexer, which uppercases bare identifiers, so without
@@ -1346,6 +1939,7 @@ fn plan_nested_renames(
     old_key: &str,
     new_name: &str,
     renamed: &NamedRange,
+    shadowed: &[usize],
 ) -> Result<Vec<NestedRename>, String> {
     let mut keys: Vec<&String> = after_map.keys().collect();
     // `after_map` is a hash map: sort so the refusal below names the same
@@ -1360,14 +1954,23 @@ fn plan_nested_renames(
             continue;
         }
         let Some(other) = after_map.get(key) else { continue };
-        if renamed.sheet_index.is_some() && other.sheet_index != renamed.sheet_index {
-            continue;
-        }
+        // A plain spelling in another definition reads the renamed name only
+        // from inside its scope and where no sheet name shadows it; a
+        // sheet-qualified one by its qualifier (`qualifier_denotes`, lane form4).
+        let plain = !(renamed.sheet_index.is_some() && other.sheet_index != renamed.sheet_index)
+            && !other.sheet_index.is_some_and(|sheet| shadowed.contains(&sheet));
         let Ok(parsed) = parser::parse(&other.refers_to) else {
             continue; // Unparseable already — leave exactly as it is.
         };
-        let (mut rewritten, changed) =
-            crate::name_resolution::rename_name_in_ast(&parsed, old_key, new_name);
+        let qualified_denotes =
+            |qualifier: &str| qualifier_denotes(sheet_names, renamed.sheet_index, shadowed, qualifier);
+        let (mut rewritten, changed) = crate::name_resolution::rename_name_in_ast_scoped(
+            &parsed,
+            old_key,
+            new_name,
+            plain,
+            &qualified_denotes,
+        );
         if !changed {
             continue;
         }
@@ -1398,6 +2001,21 @@ fn plan_nested_renames(
     Ok(planned)
 }
 
+/// Whether `qualifier!old` denotes the name being renamed, whose scope is
+/// `scope` (`None` = the workbook): the qualifier's sheet is that scope, or --
+/// for a workbook name -- a sheet with no name of its own of that spelling
+/// (`shadowed` lists the sheets that have one). An unknown sheet denotes
+/// nothing. [LIVE, Excel 16, lane form4 / verify-formfix rename.ps1]
+fn qualifier_denotes(sheet_names: &[String], scope: Option<usize>, shadowed: &[usize], qualifier: &str) -> bool {
+    let Some(target) = sheet_names.iter().position(|s| identity::sheet_names_equal(s, qualifier)) else {
+        return false;
+    };
+    match scope {
+        Some(scope_sheet) => scope_sheet == target,
+        None => !shadowed.contains(&target),
+    }
+}
+
 /// Point every stored formula that reads `old_key` at `new_name`, across the
 /// sheets the name's SCOPE reaches. Returns the PRE-mutation cells so the caller
 /// can make it undoable.
@@ -1416,11 +2034,14 @@ fn plan_nested_renames(
 /// Over the grids the CALLER holds (`rename_named_range_impl` takes both grid
 /// locks before the registry and keeps them across the move, this walk and the
 /// undo record -- BUG-0592), so it takes no lock of its own.
+#[allow(clippy::too_many_arguments)]
 fn rename_name_in_grids(
     grid: &mut engine::Grid,
     grids: &mut [engine::Grid],
     active_sheet: usize,
+    sheet_names: &[String],
     scope: Option<usize>,
+    shadowed: &[usize],
     old_key: &str,
     new_name: &str,
 ) -> Vec<(usize, u32, u32, Option<engine::Cell>)> {
@@ -1435,13 +2056,17 @@ fn rename_name_in_grids(
     let mut wanted = crate::name_resolution::NameSet::default();
     wanted.insert(old_key.to_string());
 
+    // A SHEET-QUALIFIED reader (`=Sheet1!Dup`) can sit on ANY sheet and reads
+    // the name in its QUALIFIER's scope (lane form4, [LIVE] verify-formfix
+    // rename.ps1): it is repointed exactly when that sheet resolves the old
+    // spelling to the name being renamed, wherever the formula is.
+    let qualified_denotes = |qualifier: &str| qualifier_denotes(sheet_names, scope, shadowed, qualifier);
+
     let mut touched: Vec<(usize, u32, u32, Option<engine::Cell>)> = Vec::new();
     for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
-        if let Some(scope_sheet) = scope {
-            if scope_sheet != sheet_idx {
-                continue;
-            }
-        }
+        // A PLAIN spelling reads the renamed name only inside its scope, and
+        // not on a sheet whose own name of that spelling shadows it.
+        let plain = scope.is_none_or(|scope_sheet| scope_sheet == sheet_idx) && !shadowed.contains(&sheet_idx);
         // The gate is the allocation-free, shadow-aware predicate the edge map
         // is built from, so this walk visits exactly the cells the name reaches.
         let candidates: Vec<(u32, u32)> = sheet_grid
@@ -1454,8 +2079,13 @@ fn rename_name_in_grids(
         for (row, col) in candidates {
             let Some(before) = sheet_grid.get_cell(row, col).cloned() else { continue };
             let Some(ast) = before.get_ast() else { continue };
-            let (rewritten, changed) =
-                crate::name_resolution::rename_name_in_ast(ast, old_key, new_name);
+            let (rewritten, changed) = crate::name_resolution::rename_name_in_ast_scoped(
+                ast,
+                old_key,
+                new_name,
+                plain,
+                &qualified_denotes,
+            );
             if !changed {
                 continue;
             }

@@ -41,8 +41,12 @@ export type ParsedListSource =
  */
 export const MAX_LIST_SOURCE_CELLS = 10000;
 
-/** `A1`, `$A$1`, `a1` — with either or both anchors, which carry no meaning here. */
-const CELL_REF = /^\$?([A-Za-z]{1,3})\$?([0-9]{1,7})$/;
+/**
+ * `A1`, `$A$1`, `a1` — with either or both anchors. A part without `$` is
+ * RELATIVE: Excel reads it moved by each validated cell's offset from the
+ * range's top-left (`=F1:F2` on H2:H4 lists F2:F3 at H3; BUG-0745).
+ */
+const CELL_REF = /^(\$?)([A-Za-z]{1,3})(\$?)([0-9]{1,7})$/;
 
 /** A column-only (`A`, `$A`) or row-only (`3`, `$3`) half of a full-column ref. */
 const COLUMN_ONLY = /^\$?[A-Za-z]{1,3}$/;
@@ -107,14 +111,16 @@ function splitSheetPrefix(
   return { sheet: name, rest: ref.slice(bang + 1) };
 }
 
-/** One `A1`-style cell reference as 0-based row/col, or null. */
-function parseCellRef(part: string): { row: number; col: number } | null {
+/** One `A1`-style cell reference as 0-based row/col and which parts are relative, or null. */
+function parseCellRef(
+  part: string
+): { row: number; col: number; rowRelative: boolean; colRelative: boolean } | null {
   const match = CELL_REF.exec(part.trim());
   if (!match) return null;
-  const col = letterToColumn(match[1].toUpperCase());
-  const row = Number(match[2]) - 1;
+  const col = letterToColumn(match[2].toUpperCase());
+  const row = Number(match[4]) - 1;
   if (row < 0) return null;
-  return { row, col };
+  return { row, col, colRelative: match[1] === "", rowRelative: match[3] === "" };
 }
 
 function fail(message: string): ParsedListSource {
@@ -202,10 +208,21 @@ export function parseListSourceText(
     return fail(`"${trimmed}" is not a cell range. Use a range like =$A$1:$A$10.`);
   }
 
+  // Each line keeps the `$` it was typed with when the corners are put in
+  // top-left / bottom-right order.
+  const rowsSwap = first.row > second.row;
+  const colsSwap = first.col > second.col;
   const startRow = Math.min(first.row, second.row);
   const endRow = Math.max(first.row, second.row);
   const startCol = Math.min(first.col, second.col);
   const endCol = Math.max(first.col, second.col);
+  const relative = {
+    startRow: rowsSwap ? second.rowRelative : first.rowRelative,
+    endRow: rowsSwap ? first.rowRelative : second.rowRelative,
+    startCol: colsSwap ? second.colRelative : first.colRelative,
+    endCol: colsSwap ? first.colRelative : second.colRelative,
+  };
+  const anyRelative = relative.startRow || relative.endRow || relative.startCol || relative.endCol;
 
   if (endRow >= DEFAULT_GRID_CONFIG.totalRows || endCol >= DEFAULT_GRID_CONFIG.totalCols) {
     // An off-grid rectangle resolves to no values at all, which is a dropdown
@@ -220,7 +237,68 @@ export function parseListSourceText(
     );
   }
 
-  return { kind: "range", range: { sheetIndex, startRow, startCol, endRow, endCol } };
+  return {
+    kind: "range",
+    range: anyRelative
+      ? { sheetIndex, startRow, startCol, endRow, endCol, relative }
+      : { sheetIndex, startRow, startCol, endRow, endCol },
+  };
+}
+
+/** One corner of a range source: its cell and which parts are relative. */
+interface Corner {
+  row: number;
+  col: number;
+  rowRelative: boolean;
+  colRelative: boolean;
+}
+
+/** A relative part moved by the offset, WRAPPING round the sheet (Excel's rule). */
+function moveCorner(c: Corner, drow: number, dcol: number): Corner {
+  const wrap = (v: number, size: number) => ((v % size) + size) % size;
+  return {
+    ...c,
+    row: c.rowRelative ? wrap(c.row + drow, DEFAULT_GRID_CONFIG.totalRows) : c.row,
+    col: c.colRelative ? wrap(c.col + dcol, DEFAULT_GRID_CONFIG.totalCols) : c.col,
+  };
+}
+
+/** The two corners of a range source, as stored (top-left, bottom-right). */
+function cornersOf(range: ListRangeRef): [Corner, Corner] {
+  const rel = range.relative;
+  return [
+    { row: range.startRow, col: range.startCol, rowRelative: !!rel?.startRow, colRelative: !!rel?.startCol },
+    { row: range.endRow, col: range.endCol, rowRelative: !!rel?.endRow, colRelative: !!rel?.endCol },
+  ];
+}
+
+/**
+ * A range source as the cell `drow` rows below and `dcol` columns right of
+ * the cell it is written for reads it: each relative part moved (wrapping at
+ * the sheet's edge), the corners put back in order with each line keeping its
+ * own `$`. The Data Validation dialog states the Source for the ACTIVE cell
+ * and stores it for the range's top-left, as Excel's does (lane cfdvfix,
+ * [LIVE] cfdvb/probe1.ps1 C1/C2: `=F1:F2` on H2:H4 reads `=F2:F3` at H3).
+ */
+export function moveListRange(range: ListRangeRef, drow: number, dcol: number): ListRangeRef {
+  if ((drow === 0 && dcol === 0) || !range.relative) return range;
+  const [a, b] = cornersOf(range).map((c) => moveCorner(c, drow, dcol));
+  const rowsSwap = a.row > b.row;
+  const colsSwap = a.col > b.col;
+  const relative = {
+    startRow: rowsSwap ? b.rowRelative : a.rowRelative,
+    endRow: rowsSwap ? a.rowRelative : b.rowRelative,
+    startCol: colsSwap ? b.colRelative : a.colRelative,
+    endCol: colsSwap ? a.colRelative : b.colRelative,
+  };
+  return {
+    ...range,
+    startRow: Math.min(a.row, b.row),
+    endRow: Math.max(a.row, b.row),
+    startCol: Math.min(a.col, b.col),
+    endCol: Math.max(a.col, b.col),
+    relative,
+  };
 }
 
 /**
@@ -231,24 +309,41 @@ export function parseListSourceText(
  * sheet renders as `#REF!` rather than losing the prefix: dropping it would
  * quietly rebind the list to the sheet the dialog happens to be open on, and
  * parse refuses `#REF!` so the rule cannot be saved back in that state.
+ *
+ * `offset` states a RELATIVE source for the cell that far from the one it is
+ * written for (the dialog's active cell), each corner moved where it lands and
+ * NOT re-ordered, as Excel shows it: `=$F1:F$2` written for J2 reads
+ * `=$F3:F$2` at J4 ([LIVE] cfdvb/probe1.ps1 C2).
  */
 export function formatListSourceText(
   source: ListSource,
   sheetNames: readonly string[],
-  currentSheetIndex: number
+  currentSheetIndex: number,
+  offset: { drow: number; dcol: number } = { drow: 0, dcol: 0 }
 ): string {
   if ("values" in source) {
     return source.values.join(",");
   }
 
-  const { sheetIndex, startRow, startCol, endRow, endCol } = source.range;
+  const [first, second] = cornersOf(source.range).map((c) => moveCorner(c, offset.drow, offset.dcol));
+  const { sheetIndex, relative, sheetGone } = source.range;
+  const startRow = first.row;
+  const startCol = first.col;
+  const endRow = second.row;
+  const endCol = second.col;
   let prefix = "";
-  if (sheetIndex !== undefined && sheetIndex !== currentSheetIndex) {
+  if (sheetGone) {
+    // The source's sheet was deleted: Excel shows `=#REF!$A$1:$A$3`
+    // [LIVE, cfdvb/probe1.ps1 F1], and parse refuses it back.
+    prefix = "#REF!";
+  } else if (sheetIndex !== undefined && sheetIndex !== currentSheetIndex) {
     const name = sheetNames[sheetIndex];
     prefix = name === undefined ? "#REF!" : `${quoteSheetName(name)}!`;
   }
 
-  const topLeft = `$${columnToLetter(startCol)}$${startRow + 1}`;
-  const bottomRight = `$${columnToLetter(endCol)}$${endRow + 1}`;
+  const part = (row: number, col: number, rowRelative?: boolean, colRelative?: boolean) =>
+    `${colRelative ? "" : "$"}${columnToLetter(col)}${rowRelative ? "" : "$"}${row + 1}`;
+  const topLeft = part(startRow, startCol, relative?.startRow, relative?.startCol);
+  const bottomRight = part(endRow, endCol, relative?.endRow, relative?.endCol);
   return `=${prefix}${topLeft}:${bottomRight}`;
 }

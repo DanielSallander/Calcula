@@ -26,10 +26,11 @@
 
 import {
   addConditionalFormat,
+  updateConditionalFormat,
   clearConditionalFormatsInRange,
   showToast,
 } from "@api";
-import type { AddCFParams, ConditionalFormatRange } from "@api";
+import type { AddCFParams, UpdateCFParams, ConditionalFormatRange } from "@api";
 import type { CellTargetRef } from "@api/cellTarget";
 import { invalidateAndRefresh } from "./cfStore";
 
@@ -67,6 +68,23 @@ export async function tryAddRule(params: AddCFParams, target?: CellTargetRef): P
     const result = await addConditionalFormat(params, { target });
     if (result && result.success === false) {
       return result.error || "the backend refused the rule";
+    }
+  } catch (err) {
+    return reasonOf(err);
+  }
+  await refreshAfterWrite(target);
+  return null;
+}
+
+/**
+ * Change a rule (Edit Rule, an edited Applies To). Resolves the backend's
+ * reason when it refused, else null -- and never rejects, as tryAddRule.
+ */
+export async function tryUpdateRule(params: UpdateCFParams, target?: CellTargetRef): Promise<string | null> {
+  try {
+    const result = await updateConditionalFormat(params, { target });
+    if (result && result.success === false) {
+      return result.error || "the backend refused the change";
     }
   } catch (err) {
     return reasonOf(err);

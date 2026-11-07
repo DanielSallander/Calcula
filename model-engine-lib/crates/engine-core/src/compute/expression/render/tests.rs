@@ -184,6 +184,54 @@ fn keep_case_when_mode_renders_condition_with_qualifier() {
 }
 
 #[test]
+fn the_pushdown_renders_an_aggregate_comparison_with_dax_blank_reading() {
+    // BUG-0762 on the PostgreSQL pushdown (KEEP as CASE WHEN): a BLANK side
+    // of `SUM(KEEP(...)) > SUM(...)` reads as 0; a SWITCH over an aggregate
+    // case value matches BLANK only with BLANK.
+    let keep_bikes = |c: &str| {
+        agg(
+            AggregateOp::Sum,
+            keep(
+                col(c),
+                vec![FilterPredicate::new(
+                    "Products",
+                    "category",
+                    ComparisonOp::Equal,
+                    "Bikes",
+                )],
+            ),
+        )
+    };
+    let qualifier = TableAliasQualifier { alias: "t" };
+    let render = |e: &Expression| {
+        SqlRenderer::new(PostgresDialect, &qualifier)
+            .with_keep_case_when()
+            .render(e)
+            .unwrap()
+    };
+    let bikes = "SUM(CASE WHEN t.\"category\" = 'Bikes' THEN t.\"amount\" END)";
+    assert_eq!(
+        render(&compare(
+            keep_bikes("amount"),
+            ComparisonOp::GreaterThan,
+            agg(AggregateOp::Sum, col("qty"))
+        )),
+        format!("(COALESCE({bikes}, 0) > COALESCE(SUM(t.\"qty\"), 0))")
+    );
+    let switch = Expression::Switch {
+        expr: Box::new(keep_bikes("amount")),
+        cases: vec![(agg(AggregateOp::Sum, col("qty")), lit_str("same"))],
+        default: Some(Box::new(lit_str("other"))),
+    };
+    assert_eq!(
+        render(&switch),
+        format!(
+            "CASE WHEN ({bikes}) IS NOT DISTINCT FROM (SUM(t.\"qty\")) THEN 'same' ELSE 'other' END"
+        )
+    );
+}
+
+#[test]
 fn keep_pass_through_mode_ignores_filters() {
     let expr = agg(
         AggregateOp::Sum,
@@ -275,8 +323,8 @@ fn multi_table_qualifier_renders_mixed_case_expression() {
         .unwrap();
     assert_eq!(
         sql,
-        "CASE WHEN COALESCE((invoice.\"paid_date\" <= CAST(19813 AS DATE)), FALSE) \
-         THEN customer.\"tier\" ELSE 'Unpaid' END"
+        "CASE WHEN COALESCE((COALESCE(invoice.\"paid_date\", CAST('1899-12-30' AS DATE)) \
+         <= CAST(19813 AS DATE)), FALSE) THEN customer.\"tier\" ELSE 'Unpaid' END"
     );
 }
 
@@ -294,11 +342,18 @@ fn dialect_divergence_date_literal_pinned() {
     let df = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render(&expr)
         .unwrap();
-    assert_eq!(df, "(\"paid_date\" <= CAST(19813 AS DATE))");
+    // A BLANK date compares as DATE(1899, 12, 30) ([LIVE], BUG-0762).
+    assert_eq!(
+        df,
+        "(COALESCE(\"paid_date\", CAST('1899-12-30' AS DATE)) <= CAST(19813 AS DATE))"
+    );
     let pg = SqlRenderer::new(PostgresDialect, &BareQualifier)
         .render(&expr)
         .unwrap();
-    assert_eq!(pg, "(\"paid_date\" <= DATE '2024-03-31')");
+    assert_eq!(
+        pg,
+        "(COALESCE(\"paid_date\", CAST('1899-12-30' AS DATE)) <= DATE '2024-03-31')"
+    );
 }
 
 fn bikes() -> Vec<FilterPredicate> {
@@ -898,13 +953,19 @@ fn case_when_mode_reaches_the_aggregates_of_a_comparison() {
             .unwrap()
     };
     let gt = compare(sum("amount"), ComparisonOp::GreaterThan, sum("qty"));
-    assert_eq!(render(&gt), format!("({} > {})", filtered("amount"), filtered("qty")));
+    // Two aggregates: a BLANK side reads as 0 (BUG-0762, [LIVE]).
+    let gt_sql = format!(
+        "(COALESCE({}, 0) > COALESCE({}, 0))",
+        filtered("amount"),
+        filtered("qty")
+    );
+    assert_eq!(render(&gt), gt_sql);
     let both = Expression::And(Box::new(gt.clone()), Box::new(gt.clone()));
     let sql = render(&both);
     assert_eq!(sql.matches(&filtered("amount")).count(), 2, "{sql}");
     let iff = if_expr(gt, sum("qty"), blank());
     let sql = render(&iff);
-    assert!(sql.contains(&format!("({} > {})", filtered("amount"), filtered("qty"))), "{sql}");
+    assert!(sql.contains(&gt_sql), "{sql}");
     assert!(!sql.contains("SUM(\"amount\")"), "no unfiltered sum: {sql}");
     // A comparison against a literal keeps DAX's BLANK-as-0 there too.
     let vs_zero = compare(sum("amount"), ComparisonOp::GreaterThan, lit_int(0));

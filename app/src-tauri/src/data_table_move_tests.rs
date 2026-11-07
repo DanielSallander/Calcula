@@ -216,7 +216,7 @@ fn a_moved_data_table_keeps_its_values_and_its_own_marker() {
 /// old L3:L4): that is not a change to part of it -- the cut clears what the
 /// batch does not overwrite -- so the batch passes and lands the markers.
 ///
-/// SABOTAGE: pass `&[]` for the moving tables to `check_cells_write_moving` in
+/// SABOTAGE: pass `&[]` for the moving tables to `check_cells_write_on_sheet` in
 /// `update_cells_batch_core` -- fails at "OWN BODY".
 #[test]
 fn a_whole_data_table_moved_onto_its_own_body_is_not_refused() {

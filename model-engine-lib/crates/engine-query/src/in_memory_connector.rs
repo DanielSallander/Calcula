@@ -339,6 +339,44 @@ mod tests {
         assert_eq!(total, 2);
     }
 
+    /// A scalar fetch filter -- the form a row-level-security role filter is
+    /// sealed into a cached table's scan in -- never admits a BLANK (NULL)
+    /// value: `= 0`, `<> 5`, `< 1` and `= ""` all exclude it. Owner decision
+    /// BUG-0759 (2026-11-06): RLS stays strict on BLANK.
+    #[tokio::test]
+    async fn a_scalar_filter_never_admits_a_blank_value() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tenant", DataType::Int64, true),
+            Field::new("code", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(0), None, Some(5), Some(2)])),
+                Arc::new(StringArray::from(vec![Some(""), None, Some("x"), Some("")])),
+            ],
+        )
+        .unwrap();
+        let conn = InMemoryConnector::new().with_table("public", "t", batch);
+        for (column, op, value, want) in [
+            ("tenant", FilterOperator::Equal, "0", 1),
+            ("tenant", FilterOperator::NotEqual, "5", 2),
+            ("tenant", FilterOperator::LessThan, "1", 1),
+            ("code", FilterOperator::Equal, "", 2),
+        ] {
+            let req = FetchRequest {
+                schema: Some("public".into()),
+                table: "t".into(),
+                filters: vec![FilterCondition::new(column, op, value)],
+                ..Default::default()
+            };
+            let out = conn.fetch_data(&req).await.unwrap();
+            let rows: usize = out.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, want, "{column} {op:?} {value:?}");
+        }
+    }
+
     #[tokio::test]
     async fn fetch_with_boolean_filter_works() {
         use arrow::array::BooleanArray;

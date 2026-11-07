@@ -68,7 +68,7 @@
     },
     "extensions/ConditionalFormatting/components/NewRuleDialog.tsx": {
       "counts": {
-        "numberOfRaw": 3
+        "numberOfRaw": 2
       },
       "reason": "wire",
       "note": "<select> option values (preset and colour indexes)"

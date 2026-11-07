@@ -28,6 +28,47 @@ pub struct IterationSettings {
 // CALCULATION MODE COMMANDS
 // ============================================================================
 
+/// The name of Excel's third calculation mode, "Automatic except for data
+/// tables" (xlCalculationSemiautomatic, `.xlsx` `calcMode="autoNoTable"`,
+/// BUG-0754). Calculation is AUTOMATIC for every formula; only the live data
+/// tables wait for F9 [LIVE, Excel 16 over COM, 2026-11-06, dtable/probe2.ps1:
+/// under `Calculation = 2` an edit of an input value in the table's header or
+/// of the input cell left the body as it was and CalculationState xlPending,
+/// while `B1 = A1*2` followed at once; Calculate Sheet and Calculate Now
+/// refreshed it, xlDone; a table created in this mode showed 0, xlPending;
+/// switching to xlAutomatic refreshed the body, xlDone; switching to it from
+/// manual left the body for F9 (probe5.ps1)]. Stored as
+/// `calculation_mode = "automatic"` plus `AppState::calculation_except_tables`,
+/// so every "is calculation automatic?" question in the app stays right.
+pub(crate) const AUTOMATIC_EXCEPT_TABLES: &str = "automaticExceptTables";
+
+/// Write a mode NAME ("automatic", "manual" or [`AUTOMATIC_EXCEPT_TABLES`])
+/// into its two halves. The caller holds `calculation_mode` (`calc_mode`), so
+/// both change together.
+pub(crate) fn store_calculation_mode(state: &AppState, calc_mode: &mut String, mode: &str) {
+    let except = mode == AUTOMATIC_EXCEPT_TABLES;
+    *calc_mode = if except { "automatic".to_string() } else { mode.to_string() };
+    state.calculation_except_tables.store(except, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The mode NAME the session is in, read from the two halves; the caller holds
+/// `calculation_mode` (`calc_mode`).
+pub(crate) fn calculation_mode_name(state: &AppState, calc_mode: &str) -> String {
+    if calc_mode == "automatic" && state.calculation_except_tables.load(std::sync::atomic::Ordering::SeqCst) {
+        AUTOMATIC_EXCEPT_TABLES.to_string()
+    } else {
+        calc_mode.to_string()
+    }
+}
+
+/// Whether the live data tables refresh by themselves after an edit: under
+/// AUTOMATIC calculation only -- never under manual, nor under Automatic except
+/// for data tables, where they wait for F9 like a manual workbook's cells.
+pub(crate) fn data_tables_recalculate_automatically(state: &AppState) -> bool {
+    state.calculation_mode.lock().map(|m| *m == "automatic").unwrap_or(true)
+        && !state.calculation_except_tables.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Set the calculation mode ("automatic" or "manual").
 ///
 /// STRICT: anything else is an error, not a silent coercion. The old behavior
@@ -67,10 +108,11 @@ pub async fn set_calculation_mode(
     let valid_mode = match mode.to_lowercase().as_str() {
         "automatic" => "automatic".to_string(),
         "manual" => "manual".to_string(),
+        "automaticexcepttables" => AUTOMATIC_EXCEPT_TABLES.to_string(),
         _ => {
             log_warn!("CMD", "invalid calculation mode rejected: {}", mode);
             return Err(format!(
-                "Invalid calculation mode '{}': expected 'automatic' or 'manual'",
+                "Invalid calculation mode '{}': expected 'automatic', 'automaticExceptTables' or 'manual'",
                 mode
             ));
         }
@@ -284,14 +326,21 @@ pub(crate) fn recalculate_after_leaving_manual(
         true,
     )?;
     // The live data tables, which the pass leaves to the what-if refresh
-    // (BUG-0652): leaving manual recalculates them, as in Excel.
-    let states = crate::whatif_recalc::WhatIfStates {
-        user_files: user_files_state,
-        pivots: pivot_state,
-        pane_control: pane_control_state,
-        ribbon_filter: ribbon_filter_state,
-    };
-    crate::data_tables::refresh_after_calculation_pass(state, &states, true, &mut cells);
+    // (BUG-0652): leaving manual for AUTOMATIC recalculates them, as in Excel;
+    // leaving it for Automatic except for data tables leaves them for F9 and
+    // the workbook pending [LIVE, dtable/probe5.ps1: the body kept its old
+    // values, xlPending] (BUG-0754).
+    if data_tables_recalculate_automatically(state) {
+        let states = crate::whatif_recalc::WhatIfStates {
+            user_files: user_files_state,
+            pivots: pivot_state,
+            pane_control: pane_control_state,
+            ribbon_filter: ribbon_filter_state,
+        };
+        crate::data_tables::refresh_after_calculation_pass(state, &states, true, &mut cells);
+    } else {
+        crate::data_tables::note_tables_left_for_f9(state);
+    }
     Ok(cells)
 }
 
@@ -342,8 +391,13 @@ pub(crate) fn switch_calculation_mode_in_order(
     if left_manual {
         note_values_may_be_stale_on(&grid, &grids);
     }
-    *calc_mode = mode.to_string();
-    (calc_mode.clone(), left_manual)
+    // Leaving Automatic except for data tables for AUTOMATIC recalculates the
+    // tables it left for F9, as Excel does [LIVE, dtable/probe5.ps1: the body
+    // followed and CalculationState went xlDone] -- through the same Calculate
+    // Now as leaving manual.
+    let left_except_tables = calculation_mode_name(state, &calc_mode) == AUTOMATIC_EXCEPT_TABLES && mode == "automatic";
+    store_calculation_mode(state, &mut calc_mode, mode);
+    (calculation_mode_name(state, &calc_mode), left_manual || left_except_tables)
 }
 
 /// The body of [`set_calculation_mode`], callable without a Tauri runtime.
@@ -372,7 +426,7 @@ pub(crate) fn set_calculation_mode_impl(state: &AppState, mode: &str) {
     if *calc_mode == "manual" && mode != "manual" {
         note_values_may_be_stale_on(&grid, &grids);
     }
-    *calc_mode = mode.to_string();
+    store_calculation_mode(state, &mut calc_mode, mode);
 }
 
 /// Marks every sheet's stored values as possibly stale (see
@@ -421,7 +475,7 @@ pub fn get_calculation_mode(state: State<AppState>) -> String {
     log_enter!("CMD", "get_calculation_mode");
 
     let calc_mode = state.calculation_mode.lock().unwrap();
-    let mode = calc_mode.clone();
+    let mode = calculation_mode_name(&state, &calc_mode);
 
     log_exit!("CMD", "get_calculation_mode", "mode={}", mode);
     mode
@@ -538,7 +592,7 @@ fn evaluate_single_formula(
     active_sheet: usize,
     styles: &engine::StyleRegistry,
     user_files: &std::collections::HashMap<String, Vec<u8>>,
-    pivot_data_fn: &dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>,
+    pivot_data_fn: &dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup,
     gather_fn: &dyn Fn(&str) -> engine::GatherRegionData,
     name_tables: crate::name_resolution::NameTables<'_>,
     row_heights: &std::collections::HashMap<u32, f64>,
@@ -2155,8 +2209,8 @@ pub(crate) fn run_calculation_pass_gated(
     // Build pivot data lookup closure for GETPIVOTDATA
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
-        crate::pivot::operations::lookup_pivot_data(
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
+        crate::pivot::operations::lookup_pivot_value(
             &pivot_tables,
             &pivot_views,
             data_field,
@@ -3076,8 +3130,8 @@ fn recalculate_sheet_values_with(
 
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
-        crate::pivot::operations::lookup_pivot_data(
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
+        crate::pivot::operations::lookup_pivot_value(
             &pivot_tables,
             &pivot_views,
             data_field,
@@ -3810,10 +3864,10 @@ fn recalc_visibility_dependents_body(
             // GETPIVOTDATA's lookup (NEW-getpivotdata-trials), from this
             // pass's own pivot store, taken only when one evaluates.
             let lazy = crate::pivot::operations::LazyPivotLookup::new(Some(pivot_state));
-            let lookup = |field: &str, sheet: Option<&str>, r: u32, c: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+            let lookup = |field: &str, sheet: Option<&str>, r: u32, c: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
                 lazy.lookup(field, sheet, r, c, pairs)
             };
-            let pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>> =
+            let pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup> =
                 Some(&lookup);
             for &(row, col) in &affected {
                 let cell_opt = grid.get_cell(row, col).cloned();

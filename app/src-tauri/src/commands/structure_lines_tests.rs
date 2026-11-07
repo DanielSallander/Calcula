@@ -591,7 +591,7 @@ fn non_ascii_book() -> Fx {
         names[3] = "Straße".to_string();
     }
     let mut store = fx.state.named_ranges.write(&seed).unwrap();
-    for (name, refers_to) in [("RATE", "=Översikt!$B$1"), ("STR", "=Straße!A1")] {
+    for (name, refers_to) in [("RATE", "=Översikt!$B$1"), ("STR", "=Straße!$A$1")] {
         store.insert(
             name.to_string(),
             crate::named_ranges::NamedRange {
@@ -622,15 +622,17 @@ fn a_bare_non_ascii_qualifier_in_a_defined_name_follows_its_sheet() {
     let fx = non_ascii_book();
     insert_rows(&fx, 0, 1, Some(1));
     assert_eq!(refers_to(&fx, "RATE"), "=Översikt!$B$2", "the name follows a row inserted on Översikt");
-    assert_eq!(refers_to(&fx, "STR"), "=Straße!A1", "control: a name on another sheet stays");
+    assert_eq!(refers_to(&fx, "STR"), "=Straße!$A$1", "control: a name on another sheet stays");
 
     let fx = non_ascii_book();
     insert_rows(&fx, 0, 1, Some(2));
-    assert_eq!(refers_to(&fx, "STR"), "=Straße!A1", "a row inserted on sheet E must not move =Straße!A1");
+    assert_eq!(refers_to(&fx, "STR"), "=Straße!$A$1", "a row inserted on sheet E must not move =Straße!$A$1");
 
     let fx = non_ascii_book();
     insert_columns(&fx, 0, 1, Some(3));
-    assert_eq!(refers_to(&fx, "STR"), "=Straße!B1", "the name follows a column inserted on Straße");
+    // ABSOLUTE: a relative reference in a name never follows an edit
+    // (BUG-0749 [LIVE, lane names q9.ps1]), so the qualifier is proved on one.
+    assert_eq!(refers_to(&fx, "STR"), "=Straße!$B$1", "the name follows a column inserted on Straße");
     assert_eq!(refers_to(&fx, "RATE"), "=Översikt!$B$1", "control: a name on another sheet stays");
 }
 

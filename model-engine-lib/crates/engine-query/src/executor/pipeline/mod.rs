@@ -17,6 +17,7 @@ mod multi_group_tests;
 mod order_limit;
 mod pre_aggregate;
 mod query_measures;
+mod semi_join;
 mod sql;
 #[cfg(test)]
 mod time_intelligence_tests;
@@ -62,6 +63,8 @@ impl QueryExecutor {
     /// role is active). The planner already seals them into each table's
     /// fetch; the executor re-applies them as a defense-in-depth guard so a
     /// plan that reached this path without them still cannot leak rows.
+    /// [`execute_with_cancellation`](Self::execute_with_cancellation)'s
+    /// `role_union` (false here) marks a multi-role union.
     pub async fn execute(
         plan: &QueryPlan,
         model: &DataModel,
@@ -79,6 +82,7 @@ impl QueryExecutor {
             max_inline_in_values,
             udfs,
             role_filters,
+            false,
             &CancellationToken::new(),
         )
         .await
@@ -98,6 +102,17 @@ impl QueryExecutor {
     /// but the database server may continue executing the already-submitted
     /// statement; cancellation releases the caller, it does not guarantee
     /// the source stops working.
+    ///
+    /// `role_union` says the plan's OR groups (`or_groups` of its fetches)
+    /// are the multi-role row-level-security union the `bi-engine` facade
+    /// rewrote the active roles into (`build_role_union_request`, which
+    /// refuses a user OR slicer beside one). They are then SEALED like
+    /// `role_filters`: a role restriction reaches every table related by a
+    /// single-column equality in either direction, whatever the
+    /// relationship's cross-filter direction, where a slicer follows the
+    /// direction (owner decision 2026-11-06, a security filter never
+    /// widens; [`crate::security_filter::role_restriction_propagates`]).
+    /// Pass `false` for any other plan.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_with_cancellation(
         plan: &QueryPlan,
@@ -107,6 +122,7 @@ impl QueryExecutor {
         max_inline_in_values: Option<usize>,
         udfs: Option<&UdfRegistry>,
         role_filters: &[FilterPredicate],
+        role_union: bool,
         token: &CancellationToken,
     ) -> QueryResult<Vec<RecordBatch>> {
         // Defense in depth (release-active, ALL plan arms): a dynamic RLS
@@ -184,6 +200,7 @@ impl QueryExecutor {
                     max_inline_in_values,
                     udfs,
                     role_filters,
+                    role_union,
                     None,
                     token,
                 )

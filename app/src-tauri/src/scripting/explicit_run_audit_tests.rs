@@ -43,8 +43,8 @@ fn granted_with(grants: &ExplicitRunGrants, door: ExplicitRunDoor, formatting: b
         .expect("a grant")
 }
 
-fn formats(sheet: usize, changes: u32, (r0, r1, c0, c1): (u32, u32, u32, u32)) -> ExplicitRunSheetFormats {
-    ExplicitRunSheetFormats { sheet, changes, first_row: r0, last_row: r1, first_col: c0, last_col: c1 }
+fn formats(sheet: usize, calls: u32, (r0, r1, c0, c1): (u32, u32, u32, u32)) -> ExplicitRunSheetFormats {
+    ExplicitRunSheetFormats { sheet, calls, first_row: r0, last_row: r1, first_col: c0, last_col: c1 }
 }
 
 fn sheet(sheet: usize, cells: u32, (r0, r1, c0, c1): (u32, u32, u32, u32)) -> ExplicitRunSheetWrites {
@@ -311,7 +311,7 @@ fn the_report_deserializes_from_the_wire_the_page_sends_and_refuses_extra_fields
     // `formats` is optional on the wire (a run that formatted nothing sends none).
     let mut with_formats = wire.clone();
     with_formats["formats"] =
-        serde_json::json!([{ "sheet": 0, "changes": 2, "firstRow": 0, "lastRow": 1048575, "firstCol": 2, "lastCol": 2 }]);
+        serde_json::json!([{ "sheet": 0, "calls": 2, "firstRow": 0, "lastRow": 1048575, "firstCol": 2, "lastCol": 2 }]);
     let parsed: ExplicitRunWritesReport = serde_json::from_value(with_formats).unwrap();
     assert_eq!(parsed.formats, vec![formats(0, 2, (0, 1_048_575, 2, 2))]);
     let mut extra = wire;
@@ -566,7 +566,9 @@ fn a_rollback_that_took_back_other_changes_says_how_many() {
 
 /// WHAT A GRANTED RUN FORMATTED is on the trail like the cells it wrote: one
 /// always-on `ScriptExecuted` row per formatted sheet, naming the grant's
-/// application, macro and door, the number of formatting changes and the range
+/// application, macro and door, the number of formatting CALLS (BUG-0770: a
+/// call that changed nothing is still a call, and the row never claims a
+/// change) and the range
 /// in whole-line words where it is whole lines -- never a cell count of a
 /// million for one whole-column format.
 ///
@@ -592,16 +594,16 @@ fn a_granted_runs_formatting_is_recorded_per_sheet_with_its_range() {
     assert_eq!(first.extra["formatAccess"], true);
     assert_eq!(first.extra["grantId"], id);
     assert_eq!(first.extra["sheet"], 0);
-    assert_eq!(first.extra["formatChanges"], 3);
+    assert_eq!(first.extra["formatCalls"], 3);
     assert_eq!(first.extra["lastRow"], 1_048_575);
     assert!(first.extra.get("cellsModified").is_none(), "a format row counts cells");
     assert!(
-        first.description.contains("changed the formatting of Sheet1!C:D (3 formatting changes)"),
+        first.description.contains("made formatting calls on Sheet1!C:D (3 formatting calls)"),
         "{}",
         first.description
     );
     assert!(
-        format_rows[1].description.contains("changed the formatting of Sheet2!5:7 (1 formatting change)"),
+        format_rows[1].description.contains("made formatting calls on Sheet2!5:7 (1 formatting call)"),
         "{}",
         format_rows[1].description
     );
@@ -613,7 +615,7 @@ fn a_granted_runs_formatting_is_recorded_per_sheet_with_its_range() {
     r.formats = vec![formats(0, 1, (1, 2, 1, 2))];
     assert_eq!(audit_explicit_run_writes_core(&state, &grants, &r), Ok(1));
     let last = executed(&state).pop().unwrap();
-    assert!(last.description.contains("changed the formatting of Sheet1!B2:C3"), "{}", last.description);
+    assert!(last.description.contains("made formatting calls on Sheet1!B2:C3"), "{}", last.description);
 }
 
 /// FORMATTING ONLY FROM A GRANT THAT HAD IT (Rust co-decides): a report that
@@ -642,7 +644,7 @@ fn formatting_reported_under_a_cells_only_grant_is_refused_and_keeps_the_grant()
 }
 
 /// A malformed formatting entry is refused before its grant is taken: a sheet
-/// twice, inverted bounds, bounds past the sheet, a change count of zero.
+/// twice, inverted bounds, bounds past the sheet, a call count of zero.
 #[test]
 fn a_malformed_formatting_report_is_refused_and_does_not_spend_the_grant() {
     let state = state_with_sheets(&["Sheet1"]);

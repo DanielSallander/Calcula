@@ -180,7 +180,9 @@ fn every_table_mutation_is_gated_on_sheet_protection() {
     let src = &whole[..whole.find("#[cfg(test)]").expect("tables.rs has a test module")];
     // Exempt, with the reason.
     let exempt: &[(&str, &str)] = &[(
-        "enforce_table_header",
+        // (the body of the `enforce_table_header` command since lane tabxlsx
+        // made it testable, BUG-0742)
+        "enforce_table_header_core",
         "the tail of a HEADER CELL edit: protection already decided whether the cell could be \
          edited, and [LIVE] Excel renames the column when an unlocked header cell is edited",
     )];

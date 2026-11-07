@@ -897,6 +897,42 @@ pub(crate) fn check_no_array_within(
     Ok(())
 }
 
+/// [`check_no_array_within`] for a FILL's target: the dynamic-array halves as
+/// they are, and a live data table judged as a write of the rectangle -- a fill
+/// whose target covers a table's WHOLE body REPLACES the table, one over part
+/// of it is refused (BUG-0756). Excel [LIVE, Excel 16 over COM, 2026-11-06,
+/// dtable/probe1.ps1, table K1:L4, body L2:L4 `{=TABLE(,A1)}`]: FillRight
+/// K2:L4 wrote 5 / 9 over the body, AutoFill K2:K4 -> K2:L4 the same, FillDown
+/// L1:L5 and K1:L4 wrote `=B2`.. over it, FillUp L2:L5 emptied it, every one a
+/// plain cell afterwards; FillDown L2:L4 (target L3:L4, part of the body) was
+/// refused "Can't change part of a data table.". Sort keeps the stricter
+/// [`check_no_array_within`] (Excel refuses sorting a range holding a table).
+pub(crate) fn check_fill_target(
+    state: &AppState,
+    sheet: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        check_spill_protection(
+            &spill_hosts, sheet, start_row, start_col, end_row, end_col,
+            SpillOriginPolicy::Refuse,
+        )?;
+    }
+    check_no_spill_origin_within(state, sheet, start_row, start_col, end_row, end_col)?;
+    let grid = state.grid.read().unwrap();
+    let grids = state.grids.read().unwrap();
+    let active = *state.active_sheet.read().unwrap();
+    let judged = if sheet == active { Some(&*grid) } else { grids.get(sheet) };
+    match judged {
+        Some(g) => crate::data_tables::check_range_change(g, start_row, start_col, end_row, end_col),
+        None => Ok(()),
+    }
+}
+
 /// The ORIGIN half of [`check_no_array_within`], separate so the two questions
 /// can be tested against each other — the spilled-cell check is deliberately
 /// blind to the arrangement this one catches.
@@ -2168,14 +2204,17 @@ pub(crate) fn update_cell_core(
         result.cells.extend(extra);
     }
 
-    // Under automatic calculation the workbook's live data tables follow the
-    // edit (BUG-0652; a no-op scan for a workbook without one).
-    crate::data_tables::refresh_after_edit(
+    // Under automatic calculation the live data tables the edit REACHES
+    // follow it (BUG-0652, BUG-0755: Excel recomputes a table only when a
+    // precedent changes; a no-op scan for a workbook without one).
+    let active_sheet = *state.active_sheet.read().unwrap();
+    crate::data_tables::refresh_after_cell_writes(
         state,
         user_files_state,
         pivot_state,
         pane_control_state,
         ribbon_filter_state,
+        &[(active_sheet, row, col)],
         &mut result.cells,
     );
 
@@ -2351,8 +2390,8 @@ pub(crate) fn update_cell_impl(
     // Lock pivot state for GETPIVOTDATA support
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
-        crate::pivot::operations::lookup_pivot_data(
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
+        crate::pivot::operations::lookup_pivot_value(
             &pivot_tables,
             &pivot_views,
             data_field,
@@ -3072,7 +3111,7 @@ pub(crate) fn reevaluate_formula_cell(
     udf_resolver: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
     // GETPIVOTDATA's lookup (NEW-getpivotdata-trials): the caller's, read
     // under its own guards; `None` answers GETPIVOTDATA #REF! as before.
-    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup>,
     cube: Option<&std::sync::Arc<engine::CubePrefetch>>,
     control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
     styles: &StyleRegistry,
@@ -3371,7 +3410,7 @@ fn recalc_walked_cell(
     dep_col: u32,
     user_files: &std::collections::HashMap<String, Vec<u8>>,
     control_values: &std::sync::Arc<crate::control_values::ControlValuesMap>,
-    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup>,
     styles: &StyleRegistry,
     locale: &engine::LocaleSettings,
     merge_lookup: &std::collections::HashMap<(u32, u32), &MergedRegion>,
@@ -3559,7 +3598,7 @@ pub(crate) fn cascade_cross_sheet_dependents(
     control_values: &std::sync::Arc<crate::control_values::ControlValuesMap>,
     // GETPIVOTDATA's lookup for the walked cells (NEW-getpivotdata-trials),
     // as for `reevaluate_formula_cell`; `None` answers it #REF! as before.
-    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup>,
     styles: &StyleRegistry,
     locale: &engine::LocaleSettings,
     merge_lookup: &std::collections::HashMap<(u32, u32), &MergedRegion>,
@@ -3606,7 +3645,7 @@ fn cascade_cross_sheet_dependents_from(
     cross_sheet_dependents_map: &crate::CrossSheetDependentsMap,
     user_files: &std::collections::HashMap<String, Vec<u8>>,
     control_values: &std::sync::Arc<crate::control_values::ControlValuesMap>,
-    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> engine::PivotDataLookup>,
     styles: &StyleRegistry,
     locale: &engine::LocaleSettings,
     merge_lookup: &std::collections::HashMap<(u32, u32), &MergedRegion>,
@@ -3833,6 +3872,12 @@ pub fn update_cells_batch(
     let pivot_ref = pivot_state.inner();
     let pane_ref = pane_control_state.inner();
     let ribbon_ref = ribbon_filter_state.inner();
+    // The cells the batch writes, for the data-table refresh at its tail: only
+    // the tables they reach follow it.
+    let written: Vec<(usize, u32, u32)> = {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        updates.iter().map(|u| (active_sheet, u.row, u.col)).collect()
+    };
 
     let mut cells = update_cells_batch_core(
         state_ref,
@@ -3865,9 +3910,18 @@ pub fn update_cells_batch(
         cells.extend(extra);
     }
 
-    // Under automatic calculation the live data tables follow the batch
-    // (BUG-0652).
-    crate::data_tables::refresh_after_edit(state_ref, user_files_ref, pivot_ref, pane_ref, ribbon_ref, &mut cells);
+    // Under automatic calculation the live data tables the batch REACHES
+    // follow it (BUG-0652, BUG-0755: Excel recomputes a table only when a
+    // precedent changes).
+    crate::data_tables::refresh_after_cell_writes(
+        state_ref,
+        user_files_ref,
+        pivot_ref,
+        pane_ref,
+        ribbon_ref,
+        &written,
+        &mut cells,
+    );
 
     Ok(cells)
 }
@@ -4249,7 +4303,10 @@ pub(crate) fn update_cells_batch_core(
         }
         let moving_here: Vec<engine::data_table::DataTableBody> =
             moving.iter().filter(|(sheet, _)| *sheet == active_sheet).map(|(_, t)| *t).collect();
-        crate::data_tables::check_cells_write_moving(
+        // On the active sheet BY INDEX: a `.calp` merge's version tables
+        // (`data_tables::VersionTablesClaim`, BUG-0757) are judged there.
+        crate::data_tables::check_cells_write_on_sheet(
+            Some(active_sheet),
             &grid,
             updates
                 .iter()
@@ -4408,8 +4465,8 @@ pub(crate) fn update_cells_batch_core(
     // Lock pivot state for GETPIVOTDATA support
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
-        crate::pivot::operations::lookup_pivot_data(
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
+        crate::pivot::operations::lookup_pivot_value(
             &pivot_tables,
             &pivot_views,
             data_field,
@@ -6446,101 +6503,141 @@ fn clear_hyperlinks_apply_to(
     file_state: &FileState,
     active_sheet: usize,
     params: &ClearRangeParams,
+    more_areas: &[(u32, u32, u32, u32)],
 ) -> Result<ClearRangeResult, String> {
-    let min_row = params.start_row.min(params.end_row);
-    let max_row = params.start_row.max(params.end_row);
-    let min_col = params.start_col.min(params.end_col);
-    let max_col = params.start_col.max(params.end_col);
     let remove_formats = params.apply_to == ClearApplyTo::RemoveHyperlinks;
+    let label = if remove_formats { "Remove Hyperlinks" } else { "Clear Hyperlinks" };
+    let normalise = |(r0, c0, r1, c1): (u32, u32, u32, u32)| (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    let mut areas: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(more_areas.len() + 1);
+    areas.push(normalise((params.start_row, params.start_col, params.end_row, params.end_col)));
+    areas.extend(more_areas.iter().copied().map(normalise));
+    let inside = |r: u32, c: u32| areas.iter().any(|&(r0, c0, r1, c1)| r >= r0 && r <= r1 && c >= c0 && c <= c1);
 
-    let mut linked: Vec<(u32, u32)> = state
-        .hyperlinks
-        .read()
-        .map_err(|e| e.to_string())?
+    // ONE critical section from the sheet-protection gate to the write
+    // (BUG-0766): the gate used to be asked under `read()`s dropped before the
+    // links and formats were written -- a read-drop-write window in which
+    // the sheet could be protected or a cell locked. Canonical order: grid,
+    // grids, the style registry, the protection store (read and released, as
+    // `clear_range_with_options_inner` does), then the hyperlink store.
+    let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    let style_registry = state.style_registry.lock_pending().map_err(|e| e.to_string())?;
+    {
+        let protection_storage = state.sheet_protection.read().map_err(|e| e.to_string())?;
+        for &(r0, c0, r1, c1) in &areas {
+            crate::protection::check_sheet_protection_range_in(
+                &[], &protection_storage, &grid, &style_registry, active_sheet, r0, c0, r1, c1,
+            )?;
+        }
+    }
+    let hyperlinks = state.hyperlinks.lock_pending().map_err(|e| e.to_string())?;
+    let mut linked: Vec<(u32, u32)> = hyperlinks
         .get(&active_sheet)
-        .map(|links| {
-            links
-                .keys()
-                .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
-                .copied()
-                .collect()
-        })
+        .map(|links| links.keys().filter(|(r, c)| inside(*r, *c)).copied().collect())
         .unwrap_or_default();
     if linked.is_empty() {
         return Ok(ClearRangeResult { count: 0, updated_cells: Vec::new() });
     }
     linked.sort_unstable();
-
-    if !remove_formats {
-        let count = crate::hyperlinks::clear_hyperlinks_in_range_impl(state, file_state, min_row, min_col, max_row, max_col);
-        return Ok(ClearRangeResult { count, updated_cells: Vec::new() });
-    }
-
-    // Remove Hyperlinks: the formats of the linked cells, then the links, as
-    // ONE step. The begin is OWNED: inside a script's batch it joins and the
-    // commit below closes nothing that is not its own.
-    let owned = {
-        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
-        undo_stack.begin_owned_transaction("Remove Hyperlinks".to_string())
-    };
-    let mut updated_cells: Vec<CellData> = Vec::new();
-    {
-        let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
-        let restyle: Vec<(u32, u32, engine::Cell)> = linked
+    let restyle: Vec<(u32, u32, engine::Cell)> = if remove_formats {
+        linked
             .iter()
             .filter_map(|&(r, c)| grid.get_cell(r, c).filter(|cell| cell.style_index != 0).map(|cell| (r, c, cell.clone())))
-            .collect();
-        if !restyle.is_empty() {
-            // Every gate passed (sheet protection, before this function) and
-            // something changes: committed.
-            let effect = crate::document_effect::DocumentEffect::mutates(file_state);
-            let mut grid = grid.authorize(&effect);
-            let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-            let style_registry = state.style_registry.read().map_err(|e| e.to_string())?;
-            let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
-            let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
-            let locale = state.locale.lock().map_err(|e| e.to_string())?;
-            for (row, col, cell) in restyle {
-                undo_stack.record_cell_change(active_sheet, row, col, Some(cell.clone()));
-                // Index 0 = INHERIT; see the note in the Formats branch below.
-                let mut new_cell = cell.clone();
-                new_cell.style_index = 0;
-                grid.set_cell(row, col, new_cell.clone());
-                if active_sheet < grids.len() {
-                    grids[active_sheet].set_cell(row, col, new_cell);
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Every gate passed and a link goes: committed.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut removed: Vec<((u32, u32), crate::hyperlinks::Hyperlink)> = Vec::with_capacity(linked.len());
+    {
+        let mut hyperlinks = hyperlinks.authorize(&effect);
+        if let Some(sheet_links) = hyperlinks.get_mut(&active_sheet) {
+            for key in &linked {
+                if let Some(link) = sheet_links.remove(key) {
+                    removed.push((*key, link));
                 }
-                let default_style = style_registry.get(grid.effective_style_index(row, col));
-                let (display, overflow) = crate::format_cell_value_and_class(&cell.value, default_style, &locale);
-                let (row_span, col_span) = merged_regions
-                    .iter()
-                    .find(|m| m.start_row == row && m.start_col == col)
-                    .map(|m| (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1))
-                    .unwrap_or((1, 1));
-                updated_cells.push(CellData {
-                    row,
-                    col,
-                    display,
-                    overflow,
-                    display_color: None,
-                    formula: formula_display(&cell, &locale),
-                    style_index: 0,
-                    row_span,
-                    col_span,
-                    sheet_index: None,
-                    rich_text: None,
-                    accounting_layout: None,
-                });
             }
         }
     }
-    // The links themselves (records its own removals into the open step and
-    // marks the document modified).
-    crate::hyperlinks::clear_hyperlinks_in_range_impl(state, file_state, min_row, min_col, max_row, max_col);
-    {
-        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
-        undo_stack.commit_owned(owned);
+
+    // ONE undo step (owned: inside a script's batch it joins, and the commit
+    // closes nothing that is not its own). The grid guards are still held.
+    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let owned = undo_stack.begin_owned_transaction(label.to_string());
+    for ((row, col), previous) in removed {
+        undo_stack.record_custom_restore(
+            "hyperlink".to_string(),
+            crate::hyperlinks::hyperlink_undo_bytes(active_sheet, row, col, Some(previous)),
+            label,
+        );
     }
+    let mut updated_cells: Vec<CellData> = Vec::new();
+    if !restyle.is_empty() {
+        // Remove Hyperlinks: the linked cells' own formats, in the same step.
+        let mut grid = grid.authorize(&effect);
+        let mut grids = grids.authorize(&effect);
+        let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
+        let locale = state.locale.lock().map_err(|e| e.to_string())?;
+        for (row, col, cell) in restyle {
+            undo_stack.record_cell_change(active_sheet, row, col, Some(cell.clone()));
+            // Index 0 = INHERIT; see the note in the Formats branch below.
+            let mut new_cell = cell.clone();
+            new_cell.style_index = 0;
+            grid.set_cell(row, col, new_cell.clone());
+            if active_sheet < grids.len() {
+                grids[active_sheet].set_cell(row, col, new_cell);
+            }
+            let default_style = style_registry.get(grid.effective_style_index(row, col));
+            let (display, overflow) = crate::format_cell_value_and_class(&cell.value, default_style, &locale);
+            let (row_span, col_span) = merged_regions
+                .iter()
+                .find(|m| m.start_row == row && m.start_col == col)
+                .map(|m| (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1))
+                .unwrap_or((1, 1));
+            updated_cells.push(CellData {
+                row,
+                col,
+                display,
+                overflow,
+                display_color: None,
+                formula: formula_display(&cell, &locale),
+                style_index: 0,
+                row_span,
+                col_span,
+                sheet_index: None,
+                rich_text: None,
+                accounting_layout: None,
+            });
+        }
+    }
+    undo_stack.commit_owned(owned);
     Ok(ClearRangeResult { count: linked.len() as u32, updated_cells })
+}
+
+/// Clear Hyperlinks / Remove Hyperlinks over EVERY block of a Ctrl+click or Go
+/// To Special selection in ONE call and ONE undo step (BUG-0736; the gesture
+/// ran one read and two writes per block). All or nothing, as the other
+/// multi-area clears (BUG-0395): the canvas gate here, and the sheet-protection
+/// gate for every area inside [`clear_hyperlinks_apply_to`]'s one critical
+/// section (BUG-0766), are asked before any link or format is touched. The
+/// step is labelled with Excel's command name; an area without a link adds
+/// nothing, and a selection with no link at all records no step and leaves
+/// the document clean.
+fn clear_hyperlinks_over_areas(
+    state: &AppState,
+    file_state: &FileState,
+    active_sheet: usize,
+    params: &ClearRangeParams,
+    areas: &[(u32, u32, u32, u32)],
+) -> Result<ClearRangeResult, String> {
+    crate::sheets::ensure_not_canvas_in_state(state, active_sheet, "edit cells")?;
+    let Some((&(start_row, start_col, end_row, end_col), rest)) = areas.split_first() else {
+        return Ok(ClearRangeResult { count: 0, updated_cells: Vec::new() });
+    };
+    let first = ClearRangeParams { start_row, start_col, end_row, end_col, ..params.clone() };
+    clear_hyperlinks_apply_to(state, file_state, active_sheet, &first, rest)
 }
 
 /// Clear a range of cells with options for what to clear.
@@ -6710,12 +6807,12 @@ pub fn clear_range_with_options_areas(
         return Err("Several areas are cleared on the active sheet only.".to_string());
     }
     let apply_to = params.apply_to;
-    if matches!(apply_to, ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks) {
-        return Err("Clear Hyperlinks and Remove Hyperlinks clear one area per call.".to_string());
-    }
     let mut areas: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(more_areas.len() + 1);
     areas.push((params.start_row, params.start_col, params.end_row, params.end_col));
     areas.extend(more_areas.iter().map(|a| (a.start_row, a.start_col, a.end_row, a.end_col)));
+    if matches!(apply_to, ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks) {
+        return clear_hyperlinks_over_areas(state, file_state, active_sheet, &params, &areas);
+    }
 
     // ---- GATES: every area, before any write (writes nothing, stays clean) ----
     clear_range_on_sheets_inner(
@@ -6893,15 +6990,9 @@ pub fn clear_range_with_options_inner(
     // "removeHyperlinks" reset the style of EVERY cell in the range and removed
     // no link.)
     if matches!(params.apply_to, ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks) {
-        crate::protection::check_sheet_protection_range(
-            &state,
-            active_sheet,
-            params.start_row.min(params.end_row),
-            params.start_col.min(params.end_col),
-            params.start_row.max(params.end_row),
-            params.start_col.max(params.end_col),
-        )?;
-        return clear_hyperlinks_apply_to(&state, &file_state, active_sheet, &params);
+        // Sheet protection is asked INSIDE, under the guards the write goes
+        // through (BUG-0766).
+        return clear_hyperlinks_apply_to(&state, &file_state, active_sheet, &params, &[]);
     }
 
     // A SPILLED cell is not a refusal for a content clear: Excel skips it
@@ -7650,6 +7741,7 @@ fn sort_range_off_sheet_at(
     // an icon sort needs both them and the rules while the grid guard is held.
     let sheet_names_for_icons = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
     let cf_rules_for_sort = crate::conditional_formatting::rules_snapshot(state, target);
+    let icon_names = icon_rule_names(state, &fields);
     // The app locale (leaf lock: take, clone, drop) resolves the built-in
     // custom lists' local month/day names, once for the whole sort.
     let custom_orders = {
@@ -7670,6 +7762,11 @@ fn sort_range_off_sheet_at(
         }
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut grids = grids.authorize(&effect);
+        // The target sheet's filter, in the active path's order (grids, then
+        // auto_filters, then styles and the undo stack): the rows it HIDES keep
+        // their places, and a sort of its whole range is remembered for
+        // Reapply -- the same rules as `sort_range_core`.
+        let mut auto_filters = state.auto_filters.write(&effect).unwrap();
         // WRITE: a moved cell may need the explicit Normal interned (see
         // `carried_line_format`).
         let mut styles = state.style_registry.write(&effect).unwrap();
@@ -7688,6 +7785,7 @@ fn sort_range_off_sheet_at(
                 (first_data_row..=max_row).collect()
             };
             build_icon_match_sets(
+                icon_names.as_ref(),
                 &fields,
                 &grids[target],
                 &grids,
@@ -7709,6 +7807,7 @@ fn sort_range_off_sheet_at(
                 (first_data_col..=max_col).collect()
             };
             build_icon_match_sets(
+                icon_names.as_ref(),
                 &fields,
                 &grids[target],
                 &grids,
@@ -7742,11 +7841,21 @@ fn sort_range_off_sheet_at(
                     });
                 }
 
+                // The rows a filter on these columns HIDES are not sorted: they
+                // keep their places, as in Excel (the active path's rule).
+                let filter_hidden: std::collections::HashSet<u32> = auto_filters
+                    .get(&target)
+                    .filter(|af| af.start_col <= max_col && min_col <= af.end_col)
+                    .map(|af| af.hidden_rows.clone())
+                    .unwrap_or_default();
                 // Extract rows (with tier materialization for color sorts,
                 // same rule as the active path), and which cells INHERIT
                 // their line's format, so each carries its look where it lands.
                 let mut rows: Vec<(u32, Vec<Option<engine::Cell>>, Vec<bool>)> = Vec::new();
                 for row in data_start_row..=max_row {
+                    if filter_hidden.contains(&row) {
+                        continue;
+                    }
                     let mut row_data: Vec<Option<engine::Cell>> = Vec::new();
                     let mut inherits: Vec<bool> = Vec::new();
                     for col in min_col..=max_col {
@@ -7777,9 +7886,13 @@ fn sort_range_off_sheet_at(
                     }
                 }
 
+                // The rows the sorted records land on: the rows they came
+                // from, in order (every data row, but for the hidden ones).
+                let mut slots: Vec<u32> = rows.iter().map(|(r, _, _)| *r).collect();
+                slots.sort_unstable();
                 sorted_count = rows.len() as u32;
                 for (new_row_idx, (original_row, row_data, inherits)) in rows.iter().enumerate() {
-                    let target_row = data_start_row + new_row_idx as u32;
+                    let target_row = slots[new_row_idx];
                     let row_delta = target_row as i32 - *original_row as i32;
                     for (col_offset, cell_opt) in row_data.iter().enumerate() {
                         let target_col = min_col + col_offset as u32;
@@ -7905,8 +8018,25 @@ fn sort_range_off_sheet_at(
                 crate::undo_commands::script_grid_cells_snapshot_bytes(target, previous_cells),
                 "Sort range",
             );
+            // A row sort over the target filter's whole range is the FILTER's
+            // sort, remembered for Data > Reapply (BUG-0740), in this step.
+            if matches!(orientation, SortOrientation::Rows) {
+                if let Some(af) = auto_filters.get_mut(&target) {
+                    if let Some(sort) = crate::autofilter::sort_state_for(
+                        af, min_row, max_row, min_col, max_col, has_headers, &fields, match_case,
+                    ) {
+                        undo_stack.record_custom_restore(
+                            "obj_autofilter".to_string(),
+                            crate::undo_commands::autofilter_snapshot_bytes(target, Some(af.clone())),
+                            "Sort",
+                        );
+                        af.sort_state = Some(sort);
+                    }
+                }
+            }
             undo_stack.commit_owned(owned_txn);
         }
+        drop(auto_filters);
 
         sorted_count
     };
@@ -7944,6 +8074,18 @@ fn sort_range_off_sheet_at(
 /// "the icon after sorting" is not a fixed target.
 type IconMatchSets = Vec<Option<std::collections::HashSet<u32>>>;
 
+/// The names and tables an icon sort's rule formulas resolve (BUG-0748),
+/// snapshotted only when some level sorts by icon. Call it BEFORE any grid,
+/// style or undo guard (verify-cfdvb finding 4): it takes the name stores'
+/// read locks, whose writers hold the grids.
+fn icon_rule_names<'s>(state: &'s AppState, fields: &[SortField]) -> Option<crate::conditional_formatting::RuleNames<'s>> {
+    if fields.iter().any(|f| f.sort_on == SortOn::Icon) {
+        Some(crate::conditional_formatting::snapshot_rule_names(state))
+    } else {
+        None
+    }
+}
+
 /// Build the per-level icon key: which lines display the icon each level asks for.
 ///
 /// Resolved ONCE, before the permutation, for exactly the cells the sort keys on.
@@ -7954,6 +8096,7 @@ type IconMatchSets = Vec<Option<std::collections::HashSet<u32>>>;
 /// Returns one entry per field so the comparator can index the two together;
 /// `None` for levels that are not icon sorts.
 fn build_icon_match_sets(
+    names: Option<&crate::conditional_formatting::RuleNames<'_>>,
     fields: &[SortField],
     grid: &engine::Grid,
     grids: &[engine::Grid],
@@ -7965,6 +8108,10 @@ fn build_icon_match_sets(
     by_row: bool,
     base: u32,
 ) -> IconMatchSets {
+    // The rule formulas resolve names, tables and spill references as the
+    // painter does (BUG-0748). The caller snapshots them (`icon_rule_names`)
+    // BEFORE it takes any grid or undo guard: the name stores' writers hold
+    // the grids, so reading them under those guards is a lock-order cycle.
     fields
         .iter()
         .map(|field| {
@@ -7997,6 +8144,7 @@ fn build_icon_match_sets(
                 // INTERACTIVE, not Transient: on a repaint a tripped fuel budget
                 // costs a highlight, here it would cost a wrong ORDER.
                 crate::eval_budget::EvalSurface::Interactive,
+                names.map(|n| n.tables(sheet_names)),
             );
             let mut set = std::collections::HashSet::new();
             for (&line, cell) in lines.iter().zip(cells.iter()) {
@@ -8075,6 +8223,29 @@ pub fn sort_range(
     pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    params: SortRangeParams,
+) -> Result<SortRangeResult, String> {
+    sort_range_core(&state, &file_state, &user_files_state, &pivot_state, &pane_control_state, &ribbon_filter_state, params)
+}
+
+/// The body of [`sort_range`] over borrowed state, so Data > Reapply
+/// (`autofilter::reapply_auto_filter`, which re-sorts by a filter's
+/// remembered sort, BUG-0740) and the tests can run it without a Tauri
+/// `State`.
+///
+/// A sort over an AutoFilter's whole range RECORDS that sort on the filter
+/// (`AutoFilter::sort_state`), as Excel's `AutoFilter.Sort` does, in the
+/// sort's own undo step; and a sort reaching a filtered range moves only the
+/// rows the filter SHOWS, the hidden ones keeping their places [LIVE, Excel
+/// 16, 2026-11-06, lane tabxlsx probe1: "V > 1" on A1:B7 sorted descending
+/// left the hidden row of V = 1 on row 5].
+pub(crate) fn sort_range_core(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     params: SortRangeParams,
 ) -> Result<SortRangeResult, String> {
     // P3: an OBJECT's cells (a floating grid) -- its backing sheet only.
@@ -8174,6 +8345,7 @@ pub fn sort_range(
         let sheet = params.sheet_index.unwrap_or(*state.active_sheet.read().unwrap());
         crate::conditional_formatting::rules_snapshot(&state, sheet)
     };
+    let icon_names = icon_rule_names(&state, &params.fields);
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
@@ -8181,6 +8353,10 @@ pub fn sort_range(
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The sheet's AutoFilter: its hidden rows stay put, and a sort over its
+    // whole range is remembered on it (BUG-0740). After `grids`, before the
+    // style registry -- the order of `reapply_auto_filter_inner`.
+    let mut auto_filters = state.auto_filters.write(&effect).unwrap();
     // WRITE: a moved cell may need the explicit Normal interned (see
     // `carried_line_format`).
     let mut styles = state.style_registry.write(&effect).unwrap();
@@ -8271,8 +8447,18 @@ pub fn sort_range(
             let color_sort = fields
                 .iter()
                 .any(|f| matches!(f.sort_on, SortOn::CellColor | SortOn::FontColor));
+            // The rows a filter on these columns HIDES are not sorted: they
+            // keep their places, as in Excel (see `sort_range_core`).
+            let filter_hidden: std::collections::HashSet<u32> = auto_filters
+                .get(&active_sheet)
+                .filter(|af| af.start_col <= max_col && min_col <= af.end_col)
+                .map(|af| af.hidden_rows.clone())
+                .unwrap_or_default();
             let mut rows: Vec<(u32, Vec<Option<engine::Cell>>, Vec<bool>)> = Vec::new();
             for row in data_start_row..=max_row {
+                if filter_hidden.contains(&row) {
+                    continue;
+                }
                 let mut row_data: Vec<Option<engine::Cell>> = Vec::new();
                 let mut inherits: Vec<bool> = Vec::new();
                 for col in min_col..=max_col {
@@ -8294,6 +8480,7 @@ pub fn sort_range(
             // cells the sort keys on. Excel semantics: order by the icon that was on
             // screen when the sort was invoked.
             let icon_sets = build_icon_match_sets(
+                icon_names.as_ref(),
                 &fields,
                 &grid,
                 &grids,
@@ -8304,6 +8491,10 @@ pub fn sort_range(
                 true,
                 min_col,
             );
+
+            // The rows the sorted records land on: the rows they came from, in
+            // order (every data row, but for the ones a filter hides).
+            let slots: Vec<u32> = rows.iter().map(|(r, _, _)| *r).collect();
 
             // Sort the rows using the sort fields
             rows.sort_by(|a, b| {
@@ -8318,12 +8509,27 @@ pub fn sort_range(
                 min_row, min_col, max_row, max_col
             ));
 
+            // A sort over the filter's whole range is the FILTER's sort,
+            // remembered for Data > Reapply (BUG-0740), in this step.
+            if let Some(af) = auto_filters.get_mut(&active_sheet) {
+                if let Some(sort) =
+                    crate::autofilter::sort_state_for(af, min_row, max_row, min_col, max_col, has_headers, &fields, match_case)
+                {
+                    undo_stack.record_custom_restore(
+                        "obj_autofilter".to_string(),
+                        crate::undo_commands::autofilter_snapshot_bytes(active_sheet, Some(af.clone())),
+                        "Sort",
+                    );
+                    af.sort_state = Some(sort);
+                }
+            }
+
             // Apply the sorted order back to the grid
             let mut updated_cells = Vec::new();
             let sorted_count = rows.len() as u32;
 
             for (new_row_idx, (original_row, row_data, inherits)) in rows.iter().enumerate() {
-                let target_row = data_start_row + new_row_idx as u32;
+                let target_row = slots[new_row_idx];
                 let row_delta = target_row as i32 - *original_row as i32;
 
                 for (col_offset, cell_opt) in row_data.iter().enumerate() {
@@ -8482,6 +8688,7 @@ pub fn sort_range(
 
             // Sort the columns using the sort fields (treating rows as keys)
             let icon_sets = build_icon_match_sets(
+                icon_names.as_ref(),
                 &fields,
                 &grid,
                 &grids,
@@ -8644,6 +8851,7 @@ pub fn sort_range(
     drop(merged_regions);
     drop(undo_stack);
     drop(styles);
+    drop(auto_filters);
     drop(grids);
     drop(grid);
 
@@ -9947,7 +10155,7 @@ fn bulk_rewrite_cascade(
     // `update_cell_impl` uses), and held to the end of the cascade.
     crate::pivot::operations::with_cascade_pivot_store(|pivots| {
         let lazy = crate::pivot::operations::LazyPivotLookup::new(pivots);
-        let lookup = |field: &str, sheet: Option<&str>, row: u32, col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        let lookup = |field: &str, sheet: Option<&str>, row: u32, col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
             lazy.lookup(field, sheet, row, col, pairs)
         };
         for &(dep_row, dep_col) in &recalc_order {
@@ -10157,7 +10365,7 @@ pub(crate) fn cascade_seeded_on_sheet(
     // evaluates -- as in `bulk_rewrite_cascade`.
     crate::pivot::operations::with_cascade_pivot_store(|pivots| {
         let lazy = crate::pivot::operations::LazyPivotLookup::new(pivots);
-        let lookup = |field: &str, sheet: Option<&str>, row: u32, col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        let lookup = |field: &str, sheet: Option<&str>, row: u32, col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
             lazy.lookup(field, sheet, row, col, pairs)
         };
         let mut recalced: Vec<(u32, u32)> = Vec::new();
@@ -10762,6 +10970,16 @@ pub(crate) fn update_cell_on_sheets_as(
             // this needs, so the round trip bought nothing and could only lose.
             let engine_ast = cell_template.ast.as_deref().map(crate::convert_expr);
 
+            // GETPIVOTDATA's lookup for the written formula (BUG-0765): the
+            // caller's pivot store, taken -- after the guards above, the order
+            // `update_cell_impl` takes it in -- only if one evaluates. Without
+            // it the cell stored #REF!, and a write that defers its
+            // recalculation (`recalc: false`) kept it.
+            let lazy_pivots = crate::pivot::operations::LazyPivotLookup::new(Some(pivot_state));
+            let pivot_lookup = |field: &str, sheet: Option<&str>, r: u32, c: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
+                lazy_pivots.lookup(field, sheet, r, c, pairs)
+            };
+
             for &sheet_idx in &sheet_indices {
                 if sheet_idx == active_sheet || sheet_idx >= grids.len() {
                     continue;
@@ -10805,7 +11023,7 @@ pub(crate) fn update_cell_on_sheets_as(
                 // was (no cube data -> the cube functions' preserve-or-#N/A).
                 if is_formula && !stored_as_text {
                     if let Some(ref ast) = engine_ast {
-                        let result_value = crate::evaluate_formula_raw_with_ast_files_and_cube(
+                        let result_value = crate::evaluate_formula_raw_with_ast_files_cube_and_pivot(
                             &grids,
                             &sheet_names,
                             sheet_idx,
@@ -10814,6 +11032,7 @@ pub(crate) fn update_cell_on_sheets_as(
                             None,
                             cube_by_sheet.get(&sheet_idx).cloned(),
                             None, // GET.CONTROLVALUE unavailable here (v1)
+                            Some(&pivot_lookup),
                         )
                         .to_cell_value();
                         cell.value = result_value;
@@ -11282,6 +11501,7 @@ pub(crate) fn fill_range_on_target(
     // Read before the grid guard and released: `grids` comes first in the
     // canonical order, so nothing is nested here.
     let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let (src_rows, src_cols) = (sr1 - sr0 + 1, sc1 - sc0 + 1);
 
     let mut edges: Vec<(u32, u32, rustc_hash::FxHashSet<(String, u32, u32)>)> = Vec::new();
@@ -11353,7 +11573,32 @@ pub(crate) fn fill_range_on_target(
                 plan.push((tr, tc, previous, next, keep_lock));
             }
         }
-        if plan.is_empty() {
+        // THE BACKING MERGES, as on the sheet (`fill_range_core`, BUG-0768): a
+        // destination holding merges that are not the source's own pattern,
+        // or a source a merge cuts through, changes nothing; the source's own
+        // merges are REPEATED into the destination. The backing sheet is never
+        // the active one (activate_sheet refuses object sheets), so its merges
+        // live in the per-sheet store; the active mirror is asked if it were.
+        let backing_merges: std::collections::HashSet<MergedRegion> = if backing == active {
+            state.merged_regions.read().map_err(|e| e.to_string())?.clone()
+        } else {
+            state
+                .all_merged_regions
+                .read()
+                .map_err(|e| e.to_string())?
+                .get(backing)
+                .cloned()
+                .unwrap_or_default()
+        };
+        if fill_meets_foreign_merges(&backing_merges, (sr0, sc0, sr1, sc1), (tr0, tc0, tr1, tc1)) {
+            return Ok(Vec::new());
+        }
+        let pattern_merges: Vec<MergedRegion> =
+            match fill_merge_pattern(&backing_merges, (sr0, sc0, sr1, sc1), (tr0, tc0, tr1, tc1)) {
+                Some(pattern) => pattern.into_iter().filter(|m| !backing_merges.contains(m)).collect(),
+                None => return Ok(Vec::new()),
+            };
+        if plan.is_empty() && pattern_merges.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -11362,6 +11607,18 @@ pub(crate) fn fill_range_on_target(
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut grids = grids.authorize(&effect);
         let mut styles = styles.authorize(&effect);
+        if !pattern_merges.is_empty() {
+            if backing == active {
+                let mut regions = state.merged_regions.write(&effect).map_err(|e| e.to_string())?;
+                regions.extend(pattern_merges.iter().cloned());
+            } else {
+                let mut all = state.all_merged_regions.write(&effect).map_err(|e| e.to_string())?;
+                if all.len() <= backing {
+                    all.resize_with(backing + 1, std::collections::HashSet::new);
+                }
+                all[backing].extend(pattern_merges.iter().cloned());
+            }
+        }
         let grid = &mut grids[backing];
         let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::with_capacity(plan.len());
         for (row, col, previous, next, keep_lock) in plan {
@@ -11405,11 +11662,25 @@ pub(crate) fn fill_range_on_target(
         }
         let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
         let owned = undo_stack.begin_owned_transaction(format!("Fill {} cells", previous_cells.len()));
-        undo_stack.record_custom_restore(
-            "script_grid_cells".to_string(),
-            crate::undo_commands::script_grid_cells_snapshot_bytes(backing, previous_cells),
-            "Fill",
-        );
+        // The repeated merges are taken back with the cells, in the one step.
+        for region in &pattern_merges {
+            undo_stack.record_merge_region_added(
+                backing,
+                engine::UndoMergeRegion {
+                    start_row: region.start_row,
+                    start_col: region.start_col,
+                    end_row: region.end_row,
+                    end_col: region.end_col,
+                },
+            );
+        }
+        if !previous_cells.is_empty() {
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(backing, previous_cells),
+                "Fill",
+            );
+        }
         undo_stack.commit_owned(owned);
     }
 
@@ -11549,6 +11820,82 @@ pub(crate) fn fill_meets_foreign_merges(
     !(in_the_way.len() == planned.len() && in_the_way.iter().all(|m| planned.contains(*m)))
 }
 
+/// THE SOURCE'S MERGES, REPEATED down (or across) a copy fill (BUG-0768): the
+/// merged areas a Fill Down / Fill Right / AutoFill copy creates in `dest`, or
+/// `None` when Excel's FillDown changes NOTHING because of the source's merges.
+///
+/// Excel [LIVE, Excel 16 COM, 2026-11-06, lane uimisc probe2]: FillDown of
+/// A1:B4 from a merged A1:B1 merges A2:B2, A3:B3 and A4:B4, each holding the
+/// value; FillDown of A1:A6 from a merged A1:A2 merges A3:A4 and A5:A6, and
+/// FillRight of A1:D2 from a merged A1:A2 merges B1:B2, C1:C2 and D1:D2 (Ctrl+D
+/// through the keyboard does the same). Two cases change nothing and say
+/// nothing: a destination whose edge would cut a copy of the pattern (FillDown
+/// of A1:A5 from the merged A1:A2: A5 would be half of A5:A6), and a source cut
+/// through by a merge (FillDown of A1:A4 with A1:B1 merged, the selection
+/// holding half of it). Merges already in the way are `fill_meets_foreign_merges`'
+/// question, asked first.
+pub(crate) fn fill_merge_pattern(
+    merged: &std::collections::HashSet<MergedRegion>,
+    source: (u32, u32, u32, u32),
+    dest: (u32, u32, u32, u32),
+) -> Option<Vec<MergedRegion>> {
+    let (s_r0, s_c0, s_r1, s_c1) = (
+        source.0.min(source.2),
+        source.1.min(source.3),
+        source.0.max(source.2),
+        source.1.max(source.3),
+    );
+    let (d_r0, d_c0, d_r1, d_c1) = (dest.0.min(dest.2), dest.1.min(dest.3), dest.0.max(dest.2), dest.1.max(dest.3));
+    let mut inside: Vec<&MergedRegion> = Vec::new();
+    for m in merged.iter() {
+        let meets = !(m.end_row < s_r0 || m.start_row > s_r1 || m.end_col < s_c0 || m.start_col > s_c1);
+        if !meets {
+            continue;
+        }
+        let within = m.start_row >= s_r0 && m.end_row <= s_r1 && m.start_col >= s_c0 && m.end_col <= s_c1;
+        if !within {
+            // A merge the source cuts through: nothing is filled.
+            return None;
+        }
+        inside.push(m);
+    }
+    let mut pattern: Vec<MergedRegion> = Vec::new();
+    if inside.is_empty() {
+        return Some(pattern);
+    }
+    let (src_rows, src_cols) = (s_r1 - s_r0 + 1, s_c1 - s_c0 + 1);
+    for m in inside {
+        let mut tile_r = d_r0;
+        while tile_r <= d_r1 {
+            let mut tile_c = d_c0;
+            while tile_c <= d_c1 {
+                let copy = MergedRegion {
+                    start_row: tile_r + (m.start_row - s_r0),
+                    start_col: tile_c + (m.start_col - s_c0),
+                    end_row: tile_r + (m.end_row - s_r0),
+                    end_col: tile_c + (m.end_col - s_c0),
+                };
+                if copy.start_row <= d_r1 && copy.start_col <= d_c1 {
+                    if copy.end_row > d_r1 || copy.end_col > d_c1 {
+                        // The destination's edge cuts this copy of the pattern.
+                        return None;
+                    }
+                    pattern.push(copy);
+                }
+                match tile_c.checked_add(src_cols) {
+                    Some(next) => tile_c = next,
+                    None => break,
+                }
+            }
+            match tile_r.checked_add(src_rows) {
+                Some(next) => tile_r = next,
+                None => break,
+            }
+        }
+    }
+    Some(pattern)
+}
+
 /// `fill_range` on the ACTIVE sheet without the Tauri wrappers (tests drive
 /// the real body). `source` and `dest` are inclusive `(r0, c0, r1, c1)`.
 ///
@@ -11627,7 +11974,9 @@ pub fn fill_range_core(
     // moment and re-spilled by the same pass the next.
     {
         let active = *state.active_sheet.read().unwrap();
-        check_no_array_within(
+        // A live data table's whole body under the target is REPLACED, part
+        // of one refused (`check_fill_target`, BUG-0756).
+        check_fill_target(
             &state,
             active,
             target_start_row.min(target_end_row),
@@ -11690,12 +12039,19 @@ pub fn fill_range_core(
     // do this, all the merged cells need to be the same size." on the
     // frontend (`fillMergeRefusal`, fillEngine.ts), the same rule. Nothing is
     // written, dirtied or recorded: the guards drop with the return.
-    {
+    // The source's own merges are REPEATED into the destination (BUG-0768,
+    // `fill_merge_pattern`); a destination that would cut a copy of them, or
+    // a source a merge cuts through, changes nothing (Excel [LIVE]).
+    let pattern_merges: Vec<MergedRegion> = {
         let merged_regions = state.merged_regions.read().unwrap();
         if fill_meets_foreign_merges(&merged_regions, source, dest) {
             return Ok(Vec::new());
         }
-    }
+        match fill_merge_pattern(&merged_regions, source, dest) {
+            Some(pattern) => pattern,
+            None => return Ok(Vec::new()),
+        }
+    };
     // Every gate has passed; the fill below commits.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = grid.authorize(&effect);
@@ -11717,14 +12073,39 @@ pub fn fill_range_core(
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    // Begin undo transaction -- before the pattern merges, which it records.
+    let opened_transaction = !undo_stack.has_open_transaction();
+    if opened_transaction {
+        let fill_count = (target_end_row - target_start_row + 1) * (target_end_col - target_start_col + 1);
+        undo_stack.begin_transaction(format!("Fill {} cells", fill_count));
+    }
+    // THE SOURCE'S MERGES, REPEATED (BUG-0768): made in this fill's undo step,
+    // before the merge lookup below is built, so each new master reports its
+    // span. A copy already in place is left as it is.
+    if !pattern_merges.is_empty() {
+        let mut regions = state.merged_regions.write(&effect).unwrap();
+        for region in &pattern_merges {
+            if regions.insert(region.clone()) {
+                undo_stack.record_merge_region_added(
+                    active_sheet,
+                    engine::UndoMergeRegion {
+                        start_row: region.start_row,
+                        start_col: region.start_col,
+                        end_row: region.end_row,
+                        end_col: region.end_col,
+                    },
+                );
+            }
+        }
+    }
     let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Lock pivot state for GETPIVOTDATA support
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
-        crate::pivot::operations::lookup_pivot_data(
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> engine::PivotDataLookup {
+        crate::pivot::operations::lookup_pivot_value(
             &pivot_tables,
             &pivot_views,
             data_field,
@@ -11770,13 +12151,6 @@ pub fn fill_range_core(
         if engine::data_table::is_data_table_cell(cell) {
             cell.ast = None;
         }
-    }
-
-    // Begin undo transaction
-    let opened_transaction = !undo_stack.has_open_transaction();
-    if opened_transaction {
-        let fill_count = (target_end_row - target_start_row + 1) * (target_end_col - target_start_col + 1);
-        undo_stack.begin_transaction(format!("Fill {} cells", fill_count));
     }
 
     // Build merge lookup for span info
@@ -12922,6 +13296,12 @@ mod let_name_fill_tests;
 #[cfg(test)]
 #[path = "multi_area_tests.rs"]
 mod multi_area_tests;
+
+/// Ctrl+D / Ctrl+R from a merged source repeat its merges (BUG-0768). A CHILD
+/// module of `data` for the same reason as above.
+#[cfg(test)]
+#[path = "fill_merge_pattern_tests.rs"]
+mod fill_merge_pattern_tests;
 
 /// Delete / Clear Contents / Clear All over a SPILLED cell skips it rather than
 /// refusing (Excel [LIVE]), on the active sheet, over several areas, on a sheet

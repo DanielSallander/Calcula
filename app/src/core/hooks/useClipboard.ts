@@ -47,9 +47,13 @@ import {
   insertRows,
   insertColumns,
   getMergedRegions,
+  setRowHeights,
+  setColumnWidths,
 } from "../lib/tauri-api";
 import { PASTE_ONCE, pasteMayTile, pasteTiles, type PasteTiles } from "../lib/pasteTiling";
 import { copiedCell, isDataTableFormula } from "../lib/dataTableCopy";
+import { lineSizeWrites, movedLineSizes, overlapStyleResets, targetLinesOutsideSource, vacatedMoveCells, type MovedLineSizes } from "../lib/lineMoveVacated";
+import { applyColsHidden, applyRowsHidden, refreshUserHidden } from "../lib/hiddenRowsCols";
 import { gridCommands } from "../lib/gridCommands";
 import type { CellUpdateInput, FormulaShiftInput, MovedFrom, PasteSource, UndoSavepoint } from "../lib/tauri-api";
 import {
@@ -58,7 +62,8 @@ import {
   type UndoTransactionCloses,
 } from "../lib/undoTransactionOwnership";
 import { cellEvents } from "../lib/cellEvents";
-import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
+import { setClipboard, clearClipboard, setSelection, setRowHeight, setColumnWidth } from "../state/gridActions";
+import type { GridAction } from "../state/gridActions";
 import type {
   Selection,
   CellData,
@@ -144,8 +149,11 @@ export interface ClipboardData {
    * across a rename of the source sheet and links to the new name (measured
    * live through COM, 2026-10-29). A CUT pasted on another sheet finds its
    * source here too, and clears it on that sheet (`cutSourceSheetNow`); a cut
-   * whose sheet has been deleted pastes nothing. Absent for an object source
-   * and when the context carried no id.
+   * whose sheet has been deleted pastes nothing. For an OBJECT source
+   * (`sourceTarget`) it is the stable id of the sheet that HOSTS the object,
+   * the sheet on screen at the copy (BUG-0776: nothing recorded the source
+   * sheet of an object copy at all); every sheet-cell consumer checks
+   * `sourceTarget` first. Absent when the context carried no id.
    */
   sourceSheetId?: string;
   /**
@@ -2356,8 +2364,10 @@ export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRa
   // An object source is never a sheet: -1 (see ClipboardData.sourceTarget).
   const sourceSheetIndex = target ? -1 : snapshot?.sheetContext?.activeSheetIndex ?? 0;
   const sourceSheetName = target ? target.label : snapshot?.sheetContext?.activeSheetName ?? "";
-  // The sheet's stable id, so a paste finds it after a rename (BUG-0348).
-  const sourceSheetId = target ? undefined : snapshot?.sheetContext?.activeSheetId;
+  // The sheet's stable id, so a paste finds it after a rename (BUG-0348). For
+  // an OBJECT source it is the id of the sheet that HOSTS the object (the one
+  // on screen at the copy, BUG-0776): the index stays -1, never a sheet.
+  const sourceSheetId = snapshot?.sheetContext?.activeSheetId;
 
   const minRow = Math.min(range.startRow, range.endRow);
   const maxRow = Math.max(range.startRow, range.endRow);
@@ -2485,6 +2495,50 @@ export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRa
 /**
  * Hook for clipboard operations.
  */
+/**
+ * Writes the line sizes a whole-row (`rows`) or whole-column move carries
+ * (`movedLineSizes`): each size in one batch, mirrored into the grid's
+ * dimensions, then the lines whose source was hidden by hand are hidden.
+ * Runs inside the move's undo transaction.
+ */
+async function writeMovedLineSizes(
+  rows: boolean,
+  plan: MovedLineSizes,
+  dispatch: (action: GridAction) => void,
+): Promise<void> {
+  try {
+    await writeMovedLineSizesOrThrow(rows, plan, dispatch);
+  } catch (err) {
+    // The cells have moved; a size the sheet refuses (its protection's Format
+    // Rows / Columns) leaves the lines' sizes as they were, and the move
+    // stands -- never half taken back by a size.
+    console.warn("[Clipboard] the moved lines' sizes were not written:", err);
+  }
+}
+
+async function writeMovedLineSizesOrThrow(
+  rows: boolean,
+  plan: MovedLineSizes,
+  dispatch: (action: GridAction) => void,
+): Promise<void> {
+  // The lines a write SHOWS go in a write of their own (`lineSizeWrites`).
+  for (const [size, runs] of lineSizeWrites(plan)) {
+    if (rows) await setRowHeights(runs, size);
+    else await setColumnWidths(runs, size);
+    for (const [first, last] of runs) {
+      for (let line = first; line <= last; line++) dispatch(rows ? setRowHeight(line, size) : setColumnWidth(line, size));
+    }
+  }
+  // A size given to a hidden line shows it (by hand, in a collapsed outline
+  // group, or filtered out -- the backend announces the outline and the
+  // filter it changed): the hand-hidden mirror follows the backend.
+  if (plan.showsHidden) await refreshUserHidden(dispatch);
+  if (plan.hide.length > 0) {
+    if (rows) await applyRowsHidden(plan.hide, true, dispatch);
+    else await applyColsHidden(plan.hide, true, dispatch);
+  }
+}
+
 export function useClipboard(): UseClipboardReturn {
   const { state, dispatch } = useGridContext();
   const { selection, config, clipboard, sheetContext, dimensions } = state;
@@ -2627,6 +2681,7 @@ export function useClipboard(): UseClipboardReturn {
    */
   const cutTarget = useCallback(async (owned: Extract<CellTarget, { kind: "object" }>) => {
     const sel = owned.selection;
+    const hostSheetId = getGridStateSnapshot()?.sheetContext?.activeSheetId;
     const minRow = Math.min(sel.startRow, sel.endRow);
     const maxRow = Math.max(sel.startRow, sel.endRow);
     const minCol = Math.min(sel.startCol, sel.endCol);
@@ -2655,6 +2710,8 @@ export function useClipboard(): UseClipboardReturn {
         isCut: true,
         sourceSheetIndex: -1,
         sourceSheetName: owned.label,
+        // The sheet that HOSTS the object, by its stable id (BUG-0776).
+        ...(hostSheetId ? { sourceSheetId: hostSheetId } : {}),
         sourceTarget: owned.ref,
         ...(values ? { values } : {}),
         text,
@@ -3791,9 +3848,11 @@ export function useClipboard(): UseClipboardReturn {
       const maxRow = Math.max(sourceStartRow, sourceEndRow);
       const count = maxRow - minRow + 1;
 
-      // Don't move if target is within source range
-      if (targetRow >= minRow && targetRow <= maxRow) {
-        console.log("[Clipboard] Target is within source range, no-op");
+      // A drop onto the block's own place moves nothing. A drop that lands on
+      // PART of the block -- up or DOWN by fewer rows than it spans -- moves
+      // it, as Excel does [LIVE: `Range("1:4").Cut Range("A2")`] (BUG-0756).
+      if (targetRow === minRow) {
+        console.log("[Clipboard] Target is the source's own place, no-op");
         return;
       }
 
@@ -3804,7 +3863,12 @@ export function useClipboard(): UseClipboardReturn {
       const destRowGuard = checkRangeGuards(targetRow, 0, targetEndRow, config.totalCols - 1);
       if (destRowGuard?.blocked) { if (destRowGuard.message) void alertAsync(destRowGuard.message); return; }
 
-      const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
+      // Only the rows the move REPLACES ask first: the block's own rows are
+      // the data being moved, not data in the way.
+      let hasContent = false;
+      for (const [from, to] of targetLinesOutsideSource(minRow, maxRow, targetRow, count)) {
+        if (await hasContentInRange(from, 0, to, config.totalCols - 1)) { hasContent = true; break; }
+      }
       if (hasContent) {
         const confirmed = await confirmAsync(
           "There is data in the destination area. Do you want to replace it?",
@@ -3816,6 +3880,15 @@ export function useClipboard(): UseClipboardReturn {
       let tx: OwnedUndoTransaction | null = null;
       try {
         tx = ownUndoTransaction(await beginUndoTransaction(`Move ${count} rows`), UNDO_CLOSES);
+        // The rows' heights and hidden state move with them (decided from the
+        // sizes as they stand before anything is written). EVERY hidden row
+        // counts -- by hand, filtered out or in a collapsed group -- as
+        // Excel's one hidden flag does (`movedLineSizes`).
+        const rowSizes = movedLineSizes(
+          minRow, maxRow, targetRow,
+          dimensions.rowHeights, config.defaultCellHeight,
+          dimensions.hiddenRows ?? dimensions.manuallyHiddenRows ?? new Set<number>(),
+        );
 
         // 1. Read all cell data from source rows (sparse), and their STORED
         // values: a moved constant is written from these.
@@ -3823,37 +3896,62 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Read", sourceCells.length, "cells from source rows");
         const stored = await storedValuesOf(sourceCells);
 
-        // 2. Clear target rows
-        await clearRange(targetRow, 0, targetEndRow, config.totalCols - 1);
+        // 2. Clear the target rows that are not the source's own (BUG-0756):
+        // a block moved up by fewer rows than it spans lands on part of
+        // itself, and clearing those rows first cleared the block from under
+        // its own move -- over a live data table, part of its body, which is
+        // refused (`lineMoveVacated.ts`).
+        for (const [from, to] of targetLinesOutsideSource(minRow, maxRow, targetRow, count)) {
+          await clearRange(from, 0, to, config.totalCols - 1);
+        }
 
         // 2b. A MOVED formula is written UNSHIFTED; relocateCellReferences
         // (4b) re-points its references INTO the moved rows and leaves the
         // rest, as Excel's move does (see moveCells).
 
-        // 3. Write source data to target rows
+        // 3. Write source data to target rows, in ONE batch.
         // Each write names the SOURCE it moves (BUG-0657), written as it
-        // stands at the write -- except a source in the target rows, which the
-        // clear above has just emptied -- and carries its MOVE claim, as a Cut
-        // + Paste's writes do, so a WHOLE data table in the rows moves with
-        // them (`data_tables::whole_table_moves`, NEW-drag-move-whole-table).
+        // stands at the write (the backend reads every source before any
+        // write lands), and carries its MOVE claim, as a Cut + Paste's writes
+        // do, so a WHOLE data table in the rows moves with them
+        // (`data_tables::whole_table_moves`, NEW-drag-move-whole-table) -- onto
+        // part of itself too. The cells the move leaves behind in the target
+        // rows, and any data-table body cell it leaves in the source rows, are
+        // emptied in the same batch (`vacatedMoveCells`).
         const updates: CellUpdateInput[] = [];
+        const written = new Set<string>();
         for (const cell of sourceCells) {
           const newRow = targetRow + (cell.row - minRow);
           const input = movedCellInput(cell, cell.formula, stored);
           if (input.value) {
-            const stands = cell.row < targetRow || cell.row > targetEndRow;
-            const named = input.pasted && stands;
             updates.push({
               row: newRow,
               col: cell.col,
               ...input,
-              ...(named ? { source: pasteSourceOf(sheetContext.activeSheetIndex, cell.row, cell.col, { move: true }) } : {}),
-              ...(stands ? { moved: moveClaimOf(sheetContext.activeSheetIndex, cell.row, cell.col) } : {}),
+              ...(input.pasted ? { source: pasteSourceOf(sheetContext.activeSheetIndex, cell.row, cell.col, { move: true }) } : {}),
+              moved: moveClaimOf(sheetContext.activeSheetIndex, cell.row, cell.col),
             });
+            written.add(`${newRow},${cell.col}`);
           }
+        }
+        const vacatedRows = vacatedMoveCells(sourceCells, written, (row) => row >= targetRow && row <= targetEndRow);
+        for (const cell of vacatedRows) {
+          updates.push({ row: cell.row, col: cell.col, value: "" });
         }
         if (updates.length > 0) {
           await updateCellsBatch(updates);
+        }
+        // A vacated cell in the target rows takes the rest of a clear: its format.
+        for (const cell of vacatedRows) {
+          if (cell.styleIndex > 0 && cell.row >= targetRow && cell.row <= targetEndRow) {
+            await setCellStyle(cell.row, cell.col, 0);
+          }
+        }
+
+        // A cell of the block a plain moved cell lands on takes its Normal
+        // look (Excel's move carries the whole look, `overlapStyleResets`).
+        for (const [row, col] of overlapStyleResets(sourceCells, (cell) => [targetRow + (cell.row - minRow), cell.col])) {
+          await setCellStyle(row, col, 0);
         }
 
         // 3b. Copy styles from source cells to target rows
@@ -3898,6 +3996,9 @@ export function useClipboard(): UseClipboardReturn {
           console.error("[Clipboard] Failed to relocate cell references:", err);
         }
 
+        // 4c. The rows' heights and hidden state follow them.
+        await writeMovedLineSizes(true, rowSizes, dispatch);
+
         await tx.commit();
         // The stores that follow cells (a watch, a bookmark) follow the rows --
         // only when the step recorded them as moved.
@@ -3935,7 +4036,7 @@ export function useClipboard(): UseClipboardReturn {
         void alertAsync(msg);
       }
     },
-    [config.totalCols, dispatch, sheetContext.activeSheetIndex]
+    [config.totalCols, config.defaultCellHeight, dimensions.rowHeights, dimensions.manuallyHiddenRows, dispatch, sheetContext.activeSheetIndex]
   );
 
   /**
@@ -3950,9 +4051,10 @@ export function useClipboard(): UseClipboardReturn {
       const maxCol = Math.max(sourceStartCol, sourceEndCol);
       const count = maxCol - minCol + 1;
 
-      // Don't move if target is within source range
-      if (targetCol >= minCol && targetCol <= maxCol) {
-        console.log("[Clipboard] Target is within source range, no-op");
+      // A drop onto the block's own place moves nothing; a drop onto PART of
+      // it, left or RIGHT, moves it (BUG-0756, see moveRows).
+      if (targetCol === minCol) {
+        console.log("[Clipboard] Target is the source's own place, no-op");
         return;
       }
 
@@ -3963,7 +4065,11 @@ export function useClipboard(): UseClipboardReturn {
       const destColGuard = checkRangeGuards(0, targetCol, config.totalRows - 1, targetEndCol);
       if (destColGuard?.blocked) { if (destColGuard.message) void alertAsync(destColGuard.message); return; }
 
-      const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
+      // Only the columns the move REPLACES ask first (see moveRows).
+      let hasContent = false;
+      for (const [from, to] of targetLinesOutsideSource(minCol, maxCol, targetCol, count)) {
+        if (await hasContentInRange(0, from, config.totalRows - 1, to)) { hasContent = true; break; }
+      }
       if (hasContent) {
         const confirmed = await confirmAsync(
           "There is data in the destination area. Do you want to replace it?",
@@ -3975,6 +4081,11 @@ export function useClipboard(): UseClipboardReturn {
       let tx: OwnedUndoTransaction | null = null;
       try {
         tx = ownUndoTransaction(await beginUndoTransaction(`Move ${count} columns`), UNDO_CLOSES);
+        const colSizes = movedLineSizes(
+          minCol, maxCol, targetCol,
+          dimensions.columnWidths, config.defaultCellWidth,
+          dimensions.hiddenCols ?? dimensions.manuallyHiddenCols ?? new Set<number>(),
+        );
 
         // 1. Read all cell data from source columns (sparse), and their STORED
         // values: a moved constant is written from these.
@@ -3982,35 +4093,53 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Read", sourceCells.length, "cells from source columns");
         const stored = await storedValuesOf(sourceCells);
 
-        // 2. Clear target columns
-        await clearRange(0, targetCol, config.totalRows - 1, targetEndCol);
+        // 2. Clear the target columns that are not the source's own
+        // (BUG-0756, see moveRows).
+        for (const [from, to] of targetLinesOutsideSource(minCol, maxCol, targetCol, count)) {
+          await clearRange(0, from, config.totalRows - 1, to);
+        }
 
         // 2b. A MOVED formula is written UNSHIFTED; relocateCellReferences
         // (4b) re-points its references INTO the moved columns and leaves the
         // rest, as Excel's move does (see moveCells).
 
-        // 3. Write source data to target columns
-        // Each write names the SOURCE it moves (BUG-0657) and carries its MOVE
-        // claim, as in moveRows -- except a source in the target columns, which
-        // the clear above emptied.
+        // 3. Write source data to target columns, in ONE batch, as in
+        // moveRows: every write names the SOURCE it moves (BUG-0657) and
+        // carries its MOVE claim, and the cells left behind in the target
+        // columns -- or a data-table body cell left in the source -- are
+        // emptied in the same batch.
         const updates: CellUpdateInput[] = [];
+        const written = new Set<string>();
         for (const cell of sourceCells) {
           const newCol = targetCol + (cell.col - minCol);
           const input = movedCellInput(cell, cell.formula, stored);
           if (input.value) {
-            const stands = cell.col < targetCol || cell.col > targetEndCol;
-            const named = input.pasted && stands;
             updates.push({
               row: cell.row,
               col: newCol,
               ...input,
-              ...(named ? { source: pasteSourceOf(sheetContext.activeSheetIndex, cell.row, cell.col, { move: true }) } : {}),
-              ...(stands ? { moved: moveClaimOf(sheetContext.activeSheetIndex, cell.row, cell.col) } : {}),
+              ...(input.pasted ? { source: pasteSourceOf(sheetContext.activeSheetIndex, cell.row, cell.col, { move: true }) } : {}),
+              moved: moveClaimOf(sheetContext.activeSheetIndex, cell.row, cell.col),
             });
+            written.add(`${cell.row},${newCol}`);
           }
+        }
+        const vacatedCols = vacatedMoveCells(sourceCells, written, (_row, col) => col >= targetCol && col <= targetEndCol);
+        for (const cell of vacatedCols) {
+          updates.push({ row: cell.row, col: cell.col, value: "" });
         }
         if (updates.length > 0) {
           await updateCellsBatch(updates);
+        }
+        for (const cell of vacatedCols) {
+          if (cell.styleIndex > 0 && cell.col >= targetCol && cell.col <= targetEndCol) {
+            await setCellStyle(cell.row, cell.col, 0);
+          }
+        }
+
+        // A cell of the block a plain moved cell lands on takes its Normal look.
+        for (const [row, col] of overlapStyleResets(sourceCells, (cell) => [cell.row, targetCol + (cell.col - minCol)])) {
+          await setCellStyle(row, col, 0);
         }
 
         // 3b. Copy styles from source cells to target columns
@@ -4051,6 +4180,9 @@ export function useClipboard(): UseClipboardReturn {
           console.error("[Clipboard] Failed to relocate cell references:", err);
         }
 
+        // 4c. The columns' widths and hidden state follow them (see moveRows).
+        await writeMovedLineSizes(false, colSizes, dispatch);
+
         await tx.commit();
         // The stores that follow cells (a watch, a bookmark) follow the
         // columns -- only when the step recorded them as moved.
@@ -4086,7 +4218,7 @@ export function useClipboard(): UseClipboardReturn {
         void alertAsync(msg);
       }
     },
-    [config.totalRows, dispatch, sheetContext.activeSheetIndex]
+    [config.totalRows, config.defaultCellWidth, dimensions.columnWidths, dimensions.manuallyHiddenCols, dispatch, sheetContext.activeSheetIndex]
   );
 
   /**

@@ -11,7 +11,7 @@
 //          Calcula and in Excel -- and a copy kept in two places would drift
 //          again on the next correction.
 
-import type { ConditionalFormatRule, IconSetType } from "@api";
+import type { ConditionalFormatRule, DataBarAxisPosition, DataBarDirection, IconSetType } from "@api";
 import type { PresetColorScale } from "../types";
 
 /** A Color Scales preset as a rule: lowest value, (50th percentile,) highest value. */
@@ -26,6 +26,57 @@ export function colorScaleRule(preset: PresetColorScale): ConditionalFormatRule 
   } as ConditionalFormatRule;
 }
 
+/** Excel's negative-bar red and its axis black (the 2010+ data-bar defaults). */
+export const NEGATIVE_BAR_RED = "#FF0000";
+export const AXIS_BLACK = "#000000";
+
+/**
+ * Every option of New Rule's data-bar page that the painter honours (BUG-0728):
+ * Excel's Bar Appearance (fill, border), Bar Direction, Show Bar Only, and its
+ * "Negative Value and Axis Settings" dialog. A null colour is Excel's other
+ * choice: no border, or the negative bar "same as positive".
+ */
+export interface DataBarOptions {
+  fillColor: string;
+  gradientFill: boolean;
+  /** The bar's border colour; null for No Border. */
+  borderColor: string | null;
+  /** The negative bar's fill; null = "Apply same fill color as positive bar". */
+  negativeFillColor: string | null;
+  /** The negative bar's border; null = "Apply same border color as positive
+   *  bar". A bar with no border has no negative border either. */
+  negativeBorderColor: string | null;
+  axisPosition: DataBarAxisPosition;
+  axisColor: string;
+  direction: DataBarDirection;
+  /** False is Show Bar Only. */
+  showValue: boolean;
+}
+
+/**
+ * The data-bar rule for a set of options: automatic shortest / longest bar.
+ * "Same as positive" is written as the positive colour itself -- Excel's
+ * `NegativeBarFormat.ColorType = xlDataBarSameAsPositive` follows the positive
+ * colour [LIVE, lane uiforms probe1 P3b], and the stored rule has no such
+ * flag, so the dialog writes the colour the flag means at OK. The painter draws
+ * a border only when the rule carries one (BUG-0511).
+ */
+export function dataBarRuleOf(o: DataBarOptions): ConditionalFormatRule {
+  return {
+    type: "dataBar",
+    minValueType: "autoMin",
+    maxValueType: "autoMax",
+    fillColor: o.fillColor,
+    ...(o.borderColor ? { borderColor: o.borderColor, negativeBorderColor: o.negativeBorderColor ?? o.borderColor } : {}),
+    negativeFillColor: o.negativeFillColor ?? o.fillColor,
+    axisColor: o.axisColor,
+    axisPosition: o.axisPosition,
+    direction: o.direction,
+    showValue: o.showValue,
+    gradientFill: o.gradientFill,
+  } as ConditionalFormatRule;
+}
+
 /**
  * A Data Bars preset as a rule: automatic shortest / longest bar, an automatic
  * axis, Excel's red negative bars and black axis. A GRADIENT preset has a solid
@@ -33,19 +84,17 @@ export function colorScaleRule(preset: PresetColorScale): ConditionalFormatRule 
  * none -- the painter draws a border only when the rule carries one (BUG-0511).
  */
 export function dataBarRule(color: string, gradientFill: boolean): ConditionalFormatRule {
-  return {
-    type: "dataBar",
-    minValueType: "autoMin",
-    maxValueType: "autoMax",
+  return dataBarRuleOf({
     fillColor: color,
-    ...(gradientFill ? { borderColor: color, negativeBorderColor: "#FF0000" } : {}),
-    negativeFillColor: "#FF0000",
-    axisColor: "#000000",
+    gradientFill,
+    borderColor: gradientFill ? color : null,
+    negativeFillColor: NEGATIVE_BAR_RED,
+    negativeBorderColor: NEGATIVE_BAR_RED,
     axisPosition: "automatic",
+    axisColor: AXIS_BLACK,
     direction: "context",
     showValue: true,
-    gradientFill,
-  } as ConditionalFormatRule;
+  });
 }
 
 /**

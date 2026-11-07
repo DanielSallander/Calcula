@@ -661,6 +661,9 @@ pub fn script_collaboration(
 ) -> Result<Value, String> {
     // (1) Broker-routed calls run in the main window.
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&state.audit_log, &file_state);
 
     // (2) Server-side action allowlist.
     let act = Action::parse(&action)?;
@@ -685,7 +688,7 @@ pub fn script_collaboration(
             capability
         );
         crate::net_commands::record_capability_call(
-            &state.audit_log,
+            &audit,
             capability,
             &script_id,
             false,
@@ -706,7 +709,7 @@ pub fn script_collaboration(
                 act.as_str()
             );
             crate::net_commands::record_capability_call(
-                &state.audit_log,
+                &audit,
                 capability,
                 &script_id,
                 false,
@@ -732,7 +735,7 @@ pub fn script_collaboration(
                 package_name
             );
             crate::net_commands::record_capability_call(
-                &state.audit_log,
+                &audit,
                 capability,
                 &script_id,
                 false,
@@ -746,7 +749,7 @@ pub fn script_collaboration(
     // (6) Rate limits.
     if let Err(e) = check_rate(&script_id, act.bucket()) {
         crate::net_commands::record_capability_call(
-            &state.audit_log,
+            &audit,
             capability,
             &script_id,
             false,
@@ -758,7 +761,7 @@ pub fn script_collaboration(
     if act.is_publishing_write() {
         if let Err(e) = check_session_publish_budget() {
             crate::net_commands::record_capability_call(
-                &state.audit_log,
+                &audit,
                 capability,
                 &script_id,
                 false,
@@ -791,7 +794,7 @@ pub fn script_collaboration(
     // (8) Always-on audit (success + failure).
     match &result {
         Ok(_) => crate::net_commands::record_capability_call(
-            &state.audit_log,
+            &audit,
             capability,
             &script_id,
             true,
@@ -799,7 +802,7 @@ pub fn script_collaboration(
             None,
         ),
         Err(e) => crate::net_commands::record_capability_call(
-            &state.audit_log,
+            &audit,
             capability,
             &script_id,
             false,
@@ -1749,8 +1752,10 @@ mod tests {
     #[test]
     fn both_outcomes_write_an_audit_row_naming_the_capability() {
         let log = crate::document_effect::Persisted::new(calp::audit::AuditLog::default());
+        let file = crate::persistence::FileState::default();
+        let audit = crate::machine_audit::WorkbookAudit::at_entry(&log, &file);
         crate::net_commands::record_capability_call(
-            &log,
+            &audit,
             SUBSCRIBE_CAPABILITY,
             "script-1",
             false,
@@ -1758,7 +1763,7 @@ mod tests {
             Some("RegistryNotConfigured: 'C:/evil' is not one of this machine's saved registries"),
         );
         crate::net_commands::record_capability_call(
-            &log,
+            &audit,
             PUBLISH_CAPABILITY,
             "script-1",
             true,

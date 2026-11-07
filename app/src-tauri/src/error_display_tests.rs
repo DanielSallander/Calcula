@@ -40,6 +40,7 @@ const SPELLINGS: &[(CellError, &str)] = &[
     (CellError::Null, "#NULL!"),
     (CellError::Num, "#NUM!"),
     (CellError::Spill, "#SPILL!"),
+    (CellError::Calc, "#CALC!"),
     // -- Calcula-only states, following Excel's punctuation ----------------
     (CellError::Circular, "#CIRCULAR!"),
     (CellError::Conflict, "#CONFLICT!"),
@@ -129,6 +130,7 @@ fn the_four_the_frontend_would_collapse_keep_their_exact_literal() {
         (CellError::Num, "#NUM!"),
         (CellError::Null, "#NULL!"),
         (CellError::Spill, "#SPILL!"),
+        (CellError::Calc, "#CALC!"),
     ] {
         assert_eq!(
             crate::cell_error_display(&variant),

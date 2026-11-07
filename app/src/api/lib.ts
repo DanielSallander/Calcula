@@ -228,6 +228,7 @@ export {
 
   // Comments
   addComment,
+  pasteComments,
   updateComment,
   deleteComment,
   getComment,
@@ -447,6 +448,7 @@ export type {
   ReplyResult,
   CommentIndicator,
   AddCommentParams,
+  PasteCommentsResult,
   UpdateCommentParams,
   AddReplyParams,
   UpdateReplyParams,
@@ -710,6 +712,7 @@ export type {
   EvaluateCFResult,
   AddCFParams,
   UpdateCFParams,
+  CFWriteOptions,
 } from "./backend";
 
 // ============================================================================

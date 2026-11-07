@@ -69,6 +69,22 @@ pub(crate) struct TableParts<'a> {
     /// The workbook's defined names, for the table-level formulas' file text
     /// (`excel_formula_text_with_names`).
     defined: crate::xlsx_formula_text::DefinedNames,
+    /// Each table's `<autoFilter>` WITH its criteria, by table name, where the
+    /// sheet's filter is the table's (`xlsx_autofilter`, BUG-0740), its
+    /// `<sortState>` after it.
+    filters: std::collections::HashMap<String, String>,
+    /// Each SHEET filter (one no written table owns), by sheet position.
+    sheet_filters: std::collections::HashMap<usize, SheetFilterPart>,
+}
+
+/// A sheet's own AutoFilter as its worksheet part carries it.
+struct SheetFilterPart {
+    /// 0-based `(start_row, start_col, end_row, end_col)`.
+    range: (u32, u32, u32, u32),
+    /// `<autoFilter ..>..</autoFilter>` and its `<sortState>`.
+    element: String,
+    /// Whether a column is filtered (`<sheetPr filterMode="1"/>`).
+    filtered: bool,
 }
 
 impl<'a> TableParts<'a> {
@@ -118,7 +134,87 @@ impl<'a> TableParts<'a> {
                 losses.tables.push(table.name.clone());
             }
         }
-        Self { tables: kept, defined: crate::xlsx_formula_text::DefinedNames::of(workbook) }
+        // The sheet's filter, where it is a kept table's: the table's own
+        // range above its totals row, as Excel's `<autoFilter ref>` is.
+        let sheet_filters = crate::xlsx_autofilter::sheet_filters(workbook);
+        let mut filters = std::collections::HashMap::new();
+        let mut owned_by_table: HashSet<usize> = HashSet::new();
+        for table in &kept {
+            let Some(position) = workbook.sheets.iter().position(|s| s.id == table.sheet_id) else { continue };
+            let Some(filter) = sheet_filters.get(&position) else { continue };
+            let filter_end = table.end_row - u32::from(table.style_options.total_row);
+            if !table.style_options.show_filter_button
+                || crate::xlsx_autofilter::filter_range(filter) != Some((table.start_row, table.start_col, filter_end, table.end_col))
+            {
+                continue;
+            }
+            owned_by_table.insert(position);
+            if let Some((element, lossy)) = crate::xlsx_autofilter::auto_filter_element(filter) {
+                // The table's SORT definition follows its `<autoFilter>` in
+                // the part, as Excel writes it (BUG-0740).
+                let sort = crate::xlsx_autofilter::sort_state_element(filter);
+                if lossy || sort.as_ref().is_some_and(|(_, lost)| *lost) {
+                    losses.filters.push(table.name.clone());
+                }
+                let sort = sort.map(|(s, _)| s).unwrap_or_default();
+                if element.contains("<filterColumn") || !sort.is_empty() {
+                    filters.insert(table.name.clone(), format!("{}{}", element, sort));
+                }
+            }
+        }
+        // A SHEET filter -- one no written table owns -- is the worksheet's own
+        // `<autoFilter>` (W2 xlsx: it was not written at all, so its dropdowns
+        // and criteria vanished in Excel while the rows it hid stayed hidden).
+        // [LIVE, lane tabxlsx probe1] Excel saves it in the sheet part with
+        // its `<sortState>`, `<sheetPr filterMode="1"/>` while it filters, and
+        // a hidden `_xlnm._FilterDatabase` name for its range (the library's
+        // `Worksheet::autofilter` writes the range and the name, see
+        // [`Self::add_sheet_filter`]; [`Self::finish_archive`] the criteria).
+        let mut sheet_parts = std::collections::HashMap::new();
+        for (position, filter) in &sheet_filters {
+            if owned_by_table.contains(position) {
+                continue;
+            }
+            let Some(sheet) = workbook.sheets.get(*position) else { continue };
+            let Some((r0, c0, r1, c1)) = crate::xlsx_autofilter::filter_range(filter) else { continue };
+            let label = format!("{}!{}:{}", sheet.name, crate::xlsx_autofilter::a1_address(r0, c0), crate::xlsx_autofilter::a1_address(r1, c1));
+            // Excel cannot hold a sheet filter over a table it writes.
+            let over_table = kept.iter().any(|t| {
+                t.sheet_id == sheet.id && t.start_row <= r1 && r0 <= t.end_row && t.start_col <= c1 && c0 <= t.end_col
+            });
+            if over_table || r1 >= 1_048_576 || c1 >= 16_384 {
+                losses.filters.push(label);
+                continue;
+            }
+            let Some((element, lossy)) = crate::xlsx_autofilter::auto_filter_element(filter) else { continue };
+            let sort = crate::xlsx_autofilter::sort_state_element(filter);
+            if lossy || sort.as_ref().is_some_and(|(_, lost)| *lost) {
+                losses.filters.push(label);
+            }
+            let filtered = element.contains("<filterColumn");
+            let sort = sort.map(|(s, _)| s).unwrap_or_default();
+            // A SHEET filter's sort lives INSIDE its `<autoFilter>` (a
+            // worksheet-level `<sortState>` is the sheet's own Sort, not the
+            // filter's): [LIVE, lane tabxlsx probe1/probe4] Excel saves
+            // `<autoFilter ref="A1:B7"><filterColumn ..>..</filterColumn><sortState
+            // ..>..</sortState></autoFilter>`, and reads a sibling as `Worksheet.Sort`.
+            let element = crate::xlsx_autofilter::with_sort_inside(&element, &sort);
+            sheet_parts.insert(*position, SheetFilterPart { range: (r0, c0, r1, c1), element, filtered });
+        }
+        Self { tables: kept, defined: crate::xlsx_formula_text::DefinedNames::of(workbook), filters, sheet_filters: sheet_parts }
+    }
+
+    /// The sheet's own AutoFilter range, given to the library so it writes
+    /// `<autoFilter ref>` and the `_xlnm._FilterDatabase` name; the criteria
+    /// and the sort are put in by [`Self::finish_archive`]. `position` is the
+    /// sheet's place in the workbook.
+    pub(crate) fn add_sheet_filter(&self, worksheet: &mut Worksheet, position: usize, losses: &mut XlsxExportLosses) {
+        let Some(part) = self.sheet_filters.get(&position) else { return };
+        let (r0, c0, r1, c1) = part.range;
+        if let Err(e) = worksheet.autofilter(r0, c0 as u16, r1, c1 as u16) {
+            eprintln!("[WARN] xlsx save: sheet filter skipped: {}", e);
+            losses.filters.push(format!("{}:{}", crate::xlsx_autofilter::a1_address(r0, c0), crate::xlsx_autofilter::a1_address(r1, c1)));
+        }
     }
 
     fn on_sheet(&self, sheet: SheetId) -> impl Iterator<Item = &&'a SavedTable> {
@@ -196,6 +292,7 @@ impl<'a> TableParts<'a> {
         worksheet: &mut Worksheet,
         sheet: &Sheet,
         losses: &mut XlsxExportLosses,
+        column_format: &dyn Fn(usize) -> Option<rust_xlsxwriter::Format>,
     ) {
         let names = self.names();
         for table in self.on_sheet(sheet.id) {
@@ -238,6 +335,23 @@ impl<'a> TableParts<'a> {
                         // while the row is hidden (NEW-totals-label-persist).
                         if column.totals_row_function == "none" {
                             out = out.set_total_label(label.to_string());
+                        }
+                    }
+                    // The column's DATA format, where every data cell holds the
+                    // same own style: Excel's `dataDxfId` ([LIVE, Excel 16,
+                    // lane xlsx probe3] `ListColumns(3).DataBodyRange
+                    // .NumberFormat = "0.00%"` is saved `<tableColumn ..
+                    // name="Amt" dataDxfId="1"/>` with that dxf), which Excel
+                    // gives a row the table grows by (BUG-0740).
+                    let data_end = table.end_row.saturating_sub(u32::from(options.total_row));
+                    if data_end >= first_data_row {
+                        let mut styles = (first_data_row..=data_end).map(|row| sheet.cells.get(&(row, col)).map(|c| c.style_index));
+                        if let Some(Some(first)) = styles.next() {
+                            if first != 0 && styles.all(|s| s == Some(first)) {
+                                if let Some(format) = column_format(first) {
+                                    out = out.set_format(format);
+                                }
+                            }
                         }
                     }
                     match self.calculated_text(table, i, &names) {
@@ -333,16 +447,29 @@ impl<'a> TableParts<'a> {
                 }
             }
         }
-        if restore.is_empty() {
+        if restore.is_empty() && self.filters.is_empty() && self.sheet_filters.is_empty() {
             return Ok(None);
         }
         let invalid = |e: zip::result::ZipError| crate::PersistenceError::InvalidFormat(format!("xlsx table parts: {}", e));
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(xlsx)).map_err(invalid)?;
         let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        // rust_xlsxwriter numbers the worksheet parts from 1 in sheet order.
+        let sheet_part = |name: &str| -> Option<&SheetFilterPart> {
+            let n: usize = name.strip_prefix("xl/worksheets/sheet")?.strip_suffix(".xml")?.parse().ok()?;
+            self.sheet_filters.get(&n.checked_sub(1)?)
+        };
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).map_err(invalid)?;
             let name = entry.name().to_string();
+            if let Some(part) = sheet_part(&name) {
+                let mut xml = String::new();
+                entry.read_to_string(&mut xml)?;
+                drop(entry);
+                out.start_file(name, deflated).map_err(invalid)?;
+                out.write_all(with_sheet_filter(&xml, part).as_bytes())?;
+                continue;
+            }
             if !(name.starts_with("xl/tables/") && name.ends_with(".xml")) {
                 out.raw_copy_file(entry).map_err(invalid)?;
                 continue;
@@ -355,11 +482,48 @@ impl<'a> TableParts<'a> {
                     xml = xml.replace(garbled.as_str(), file);
                 }
             }
+            // The table's filter criteria (BUG-0740): the library writes the
+            // range alone, `<autoFilter ref=".."/>`.
+            for (table, element) in &self.filters {
+                if xml.contains(&format!(" displayName=\"{}\"", xml_attr_text(table))) {
+                    if let Some(at) = xml.find("<autoFilter ") {
+                        if let Some(end) = xml[at..].find("/>").map(|e| at + e + 2) {
+                            xml.replace_range(at..end, element);
+                        }
+                    }
+                }
+            }
             out.start_file(name, deflated).map_err(invalid)?;
             out.write_all(xml.as_bytes())?;
         }
         Ok(Some(out.finish().map_err(invalid)?.into_inner()))
     }
+}
+
+/// A worksheet part with its own AutoFilter as Excel writes it: the library's
+/// `<autoFilter ref=".."/>` replaced by the criteria and the sort, and
+/// `filterMode="1"` on `<sheetPr>` while a column is filtered (the library
+/// writes no `<sheetPr>` at all for a sheet with no tab colour or fit).
+fn with_sheet_filter(xml: &str, part: &SheetFilterPart) -> String {
+    let mut xml = xml.to_string();
+    if let Some(at) = xml.find("<autoFilter ") {
+        if let Some(end) = xml[at..].find("/>").map(|e| at + e + 2) {
+            // The library's empty element: nothing closes before its `/>`.
+            if !xml[at..end - 2].contains('>') {
+                xml.replace_range(at..end, &part.element);
+            }
+        }
+    }
+    if part.filtered && !xml.contains("filterMode=") {
+        if let Some(at) = xml.find("<sheetPr") {
+            xml.insert_str(at + "<sheetPr".len(), " filterMode=\"1\"");
+        } else if let Some(open) = xml.find("<worksheet") {
+            if let Some(end) = xml[open..].find('>').map(|e| open + e + 1) {
+                xml.insert_str(end, "<sheetPr filterMode=\"1\"/>");
+            }
+        }
+    }
+    xml
 }
 
 /// What rust_xlsxwriter's `Formula::escape_table_functions` (0.79.4) makes of
@@ -384,6 +548,11 @@ fn library_table_rewrite(formula: &str) -> String {
 /// An element's text escaped as rust_xlsxwriter writes it (`&`, `<`, `>`).
 fn xml_text(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// An attribute's text escaped as rust_xlsxwriter writes it (and `"`).
+fn xml_attr_text(text: &str) -> String {
+    xml_text(text).replace('"', "&quot;")
 }
 
 /// A table-level formula (a calculated column's, a custom total's) as an
@@ -713,6 +882,11 @@ pub(crate) fn read_table_parts<R: std::io::Read + std::io::Seek>(
     wb: &mut Workbook,
 ) {
     let mut tables: Vec<SavedTable> = Vec::new();
+    // Each table's and each sheet's filter criteria and sort
+    // (`xlsx_autofilter`, BUG-0740), by sheet.
+    let mut filters: Vec<(usize, String, serde_json::Value, bool)> = Vec::new();
+    // A colour filter or colour sort names its colour by a dxf.
+    let dxfs = read_entry(archive, "xl/styles.xml").map(|x| crate::xlsx_autofilter::parse_dxf_colors(&x)).unwrap_or_default();
     for (position, sheet_path) in sheet_paths {
         let Some(sheet_name) = position.checked_sub(1).and_then(|p| sheet_names.get(p)) else { continue };
         if sheet_name == META_SHEET_NAME {
@@ -720,11 +894,41 @@ pub(crate) fn read_table_parts<R: std::io::Read + std::io::Seek>(
         }
         let Some(sheet_index) = wb.sheets.iter().position(|s| &s.name == sheet_name) else { continue };
         let sheet_id = wb.sheets[sheet_index].id;
+        // The sheet's OWN AutoFilter (W2 xlsx: never read, so its criteria
+        // and dropdowns were lost while the rows it hid stayed hidden).
+        if let Some((filter, lossy)) =
+            read_entry(archive, sheet_path).and_then(|xml| crate::xlsx_autofilter::parse_sheet_auto_filter(&xml, &dxfs))
+        {
+            if let Some((r0, c0, r1, c1)) = crate::xlsx_autofilter::filter_range(&filter) {
+                let label = format!("{}!{}:{}", sheet_name, crate::xlsx_autofilter::a1_address(r0, c0), crate::xlsx_autofilter::a1_address(r1, c1));
+                filters.push((sheet_index, label, filter, lossy));
+            }
+        }
         let Some(rels) = read_entry(archive, &rels_path_of(sheet_path)) else { continue };
         for target in table_targets(&rels) {
             let part = resolve_target(sheet_path, &target);
             let Some(xml) = read_entry(archive, &part) else { continue };
             let Some(table) = parse_table_part(&xml, sheet_id) else { continue };
+            // A table with filter buttons but no criterion -- a bare
+            // `<autoFilter ref>`, perhaps with a sort -- has a filter too: the
+            // dropdowns (and the sort). It is listed so that it competes for
+            // the sheet's one filter slot with a sheet filter or another table
+            // (`install_table_filters`), and is REPORTED when it loses; unlisted,
+            // a sheet filter took the slot and the table's dropdowns went with
+            // no word (wave-4 verifier finding).
+            let parsed = crate::xlsx_autofilter::parse_auto_filter_with(&xml, &dxfs).or_else(|| {
+                table.style_options.show_filter_button.then(|| {
+                    let end = table.end_row - u32::from(table.style_options.total_row);
+                    (
+                        serde_json::json!({ "startRow": table.start_row, "startCol": table.start_col, "endRow": end, "endCol": table.end_col, "columnFilters": {}, "hiddenRows": [], "enabled": true }),
+                        false,
+                    )
+                })
+            });
+            if let Some((mut filter, mut lossy)) = parsed {
+                crate::xlsx_autofilter::attach_sort_state(&mut filter, &mut lossy, &xml, &dxfs);
+                filters.push((sheet_index, table.name.clone(), filter, lossy));
+            }
             let sheet = &mut wb.sheets[sheet_index];
             for (&(row, col), cell) in sheet.cells.iter_mut() {
                 if row < table.start_row || row > table.end_row || col < table.start_col || col > table.end_col {
@@ -738,6 +942,60 @@ pub(crate) fn read_table_parts<R: std::io::Read + std::io::Seek>(
         }
     }
     wb.tables = tables;
+    install_table_filters(wb, filters);
+}
+
+/// The tables' filters as the app's AutoFilter store
+/// (`user_files["autofilters.json"]`, one per sheet, keyed by its position),
+/// each with the rows it hides: a row a filter hid is the FILTER's, not the
+/// user's (Excel has one `hidden` bit; clearing the filter shows it again).
+/// A second filtered table on a sheet, and a criterion Calcula cannot hold,
+/// is reported (`XlsxImportLosses::filters`).
+pub(crate) fn install_table_filters(wb: &mut Workbook, filters: Vec<(usize, String, serde_json::Value, bool)>) {
+    if filters.is_empty() {
+        return;
+    }
+    let mut store = serde_json::Map::new();
+    let mut lost: Vec<String> = Vec::new();
+    // Excel keeps a sheet filter AND every table's; Calcula holds ONE per
+    // sheet, so one is chosen deliberately and every other is reported: a
+    // filter that FILTERS or SORTS beats one that is only dropdowns (losing it
+    // would show rows it hid, or forget the order Reapply keeps), and among
+    // equals the first in the sheet (row, then column) keeps its filter -- the
+    // app seeds a sheet's filter from its first table the same way -- whatever
+    // order the parts are listed in.
+    let mut filters = filters;
+    filters.sort_by_key(|(sheet, _, filter, _)| {
+        let (r0, c0, _, _) = crate::xlsx_autofilter::filter_range(filter).unwrap_or((u32::MAX, u32::MAX, 0, 0));
+        let filters_or_sorts = filter["columnFilters"].as_object().is_some_and(|c| !c.is_empty())
+            || filter.get("sortState").is_some_and(|s| !s.is_null());
+        (*sheet, !filters_or_sorts, r0, c0)
+    });
+    for (sheet, table, mut filter, lossy) in filters {
+        if lossy {
+            lost.push(table.clone());
+        }
+        if store.contains_key(&sheet.to_string()) {
+            lost.push(table);
+            continue;
+        }
+        let Some((r0, _, r1, _)) = crate::xlsx_autofilter::filter_range(&filter) else { continue };
+        let Some(target) = wb.sheets.get_mut(sheet) else { continue };
+        let mut hidden: Vec<u32> = target.user_hidden_rows.iter().copied().filter(|r| *r > r0 && *r <= r1).collect();
+        hidden.sort_unstable();
+        for row in &hidden {
+            target.user_hidden_rows.remove(row);
+            target.hidden_rows.insert(*row);
+        }
+        filter["hiddenRows"] = serde_json::json!(hidden);
+        store.insert(sheet.to_string(), filter);
+    }
+    if !store.is_empty() {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&serde_json::Value::Object(store)) {
+            wb.user_files.insert("autofilters.json".to_string(), bytes);
+        }
+    }
+    crate::xlsx_reader::note_import_losses(wb, |losses| losses.filters.extend(lost));
 }
 
 fn read_entry<R: std::io::Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
@@ -848,7 +1106,7 @@ fn decode_ooxml_escapes(s: &str) -> String {
 }
 
 /// `B2:D6` (or one cell) as 0-based `(start_row, start_col, end_row, end_col)`.
-fn parse_ref(range: &str) -> Option<(u32, u32, u32, u32)> {
+pub(crate) fn parse_ref(range: &str) -> Option<(u32, u32, u32, u32)> {
     fn cell(a1: &str) -> Option<(u32, u32)> {
         let a1 = a1.replace('$', "");
         let split = a1.find(|c: char| c.is_ascii_digit())?;

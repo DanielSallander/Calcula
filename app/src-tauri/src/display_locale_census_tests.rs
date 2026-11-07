@@ -71,7 +71,7 @@ const ALLOWLIST: &[Allowed] = &[
     ("conditional_formatting.rs", "cell_value_to_string", SIMPLE_NUMBER, "CF rule comparison text"),
     ("conditional_formatting.rs", "evaluate_text_rule", SIMPLE_NUMBER, "CF text-rule comparison"),
     ("data_validation.rs", "validate_cell_value", SIMPLE_NUMBER, "DV list membership / text length comparison"),
-    ("data_validation.rs", "resolve_list_source", SIMPLE_NUMBER, "DV list values compared against the cell (same invariant text)"),
+    ("data_validation.rs", "list_compare_text", SIMPLE_NUMBER, "DV list items compared against the cell (same invariant text); the dropdown SHOWS them through resolve_list_display in the app locale"),
 ];
 
 /// Sites that hold an `AppState` and write DISPLAY text: each must still read
@@ -81,13 +81,16 @@ const MUST_READ_STATE_LOCALE: &[(&str, &str)] = &[
     // The body of the `get_range_cells_typed` command (testability split).
     ("commands/data.rs", "range_cells_typed"),
     ("commands/data.rs", "get_cell_collection"),
-    ("commands/data.rs", "sort_range"),
+    // The body of the `sort_range` command (callable from Reapply, BUG-0740).
+    ("commands/data.rs", "sort_range_core"),
     ("formula_eval_plan.rs", "get_formula_eval_plan"),
     ("bi/commands.rs", "bi_insert_result"),
     ("bi/commands.rs", "bi_refresh_connection"),
     ("insights/commands.rs", "insights_for_series"),
     // Collected Responses shows each answer as the cells show it (2026-10-21).
     ("calp_commands.rs", "load_region_submissions_core"),
+    // The Data Validation dropdown shows its items as the user reads them (cfdvfix).
+    ("data_validation.rs", "get_validation_list_values_on"),
 ];
 
 fn src_dir() -> PathBuf {

@@ -267,16 +267,23 @@ export function planFormatCellsWrites(
   // are rows 0..1048574 and 1..1048575: neither is a whole column, so the
   // backend walked about a million cells per column, or refused four columns
   // and up (round-2 review revA#3).
+  //
+  // A MIXED inside line (BUG-0726: its boundaries draw different lines, and the
+  // user chose none for it) is never written, exactly as a mixed outer edge is
+  // not: its preset with the mixed side's "none" would REMOVE every inner line
+  // of the range.
   const multiRow = rect.endRow > rect.startRow;
   const multiCol = rect.endCol > rect.startCol;
   if (
     multiRow &&
+    !current.borderInsideHorizontal.mixed &&
     (!sameSide(current.borderInsideHorizontal, borderBase.borderInsideHorizontal) || forcedSide("borderInsideHorizontal"))
   ) {
     calls.push({ kind: "preset", preset: "insideHorizontal", ...presetLine(current.borderInsideHorizontal) });
   }
   if (
     multiCol &&
+    !current.borderInsideVertical.mixed &&
     (!sameSide(current.borderInsideVertical, borderBase.borderInsideVertical) || forcedSide("borderInsideVertical"))
   ) {
     calls.push({ kind: "preset", preset: "insideVertical", ...presetLine(current.borderInsideVertical) });

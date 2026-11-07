@@ -697,7 +697,18 @@ pub(crate) fn update_floating_range_inner(
             .position(|fr| fr.id == id)
             .ok_or_else(|| format!("No floating range with id {id}"))?;
         let previous = pending[index].clone();
-        let updated = patched(&previous, &patch);
+        let mut updated = patched(&previous, &patch);
+        // ONLY THE CONTAINER FIELDS A FLOATING GRID PAINTS (BUG-0773),
+        // decided against the row this write replaces, under this hold and
+        // before any effect.
+        if let Some(Some(container)) = &patch.container {
+            let checked = visual_format::check_family_container_write(
+                visual_format::FAMILY_FLOATING_GRID,
+                container,
+                previous.container.as_ref(),
+            )?;
+            updated.container = Some(checked).filter(|c| !c.is_empty());
+        }
         if !patchable_fields_differ(&previous, &updated) {
             // A patch that changes nothing is not an edit: no dirty flag, no
             // undo entry, no write.

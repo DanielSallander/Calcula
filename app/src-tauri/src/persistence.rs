@@ -3565,6 +3565,8 @@ fn restore_scheduled_jobs(
     workbook: &mut Workbook,
 ) {
     use calcula_format::features::scheduled_jobs::{ScheduledJobsFile, SCHEDULED_JOBS_FILE};
+    // Written BY the load, into the trail of the workbook being opened.
+    let loading = crate::machine_audit::WorkbookAudit::while_loading(audit_log);
 
     let hashes = workbook_script_hashes(workbook);
     let defs = match workbook.user_files.remove(SCHEDULED_JOBS_FILE) {
@@ -3579,7 +3581,7 @@ fn restore_scheduled_jobs(
                     e
                 );
                 crate::net_commands::record_capability_call(
-                    audit_log,
+                    &loading,
                     crate::scripting::scheduler::SCHEDULE_CAPABILITY,
                     "",
                     false,
@@ -3602,7 +3604,7 @@ fn restore_scheduled_jobs(
             dropped.reason
         );
         crate::net_commands::record_capability_call(
-            audit_log,
+            &loading,
             crate::scripting::scheduler::SCHEDULE_CAPABILITY,
             &dropped.script_id,
             false,
@@ -3615,7 +3617,7 @@ fn restore_scheduled_jobs(
         // knowing what it wants to run on a timer is exactly the thing the
         // transparency trail exists to make visible.
         crate::net_commands::record_capability_call(
-            audit_log,
+            &loading,
             crate::scripting::scheduler::SCHEDULE_CAPABILITY,
             "",
             true,
@@ -4022,6 +4024,9 @@ pub fn open_file(
         }
         _ => load_xlsx(&path_buf).map_err(|e| e.to_string())?,
     };
+    // What an .xlsx import could not carry (a formula Calcula cannot read, a
+    // table filter it cannot hold): said once the open has succeeded, below.
+    let import_notice = persistence::take_xlsx_import_losses(&mut workbook).message();
 
     if workbook.sheets.is_empty() {
         return Err("No sheets in workbook".to_string());
@@ -4088,6 +4093,12 @@ pub fn open_file(
     // can still return Err, and a notice that "the workbook was opened with a
     // sheet renamed" for a workbook that then did not open is untrue (rev13C).
     let mut load_warnings: Vec<serde_json::Value> = Vec::new();
+    if let Some(message) = import_notice {
+        load_warnings.push(serde_json::json!({
+            "section": "xlsxImport",
+            "message": message,
+        }));
+    }
 
     {
         // Build a single shared StyleRegistry from all sheets.
@@ -4467,11 +4478,13 @@ pub fn open_file(
                 },
                 None => None,
             };
-            // The map is keyed by the defined-name KEY (`name_resolution::name_key`) (case-insensitive lookup
-            // invariant shared with create/update/rename/delete + the BI insert);
-            // the struct keeps the original-case name for display.
+            // The map is keyed by (scope, defined-name key)
+            // (`named_ranges::registry_key`, BUG-0744: a workbook `Rate` and a
+            // `Sheet1!Rate` are two names, as in Excel and as the saved shape
+            // already said through `sheet_id`); the struct keeps the
+            // original-case name for display.
             named_ranges.insert(
-                crate::name_resolution::name_key(&nr.name),
+                crate::named_ranges::registry_key(sheet_index, &nr.name),
                 crate::named_ranges::NamedRange {
                     name: nr.name.clone(),
                     sheet_index,
@@ -6739,6 +6752,12 @@ pub(crate) const XLSX_LOSS_COVERAGE: &[(&str, &str)] = &[
          read from), and the open adopts it back (adopt_xlsx_calculation_mode)",
     ),
     (
+        "calculation_except_tables",
+        "WRITTEN: Excel's own <calcPr calcMode=\"autoNoTable\"/> (Automatic except \
+         for data tables, BUG-0754), written by the same finish_archive pass as \
+         calcMode=\"manual\" and adopted back by adopt_xlsx_calculation_mode",
+    ),
+    (
         "format_version",
         "SILENT: the .cala stamp. An .xlsx carries its own format identity and \
          this number has no meaning inside one.",
@@ -6896,16 +6915,16 @@ pub(crate) fn save_xlsx_for_session(
 /// were just read from the file. A file whose mode cannot be read leaves the
 /// mode as it was. Returns the mode adopted, if any.
 pub(crate) fn adopt_xlsx_calculation_mode(state: &AppState, path: &std::path::Path) -> Option<&'static str> {
-    let mode = match persistence::read_xlsx_manual_calculation(path) {
-        Ok(true) => "manual",
-        Ok(false) => "automatic",
+    // "automaticExceptTables" for Excel's calcMode="autoNoTable" (BUG-0754).
+    let mode = match persistence::read_xlsx_calculation_mode(path) {
+        Ok(mode) => mode,
         Err(e) => {
             crate::log_warn!("CALC", "could not read the workbook's calculation mode; keeping the current one: {}", e);
             return None;
         }
     };
     let mut current = state.calculation_mode.lock().ok()?;
-    *current = mode.to_string();
+    crate::calculation::store_calculation_mode(state, &mut current, mode);
     Some(mode)
 }
 
@@ -6918,7 +6937,15 @@ pub(crate) fn adopt_xlsx_calculation_mode(state: &AppState, path: &std::path::Pa
 /// New resets, see the census exemption for `AppState.calculation_mode`), so
 /// it is read here, on the leaf lock, like `save_xlsx_for_session` reads it.
 pub(crate) fn record_session_calculation_mode(state: &AppState, workbook: &mut Workbook) {
-    workbook.calculation_manual = state.calculation_mode.lock().map(|mode| *mode == "manual").unwrap_or(false);
+    let (manual, except_tables) = state
+        .calculation_mode
+        .lock()
+        .map(|mode| (*mode == "manual", crate::calculation::calculation_mode_name(state, &mode) == crate::calculation::AUTOMATIC_EXCEPT_TABLES))
+        .unwrap_or((false, false));
+    workbook.calculation_manual = manual;
+    // Automatic except for data tables (BUG-0754): `calc_mode.json` and the
+    // .xlsx `calcMode="autoNoTable"` record it too.
+    workbook.calculation_except_tables = except_tables;
 }
 
 /// `open_file`'s .cala half of the same rule: the workbook sets the session's
@@ -6929,9 +6956,15 @@ pub(crate) fn record_session_calculation_mode(state: &AppState, workbook: &mut W
 /// were just read; whether their values are current is the separate
 /// `calculation_incomplete` mark). Returns the mode adopted.
 pub(crate) fn adopt_cala_calculation_mode(state: &AppState, workbook: &Workbook) -> &'static str {
-    let mode = if workbook.calculation_manual { "manual" } else { "automatic" };
+    let mode = if workbook.calculation_manual {
+        "manual"
+    } else if workbook.calculation_except_tables {
+        crate::calculation::AUTOMATIC_EXCEPT_TABLES
+    } else {
+        "automatic"
+    };
     if let Ok(mut current) = state.calculation_mode.lock() {
-        *current = mode.to_string();
+        crate::calculation::store_calculation_mode(state, &mut current, mode);
     }
     mode
 }

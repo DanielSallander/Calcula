@@ -205,6 +205,7 @@ async fn run_pipeline(
         None,
         None,
         &[],
+        false,
         Some(&mut plan),
         &tokio_util::sync::CancellationToken::new(),
     )

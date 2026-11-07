@@ -70,6 +70,7 @@ const MEASURES: &[(&str, &str)] = &[
     // DAX compares a BLANK as 0 against a number: COUNTROWS(empty) = 0 is TRUE.
     ("EmptyFlag", "IF(COUNTROWS(Sales) = 0, 1, 2)"),
     ("FewRows", "IF(COUNTROWS(Sales) < 1, 1, 2)"),
+    // ... but SWITCH is strict: a BLANK count does not match 0.
     ("SwitchRows", "SWITCH(COUNTROWS(Sales), 0, 10, 20)"),
     ("RowsBlank", "IF(ISBLANK(COUNTROWS(Sales)), 1, 2)"),
     // DISTINCTCOUNT counts BLANK as a value; DISTINCTCOUNTNOBLANK does not.
@@ -352,9 +353,12 @@ async fn a_blank_count_still_compares_as_zero() {
         Ok(n(1.0)),
         "COUNTROWS(empty) < 1"
     );
+    // SWITCH is STRICT, unlike `=`: a BLANK count matches no 0. [LIVE] Excel
+    // 16's data model answers `SWITCH(<BLANK sum>, 0, "zero", "other")` with
+    // "other" (BUG-0762; the open-ledger round C read BLANK as 0 here).
     assert_eq!(
         scalar(&e, "SwitchRows").await,
-        Ok(n(10.0)),
+        Ok(n(20.0)),
         "SWITCH(COUNTROWS(empty), 0, ...)"
     );
     assert_eq!(

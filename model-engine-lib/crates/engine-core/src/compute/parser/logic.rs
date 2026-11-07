@@ -214,7 +214,8 @@ mod tests {
         )
         .unwrap();
         let sql = expr.to_sql_string().unwrap();
-        assert!(sql.contains("CASE COALESCE(SUM(\"status\"), 0)"));
+        // SWITCH is strict: a BLANK subject is not read as 0 ([LIVE]).
+        assert!(sql.contains("CASE SUM(\"status\") WHEN"), "{sql}");
         assert!(sql.contains("WHEN 1 THEN 'Active'"));
         assert!(sql.contains("WHEN 2 THEN 'Inactive'"));
         assert!(sql.contains("ELSE 'Unknown'"));

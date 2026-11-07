@@ -2408,18 +2408,31 @@ export interface UpdateCFParams {
 }
 
 /**
+ * Where a conditional-format WRITE lands: an object's cells (`target`, P3),
+ * or another worksheet by index (`sheetIndex`) -- what Excel's Rules Manager
+ * does under "Show formatting rules for" another sheet. Neither: the active
+ * sheet. A sheet that does not exist, or is protected without Format Cells,
+ * refuses. Kept OUT of the params structs, so a caller that forwards a
+ * script's patch cannot name another sheet through it.
+ */
+export interface CFWriteOptions extends CellTargetOptions {
+  sheetIndex?: number;
+}
+
+/**
  * Add a conditional format rule.
  * @param params - Rule parameters
  * @returns Result with the created rule
  */
 export async function addConditionalFormat(
   params: AddCFParams,
-  opts?: CellTargetOptions,
+  opts?: CFWriteOptions,
 ): Promise<CFResult> {
   // `opts.target` (P3): the rule lives on the OBJECT's backing sheet, its
   // ranges in the object's coordinates; inside the params struct.
   return invoke<CFResult>("add_conditional_format", {
-    params: { ...params, ...cellTargetArg("add_conditional_format", opts) },
+    params: { ...params, ...cellTargetArg("add_conditional_format", opts, opts?.sheetIndex) },
+    sheetIndex: opts?.sheetIndex,
   });
 }
 
@@ -2430,10 +2443,11 @@ export async function addConditionalFormat(
  */
 export async function updateConditionalFormat(
   params: UpdateCFParams,
-  opts?: CellTargetOptions,
+  opts?: CFWriteOptions,
 ): Promise<CFResult> {
   return invoke<CFResult>("update_conditional_format", {
-    params: { ...params, ...cellTargetArg("update_conditional_format", opts) },
+    params: { ...params, ...cellTargetArg("update_conditional_format", opts, opts?.sheetIndex) },
+    sheetIndex: opts?.sheetIndex,
   });
 }
 
@@ -2444,11 +2458,12 @@ export async function updateConditionalFormat(
  */
 export async function deleteConditionalFormat(
   ruleId: number,
-  opts?: CellTargetOptions,
+  opts?: CFWriteOptions,
 ): Promise<CFResult> {
   return invoke<CFResult>("delete_conditional_format", {
     ruleId,
-    ...cellTargetArg("delete_conditional_format", opts),
+    ...cellTargetArg("delete_conditional_format", opts, opts?.sheetIndex),
+    sheetIndex: opts?.sheetIndex,
   });
 }
 
@@ -2459,11 +2474,12 @@ export async function deleteConditionalFormat(
  */
 export async function reorderConditionalFormats(
   ruleIds: number[],
-  opts?: CellTargetOptions,
+  opts?: CFWriteOptions,
 ): Promise<CFResult> {
   return invoke<CFResult>("reorder_conditional_formats", {
     ruleIds,
-    ...cellTargetArg("reorder_conditional_formats", opts),
+    ...cellTargetArg("reorder_conditional_formats", opts, opts?.sheetIndex),
+    sheetIndex: opts?.sheetIndex,
   });
 }
 
@@ -2988,14 +3004,34 @@ export interface NamedRangeCoords {
 }
 
 /**
+ * Where a name is asked FROM: the sheet (its own name of the spelling shadows
+ * the workbook's) and the 0-based active cell a RELATIVE name is read at.
+ */
+export interface NamedRangeAskedFrom {
+  sheetIndex: number;
+  row: number;
+  col: number;
+}
+
+/**
  * Resolve a named range to 0-based grid coordinates.
- * @param name - The name
+ * @param name - The name (`Sheet2!Rate` asks Sheet2's own name)
+ * @param from - Where it is asked from: the Name Box and Go To pass the
+ *   active sheet and cell, so a RELATIVE name means the cell you are on, as
+ *   Excel's Go To reads it; omitted (a script), the name is read as written,
+ *   anchored at A1, as Excel's object model `Range("name")` reads it.
  * @returns The resolved coordinates
  */
 export async function resolveNamedRangeCoords(
-  name: string
+  name: string,
+  from?: NamedRangeAskedFrom
 ): Promise<NamedRangeCoords> {
-  return invoke<NamedRangeCoords>("resolve_named_range_coords", { name });
+  return invoke<NamedRangeCoords>("resolve_named_range_coords", {
+    name,
+    sheetIndex: from?.sheetIndex ?? null,
+    row: from?.row ?? null,
+    col: from?.col ?? null,
+  });
 }
 
 /**
@@ -6929,6 +6965,11 @@ export interface NamedCellStyle {
   styleIndex: number;
   /** Category for grouping */
   category: string;
+  /** Excel's IncludeProtection where the style states it (a style read from
+   *  an .xlsx); absent: Excel's default for the style -- "Normal" and a
+   *  user's own style write Locked / Formula Hidden, every other built-in
+   *  keeps the cell's. */
+  includeProtection?: boolean;
 }
 
 /** Get all named styles. */

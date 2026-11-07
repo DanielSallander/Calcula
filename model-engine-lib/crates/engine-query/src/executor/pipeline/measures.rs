@@ -10,23 +10,25 @@ use engine_core::compute::context::ContextResolver;
 use engine_core::compute::expression::{expand_global_variables, expand_measure_refs};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
-use engine_core::compute::sql_util::quote_ident_double;
+use engine_core::compute::sql_util::{null_is_false_condition, quote_ident_double};
 use engine_core::error::EngineError;
 use engine_core::model::DataModel;
 
-use crate::error::QueryResult;
+use crate::error::{QueryError, QueryResult};
 use crate::request::ColumnRef;
 
 use super::fetch::register_partitioned_table;
+use super::sql::{build_condition_sql_with_conditions, model_column_class, reject_unconsumed_in_filters};
 use super::QueryExecutor;
 
 impl QueryExecutor {
     /// Split evaluation for measures with unsafe USERELATIONSHIP overrides.
     ///
     /// Normal measures are evaluated via the standard local aggregation path.
-    /// Unsafe override measures are evaluated via pre-aggregation: the fact
-    /// table is pre-aggregated by its join key columns, then joined to the
-    /// override dimension. Results are combined via FULL OUTER JOIN.
+    /// Each unsafe override measure reads the fact rows through a DISTINCT
+    /// mapping from the fact's relationship keys to the group values the
+    /// override relates them to (Part B). Results are combined via FULL OUTER
+    /// JOIN.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_split_override_measures(
         ctx: &SessionContext,
@@ -121,169 +123,274 @@ impl QueryExecutor {
             }
         }
 
-        // --- Part B: evaluate each unsafe override measure via boundary approach ---
+        // --- Part B: each unsafe override measure through a DISTINCT mapping ---
         //
-        // For non-equi USERELATIONSHIP with GROUP BY on the dim, the DAX
-        // semantics are: for each group, include fact rows that match ANY
-        // dimension row in that group. For a single-condition relationship
-        // like `fact.orderdate <= dim.datekey`, this means:
-        //   "include fact rows where orderdate <= MAX(datekey in group)"
+        // DAX: USERELATIONSHIP makes the override the relationship between the
+        // fact and the GROUP BY dimension for this measure, so a group reads
+        // the fact rows that SOME of its dimension rows relate to through the
+        // override -- each fact row ONCE per group however many of the group's
+        // rows match it (a many-to-many relationship is "limited": INNER JOIN
+        // semantics, no blank row; its groups are non-additive -- Microsoft,
+        // "Model relationships in Power BI Desktop", "Many-to-many
+        // relationship guidance").
         //
-        // We compute boundary values (MAX/MIN) per group from the dimension,
-        // then CROSS JOIN with fact and filter by the boundary. Each fact row
-        // is counted once per qualifying group.
+        // The mapping holds one row per (fact key tuple, group values) the
+        // override relates, read off the fact's DISTINCT relationship keys and
+        // the (request-filtered) dimension, so joining it back on the fact's
+        // keys can never meet a fact row twice in one group. Until wave 4 each
+        // group was bounded by the MAX / MIN of each condition's dimension key
+        // (`fact.k <= MAX(dim.k)` per condition), which is right for ONE range
+        // condition only: an equality many-to-many kept the group's largest
+        // key alone (odd products 1 and 3 read product 3's rows), a BETWEEN
+        // pair widened every group to its outermost bounds, and a KEEP of the
+        // measure was dropped.
         let mut override_table_names: Vec<(String, String)> = Vec::new(); // (table_name, measure_name)
 
         for (i, measure) in unsafe_measures.iter().enumerate() {
             let ref_expanded = expand_measure_refs(measure.expression(), model)?;
             let expanded = expand_global_variables(&ref_expanded, model);
             if expanded.has_query_scoped_bindings() {
-                return Err(crate::error::QueryError::InvalidQuery(format!(
+                return Err(QueryError::InvalidQuery(format!(
                     "internal: measure '{}' reached the executor with an unresolved query-scoped \
                      (GVAR) binding (it must be resolved at the Engine facade)",
                     measure.name()
                 )));
             }
             let (stripped, eval_ctx) = resolver.resolve(&expanded)?;
+            let measure_name = measure.name();
 
-            // Find the override relationship.
-            let override_rel_name = eval_ctx.relationship_overrides.first().ok_or_else(|| {
-                crate::error::QueryError::Engine(EngineError::InvalidData(
-                    "Expected USERELATIONSHIP override".into(),
-                ))
-            })?;
-            let rel = model.relationship(override_rel_name)?;
-            let dim_table = if rel.from_table() == fact_model_name {
+            // The override that reaches a GROUP BY table through an unsafe
+            // relationship (the one that sent the measure here).
+            let rel = eval_ctx
+                .relationship_overrides
+                .iter()
+                .filter_map(|name| model.relationship(name).ok())
+                .find(|rel| {
+                    let other = if rel.from_table().eq_ignore_ascii_case(fact_model_name) {
+                        rel.to_table()
+                    } else if rel.to_table().eq_ignore_ascii_case(fact_model_name) {
+                        rel.from_table()
+                    } else {
+                        return false;
+                    };
+                    !rel.join_safe_from(fact_model_name)
+                        && group_by.iter().any(|g| g.table.eq_ignore_ascii_case(other))
+                })
+                .ok_or_else(|| {
+                    QueryError::Engine(EngineError::InvalidData(
+                        "Expected a USERELATIONSHIP override to a group-by table".into(),
+                    ))
+                })?;
+            let fact_is_from = rel.from_table().eq_ignore_ascii_case(fact_model_name);
+            let dim_table = if fact_is_from {
                 rel.to_table()
             } else {
                 rel.from_table()
             };
             let dim_lower = dim_table.to_lowercase();
-            let fact_is_from = rel.from_table() == fact_model_name;
+            if eval_ctx.relationship_overrides.len() > 1 {
+                return Err(QueryError::InvalidQuery(format!(
+                    "measure '{measure_name}' combines a USERELATIONSHIP to the group-by table \
+                     '{dim_table}' with another USERELATIONSHIP, which the local path does not \
+                     support yet; request the measure grouped by another column"
+                )));
+            }
+            reject_unconsumed_in_filters(measure_name, &eval_ctx)?;
 
-            // Build boundary query: compute aggregate boundaries per GROUP BY group.
-            // For each join condition, compute the boundary (MAX or MIN) of the
-            // dim-side column grouped by the GROUP BY columns.
-            let bounds_alias = format!("__bounds_{i}");
-
-            let mut bounds_select: Vec<String> = Vec::new();
-            let mut bounds_group: Vec<String> = Vec::new();
-            let mut where_conditions: Vec<String> = Vec::new();
-
-            // GROUP BY columns from the dim table.
-            for dim in group_by {
-                if dim.table.eq_ignore_ascii_case(dim_table)
-                    || dim.table.eq_ignore_ascii_case(fact_model_name)
+            // Every GROUP BY column must be the dimension's or the fact's own.
+            for g in group_by {
+                if !g.table.eq_ignore_ascii_case(dim_table)
+                    && !g.table.eq_ignore_ascii_case(fact_model_name)
                 {
-                    let tbl = dim.table.to_lowercase();
-                    let qualified = format!("{tbl}.{}", quote_ident_double(&dim.column));
-                    bounds_select.push(qualified.clone());
-                    bounds_group.push(qualified);
+                    return Err(QueryError::InvalidQuery(format!(
+                        "measure '{measure_name}' uses USERELATIONSHIP to the group-by table \
+                         '{dim_table}', which cannot be grouped together with '{}[{}]' on the \
+                         local path yet; group by columns of '{dim_table}' and '{fact_model_name}' \
+                         only",
+                        g.table, g.column
+                    )));
                 }
             }
 
-            // Boundary aggregates for each join condition.
-            for (ci, cond) in rel.conditions().iter().enumerate() {
-                let dim_col = if fact_is_from {
-                    cond.to_column()
-                } else {
-                    cond.from_column()
-                };
-                let fact_col = if fact_is_from {
-                    cond.from_column()
-                } else {
-                    cond.to_column()
-                };
-                let boundary_agg = cond.operator().boundary_aggregate();
-                let boundary_alias = format!("__b_{ci}");
-                bounds_select.push(format!(
-                    "{boundary_agg}({dim_lower}.{}) AS \"{boundary_alias}\"",
-                    quote_ident_double(dim_col)
-                ));
-
-                // Build WHERE condition for fact table against boundary.
-                let op = cond.operator().as_sql();
-                where_conditions.push(format!(
-                    "{fact_table}.{} {op} {bounds_alias}.\"{boundary_alias}\"",
-                    quote_ident_double(fact_col)
-                ));
+            // The measure's own KEEPs: on the dimension they restrict the
+            // mapping's rows (the same row as the group, as DAX intersects
+            // filters on one table); on the fact they are the aggregate's
+            // condition. A KEEP on any other table has no rendering here.
+            let effective = eval_ctx.effective_filters(&[]);
+            let (on_dim, on_fact): (Vec<_>, Vec<_>) = effective
+                .into_iter()
+                .partition(|f| f.table.eq_ignore_ascii_case(dim_table));
+            if let Some(f) = on_fact
+                .iter()
+                .find(|f| !f.table.eq_ignore_ascii_case(fact_model_name))
+            {
+                return Err(QueryError::InvalidQuery(format!(
+                    "measure '{measure_name}' uses USERELATIONSHIP to the group-by table \
+                     '{dim_table}' and filters '{}', which the local path does not support yet",
+                    f.table
+                )));
             }
+            let mut dim_conditions: Vec<engine_core::compute::expression::Expression> =
+                Vec::new();
+            let mut fact_conditions: Vec<engine_core::compute::expression::Expression> =
+                Vec::new();
+            for cond in &eval_ctx.conditions {
+                let tables: Vec<&str> = cond
+                    .qualified_column_references()
+                    .into_iter()
+                    .map(|(t, _)| t)
+                    .collect();
+                if !tables.is_empty() && tables.iter().all(|t| t.eq_ignore_ascii_case(dim_table)) {
+                    dim_conditions.push(cond.clone());
+                } else if tables.iter().all(|t| t.eq_ignore_ascii_case(fact_model_name)) {
+                    fact_conditions.push(cond.clone());
+                } else {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "measure '{measure_name}' uses USERELATIONSHIP to the group-by table \
+                         '{dim_table}' with a KEEP condition across tables, which the local path \
+                         does not support yet"
+                    )));
+                }
+            }
+            let no_aliases = std::collections::HashMap::new();
+            let dim_where = if on_dim.is_empty() && dim_conditions.is_empty() {
+                String::new()
+            } else {
+                // Rendered against the dimension: `dim_lower` is its table.
+                let sql = build_condition_sql_with_conditions(
+                    &on_dim,
+                    &dim_conditions,
+                    &dim_lower,
+                    dim_table,
+                    model,
+                    &no_aliases,
+                )?;
+                format!(" WHERE {}", null_is_false_condition(&sql, true))
+            };
+            let fact_condition = if on_fact.is_empty() && fact_conditions.is_empty() {
+                String::new()
+            } else {
+                build_condition_sql_with_conditions(
+                    &on_fact,
+                    &fact_conditions,
+                    fact_table,
+                    fact_model_name,
+                    model,
+                    &no_aliases,
+                )?
+            };
 
-            let bounds_sql = format!(
-                "SELECT {} FROM {dim_lower} GROUP BY {}",
-                bounds_select.join(", "),
-                bounds_group.join(", ")
+            // The fact's relationship columns, each once (a BETWEEN pair names
+            // its fact column twice).
+            let mut fact_keys: Vec<&str> = Vec::new();
+            for c in rel.conditions() {
+                let k = if fact_is_from {
+                    c.from_column()
+                } else {
+                    c.to_column()
+                };
+                if !fact_keys.contains(&k) {
+                    fact_keys.push(k);
+                }
+            }
+            let map_alias = format!("__om_{i}");
+            let on = rel.build_on_clause("__k", &dim_lower, fact_is_from);
+            let mut map_select: Vec<String> = fact_keys
+                .iter()
+                .enumerate()
+                .map(|(j, k)| format!("__k.{} AS \"__k{j}\"", quote_ident_double(k)))
+                .collect();
+            for g in group_by {
+                if g.table.eq_ignore_ascii_case(dim_table) {
+                    map_select.push(format!("{dim_lower}.{}", quote_ident_double(&g.column)));
+                }
+            }
+            let distinct_keys: Vec<String> = fact_keys
+                .iter()
+                .map(|k| format!("{fact_table}.{}", quote_ident_double(k)))
+                .collect();
+            let mapping = format!(
+                "(SELECT DISTINCT {} FROM (SELECT DISTINCT {} FROM {fact_table}) AS __k JOIN \
+                 {dim_lower} ON {on}{dim_where})",
+                map_select.join(", "),
+                distinct_keys.join(", ")
             );
+            let back: Vec<String> = fact_keys
+                .iter()
+                .enumerate()
+                .map(|(j, k)| {
+                    format!(
+                        "{fact_table}.{} = {map_alias}.\"__k{j}\"",
+                        quote_ident_double(k)
+                    )
+                })
+                .collect();
 
-            let bounds_start = Instant::now();
-            let bounds_df = ctx.sql(&bounds_sql).await?;
-            let bounds_batches = bounds_df.collect().await?;
-            let bounds_elapsed = bounds_start.elapsed();
-
-            if bounds_batches.is_empty() {
-                continue;
-            }
-
-            register_partitioned_table(ctx, &bounds_alias, bounds_batches.clone())?;
-
-            // Main query: CROSS JOIN fact with bounds, filter by boundary.
+            // Main query: the fact rows through the mapping, grouped.
             let mut main_select: Vec<String> = Vec::new();
             let mut main_group: Vec<String> = Vec::new();
-
-            for dim in group_by {
-                let qualified = format!("{bounds_alias}.{}", quote_ident_double(&dim.column));
-                main_select.push(qualified.clone());
+            for g in group_by {
+                let source = if g.table.eq_ignore_ascii_case(dim_table) {
+                    map_alias.as_str()
+                } else {
+                    fact_table
+                };
+                let qualified = format!("{source}.{}", quote_ident_double(&g.column));
+                main_select.push(format!("{qualified} AS {}", quote_ident_double(&g.column)));
                 main_group.push(qualified);
             }
-
-            // Measure aggregate.
-            let measure_name = measure.name();
-            if let Some((op, col)) = stripped.as_simple_aggregate() {
+            let fact_lc = fact_model_name.to_lowercase();
+            let agg_sql = if !fact_condition.is_empty() {
+                stripped.to_case_when_sql_with_classes(&fact_condition, &fact_lc, &|t, c| {
+                    model_column_class(model, fact_model_name, t, c)
+                })?
+            } else if let Some((op, col)) = stripped.as_simple_aggregate() {
                 let col_ref = format!("{fact_table}.{}", quote_ident_double(col));
                 // A count answers BLANK, never 0 (DAX).
-                let agg_sql = engine_core::compute::dax_semantics::measure_aggregate_sql(&op, &col_ref);
-                main_select.push(format!("{agg_sql} AS {}", quote_ident_double(measure_name)));
+                engine_core::compute::dax_semantics::measure_aggregate_sql(&op, &col_ref)
             } else {
-                let expr_sql = stripped.to_sql_string()?;
-                main_select.push(format!(
-                    "{expr_sql} AS {}",
-                    quote_ident_double(measure_name)
-                ));
-            }
+                stripped.to_sql_string()?
+            };
+            main_select.push(format!("{agg_sql} AS {}", quote_ident_double(measure_name)));
 
             let main_sql = format!(
-                "SELECT {} FROM {fact_table} CROSS JOIN {bounds_alias} WHERE {} GROUP BY {}",
+                "SELECT {} FROM {fact_table} JOIN {mapping} AS {map_alias} ON {} GROUP BY {}",
                 main_select.join(", "),
-                where_conditions.join(" AND "),
+                back.join(" AND "),
                 main_group.join(", ")
+            );
+            // A group whose measure is BLANK is no row (SUMMARIZECOLUMNS).
+            let main_sql = format!(
+                "SELECT * FROM ({main_sql}) AS __ov WHERE __ov.{} IS NOT NULL",
+                quote_ident_double(measure_name)
             );
 
             let result_table = format!("__override_{i}");
             let main_start = Instant::now();
             let main_df = ctx.sql(&main_sql).await?;
-            let main_batches = main_df.collect().await?;
+            let main_schema = main_df.schema().inner().clone();
+            let mut main_batches = main_df.collect().await?;
+            // No group answers: keep the columns, so the measure is still a
+            // (BLANK) column of the combined result.
+            if main_batches.is_empty() {
+                main_batches.push(RecordBatch::new_empty(main_schema));
+            }
             let main_elapsed = main_start.elapsed();
 
             if let Some(ref mut pn) = plan {
-                let bounds_rows: usize = bounds_batches.iter().map(|b| b.num_rows()).sum();
                 let main_rows: usize = main_batches.iter().map(|b| b.num_rows()).sum();
-                let mut node = PlanNode::new(
+                let node = PlanNode::new(
                     PlanOperation::LocalAggregation,
-                    format!("Boundary Override: {measure_name}"),
+                    format!("Override Mapping: {measure_name}"),
                 )
-                .with_property("bounds_sql", PlanValue::Text(bounds_sql))
-                .with_property("bounds_rows", PlanValue::Number(bounds_rows as f64))
                 .with_property("main_sql", PlanValue::Text(main_sql.clone()))
-                .with_property("main_rows", PlanValue::Number(main_rows as f64));
-                // Report combined time for both stages.
-                node.duration = (bounds_elapsed + main_elapsed).into();
+                .with_property("main_rows", PlanValue::Number(main_rows as f64))
+                .with_duration(main_elapsed);
                 pn.add_child(node);
             }
 
-            if !main_batches.is_empty() {
-                register_partitioned_table(ctx, &result_table, main_batches)?;
-                override_table_names.push((result_table, measure_name.to_string()));
-            }
+            register_partitioned_table(ctx, &result_table, main_batches)?;
+            override_table_names.push((result_table, measure_name.to_string()));
         }
 
         // --- Part C: combine via FULL OUTER JOIN ---

@@ -55,6 +55,11 @@ export const UDF_ERROR_KEY = "__calculaError";
  * dynamic array that cannot write its result is not an argument problem at all
  * — the remedy is in ANOTHER CELL ("clear what is in the way"), and collapsing
  * it to #VALUE! sends the user to inspect a formula that is entirely correct.
+ *
+ * `#CALC!` (BUG-0774) is Excel's error for a result no cell can hold — an
+ * EMPTY array (`FILTER` with no match), a NESTED one (`MAP` whose function
+ * returns an array) or an uncalled LAMBDA. Its arguments are fine too, so it
+ * must not collapse into #VALUE! either; Excel's `ERROR.TYPE` is 14.
  */
 export const CELL_ERROR_LITERALS = [
   "#DIV/0!",
@@ -69,6 +74,7 @@ export const CELL_ERROR_LITERALS = [
   "#BLOCKED!",
   "#LIMIT!",
   "#SPILL!",
+  "#CALC!",
 ] as const;
 
 export type CellErrorLiteral = (typeof CELL_ERROR_LITERALS)[number];

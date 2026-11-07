@@ -1248,6 +1248,15 @@ export interface PullResponse {
    * `PullResponse::inline_button_code_removed`.
    */
   inlineButtonCodeRemoved?: string[];
+  /**
+   * Charts, ribbon filters, slicers, timelines, pane controls and saved pivot
+   * layouts this pull did NOT add because the workbook already holds one under
+   * that id (another application's, or its own) or, for a ribbon filter or a
+   * pane control, under that name -- and each ribbon filter whose model the
+   * application does not carry -- one sentence each (BUG-0734).
+   * Mirrors `PullResponse::objects_not_added`; optional for an older backend.
+   */
+  objectsNotAdded?: string[];
 }
 
 /** Contents of an application version, for pre-pull review. */
@@ -1679,6 +1688,14 @@ export interface RefreshResult {
    * `RefreshResult::inline_button_code_removed`; optional for an older backend.
    */
   inlineButtonCodeRemoved?: string[];
+  /**
+   * The objects `PullResponse.objectsNotAdded` names, for the new version
+   * this refresh brought: what it did NOT add because the workbook already
+   * holds one under that id or name, or whose model it does not carry -- one
+   * sentence each (BUG-0734). Mirrors core `RefreshResult::objects_not_added`;
+   * optional for an older backend.
+   */
+  objectsNotAdded?: string[];
 }
 
 export interface StructuralConflict {

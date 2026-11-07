@@ -926,9 +926,10 @@ pub fn get_formula_eval_plan(
             let resolved = if crate::ast_has_named_refs(&parser_ast) {
                 let named_ranges_map = state.named_ranges.read().unwrap();
                 let mut visited = std::collections::HashSet::new();
-                let r = crate::resolve_names_in_ast_at(
+                let r = crate::resolve_names_in_ast_in(
                     &parser_ast,
                     &named_ranges_map,
+                    &sheet_names,
                     active_sheet,
                     (row, col),
                     &mut visited,

@@ -45,12 +45,17 @@ const h = vi.hoisted(() => ({
   mergedRegions: [] as Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>,
   getMergedRegions: vi.fn(async () => h.mergedRegions),
   filterMode: false,
+  /** "row,col" of cells whose number format is Text (`@`): style 9. */
+  textCells: new Set<string>(),
   alertAsync: vi.fn(async () => {}),
 }));
 
 vi.mock("../../../lib/tauri-api", () => ({
   getMergeInfo: vi.fn(async () => null),
-  getCell: vi.fn(async () => null),
+  getCell: vi.fn(async (row: number, col: number) =>
+    h.textCells.has(`${row},${col}`) ? { row, col, display: "", formula: null, styleIndex: 9 } : null,
+  ),
+  getStyle: vi.fn(async (index: number) => ({ numberFormat: index === 9 ? "@" : "General" })),
   updateCell: h.updateCell,
   updateCellOnSheets: vi.fn(async () => []),
   setActiveSheet: vi.fn(async () => {}),
@@ -197,6 +202,7 @@ describe("Ctrl+Enter and Delete over a cell that takes one edit at a time", () =
     h.getMergedRegions.mockClear();
     h.activeType = "number";
     h.mergedRegions = [];
+    h.textCells.clear();
     h.filterMode = false;
     initialHidden = { rows: [], cols: [] };
     h.alertAsync.mockClear();
@@ -353,7 +359,11 @@ describe("Ctrl+Enter and Delete over a cell that takes one edit at a time", () =
     );
     await ctrlEnter({ startRow: 1, startCol: 0, endRow: 0, endCol: 0 }, "=B1");
     expect(h.shiftFormulasBatch).not.toHaveBeenCalled();
-    expect(written()).toEqual(["0,0==B1", "1,0='=B1"]);
+    // A PASTED invariant write (BUG-0769, C9/K2): A2 keeps its General format,
+    // as in Excel [LIVE] -- a typed apostrophe would make it Text.
+    expect(written()).toEqual(["0,0==B1", "1,0='=B1 (p)"]);
+    const second = h.updateCellsBatch.mock.calls[1][0][0];
+    expect(second.invariant, "a typed-entry write would restyle A2 as Text").toBe(true);
   });
 
   it("rev-ui-5 a number goes into every cell as the number, Text format or not", async () => {
@@ -382,6 +392,57 @@ describe("Ctrl+Enter and Delete over a cell that takes one edit at a time", () =
     expect(cells.some((c) => c.startsWith("3,")), "no cell of the hidden row").toBe(false);
     expect(cells.some((c) => c.endsWith(",7")), "no cell of the hidden column").toBe(false);
     expect(cells.length).toBe(4 * 2);
+  });
+
+  it("BUG-0769 in filter mode an ACTIVE cell on a hidden row is not written either (Excel leaves it empty)", async () => {
+    // G4:G6 (rows 3..5) with G4 (row 3) active and hidden: Excel [LIVE, uimisc
+    // probe3 C13] writes the visible cells only.
+    h.filterMode = true;
+    initialHidden = { rows: [3], cols: [] };
+    await ctrlEnter({ startRow: 5, startCol: 6, endRow: 3, endCol: 6 }, "x");
+    const cells = written().map((w) => w.split("=")[0]);
+    expect(cells, "the hidden active cell was written").not.toContain("3,6");
+    expect(cells).toEqual(["4,6", "5,6"]);
+  });
+
+  it("BUG-0769 a formula typed for a hidden active cell is moved from it to every cell it lands in", async () => {
+    h.filterMode = true;
+    initialHidden = { rows: [3], cols: [] };
+    await ctrlEnter({ startRow: 5, startCol: 6, endRow: 3, endCol: 6 }, "=B1");
+    // The first visible cell takes the entry moved one row from the active
+    // cell; the next one two rows -- each relative to the ACTIVE cell. The
+    // stand-in is written as the active cell would read it, its own Text rung
+    // skipped (`pasted`, wave 3).
+    expect(written()).toEqual(["4,6==B1|1,0 (p)", "5,6==B1|2,0 (p)"]);
+  });
+
+  // Ledger programme 2, wave 3 (W2 uimisc new defect): with the active cell on a
+  // filter-hidden row, the entry's kind was decided at the first VISIBLE cell's
+  // format. Excel [LIVE, Excel 16, 2026-11-06, lane dtui probe3: filter <>3
+  // hiding row 4, B2:B6 with B4 active] decides it at the ACTIVE cell's: a
+  // Text-formatted B4 makes `007` the text "007" and `=A2` the text "=A2" in
+  // the General B2, B3, B5; a General B4 makes `5` the NUMBER 5 in a
+  // Text-formatted B2.
+  // SABOTAGE: make `textFormatAt` answer false in ctrlEnterFill's text branch
+  // -- fails at "DECIDED AT THE FIRST VISIBLE CELL".
+  it("a hidden ACTIVE cell's format decides the entry's kind for every visible cell", async () => {
+    h.filterMode = true;
+    initialHidden = { rows: [3], cols: [] };
+    h.textCells.add("3,6"); // the active G4 is Text-formatted
+    await ctrlEnter({ startRow: 5, startCol: 6, endRow: 3, endCol: 6 }, "=B1");
+    expect(written(), "DECIDED AT THE FIRST VISIBLE CELL: a Text active cell makes the entry text").toEqual([
+      "4,6='=B1 (p)",
+      "5,6='=B1 (p)",
+    ]);
+    expect(h.shiftFormulasBatch, "a text entry is never shifted").not.toHaveBeenCalled();
+
+    // A General active cell over a Text-formatted first visible cell: the
+    // stand-in skips its Text rung, so 5 is the number in it.
+    h.updateCellsBatch.mockClear();
+    h.textCells.clear();
+    h.textCells.add("4,6");
+    await ctrlEnter({ startRow: 5, startCol: 6, endRow: 3, endCol: 6 }, "5");
+    expect(written()).toEqual(["4,6=5 (p)", "5,6=5 (p)"]);
   });
 
   it("rev-ui-4 outside filter mode hidden rows and columns are filled like any other", async () => {

@@ -158,10 +158,27 @@ pub(crate) type DefinedNameSheets = std::collections::HashMap<String, NameSheet>
 pub(crate) fn defined_name_sheets(
     names: &std::collections::HashMap<String, crate::named_ranges::NamedRange>,
 ) -> DefinedNameSheets {
-    names
-        .iter()
-        .filter_map(|(key, name)| name_definition_sheet(&name.refers_to, name.sheet_index).map(|s| (key.clone(), s)))
-        .collect()
+    // Keyed by the NAME key: a sheet's own name is held under
+    // `"{sheet}!{key}"` (BUG-0744). A canvas has no names of its own, so a
+    // canvas chart reads the workbook's name of the spelling, else the first
+    // sheet's own -- `resolveDataSource`'s no-scope fallback
+    // (`named_ranges::addressed_key`, Excel's `Names()` [LIVE, lane obj4
+    // n1/n2]) -- never whichever the hash map happened to visit first. A name
+    // scoped only to a later sheet is not one a canvas chart can read.
+    let mut out = DefinedNameSheets::new();
+    for key in names.keys() {
+        let name_key = crate::named_ranges::name_part_of_registry_key(key);
+        if out.contains_key(name_key) {
+            continue;
+        }
+        let Some(name) = crate::named_ranges::addressed_key(names, name_key, None).and_then(|k| names.get(&k)) else {
+            continue;
+        };
+        if let Some(sheet) = name_definition_sheet(&name.refers_to, name.sheet_index) {
+            out.insert(name_key.to_string(), sheet);
+        }
+    }
+    out
 }
 
 /// The sheet one definition is on (`parseRefersToFormula` then

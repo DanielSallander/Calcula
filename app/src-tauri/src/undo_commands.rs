@@ -2696,6 +2696,10 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         // filtered-out rows, or an Apply, re-hid them and left the totals
         // counting them (rev15C).
         ("obj_autofilter", MutationDomains::of(Hidden)),
+        // An advanced filter's hidden rows: a visibility change for the same
+        // reasons, and "objects" makes the AutoFilter extension -- the owner of
+        // the grid's filter-hidden mirror -- re-read `get_hidden_rows`.
+        (ADVANCED_FILTER_HIDDEN_RESTORE_KIND, MutationDomains::of(Hidden)),
         ("obj_validation", MutationDomains::of(Validations)),
         ("obj_named_range", NONE), ("obj_freeze", NONE), ("obj_extension_data", NONE),
         ("obj_cell_types", NONE), ("obj_cell_behaviors", NONE),
@@ -5314,6 +5318,26 @@ pub(crate) fn autofilter_snapshot_bytes(
     .unwrap_or_default()
 }
 
+/// The restore kind of one sheet's ADVANCED-filter hidden-row set
+/// (`AppState::advanced_filter_hidden_rows`): a whole-set swap, recorded by a
+/// step that shows rows the filter hid (a Row Height given to nothing but
+/// hidden rows, which a whole-row move's vacated rows are -- Excel shows them,
+/// `commands::dimensions::set_line_sizes_core`).
+pub(crate) const ADVANCED_FILTER_HIDDEN_RESTORE_KIND: &str = "obj_advanced_filter_hidden";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AdvancedFilterHiddenObjSnapshot {
+    sheet_index: usize,
+    /// The sheet's set as it was; `None` when the sheet had no entry.
+    previous: Option<Vec<u32>>,
+}
+
+/// Serialized [`ADVANCED_FILTER_HIDDEN_RESTORE_KIND`] snapshot bytes (same
+/// in-open-transaction contract as `table_snapshot_bytes`).
+pub(crate) fn advanced_filter_hidden_snapshot_bytes(sheet_index: usize, previous: Option<Vec<u32>>) -> Vec<u8> {
+    serde_json::to_vec(&AdvancedFilterHiddenObjSnapshot { sheet_index, previous }).unwrap_or_default()
+}
+
 /// Serialized "script_grid_cells" snapshot bytes (same in-open-transaction
 /// contract as `table_snapshot_bytes`).
 ///
@@ -5952,6 +5976,26 @@ fn apply_object_swap_restore(
                 store.insert(k, v);
             }
             push_obj_inverse(inverse_transaction, kind, &NamedRangesObjSnapshot { previous: current });
+        }
+        ADVANCED_FILTER_HIDDEN_RESTORE_KIND => {
+            let snap: AdvancedFilterHiddenObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad {} snapshot: {}", kind, e); return; }
+            };
+            // Swap the sheet's set, the current one becoming the inverse so a
+            // redo shows the rows again.
+            let current = {
+                let mut store = state.advanced_filter_hidden_rows.write(effect).unwrap();
+                let current = store.remove(&snap.sheet_index);
+                if let Some(previous) = snap.previous {
+                    store.insert(snap.sheet_index, previous);
+                }
+                current
+            };
+            push_obj_inverse(inverse_transaction, kind, &AdvancedFilterHiddenObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
         }
         "obj_coord_stores" => {
             let snap: CoordStoresObjSnapshot = match serde_json::from_slice(data) {
@@ -6897,6 +6941,7 @@ mod restore_registry_tests {
             ("obj_sparklines", true, OBJ),
             ("obj_table", true, OBJ),
             ("obj_autofilter", true, obj_plus(Hidden)),
+            (ADVANCED_FILTER_HIDDEN_RESTORE_KIND, true, obj_plus(Hidden)),
             ("obj_validation", true, obj_plus(Validations)),
             ("obj_named_range", true, OBJ),
             ("obj_freeze", true, OBJ),

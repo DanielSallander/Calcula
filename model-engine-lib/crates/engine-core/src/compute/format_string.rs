@@ -28,13 +28,33 @@
 //! - dates and times: `d dd ddd dddd ddddd dddddd`, `w ww`, `m mm mmm mmmm`
 //!   (`m` right after an hour, or before `:s`, is the MINUTE), `q`, `y yy
 //!   yyyy`, `h hh` (12-hour when the pattern has an AM/PM token, else
-//!   24-hour), `n nn`, `s ss`, `AM/PM am/pm A/P a/p AMPM tt`, `c`, `ttttt`;
-//!   `/` and `:` are the culture's date and time separators. Tokens are
-//!   case-insensitive, so .NET-style `yyyy-MM-dd HH:mm:ss` reads the same.
+//!   24-hour), `n nn`, `s ss`, `AM/PM am/pm A/P a/p` (literal letters) and
+//!   `AMPM` (the culture's designators), `c`, `ttttt`; `/` and `:` are the
+//!   culture's date and time separators. Tokens are case-insensitive, so
+//!   .NET-style `yyyy-MM-dd HH:mm:ss` reads the same -- but .NET's `tt` is
+//!   literal text, as in DAX.
 //!
 //! A number formatted with a date pattern is an OLE serial date (day 0 =
-//! 1899-12-30); a date formatted with a number pattern is its serial. BLANK
-//! formats to the empty string, as in DAX. Text is returned unchanged.
+//! 1899-12-30); a date formatted with a number pattern is its serial, and a
+//! boolean is VBA's -1 / 0. BLANK formats to the empty string, as in DAX.
+//! Text is returned unchanged. `FORMAT(value, format, locale_name)`, DAX's
+//! third argument, formats in the culture the name names
+//! ([`culture_for_locale_name`], [`format_udf_with_cultures`]).
+//!
+//! # Evidence
+//!
+//! [LIVE] Excel 16's data model (the Power BI DAX engine) on a sv-SE
+//! machine, over `EVALUATE ROW(...)` through its ADO connection, 2026-11-06
+//! (BUG-0731): "Currency" is `-1 234,50 kr` (no-break space between groups,
+//! a plain space before `kr`); "Percent" is `12,34%`; `AMPM` writes nothing
+//! (Windows' sv-SE designators are empty) while `AM/PM` writes `PM`;
+//! "Medium Time" is `02:30 ` and "Medium Date" `15/01 2024`; "Yes/No",
+//! "True/False" and "On/Off" write `Ja`/`Nej`, `Sant`/`Falskt`, `P\u{e5}`/`Av`;
+//! `FORMAT(TRUE(), "0")` is `-1`; `hh:nn tt` is `14:30 tt`. Excel 16's engine
+//! has no 3-argument FORMAT (it is a syntax error there), so the en-US and
+//! de-DE data follow Windows' own culture tables (`LOCALE_INEGCURR` 0 for
+//! en-US: `($1,234.50)`; empty de-DE designators), which the sv-SE results
+//! show the engine reads.
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 
@@ -66,8 +86,24 @@ pub struct FormatCulture {
     pub long_date: String,
     /// "Long Time" and `ttttt`.
     pub long_time: String,
+    /// What the `AMPM` token (and so "Medium Time") writes before and after
+    /// noon: the culture's designators, EMPTY in sv-SE and de-DE (Windows'
+    /// `LOCALE_S1159` / `LOCALE_S2359`). `AM/PM`, `am/pm`, `A/P` and `a/p`
+    /// are literal in every culture.
     pub am_designator: String,
     pub pm_designator: String,
+    /// A negative "Currency" in parentheses (`($1,234.50)`) rather than with
+    /// a leading minus (`-1 234,50 kr`): the culture's negative currency
+    /// pattern (Windows `LOCALE_INEGCURR`: 0 in en-US, 8 in sv-SE and de-DE).
+    pub currency_negative_parentheses: bool,
+    /// "Medium Date", in the FORMAT token language.
+    pub medium_date: String,
+    /// What "Yes/No" writes for a true and a false value.
+    pub yes_no: [String; 2],
+    /// What "True/False" writes for a true and a false value.
+    pub true_false: [String; 2],
+    /// What "On/Off" writes for a true and a false value.
+    pub on_off: [String; 2],
     /// January..December.
     pub months: [String; 12],
     pub months_short: [String; 12],
@@ -97,6 +133,12 @@ impl FormatCulture {
             long_time: "h:mm:ss AM/PM".into(),
             am_designator: "AM".into(),
             pm_designator: "PM".into(),
+            // Windows en-US: negative currency pattern 0, `($n)`.
+            currency_negative_parentheses: true,
+            medium_date: "dd-mmm-yy".into(),
+            yes_no: strings(["Yes", "No"]),
+            true_false: strings(["True", "False"]),
+            on_off: strings(["On", "Off"]),
             months: strings([
                 "January",
                 "February",
@@ -141,8 +183,21 @@ impl FormatCulture {
             short_date: "yyyy-mm-dd".into(),
             long_date: "\"den \"d mmmm yyyy".into(),
             long_time: "hh:mm:ss".into(),
-            am_designator: "fm".into(),
-            pm_designator: "em".into(),
+            // [LIVE] Excel 16's data model under sv-SE (the Power BI DAX
+            // engine, 2026-11-06): `FORMAT(<14:30>, "h:nn AMPM")` is "2:30 "
+            // -- Windows' sv-SE designators are empty -- and "Medium Time"
+            // is "02:30 ".
+            am_designator: String::new(),
+            pm_designator: String::new(),
+            // [LIVE] "-1 234,50 kr" (pattern 8, `-n $`).
+            currency_negative_parentheses: false,
+            // [LIVE] "Medium Date" is "15/01 2024": a LITERAL slash (the
+            // date separator `/` writes "-" in sv-SE).
+            medium_date: "dd\\/mm yyyy".into(),
+            // [LIVE] "Ja" / "Nej", "Sant" / "Falskt", "P\u{e5}" / "Av".
+            yes_no: strings(["Ja", "Nej"]),
+            true_false: strings(["Sant", "Falskt"]),
+            on_off: strings(["P\u{e5}", "Av"]),
             months: strings([
                 "januari",
                 "februari",
@@ -189,8 +244,17 @@ impl FormatCulture {
             short_date: "dd.mm.yyyy".into(),
             long_date: "dddd, d. mmmm yyyy".into(),
             long_time: "hh:mm:ss".into(),
-            am_designator: "AM".into(),
-            pm_designator: "PM".into(),
+            // Windows de-DE: empty designators, negative currency pattern 8
+            // (`-n $`). The boolean words are VBA's German ones; the 3-argument
+            // FORMAT that would show them is not in Excel 16's engine, so
+            // they are not measured live.
+            am_designator: String::new(),
+            pm_designator: String::new(),
+            currency_negative_parentheses: false,
+            medium_date: "dd-mmm-yy".into(),
+            yes_no: strings(["Ja", "Nein"]),
+            true_false: strings(["Wahr", "Falsch"]),
+            on_off: strings(["Ein", "Aus"]),
             months: strings([
                 "Januar",
                 "Februar",
@@ -242,6 +306,38 @@ impl FormatCulture {
         self.hash(&mut h);
         h.finish()
     }
+
+    /// Does this culture answer to the locale name `tag` (`en-US`; matched
+    /// case-insensitively, `_` read as `-`)?
+    pub fn answers_to(&self, tag: &str) -> bool {
+        self.name.replace('_', "-").eq_ignore_ascii_case(&tag.replace('_', "-"))
+    }
+}
+
+/// The culture a DAX `FORMAT(value, format_string, locale_name)` names,
+/// among `cultures` (in order) and then the built-ins: the first whose tag IS
+/// `locale_name` ([`FormatCulture::answers_to`]), else -- a language-only
+/// name, `"de"` -- the first whose language is it. `None` when no culture
+/// answers: the UDF then fails the query rather than format in a culture the
+/// author did not name.
+pub fn culture_for_locale_name(locale_name: &str, cultures: &[FormatCulture]) -> Option<FormatCulture> {
+    let builtins = [FormatCulture::en_us(), FormatCulture::sv_se(), FormatCulture::de_de()];
+    let all = || cultures.iter().chain(builtins.iter());
+    let name = locale_name.trim();
+    if let Some(c) = all().find(|c| c.answers_to(name)) {
+        return Some(c.clone());
+    }
+    if name.is_empty() || name.contains(['-', '_']) {
+        return None;
+    }
+    all()
+        .find(|c| {
+            c.name
+                .split(['-', '_'])
+                .next()
+                .is_some_and(|language| language.eq_ignore_ascii_case(name))
+        })
+        .cloned()
 }
 
 impl Default for FormatCulture {
@@ -285,12 +381,16 @@ pub fn format_value(value: &FormatValue, format: &str, culture: &FormatCulture) 
     match value {
         FormatValue::Blank => String::new(),
         FormatValue::Text(s) => s.clone(),
+        // "Yes/No", "True/False" and "On/Off" write the CULTURE's words
+        // ([LIVE] sv-SE: "Ja", "Sant", "P\u{e5}"); the empty format writes
+        // "True" / "False" in every culture ([LIVE]); a number pattern reads
+        // TRUE as VBA's -1 ([LIVE] `FORMAT(TRUE(), "0")` is "-1").
         FormatValue::Bool(b) => match named(format) {
-            Some(Named::YesNo) => (if *b { "Yes" } else { "No" }).to_string(),
-            Some(Named::TrueFalse) => (if *b { "True" } else { "False" }).to_string(),
-            Some(Named::OnOff) => (if *b { "On" } else { "Off" }).to_string(),
+            Some(Named::YesNo) => word(&culture.yes_no, *b),
+            Some(Named::TrueFalse) => word(&culture.true_false, *b),
+            Some(Named::OnOff) => word(&culture.on_off, *b),
             _ if format.trim().is_empty() => (if *b { "True" } else { "False" }).to_string(),
-            _ => format_number(if *b { 1.0 } else { 0.0 }, format, culture),
+            _ => format_number(if *b { -1.0 } else { 0.0 }, format, culture),
         },
         FormatValue::Number(n) => format_number(*n, format, culture),
         FormatValue::DateTime(dt) => {
@@ -365,14 +465,21 @@ fn named(format: &str) -> Option<Named> {
     })
 }
 
+/// The culture's word for a true or false value (`["Yes", "No"]`).
+fn word(words: &[String; 2], value: bool) -> String {
+    words[usize::from(!value)].clone()
+}
+
 fn format_named_date(n: Named, dt: &NaiveDateTime, c: &FormatCulture) -> String {
     match n {
         Named::GeneralDate => general_date(dt, c),
         Named::LongDate => format_date_pattern(dt, &c.long_date, c),
-        Named::MediumDate => format_date_pattern(dt, "dd-mmm-yy", c),
+        Named::MediumDate => format_date_pattern(dt, &c.medium_date, c),
         Named::ShortDate => format_date_pattern(dt, &c.short_date, c),
         Named::LongTime => format_date_pattern(dt, &c.long_time, c),
-        Named::MediumTime => format_date_pattern(dt, "hh:nn AM/PM", c),
+        // 12-hour with the CULTURE's designator ([LIVE] sv-SE: "02:30 ",
+        // "12:05 " -- its designators are empty).
+        Named::MediumTime => format_date_pattern(dt, "hh:nn AMPM", c),
         Named::ShortTime => format_date_pattern(dt, "hh:nn", c),
         _ => String::new(),
     }
@@ -411,23 +518,23 @@ fn format_number(n: f64, format: &str, c: &FormatCulture) -> String {
         Some(Named::GeneralNumber) => general_number(n, c),
         Some(Named::Currency) => {
             let body = custom_number(n.abs(), "#,##0.00", c);
+            // A plain space between number and symbol: [LIVE] sv-SE writes
+            // "1 234,50 kr" with U+0020 there (the group separator is the
+            // no-break space).
+            let space = if c.currency_space { " " } else { "" };
             let with_symbol = if c.currency_symbol_before {
-                format!(
-                    "{}{}{}",
-                    c.currency_symbol,
-                    if c.currency_space { " " } else { "" },
-                    body
-                )
+                format!("{}{space}{body}", c.currency_symbol)
             } else {
-                format!(
-                    "{}{}{}",
-                    body,
-                    if c.currency_space { "\u{a0}" } else { "" },
-                    c.currency_symbol
-                )
+                format!("{body}{space}{}", c.currency_symbol)
             };
             if n < 0.0 && !is_all_zero(&body) {
-                format!("-{with_symbol}")
+                // The culture's negative pattern: [LIVE] sv-SE "-1 234,50
+                // kr"; en-US `($1,234.50)` (Windows pattern 0).
+                if c.currency_negative_parentheses {
+                    format!("({with_symbol})")
+                } else {
+                    format!("-{with_symbol}")
+                }
             } else {
                 with_symbol
             }
@@ -436,9 +543,9 @@ fn format_number(n: f64, format: &str, c: &FormatCulture) -> String {
         Some(Named::Standard) => format_sections(n, "#,##0.00", c),
         Some(Named::Percent) => format_sections(n, "0.00%", c),
         Some(Named::Scientific) => format_sections(n, "0.00E+00", c),
-        Some(Named::YesNo) => (if n != 0.0 { "Yes" } else { "No" }).to_string(),
-        Some(Named::TrueFalse) => (if n != 0.0 { "True" } else { "False" }).to_string(),
-        Some(Named::OnOff) => (if n != 0.0 { "On" } else { "Off" }).to_string(),
+        Some(Named::YesNo) => word(&c.yes_no, n != 0.0),
+        Some(Named::TrueFalse) => word(&c.true_false, n != 0.0),
+        Some(Named::OnOff) => word(&c.on_off, n != 0.0),
         Some(date) => match serial_to_datetime(n) {
             Some(dt) => format_named_date(date, &dt, c),
             None => general_number(n, c),
@@ -971,16 +1078,17 @@ fn tokenize_date(pattern: &str) -> Vec<DateTok> {
                 i += n;
             }
             't' => {
+                // `ttttt` is the long time; a shorter run is LITERAL text --
+                // .NET's `tt` is not a DAX token. [LIVE] "hh:nn tt" writes
+                // "14:30 tt", "t" writes "t", "tttttt" the long time + "t".
                 let n = run(i, 't');
                 if n >= 5 {
                     toks.push(DateTok::LongTime);
+                    i += 5;
                 } else {
-                    // .NET's `tt` / `t`: the AM/PM designator.
-                    toks.push(DateTok::AmPm {
-                        style: AmPmStyle::Culture,
-                    });
+                    toks.push(DateTok::Literal(chars[i..i + n].iter().collect()));
+                    i += n;
                 }
-                i += n;
             }
             'c' => {
                 toks.push(DateTok::GeneralDate);
@@ -1115,21 +1223,56 @@ pub const FORMAT_UDF_NAME: &str = "calcula_format";
 
 /// `calcula_format(value, format)` in `culture`: any value type (numbers and
 /// decimals, dates and timestamps, text, booleans, NULL -> ""), returning
-/// Utf8.
+/// Utf8. See [`format_udf_with_cultures`] for the 3-argument form.
 pub fn format_udf(culture: FormatCulture) -> datafusion::logical_expr::ScalarUDF {
+    format_udf_with_cultures(culture, Vec::new())
+}
+
+/// [`format_udf`] that also takes DAX's third argument,
+/// `calcula_format(value, format, locale_name)`: the value is formatted in
+/// the culture `locale_name` names ([`culture_for_locale_name`] over
+/// `culture`, then `named`, then the built-ins). A BLANK or empty
+/// `locale_name` is `culture`, as if it were not given; a name no culture
+/// answers to FAILS the query (never a silent format in another culture).
+pub fn format_udf_with_cultures(
+    culture: FormatCulture,
+    named: Vec<FormatCulture>,
+) -> datafusion::logical_expr::ScalarUDF {
+    use datafusion::logical_expr::{Signature, TypeSignature, Volatility};
+    let mut cultures = Vec::with_capacity(named.len() + 1);
+    cultures.push(culture.clone());
+    cultures.extend(named);
     datafusion::logical_expr::ScalarUDF::new_from_impl(FormatUdf {
-        signature: datafusion::logical_expr::Signature::any(
-            2,
-            datafusion::logical_expr::Volatility::Immutable,
+        signature: Signature::one_of(
+            vec![TypeSignature::Any(2), TypeSignature::Any(3)],
+            Volatility::Immutable,
         ),
         culture,
+        cultures,
     })
+}
+
+/// The registry version of [`format_udf_with_cultures`]: the identity of the
+/// default culture and of every named one, so a change to any changes every
+/// query-cache key.
+pub fn format_udf_version(culture: &FormatCulture, named: &[FormatCulture]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    if named.is_empty() {
+        return culture.identity();
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    culture.hash(&mut h);
+    named.hash(&mut h);
+    h.finish()
 }
 
 #[derive(Debug)]
 struct FormatUdf {
     signature: datafusion::logical_expr::Signature,
+    /// The default culture (2 arguments, or a BLANK / empty locale name).
     culture: FormatCulture,
+    /// The cultures a locale name may name, the default first.
+    cultures: Vec<FormatCulture>,
 }
 
 impl datafusion::logical_expr::ScalarUDFImpl for FormatUdf {
@@ -1159,9 +1302,9 @@ impl datafusion::logical_expr::ScalarUDFImpl for FormatUdf {
     ) -> datafusion::error::Result<datafusion::logical_expr::ColumnarValue> {
         use arrow::array::{Array, ArrayRef, StringArray};
         use arrow::datatypes::{DataType, TimeUnit};
-        if args.len() != 2 {
+        if args.len() != 2 && args.len() != 3 {
             return Err(datafusion::error::DataFusionError::Plan(
-                "FORMAT takes a value and a format string".to_string(),
+                "FORMAT takes a value, a format string and an optional locale name".to_string(),
             ));
         }
         let arrays: Vec<ArrayRef> = args
@@ -1185,6 +1328,44 @@ impl datafusion::logical_expr::ScalarUDFImpl for FormatUdf {
                 formats.value(i)
             }
         };
+        // The culture of each row: the default, or the one its locale name
+        // (DAX's third argument) names, resolved once per distinct name.
+        let mut table: Vec<FormatCulture> = vec![self.culture.clone()];
+        let mut culture_index: Vec<usize> = vec![0; n];
+        if let Some(locales) = arrays.get(2) {
+            let locales = arrow::compute::cast(locales, &DataType::Utf8)?;
+            let locales = locales
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal("FORMAT: locale cast".into())
+                })?;
+            let mut by_name: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for (i, slot) in culture_index.iter_mut().enumerate() {
+                if locales.is_null(i) || locales.value(i).trim().is_empty() {
+                    continue;
+                }
+                let name = locales.value(i).trim();
+                let key = name.to_ascii_lowercase();
+                *slot = match by_name.get(&key) {
+                    Some(index) => *index,
+                    None => {
+                        let culture =
+                            culture_for_locale_name(name, &self.cultures).ok_or_else(|| {
+                                datafusion::error::DataFusionError::Execution(format!(
+                                    "FORMAT: '{name}' is not a locale name this engine can \
+                                     format in"
+                                ))
+                            })?;
+                        table.push(culture);
+                        by_name.insert(key, table.len() - 1);
+                        table.len() - 1
+                    }
+                };
+            }
+        }
+        let culture_at = |i: usize| &table[culture_index[i]];
         match values.data_type() {
             DataType::Null => out.extend((0..n).map(|_| String::new())),
             DataType::Boolean => {
@@ -1200,7 +1381,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for FormatUdf {
                     } else {
                         FormatValue::Bool(b.value(i))
                     };
-                    out.push(format_value(&v, fmt_at(i), &self.culture));
+                    out.push(format_value(&v, fmt_at(i), culture_at(i)));
                 }
             }
             DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, _) => {
@@ -1223,7 +1404,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for FormatUdf {
                             None => FormatValue::Blank,
                         }
                     };
-                    out.push(format_value(&v, fmt_at(i), &self.culture));
+                    out.push(format_value(&v, fmt_at(i), culture_at(i)));
                 }
             }
             DataType::Utf8
@@ -1240,7 +1421,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for FormatUdf {
                     } else {
                         FormatValue::Text(s.value(i).to_string())
                     };
-                    out.push(format_value(&v, fmt_at(i), &self.culture));
+                    out.push(format_value(&v, fmt_at(i), culture_at(i)));
                 }
             }
             _ => {
@@ -1257,7 +1438,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for FormatUdf {
                     } else {
                         FormatValue::Number(f.value(i))
                     };
-                    out.push(format_value(&v, fmt_at(i), &self.culture));
+                    out.push(format_value(&v, fmt_at(i), culture_at(i)));
                 }
             }
         }
@@ -1337,8 +1518,30 @@ mod tests {
         assert_eq!(num(1234.5, "General Number", &en()), "1234.5");
         assert_eq!(num(1234.5, "General Number", &sv()), "1234,5");
         assert_eq!(num(1234.5, "Currency", &en()), "$1,234.50");
-        assert_eq!(num(-1234.5, "Currency", &en()), "-$1,234.50");
-        assert_eq!(num(1234.5, "Currency", &sv()), format!("1{NB}234,50{NB}kr"));
+        // The culture's negative currency pattern: en-US `($n)` (Windows
+        // pattern 0); [LIVE] sv-SE "-1 234,50 kr" with a plain space before
+        // "kr" and the no-break space as the group separator (BUG-0731).
+        assert_eq!(num(-1234.5, "Currency", &en()), "($1,234.50)");
+        assert_eq!(num(-0.001, "Currency", &en()), "$0.00");
+        assert_eq!(num(1234.5, "Currency", &sv()), format!("1{NB}234,50 kr"));
+        assert_eq!(num(-1234.5, "Currency", &sv()), format!("-1{NB}234,50 kr"));
+        assert_eq!(num(-0.005, "Currency", &sv()), "-0,01 kr");
+        assert_eq!(num(0.0, "Currency", &sv()), "0,00 kr");
+        assert_eq!(
+            num(1234567.891, "Currency", &sv()),
+            format!("1{NB}234{NB}567,89 kr")
+        );
+        // [LIVE] sv-SE: "Percent" has no space before the sign; the boolean
+        // words are the culture's.
+        assert_eq!(num(-0.1234, "Percent", &sv()), "-12,34%");
+        assert_eq!(num(1234.5, "Percent", &sv()), "123450,00%");
+        assert_eq!(num(0.1234, "0.0 %", &sv()), "12,3 %");
+        assert_eq!(num(0.0, "Yes/No", &sv()), "Nej");
+        assert_eq!(num(-1.0, "Yes/No", &sv()), "Ja");
+        assert_eq!(num(0.5, "Yes/No", &sv()), "Ja");
+        assert_eq!(num(1.0, "On/Off", &sv()), "P\u{e5}");
+        assert_eq!(num(0.0, "On/Off", &sv()), "Av");
+        assert_eq!(num(1e20, "General Number", &sv()), "1E+20");
         assert_eq!(num(1234.5, "Fixed", &en()), "1234.50");
         assert_eq!(num(1234.5, "Fixed", &sv()), "1234,50");
         assert_eq!(num(1234.5, "Standard", &en()), "1,234.50");
@@ -1392,17 +1595,44 @@ mod tests {
         assert_eq!(dt(&v, "Long Time", &sv()), "14:30:05");
         assert_eq!(dt(&v, "General Date", &sv()), "2024-01-15 14:30:05");
         assert_eq!(dt(&v, "h:nn AM/PM", &sv()), "2:30 PM");
-        assert_eq!(dt(&v, "h:nn ampm", &sv()), "2:30 em");
+        // [LIVE] Excel 16's data model under sv-SE (BUG-0731): `AM/PM`,
+        // `am/pm` and `A/P` are literal; `AMPM` writes Windows' sv-SE
+        // designators, which are EMPTY, so "Medium Time" (12-hour + AMPM)
+        // ends in a bare space; .NET's `tt` and a short `t` run are literal.
+        assert_eq!(dt(&v, "h:nn ampm", &sv()), "2:30 ");
+        assert_eq!(dt(&v, "h:nn am/pm", &sv()), "2:30 pm");
+        assert_eq!(dt(&v, "h:nn A/P", &sv()), "2:30 P");
+        assert_eq!(dt(&v, "Medium Time", &sv()), "02:30 ");
+        let morning = date(2024, 1, 15, 9, 5, 7);
+        assert_eq!(dt(&morning, "Medium Time", &sv()), "09:05 ");
+        assert_eq!(dt(&morning, "h:nn AM/PM", &sv()), "9:05 AM");
+        assert_eq!(dt(&morning, "Long Time", &sv()), "09:05:07");
+        assert_eq!(dt(&date(2024, 11, 5, 0, 5, 0), "Medium Time", &sv()), "12:05 ");
+        assert_eq!(dt(&v, "hh:nn tt", &sv()), "14:30 tt");
+        assert_eq!(dt(&v, "t", &sv()), "t");
+        assert_eq!(dt(&v, "tttt", &sv()), "tttt");
+        assert_eq!(dt(&v, "tttttt", &sv()), "14:30:05t");
+        // [LIVE] "Medium Date" is "15/01 2024" (a literal slash).
+        assert_eq!(dt(&v, "Medium Date", &sv()), "15/01 2024");
+        assert_eq!(dt(&date(2024, 11, 5, 0, 0, 0), "Medium Date", &sv()), "05/11 2024");
+        assert_eq!(dt(&v, "ddd mmm", &sv()), "m\u{e5}n jan");
+    }
+
+    #[test]
+    fn the_en_us_designators_and_named_times() {
+        let v = date(2024, 1, 15, 14, 30, 5);
+        assert_eq!(dt(&v, "h:nn AMPM", &en()), "2:30 PM");
+        assert_eq!(dt(&v, "Medium Time", &en()), "02:30 PM");
+        assert_eq!(dt(&v, "hh:nn tt", &en()), "14:30 tt");
+        assert_eq!(dt(&v, "Medium Date", &en()), "15-Jan-24");
     }
 
     #[test]
     fn de_de_and_the_builtin_lookup() {
         let de = FormatCulture::builtin("de_DE").expect("de-DE is built in");
         assert_eq!(num(1234.5, "#,0.00", &de), "1.234,50");
-        assert_eq!(
-            num(1234.5, "Currency", &de),
-            format!("1.234,50{NB}\u{20ac}")
-        );
+        assert_eq!(num(1234.5, "Currency", &de), "1.234,50 \u{20ac}");
+        assert_eq!(num(-1234.5, "Currency", &de), "-1.234,50 \u{20ac}");
         let v = date(2024, 1, 15, 14, 30, 5);
         assert_eq!(dt(&v, "dd/mm/yyyy", &de), "15.01.2024");
         assert_eq!(dt(&v, "Long Date", &de), "Montag, 15. Januar 2024");
@@ -1431,5 +1661,86 @@ mod tests {
             "Yes"
         );
         assert_eq!(format_value(&FormatValue::Bool(false), "", &en()), "False");
+        // [LIVE] sv-SE: the named boolean formats write the culture's words,
+        // the empty format writes "True" / "False", and a number pattern
+        // reads TRUE as VBA's -1.
+        let b = |v: bool, f: &str| format_value(&FormatValue::Bool(v), f, &sv());
+        assert_eq!(b(true, "True/False"), "Sant");
+        assert_eq!(b(false, "True/False"), "Falskt");
+        assert_eq!(b(true, "Yes/No"), "Ja");
+        assert_eq!(b(false, "On/Off"), "Av");
+        assert_eq!(b(true, ""), "True");
+        assert_eq!(b(false, ""), "False");
+        assert_eq!(b(true, "0"), "-1");
+        assert_eq!(b(false, "0"), "0");
+    }
+
+    #[test]
+    fn a_locale_name_finds_its_culture() {
+        let gb = FormatCulture {
+            name: "en-GB".into(),
+            ..FormatCulture::en_us()
+        };
+        let named = vec![gb.clone()];
+        assert_eq!(culture_for_locale_name("en-GB", &named), Some(gb.clone()));
+        assert_eq!(culture_for_locale_name("EN_gb", &named), Some(gb));
+        assert_eq!(culture_for_locale_name("sv-SE", &named), Some(sv()));
+        assert_eq!(culture_for_locale_name("de", &named), Some(FormatCulture::de_de()));
+        assert_eq!(culture_for_locale_name("xx-YY", &named), None);
+        assert_eq!(culture_for_locale_name("", &named), None);
+        assert_eq!(culture_for_locale_name("sv-FI", &named), None);
+    }
+
+    #[tokio::test]
+    async fn the_three_argument_format_writes_in_the_named_culture() {
+        // BUG-0731: the parser accepted FORMAT's third argument and the SQL
+        // dropped it, so `FORMAT(x, "Currency", "de-DE")` wrote the engine's
+        // own culture.
+        let ctx = datafusion::prelude::SessionContext::new();
+        ctx.register_udf(format_udf_with_cultures(sv(), Vec::new()));
+        let one = |sql: &'static str| {
+            let ctx = &ctx;
+            async move {
+                let batches = ctx.sql(sql).await?.collect().await?;
+                let column = arrow::compute::cast(batches[0].column(0), &arrow::datatypes::DataType::Utf8)?;
+                let strings = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.unwrap_or("").to_string())
+                    .collect::<Vec<_>>();
+                Ok::<_, datafusion::error::DataFusionError>(strings)
+            }
+        };
+        assert_eq!(
+            one("SELECT calcula_format(-1234.5, 'Currency', 'de-DE')").await.unwrap(),
+            vec!["-1.234,50 \u{20ac}"]
+        );
+        assert_eq!(
+            one("SELECT calcula_format(-1234.5, 'Currency', 'en-US')").await.unwrap(),
+            vec!["($1,234.50)"]
+        );
+        // Two arguments, a BLANK and an empty locale name: the engine's own.
+        let own = format!("-1{NB}234,50 kr");
+        assert_eq!(one("SELECT calcula_format(-1234.5, 'Currency')").await.unwrap(), vec![own.clone()]);
+        assert_eq!(
+            one("SELECT calcula_format(-1234.5, 'Currency', CAST(NULL AS VARCHAR))").await.unwrap(),
+            vec![own.clone()]
+        );
+        assert_eq!(one("SELECT calcula_format(-1234.5, 'Currency', '')").await.unwrap(), vec![own]);
+        // Per row: each row its own locale name.
+        assert_eq!(
+            one(
+                "SELECT calcula_format(v, '#,0.00', l) FROM (VALUES (1234.5, 'en-US'), \
+                 (1234.5, 'de-DE'), (1234.5, 'sv-SE')) AS t(v, l)"
+            )
+            .await
+            .unwrap(),
+            vec!["1,234.50".to_string(), "1.234,50".to_string(), format!("1{NB}234,50")]
+        );
+        // A name no culture answers to fails the query.
+        let err = one("SELECT calcula_format(1, '0', 'xx-YY')").await.unwrap_err();
+        assert!(err.to_string().contains("xx-YY"), "{err}");
     }
 }

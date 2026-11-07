@@ -726,6 +726,7 @@ mod tests {
             None,
             None,
             &[],
+            false,
             Some(&mut plan),
             &tokio_util::sync::CancellationToken::new(),
         )

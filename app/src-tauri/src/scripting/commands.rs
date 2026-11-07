@@ -1067,7 +1067,7 @@ pub(crate) fn apply_script_modified_grids_core(
     // body, or a `=TABLE(..)` marker, on a background sheet used to be
     // installed with no gate at all -- and `parse_script_formula_writes` would
     // then turn the typed marker into a live table body only the Data Table
-    // command may create. The rule is the batch's (`check_cells_write`):
+    // command may create. The rule is the batch's (`check_cells_write_on_sheet`):
     // writing every body cell replaces the table, as in Excel [LIVE]. The
     // active sheet is judged against its MIRROR (`state.grid`, taken first:
     // canonical order grid, grids), the grid the batch gate reads.
@@ -1108,9 +1108,13 @@ pub(crate) fn apply_script_modified_grids_core(
                 diff.iter().map(|u| (u.row, u.col)),
             )?;
             let table_sheet: &Grid = if idx == active_sheet { &*active_mirror } else { before };
-            crate::data_tables::check_cells_write(
+            // By sheet index: a `.calp` merge's version tables
+            // (`data_tables::VersionTablesClaim`, BUG-0757) are judged there.
+            crate::data_tables::check_cells_write_on_sheet(
+                Some(idx),
                 table_sheet,
                 diff.iter().map(|u| (u.row, u.col, u.value.as_str())),
+                &[],
             )?;
             // Collect the NON-active coordinates for the writeback gate below.
             // The active sheet is filtered by `update_cells_batch`'s own
@@ -1162,11 +1166,27 @@ pub(crate) fn apply_script_modified_grids_core(
     // refusal used to leave every background sheet written with no recalc and
     // no audit entry: the atomicity hole the protection pre-pass above names.
     // The same rule, asked first; with no lock held (`spill_hosts` is taken and
-    // released inside). Background sheets keep their wholesale-install
-    // semantics (`release_spills_orphaned_by_grid`).
+    // released inside). The background sheets are asked the same just below
+    // (BUG-0775); what they install is still wholesale
+    // (`release_spills_orphaned_by_grid` drops a spill whose origin went).
     if !updates.is_empty() {
         let active_cells: Vec<(u32, u32)> = updates.iter().map(|u| (u.row, u.col)).collect();
         crate::commands::data::check_spill_protection_cells(state, active_sheet, &active_cells)?;
+    }
+    // ...and on EVERY BACKGROUND sheet (BUG-0775): a write there over a
+    // spilled value used to be installed wholesale, unchecked and unreported
+    // -- by a script's `sheets(i)` write and by a `.calp` merge or hold-back
+    // alike, which lay a version's cells through here -- while the same write
+    // on the active sheet is refused naming the origin. Asked here, before
+    // any sheet is installed, so a refusal leaves the workbook untouched.
+    // A merge or hold-back reaches here WITHOUT the version's spilled values:
+    // those are derived, not content, and `published_cells_in_local_names`
+    // leaves them out for both doors, so a version that only grew or shrank
+    // an array lays its origin and inputs and the recalculation re-derives it
+    // (wave-3 verifier, backmisc). What still meets this gate from a version
+    // is a LITERAL over one of this copy's spilled cells: a real conflict.
+    for (idx, cells) in &non_active_touched {
+        crate::commands::data::check_spill_protection_cells(state, *idx, cells)?;
     }
 
     // Apply non-active-sheet writes the undoable + parsed + recalc-tracked way,
@@ -1431,7 +1451,7 @@ pub(crate) fn record_queued_formatting(
                 }
                 extra.insert("sheet".into(), serde_json::json!(sheet));
                 extra.insert("formatting".into(), serde_json::json!(true));
-                extra.insert("formatChanges".into(), serde_json::json!(1));
+                extra.insert("formatCalls".into(), serde_json::json!(1));
                 extra.insert("namedStyle".into(), serde_json::json!(name));
                 extra.insert("firstRow".into(), serde_json::json!(first_row));
                 extra.insert("lastRow".into(), serde_json::json!(last_row));
@@ -3398,12 +3418,12 @@ mod script_apply_tests {
     }
 
     /// Excel [LIVE, BUG-0652]: part of a data table's body cannot be changed
-    /// ("Cannot change part of a data table."), and `=TABLE(..)` cannot be
+    /// ("Can't change part of a data table."), and `=TABLE(..)` cannot be
     /// entered anywhere ("That function isn't valid."). A script's write to a
     /// BACKGROUND sheet used to be installed with no gate at all -- and its
     /// typed marker was then parsed into a live table body.
     ///
-    /// SABOTAGE: delete the `check_cells_write` call from the pre-pass of
+    /// SABOTAGE: delete the `check_cells_write_on_sheet` call from the pre-pass of
     /// `apply_script_modified_grids_core` -- fails at "WROTE PART".
     #[test]
     fn a_script_cannot_change_part_of_a_background_data_table() {
@@ -3444,6 +3464,45 @@ mod script_apply_tests {
         assert_eq!(value_at(&h, 1, 2, 11), CellValue::Number(8.0));
     }
 
+    /// BUG-0757: a `.calp` merge laying a version that holds a NEW data table on
+    /// a BACKGROUND sheet goes through this pre-pass, which read the version's
+    /// marker as a typed `=TABLE(..)` and refused the merge ("That function
+    /// isn't valid."). Under the merge's marker claim
+    /// (`data_tables::claim_version_tables` over the laid grids) the table is
+    /// installed, a live marker; a text-only `=TABLE(..)` a script wrote is not
+    /// a marker the claim holds and is still refused.
+    ///
+    /// SABOTAGE: pass `None` for the sheet index to `check_cells_write_on_sheet`
+    /// in the pre-pass -- fails at "MERGE REFUSED (background)".
+    #[test]
+    fn a_merge_installs_a_new_background_data_table_through_the_marker_claim() {
+        let mut plain = sheet_with_data_table();
+        plain.clear_cell(1, 11);
+        plain.clear_cell(2, 11);
+        let h = harness(plain.clone());
+        let theirs = modified(&h, sheet_with_data_table());
+        let (result, _) = apply(&h, &theirs, 2, "calpMerge", "pkg@1.1.0");
+        assert_eq!(result.err().as_deref(), Some(engine::data_table::TABLE_NOT_VALID), "precondition: no claim");
+
+        let mut typed = sheet_with_data_table();
+        typed.set_cell(5, 5, script_wrote(CellValue::Text("=TABLE(,A1)".to_string())));
+        let stray = modified(&h, typed);
+        {
+            let _claim = crate::data_tables::claim_version_tables(&stray);
+            let (result, _) = apply(&h, &stray, 3, "calpMerge", "pkg@1.1.0");
+            assert_eq!(
+                result.err().as_deref(),
+                Some(engine::data_table::TABLE_NOT_VALID),
+                "a text marker is not one the claim holds"
+            );
+            let _inner = crate::data_tables::claim_version_tables(&theirs);
+            let (result, _) = apply(&h, &theirs, 2, "calpMerge", "pkg@1.1.0");
+            assert!(result.is_ok(), "MERGE REFUSED (background): {result:?}");
+        }
+        let l2 = h.state.grids.read().unwrap()[1].get_cell(1, 11).cloned().expect("L2 installed");
+        assert!(engine::data_table::is_data_table_cell(&l2), "L2 holds the version's live marker");
+    }
+
     /// A refusal on the ACTIVE sheet (the batch's own gates: a data table, a
     /// spilled value) is decided BEFORE any background sheet is installed. The
     /// batch asks it only after the install, so the refusal used to leave the
@@ -3452,7 +3511,7 @@ mod script_apply_tests {
     ///
     /// SABOTAGE: delete the active-sheet `check_spill_protection_cells` call
     /// from `apply_script_modified_grids_core` -- fails at "HALF APPLIED
-    /// (spill)"; delete the pre-pass `check_cells_write` -- fails at "HALF
+    /// (spill)"; delete the pre-pass `check_cells_write_on_sheet` -- fails at "HALF
     /// APPLIED (table)".
     #[test]
     fn an_active_sheet_refusal_leaves_every_background_sheet_untouched() {
@@ -3481,6 +3540,43 @@ mod script_apply_tests {
         assert!(active_calls.is_empty(), "the active leg never ran");
         assert_eq!(h.state.undo_stack.lock().unwrap().undo_depth(), 0);
         assert!(!h.file_state.is_dirty());
+    }
+
+    /// BUG-0775: a write over a spilled value on a BACKGROUND sheet -- a
+    /// script's `sheets(i)` write, a `.calp` merge or hold-back laying a
+    /// version's cell -- was installed wholesale, unchecked and unreported,
+    /// while the same write on the active sheet is refused naming the origin.
+    /// It is now refused the same way, before anything is installed. A write
+    /// to the ORIGIN itself, or beside the array, still goes through.
+    ///
+    /// SABOTAGE: drop the background `check_spill_protection_cells` loop from
+    /// `apply_script_modified_grids_core` -- "a spilled value on sheet 2 was
+    /// overwritten".
+    #[test]
+    fn a_spilled_value_on_a_background_sheet_is_refused_like_the_active_sheets() {
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(0, 0, Cell::new_number(5.0));
+        sheet1.set_cell(1, 0, Cell::new_number(6.0));
+        let h = harness(sheet1.clone());
+        // Sheet 2's A2 belongs to A1's array.
+        h.state.spill_hosts.lock().unwrap().insert((1, 1, 0), (0, 0));
+        let mut background = sheet1.clone();
+        background.set_cell(1, 0, script_wrote(CellValue::Number(42.0)));
+        let grids = modified(&h, background);
+        let (result, active_calls) = apply(&h, &grids, 1, "calpMerge", "app@1.1.0");
+        let err = result.expect_err("a spilled value on sheet 2 was overwritten");
+        assert!(err.contains("spilled from the formula in A1"), "the batch's own message: {err}");
+        assert_eq!(value_at(&h, 1, 1, 0), CellValue::Number(6.0), "nothing was installed");
+        assert!(active_calls.is_empty());
+        assert!(!h.file_state.is_dirty());
+
+        // Positive control: beside the array, the write lands.
+        let mut beside = sheet1.clone();
+        beside.set_cell(1, 3, script_wrote(CellValue::Number(9.0)));
+        let grids = modified(&h, beside);
+        let (result, _) = apply(&h, &grids, 1, "calpMerge", "app@1.1.0");
+        result.expect("a cell outside the array is written");
+        assert_eq!(value_at(&h, 1, 1, 3), CellValue::Number(9.0));
     }
 
     // --- DEFECT 2: formula strings written off the active sheet ------------

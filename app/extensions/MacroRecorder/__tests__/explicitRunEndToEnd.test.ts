@@ -909,7 +909,7 @@ describe("a run with cell access may CLEAR cell contents (BUG-0616 #2)", () => {
     expect(h.reports[0]).toMatchObject({
       completed: true,
       sheets: [{ sheet: 1, cellsModified: 1 }],
-      formats: [{ sheet: 1, changes: 1, firstRow: 0, lastRow: 1, firstCol: 0, lastCol: 0 }],
+      formats: [{ sheet: 1, calls: 1, firstRow: 0, lastRow: 1, firstCol: 0, lastCol: 0 }],
     });
   });
 });
@@ -929,7 +929,7 @@ describe("nothing else changes", () => {
     expect(h.reports[0]).toMatchObject({
       completed: true,
       sheets: [{ sheet: 0, cellsModified: 1 }],
-      formats: [{ sheet: 0, changes: 1, firstRow: 0, lastRow: 0, firstCol: 0, lastCol: 0 }],
+      formats: [{ sheet: 0, calls: 1, firstRow: 0, lastRow: 0, firstCol: 0, lastCol: 0 }],
     });
   });
 

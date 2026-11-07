@@ -9,11 +9,20 @@
 //          It used to set all four sides of every cell for Outline, which on a
 //          range is All Borders (survey D5). (The old header called OK a
 //          no-op; borders have rendered and applied for a long time.)
+//
+//          A MIXED line -- an outer edge whose cells differ (BUG-0365) or an
+//          inside line whose boundaries differ (BUG-0726) -- is greyed: its
+//          button is not pressed and the preview draws it as Excel's grey
+//          dotted line, where a real line is drawn in its own style and colour
+//          [LIVE, Excel 16, 2026-11-06, lane uiforms probe3/probe4: the preview
+//          pixels of a mixed inside / outer line are #C0C0C0 alternating with
+//          white, 2px; a uniform thin line is #000000, 1px].
 
 import React, { useState } from "react";
 import styled from "styled-components";
 import { useFormatCellsStore, type BorderSide } from "../hooks/useFormatCellsState";
 import { ColorPicker } from "../components/ColorPicker";
+import { previewLine } from "../lib/borderEdges";
 
 const v = (name: string) => `var(${name})`;
 
@@ -95,30 +104,15 @@ export function BorderTab(): React.ReactElement {
     }
   };
 
-  const getBorderStyle = (side: BorderSide): React.CSSProperties => {
-    if (side.style === "none") return { borderColor: "transparent" };
-    const width =
-      side.style === "thin"
-        ? "1px"
-        : side.style === "medium"
-        ? "2px"
-        : side.style === "thick"
-        ? "3px"
-        : "1px";
-    const style =
-      side.style === "dashed"
-        ? "dashed"
-        : side.style === "dotted"
-        ? "dotted"
-        : side.style === "double"
-        ? "double"
-        : "solid";
-    return {
-      borderColor: side.color,
-      borderWidth: width,
-      borderStyle: style,
-    };
-  };
+  /** One outer edge of the preview sample: its line, the mixed grey, or none. */
+  const previewEdge = (side: BorderSide): { color: string; width: string; style: string } =>
+    previewLine(side) ?? { color: "transparent", width: "2px", style: "solid" };
+  const top = previewEdge(borderTop);
+  const right = previewEdge(borderRight);
+  const bottom = previewEdge(borderBottom);
+  const left = previewEdge(borderLeft);
+  const insideH = previewLine(borderInsideHorizontal);
+  const insideV = previewLine(borderInsideVertical);
 
   return (
     <Container>
@@ -192,7 +186,8 @@ export function BorderTab(): React.ReactElement {
             <BorderToggle
               type="button"
               $active={borderInsideHorizontal.style !== "none"}
-              aria-pressed={borderInsideHorizontal.style !== "none"}
+              $mixed={Boolean(borderInsideHorizontal.mixed)}
+              aria-pressed={borderInsideHorizontal.mixed ? "mixed" : borderInsideHorizontal.style !== "none"}
               disabled={!rangeShape.multiRow}
               onClick={() => toggleBorder("insideHorizontal", borderInsideHorizontal, setBorderInsideHorizontal)}
               title="Inside horizontal (between the selected rows)"
@@ -223,7 +218,8 @@ export function BorderTab(): React.ReactElement {
             <BorderToggle
               type="button"
               $active={borderInsideVertical.style !== "none"}
-              aria-pressed={borderInsideVertical.style !== "none"}
+              $mixed={Boolean(borderInsideVertical.mixed)}
+              aria-pressed={borderInsideVertical.mixed ? "mixed" : borderInsideVertical.style !== "none"}
               disabled={!rangeShape.multiCol}
               onClick={() => toggleBorder("insideVertical", borderInsideVertical, setBorderInsideVertical)}
               title="Inside vertical (between the selected columns)"
@@ -267,27 +263,22 @@ export function BorderTab(): React.ReactElement {
           <SectionTitle>Preview</SectionTitle>
           <PreviewBox>
             <PreviewCell
+              data-testid="fc-border-preview"
               style={{
-                borderTop: "2px solid transparent",
-                borderRight: "2px solid transparent",
-                borderBottom: "2px solid transparent",
-                borderLeft: "2px solid transparent",
                 position: "relative",
                 overflow: "hidden",
-                ...(({
-                  borderTopColor: borderTop.style !== "none" ? borderTop.color : "transparent",
-                  borderTopWidth: borderTop.style !== "none" ? getBorderStyle(borderTop).borderWidth : "2px",
-                  borderTopStyle: borderTop.style !== "none" ? (getBorderStyle(borderTop).borderStyle as string) : "solid",
-                  borderRightColor: borderRight.style !== "none" ? borderRight.color : "transparent",
-                  borderRightWidth: borderRight.style !== "none" ? getBorderStyle(borderRight).borderWidth : "2px",
-                  borderRightStyle: borderRight.style !== "none" ? (getBorderStyle(borderRight).borderStyle as string) : "solid",
-                  borderBottomColor: borderBottom.style !== "none" ? borderBottom.color : "transparent",
-                  borderBottomWidth: borderBottom.style !== "none" ? getBorderStyle(borderBottom).borderWidth : "2px",
-                  borderBottomStyle: borderBottom.style !== "none" ? (getBorderStyle(borderBottom).borderStyle as string) : "solid",
-                  borderLeftColor: borderLeft.style !== "none" ? borderLeft.color : "transparent",
-                  borderLeftWidth: borderLeft.style !== "none" ? getBorderStyle(borderLeft).borderWidth : "2px",
-                  borderLeftStyle: borderLeft.style !== "none" ? (getBorderStyle(borderLeft).borderStyle as string) : "solid",
-                }) as React.CSSProperties),
+                borderTopColor: top.color,
+                borderTopWidth: top.width,
+                borderTopStyle: top.style as React.CSSProperties["borderTopStyle"],
+                borderRightColor: right.color,
+                borderRightWidth: right.width,
+                borderRightStyle: right.style as React.CSSProperties["borderRightStyle"],
+                borderBottomColor: bottom.color,
+                borderBottomWidth: bottom.width,
+                borderBottomStyle: bottom.style as React.CSSProperties["borderBottomStyle"],
+                borderLeftColor: left.color,
+                borderLeftWidth: left.width,
+                borderLeftStyle: left.style as React.CSSProperties["borderLeftStyle"],
               }}
             >
               {(borderDiagonalDown.style !== "none" || borderDiagonalUp.style !== "none") && (
@@ -315,25 +306,28 @@ export function BorderTab(): React.ReactElement {
                 </svg>
               )}
               {/* The inside lines, drawn through the middle of the sample as
-                  the boundaries between its rows / columns. */}
-              {borderInsideHorizontal.style !== "none" && (
+                  the boundaries between its rows / columns (a mixed one in
+                  Excel's grey dotted line). */}
+              {insideH && (
                 <div
+                  data-testid="fc-border-preview-insideHorizontal"
                   style={{
                     position: "absolute", left: 0, right: 0, top: "50%",
-                    borderTopWidth: getBorderStyle(borderInsideHorizontal).borderWidth,
-                    borderTopStyle: getBorderStyle(borderInsideHorizontal).borderStyle as React.CSSProperties["borderTopStyle"],
-                    borderTopColor: borderInsideHorizontal.color,
+                    borderTopWidth: insideH.width,
+                    borderTopStyle: insideH.style as React.CSSProperties["borderTopStyle"],
+                    borderTopColor: insideH.color,
                     pointerEvents: "none",
                   }}
                 />
               )}
-              {borderInsideVertical.style !== "none" && (
+              {insideV && (
                 <div
+                  data-testid="fc-border-preview-insideVertical"
                   style={{
                     position: "absolute", top: 0, bottom: 0, left: "50%",
-                    borderLeftWidth: getBorderStyle(borderInsideVertical).borderWidth,
-                    borderLeftStyle: getBorderStyle(borderInsideVertical).borderStyle as React.CSSProperties["borderLeftStyle"],
-                    borderLeftColor: borderInsideVertical.color,
+                    borderLeftWidth: insideV.width,
+                    borderLeftStyle: insideV.style as React.CSSProperties["borderLeftStyle"],
+                    borderLeftColor: insideV.color,
                     pointerEvents: "none",
                   }}
                 />

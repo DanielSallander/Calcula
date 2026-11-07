@@ -25,6 +25,15 @@ const v = (name: string) => `var(${name})`;
 // SVG icon helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * A row's identity: its SCOPE and its name (BUG-0744). A workbook `Rate` and a
+ * `Sheet1!Rate` are two names, as in Excel, so the name alone cannot say which
+ * row is selected, dragged or deleted.
+ */
+function rowKeyOf(nr: NamedRange): string {
+  return nr.sheetIndex == null ? nr.name : `${nr.sheetIndex}!${nr.name}`;
+}
+
 function ChevronIcon({ expanded }: { expanded: boolean }) {
   return (
     <svg
@@ -348,7 +357,7 @@ export function NameManagerDialog(
       // that reports success by staying quiet. Drop a selection the reload no
       // longer knows about.
       setSelectedName((current) =>
-        current && allNames.some((nr) => nr.name === current) ? current : null
+        current && allNames.some((nr) => rowKeyOf(nr) === current) ? current : null
       );
     } catch (error) {
       console.error("[NameManager] Failed to load data:", error);
@@ -425,15 +434,18 @@ export function NameManagerDialog(
 
   const handleEdit = useCallback(() => {
     if (!selectedName) return;
-    const nr = names.find((n) => n.name === selectedName);
+    const nr = names.find((n) => rowKeyOf(n) === selectedName);
     if (!nr) return;
     openEditDialog(nr);
   }, [selectedName, names, openEditDialog]);
 
   const handleDelete = useCallback(async () => {
     if (!selectedName) return;
+    const nr = names.find((n) => rowKeyOf(n) === selectedName);
+    if (!nr) return;
     try {
-      const result = await deleteNamedRange(selectedName);
+      // The name OF ITS SCOPE: a workbook Rate and a Sheet1!Rate are two names.
+      const result = await deleteNamedRange(nr.name, nr.sheetIndex);
       if (result.success) {
         setSelectedName(null);
         emitAppEvent(AppEvents.NAMED_RANGES_CHANGED);
@@ -442,19 +454,21 @@ export function NameManagerDialog(
     } catch (error) {
       console.error("[NameManager] Failed to delete:", error);
     }
-  }, [selectedName, loadData]);
+  }, [selectedName, names, loadData]);
 
   const handleEditScript = useCallback(() => {
     if (!selectedName) return;
+    const nr = names.find((n) => rowKeyOf(n) === selectedName);
+    if (!nr) return;
     // Generic scriptable-objects seam: the ScriptableObjects extension scaffolds
     // + registers a "namedRange" script keyed by the name, then opens the editor.
     emitAppEvent("scriptable-objects:edit-script", {
       objectType: "namedRange",
-      instanceId: selectedName,
-      objectName: selectedName,
+      instanceId: nr.name,
+      objectName: nr.name,
     });
     onClose();
-  }, [selectedName, onClose]);
+  }, [selectedName, names, onClose]);
 
   const toggleFolder = useCallback((folderName: string) => {
     setCollapsedFolders((prev) => {
@@ -474,7 +488,7 @@ export function NameManagerDialog(
 
   const handleDrop = useCallback(
     async (nrName: string, target: DropTargetType) => {
-      const nr = names.find((n) => n.name === nrName);
+      const nr = names.find((n) => rowKeyOf(n) === nrName);
       if (!nr) return;
 
       const newFolder =
@@ -514,7 +528,7 @@ export function NameManagerDialog(
           y <= rect.bottom
         ) {
           // Don't allow dropping on the folder the item is already in
-          const nr = names.find((n) => n.name === dragStart?.name);
+          const nr = names.find((n) => rowKeyOf(n) === dragStart?.name);
           if (nr?.folder === folderName) return null;
           return { type: "folder", folder: folderName };
         }
@@ -543,7 +557,7 @@ export function NameManagerDialog(
           y >= rect.top &&
           y <= rect.bottom
         ) {
-          const nr = names.find((n) => n.name === dragStart?.name);
+          const nr = names.find((n) => rowKeyOf(n) === dragStart?.name);
           if (nr?.folder) {
             return { type: "root" };
           }
@@ -648,25 +662,25 @@ export function NameManagerDialog(
   );
 
   const draggedNr = dragStart
-    ? names.find((n) => n.name === dragStart.name)
+    ? names.find((n) => rowKeyOf(n) === dragStart.name)
     : null;
   const showRootDropZone = isDragging && draggedNr?.folder;
 
   const renderRow = (nr: NamedRange, inFolder: boolean) => {
-    const isSelected = nr.name === selectedName;
-    const isBeingDragged = isDragging && dragStart?.name === nr.name;
+    const isSelected = rowKeyOf(nr) === selectedName;
+    const isBeingDragged = isDragging && dragStart?.name === rowKeyOf(nr);
     const isFn = isCustomFunction(nr);
     return (
       <tr
-        key={nr.name}
+        key={rowKeyOf(nr)}
         style={{
           ...styles.row,
           ...(isSelected ? styles.rowSelected : {}),
           ...(isBeingDragged ? { opacity: 0.4 } : {}),
         }}
-        onMouseDown={(e) => handleRowMouseDown(e, nr.name)}
+        onMouseDown={(e) => handleRowMouseDown(e, rowKeyOf(nr))}
         onClick={() => {
-          if (!isDragging) setSelectedName(nr.name);
+          if (!isDragging) setSelectedName(rowKeyOf(nr));
         }}
         onDoubleClick={() => openEditDialog(nr)}
       >

@@ -1479,11 +1479,14 @@ SCRIPT"), and in Rust by `a_run_without_a_persons_door_is_recorded_as_restricted
 **On the trail.** The host records each formatting call the run made
 (`executeAccountingGrantedRun` -> `noteGrantedRunFormat`, host.ts): the sheet
 resolved before it ran, and the rectangles it reached (a size reaches its whole
-line). The ONE report carries them per sheet (`formats`: changes and bounds),
+line). The ONE report carries them per sheet (`formats`: calls and bounds),
 and Rust writes one always-on `ScriptExecuted` row per formatted sheet --
-"changed the formatting of Sheet1!C:D (3 formatting changes)", `formatting:
-true`, `formatChanges`, the grant's application, macro, door and button
-(`explicit_run_audit.rs`). A rollback's account of other people's changes
+"made formatting calls on Sheet1!C:D (3 formatting calls)", `formatting:
+true`, `formatCalls`, the grant's application, macro, door and button
+(`explicit_run_audit.rs`). The row counts CALLS and says where they reached,
+never that they changed anything: a call that set what the cells already had
+is still a call the run made, and the formatting doors do not say what they
+changed (BUG-0770). A rollback's account of other people's changes
 counts a cell the run formatted as the run's own (`formattedByRun`).
 
 **Undone whole.** Every formatting command a granted run reaches joins the

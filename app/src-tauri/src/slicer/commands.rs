@@ -723,6 +723,18 @@ pub(crate) fn update_slicer_core(
         }
     }
 
+    // ONLY THE CONTAINER FIELDS A SLICER PAINTS (BUG-0773), decided against
+    // the record this write replaces, under the same hold of the store.
+    let container = match &params.container {
+        Some(Some(c)) => Some(Some(visual_format::check_family_container_write(
+            visual_format::FAMILY_SLICER,
+            c,
+            before.container.as_ref(),
+        )?)),
+        Some(None) => Some(None),
+        None => None,
+    };
+
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let updated = {
         let mut slicers = pending.authorize(&effect);
@@ -787,7 +799,7 @@ pub(crate) fn update_slicer_core(
         if let Some(filter_level) = params.filter_level {
             slicer.filter_level = filter_level;
         }
-        if let Some(container) = params.container {
+        if let Some(container) = container {
             // An empty container is no container (no key on save).
             slicer.container = container.filter(|c| !c.is_empty());
         }
@@ -1697,7 +1709,19 @@ pub(crate) async fn available_under_visual_constraints(
 /// selections of OTHER visuals on the page that reach this MODEL slicer, as
 /// `@api/reportFilters` resolved them. They narrow its has-data shading only
 /// (never its selection); a non-model slicer ignores them.
+///
+/// `for_table` (BUG-0732, optional on the wire): the members of the slicer's
+/// column as the CONNECTED table `for_table` holds them -- one item per
+/// distinct (key, display text) pair of that table's cells, app locale and
+/// each cell's own number format -- for the Report Connections save, which
+/// writes a newly connected table's AutoFilter by the texts ITS cells show
+/// (the click does this in the backend, `table_display_texts_for_keys`).
+/// The save used the slicer's own items, so a table that is not the slicer's
+/// source was filtered by another table's texts, and a key that table did not
+/// list by its raw invariant spelling ("1234.5" for a cell showing
+/// "1 234,5"). Every item is `selected: false, has_data: true`.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn get_slicer_items(
     state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
@@ -1706,7 +1730,21 @@ pub async fn get_slicer_items(
     bi_state: State<'_, crate::bi::types::BiState>,
     slicer_id: identity::EntityId,
     visual_constraints: Option<crate::api_types::SlicerVisualConstraints>,
+    for_table: Option<identity::EntityId>,
 ) -> Result<Vec<SlicerItem>, String> {
+    if let Some(table_id) = for_table {
+        let field_name = slicer_state
+            .slicers
+            .read()
+            .map_err(|e| e.to_string())?
+            .get(&slicer_id)
+            .map(|s| s.field_name.clone())
+            .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+        return Ok(table_column_display_members(&state, table_id, &field_name)?
+            .into_iter()
+            .map(|m| SlicerItem { key: m.key, label: m.label, selected: false, has_data: true })
+            .collect());
+    }
     get_slicer_items_core(
         &state,
         &pivot_state,
@@ -2196,6 +2234,52 @@ pub(crate) fn table_display_texts_for_keys(
         let text = format_cell_value(&cell.value, style, &locale);
         if !out.contains(&text) {
             out.push(text);
+        }
+    }
+    Ok(out)
+}
+
+/// Every distinct (member KEY, display text) pair of table `table_id`'s
+/// column `field_name`, in row order (BUG-0732): what a Report Connections
+/// save writes a connected table's AutoFilter with -- the same texts
+/// [`table_display_texts_for_keys`] gives the click. Blank cells are not
+/// listed.
+///
+/// LOCKS: `grids`, `style_registry`, `tables`, `locale` -- the order
+/// [`get_table_column_values`] takes -- all released on return.
+pub(crate) fn table_column_display_members(
+    state: &AppState,
+    table_id: identity::EntityId,
+    field_name: &str,
+) -> Result<Vec<MemberRef>, String> {
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
+    let style_registry = state.style_registry.read().map_err(|e| e.to_string())?;
+    let tables = state.tables.read().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
+    let table = tables
+        .values()
+        .flat_map(|sheet_tables| sheet_tables.values())
+        .find(|t| t.id == table_id)
+        .ok_or_else(|| "its table is no longer in the workbook".to_string())?;
+    let col_offset = table
+        .columns
+        .iter()
+        .position(|c| c.name == field_name)
+        .ok_or_else(|| format!("the table has no column \"{field_name}\""))?;
+    let abs_col = table.start_col + col_offset as u32;
+    let data_start_row = if table.style_options.header_row { table.start_row + 1 } else { table.start_row };
+    let grid = grids.get(table.sheet_index).ok_or_else(|| "Invalid sheet index".to_string())?;
+    let mut out: Vec<MemberRef> = Vec::new();
+    for row in data_start_row..=table.end_row {
+        let Some(cell) = grid.cells.get(&(row, abs_col)) else { continue };
+        let key = table_member_key(&cell.value);
+        if key.is_empty() {
+            continue;
+        }
+        let style = style_registry.get(grid.effective_style_index(row, abs_col));
+        let label = format_cell_value(&cell.value, style, &locale);
+        if !out.iter().any(|m| m.key == key && m.label == label) {
+            out.push(MemberRef { key, label });
         }
     }
     Ok(out)

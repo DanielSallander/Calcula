@@ -25,6 +25,9 @@ mod blank_member_tests;
 #[cfg(test)]
 mod member_tests;
 
+#[cfg(test)]
+mod rls_blank_strict_tests;
+
 pub use commands::*;
 pub use types::{BiState, ConnectionId};
 pub use engine_registry::EngineRegistry;

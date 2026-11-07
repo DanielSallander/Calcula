@@ -306,6 +306,27 @@ pub(crate) fn scenario_show_impl(
         return ScenarioShowResult { updated_cells, error: Some(e) };
     }
 
+    // THE LIVE DATA TABLES FOLLOW THE SCENARIO (BUG-0755). Excel [LIVE, Excel
+    // 16 over COM, 2026-11-06, dtable/probe4.ps1, `B1 = A1*2+C1`, table K1:L4
+    // over `L1 = B1` with column input A1]: under automatic calculation
+    // showing a scenario that sets C1 = 100 turned L2 from 10 into 110,
+    // xlDone; under manual calculation it left the body for F9, xlPending. The
+    // run holds the what-if single-flight, so the scenario's own writes never
+    // refreshed a table (their recalculations are what-if writes) and the body
+    // kept the old scenario's numbers; it is refreshed here, under the run's
+    // own single-flight, once the scenario's cells are in.
+    if crate::calculation::data_tables_recalculate_automatically(state) {
+        crate::data_tables::refresh_live_tables_held(
+            state,
+            states,
+            &_run,
+            crate::data_tables::TableScope::Workbook,
+            &mut updated_cells,
+        );
+    } else {
+        crate::data_tables::note_tables_left_for_f9(state);
+    }
+
     ScenarioShowResult {
         updated_cells,
         error: None,

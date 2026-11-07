@@ -244,7 +244,7 @@ export function ChartRangeDataTab({ ctx, chartId, getChart, onEditInDialog }: Ch
         ref = binding.ref;
         data = replacementRangeRef(binding.ref);
       } else if (looksLikeDefinedName(text)) {
-        const answer = await resolveRangeName(text, sheets);
+        const answer = await resolveRangeName(text, sheets, bindingContext.currentSheetIndex);
         if (answer.ref === null) {
           setCommitError(answer.error);
           return;

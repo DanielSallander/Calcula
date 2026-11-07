@@ -1073,7 +1073,8 @@ fn every_command_that_cannot_carry_an_array_refuses_one() {
     const SEARCH_RS: &str = include_str!("search.rs");
 
     for (source, command) in [
-        (DATA_RS, "sort_range"),
+        // The `sort_range` command's body (callable from Reapply, BUG-0740).
+        (DATA_RS, "sort_range_core"),
         // P3 S4: the off-sheet body is the `_at` twin (the public name is a
         // wrapper); fill and merge on a floating grid ask too.
         (DATA_RS, "sort_range_off_sheet_at"),
@@ -1085,7 +1086,9 @@ fn every_command_that_cannot_carry_an_array_refuses_one() {
     ] {
         let body = body_of(source, command);
         assert!(
-            body.contains("check_no_array_within("),
+            // A fill asks the same two halves through `check_fill_target`,
+            // which judges a live data table as a write (BUG-0756).
+            body.contains("check_no_array_within(") || body.contains("check_fill_target("),
             "`{}` permutes, overwrites or deletes a whole rectangle without \
              asking whether it holds part of a dynamic array. Both halves of \
              that question matter: the spilled-CELL check alone is blind to a \
@@ -1285,7 +1288,9 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("ai/preview_eval.rs", "build_grid", "IS NOT A DOCUMENT WRITE: fills a `Grid::new()` built inside the function for the script preview's formula evaluator. It never reaches AppState and has no spill map to orphan."),
         ("ai/preview_eval.rs", "evaluate_preview", "IS NOT A DOCUMENT WRITE: iterates formulas to a fixed point over that same detached grid. It cannot orphan a spill because it REFUSES to store one — a dynamic-array result is counted in `spilled` and the caller rejects the whole batch rather than fabricating half a spill."),
         ("insights/report.rs", "paint", "WRITES ONLY LITERALS, INTO A GRID ITS CALLER JUST CREATED. `insights_create_report_sheet` builds a fresh `Grid::new()` for a brand-new sheet whose name was proved free first, and every cell painted is text or a number — `ReportCell` has no formula variant at all, which is what makes this exemption structural rather than a promise. A grid with no formulas has no spill origin to orphan, and a sheet that did not exist a moment ago has no spill map."),
-        ("data_tables.rs", "whole_table_moves", "IS NOT A WRITE: reads the grids and RETURNS which move claims carry a whole data table. The marker cells are written by update_cells_batch_core's own write path, which maintains the spill map for every cell it writes; a data-table body is never a spill origin."),
+        ("data_tables.rs", "claim_version_tables", "IS NOT A WRITE: reads the grids a .calp merge lays and records, in a thread-local set, which cells hold a TABLE(..) marker (BUG-0757). The markers are written by update_cells_batch_core and the script pipeline's own install, which maintain the spill map; a data-table body is never a spill origin."),
+        ("data_tables.rs", "whole_table_moves","IS NOT A WRITE: reads the grids and RETURNS which move claims carry a whole data table. The marker cells are written by update_cells_batch_core's own write path, which maintains the spill map for every cell it writes; a data-table body is never a spill origin."),
+        ("data_validation.rs", "validate_pending_value_on", "IS NOT A DOCUMENT WRITE: judges an entry BEFORE it is stored. It writes the pending value, and the values of the cells that read it, into private CLONES of the active sheet and of the other sheets holding a reader (`scratch_grid`, `reader_scratch_grid`), which a custom rule's formula reads and which are dropped when the check returns. Nothing reaches AppState (`a_pending_check_leaves_the_document_untouched` in cfdvfix_tests.rs), and the clones have no spill map to orphan."),
         // -- It IS the spill machinery, or an inner step of it ---------------
         ("commands/data.rs", "erase_released_spill_cells", "IS the tear-down's grid half: it erases exactly the cells take_spills_* released"),
         // §3bm REMOVED SIX ENTRIES FROM THIS LIST, and that is the point of the
@@ -1473,7 +1478,8 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("commands/data.rs", "clear_rect_on_background_sheet"),
         // The `clear_cell` command delegates to this body (testability split).
         ("commands/data.rs", "clear_cell_core"),
-        ("commands/data.rs", "sort_range"),
+        // The `sort_range` command's body (callable from Reapply, BUG-0740).
+        ("commands/data.rs", "sort_range_core"),
         ("commands/data.rs", "fill_range_core"),
         ("commands/data.rs", "remove_duplicates"),
         // The command's writing body (testability split — the `update_cell_on_sheets`
@@ -1916,6 +1922,9 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
         "shift_flat_cell_stores(",
         "release_spills_orphaned_by_grid(",
         "check_no_array_within(",
+        // The fill's form of the line above (BUG-0756): the same two spill
+        // halves, a live data table judged as a write.
+        "check_fill_target(",
         "check_spill_protection_cells(",
         // §3bm: see the note in WRITES.
         "apply_spill_decision(",

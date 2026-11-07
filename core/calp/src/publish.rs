@@ -1113,14 +1113,21 @@ pub fn published_object_bindings(
 /// checkout and refresh (`refuse_invalid_pulled_names` in the app) ask, so a
 /// package can carry nothing the subscriber's own UI would refuse:
 ///
-/// - a defined name or a table name that is not a valid name
-///   (`identity::is_valid_defined_name`, Excel's rule measured live: `R1C1`,
-///   `C`, `Q1`, `TRUE`, a space...). The app's Name Manager and table commands
+/// - a defined name that is not a valid name (`identity::is_valid_defined_name`),
+///   or a table name that is not a valid TABLE name (`identity::is_valid_table_name`:
+///   the same rule, except that a table may be called `\a` [LIVE, Excel 16,
+///   2026-11-06, lane names q4.ps1]) -- Excel's rule measured live: `R1C1`,
+///   `C`, `Q1`, `TRUE`, a space... The app's Name Manager and table commands
 ///   refuse those, and an `.xlsx` export carrying one is a file Excel refuses
 ///   to open;
-/// - a table and a defined name with one name, or two tables with one name:
-///   names and tables share one formula namespace (`identity::defined_name_key`,
-///   any scope), and the app refuses both directions.
+/// - a table and a WORKBOOK-scoped defined name with one name, or two tables
+///   with one name: a table shares the workbook's formula namespace
+///   (`identity::defined_name_key`), and the app refuses both directions. A
+///   SHEET-scoped name may share a table's spelling -- Excel names a table
+///   like an existing sheet-scoped name [LIVE, q4.ps1], and the app's table
+///   door (`tables::name_collides_with_defined_name`) allows it -- so a
+///   workbook Calcula lets you build is never one it refuses to publish or
+///   pull.
 ///
 /// Two DEFINED names with one name are not judged here: a sheet-scoped name
 /// and a workbook-scoped one may legitimately share it, as in Excel.
@@ -1131,33 +1138,33 @@ pub fn published_name_problem<'a>(
     for nr in named_ranges {
         if !identity::is_valid_defined_name(&nr.name) {
             return Some(format!(
-                "the defined name '{}' is not a valid name -- a name cannot read as a cell or \
-                 R1C1 reference or as TRUE/FALSE, must start with a letter or an underscore, \
-                 and holds only letters, digits, underscores and periods.",
+                "the defined name '{}' is not a valid name -- a name must start with a letter, \
+                 an underscore or a backslash, cannot hold a space or a character that isn't \
+                 allowed, and cannot read as a cell reference or as TRUE/FALSE.",
                 nr.name
             ));
         }
     }
     let name_keys: std::collections::HashMap<String, &str> = named_ranges
         .iter()
+        .filter(|nr| nr.sheet_id.is_none())
         .map(|nr| (identity::defined_name_key(&nr.name), nr.name.as_str()))
         .collect();
     let mut table_keys: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
     for table in table_names {
-        if !identity::is_valid_defined_name(table) {
+        if !identity::is_valid_table_name(table) {
             return Some(format!(
-                "the table name '{}' is not a valid name -- a table name follows the rule for \
-                 defined names: it cannot read as a cell or R1C1 reference or as TRUE/FALSE, \
-                 must start with a letter or an underscore, and holds only letters, digits, \
-                 underscores and periods.",
+                "the table name '{}' is not a valid name -- a table name must start with a \
+                 letter, an underscore or a backslash, cannot hold a space or a character that \
+                 isn't allowed, and cannot read as a cell reference or as TRUE/FALSE.",
                 table
             ));
         }
         let key = identity::defined_name_key(table);
         if let Some(name) = name_keys.get(&key) {
             return Some(format!(
-                "the table '{}' and the defined name '{}' have the same name -- names and tables \
-                 share one namespace, so a formula naming it could mean either.",
+                "the table '{}' and the workbook-scoped defined name '{}' have the same name -- a \
+                 table shares the workbook's names, so a formula naming it could mean either.",
                 table, name
             ));
         }
@@ -1166,6 +1173,78 @@ pub fn published_name_problem<'a>(
         }
     }
     None
+}
+
+/// ONE WRITEBACK ID, ONE APPLICATION, on the publish side (BUG-0734, owner
+/// decision 2026-11-06): refuse a push of `package_name` that declares a
+/// writeback region id or a model writeback column id which ANOTHER
+/// application in `registry` declares in any of its versions, while
+/// `package_name`'s own history does not.
+///
+/// Both kinds of id are the `region_id` a submission is routed and filed by,
+/// so they share one namespace: a region id another application declares as a
+/// model column is taken too.
+///
+/// FAIL CLOSED. Any application -- the pushed one included -- whose version
+/// list or one of whose version manifests cannot be read refuses the push
+/// (`WritebackIdsUnchecked`): an unread manifest is not one that declares
+/// nothing. The pushed application's own history is empty only when it does
+/// not exist yet.
+///
+/// `pub` because the host asks the same question before it assembles a push
+/// (and in its push preview); core publish asks it again under the workspace
+/// lock, which is the answer that counts.
+pub fn refuse_writeback_ids_another_application_declares(
+    registry: &dyn WorkspaceTransport,
+    package_name: &str,
+    regions: &[crate::writeback::WritebackRegionDeclaration],
+    model_writebacks: &[crate::writeback::ModelWritebackDeclaration],
+) -> Result<(), CalpError> {
+    let wanted: Vec<(&str, &str)> = regions
+        .iter()
+        .map(|r| (r.id.as_str(), "region"))
+        .chain(model_writebacks.iter().map(|m| (m.id.as_str(), "model column")))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let unchecked = |reason: String| CalpError::WritebackIdsUnchecked { package: package_name.to_string(), reason };
+    let declared_by = |application: &str, missing_is_empty: bool| -> Result<std::collections::BTreeSet<String>, CalpError> {
+        let versions = match registry.list_versions(application) {
+            Ok(v) => v,
+            Err(CalpError::ApplicationNotFound(_)) if missing_is_empty => return Ok(Default::default()),
+            Err(e) => return Err(unchecked(format!("the versions of '{application}' could not be read: {e}"))),
+        };
+        let mut ids = std::collections::BTreeSet::new();
+        for version in versions {
+            let manifest = registry
+                .get_version_manifest(application, &version.to_string())
+                .map_err(|e| unchecked(format!("version {version} of '{application}' could not be read: {e}")))?;
+            ids.extend(manifest.writeback_regions.unwrap_or_default().into_iter().map(|r| r.id));
+            ids.extend(manifest.model_writebacks.unwrap_or_default().into_iter().map(|m| m.id));
+        }
+        Ok(ids)
+    };
+    let own = declared_by(package_name, true)?;
+    let wanted: Vec<(&str, &str)> = wanted.into_iter().filter(|(id, _)| !own.contains(*id)).collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let applications = registry
+        .list_applications()
+        .map_err(|e| unchecked(format!("the workspace's applications could not be listed: {e}")))?;
+    for application in applications.iter().filter(|a| a.as_str() != package_name) {
+        let theirs = declared_by(application, false)?;
+        if let Some((id, what)) = wanted.iter().find(|(id, _)| theirs.contains(*id)) {
+            return Err(CalpError::WritebackIdTaken {
+                what: what.to_string(),
+                id: id.to_string(),
+                application: application.clone(),
+                package: package_name.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Publish selected sheets from a workbook to a local workspace.
@@ -1453,6 +1532,20 @@ pub fn publish(
         }
         _ => {}
     }
+
+    // Gate 1b -- one writeback id, one application (BUG-0734, owner decision
+    // 2026-11-06). Asked HERE, under the lock, so two first publishes of two
+    // copies of one workbook cannot both pass a check made before either
+    // landed; and an application whose versions cannot be read refuses rather
+    // than counting as one that declares nothing. The host asks the same
+    // question earlier for a friendlier, earlier answer and for its preview;
+    // this one is the authority.
+    refuse_writeback_ids_another_application_declares(
+        registry,
+        pkg,
+        request.writeback_regions.as_deref().unwrap_or_default(),
+        request.model_writebacks.as_deref().unwrap_or_default(),
+    )?;
 
     if let (PushMode::Update { expected_base }, Some(pkg_manifest)) =
         (&request.mode, &existing_manifest)
@@ -2283,6 +2376,41 @@ mod tests {
     use persistence::Sheet;
     use engine::cell::Cell;
     use crate::workspace::LocalWorkspace;
+
+    /// The publish/pull name gate judges a TABLE by Excel's table rule and
+    /// keeps a table off WORKBOOK names only (lane namescalp, wave 3).
+    /// [LIVE, Excel 16, 2026-11-06, lane names q4.ps1] `ListObject.Name`
+    /// takes `\a` (a defined name may not be `\a`), and a table may be named
+    /// like an existing sheet-scoped name -- as Calcula's own table door
+    /// allows. The gate refused both, so a workbook Calcula lets you build
+    /// could be neither published nor pulled (CALP_INVALID_NAME).
+    ///
+    /// SABOTAGE (namescalp-gate): drop the `sheet_id.is_none()` filter --
+    /// fails at "A SHEET-SCOPED NAME".
+    #[test]
+    fn the_name_gate_takes_excels_table_rule_and_only_workbook_names() {
+        let name = |text: &str, sheet: Option<SheetId>| PublishedNamedRange {
+            name: text.to_string(),
+            refers_to: "=1".to_string(),
+            sheet_id: sheet,
+            extra: std::collections::HashMap::new(),
+        };
+        let sheet = SheetId::from_bytes([7; 16]);
+        let scoped = [name("Foo", Some(sheet))];
+        assert_eq!(
+            published_name_problem(&scoped, ["Foo"].into_iter()),
+            None,
+            "A SHEET-SCOPED NAME may share a table's spelling"
+        );
+        let workbook = [name("Foo", None)];
+        let clash = published_name_problem(&workbook, ["foo"].into_iter()).expect("a workbook name clashes");
+        assert!(clash.contains("'foo'") && clash.contains("workbook-scoped defined name 'Foo'"), "{clash}");
+        assert_eq!(published_name_problem(&[], [r"\a"].into_iter()), None, r"a table may be called \a");
+        let bad = published_name_problem(&[name(r"\a", None)], std::iter::empty()).expect(r"a name may not");
+        assert!(bad.contains("start with a letter, an underscore or a backslash"), "{bad}");
+        let bad_table = published_name_problem(&[], ["1x"].into_iter()).expect("an invalid table name");
+        assert!(bad_table.contains("the table name '1x' is not a valid name"), "{bad_table}");
+    }
 
     fn make_test_workbook() -> Workbook {
         let mut sheet1 = Sheet::new("Dashboard".to_string());
@@ -4070,5 +4198,88 @@ mod tests {
         wb.charts = vec![home];
         assert!(carries_wave_content(&object_request(&wb, "a", vec![0])), "a written binding stamps");
         assert!(!carries_wave_content(&object_request(&wb, "b", vec![1])), "a binding that stays home does not");
+    }
+
+    fn rk3_region(sheet: identity::SheetId, id: &str) -> crate::writeback::WritebackRegionDeclaration {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "selector": { "sheetId": sheet.to_string(), "rowStart": 0, "rowEnd": 1, "colStart": 0, "colEnd": 0 },
+            "mode": "per_subscriber",
+            "schema": { "valueType": "number", "required": false },
+            "visibility": "own_plus_aggregate",
+            "submissionPolicy": "on_submit"
+        }))
+        .expect("a region declaration")
+    }
+
+    fn rk3_model_column(id: &str) -> crate::writeback::ModelWritebackDeclaration {
+        crate::writeback::ModelWritebackDeclaration {
+            id: id.to_string(),
+            data_source_id: "ds".to_string(),
+            table: "Sales".to_string(),
+            column: "Forecast".to_string(),
+            key_columns: vec!["Id".to_string()],
+            kind: "history".to_string(),
+            schema: None,
+            allowed_editors: Vec::new(),
+            submission_policy: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// ONE WRITEBACK ID, ONE APPLICATION, UNDER THE LOCK (BUG-0734): core
+    /// publish itself refuses a NEW application declaring a region id -- or a
+    /// model writeback column id, which is routed the same way -- that another
+    /// application in the workspace declares, while that application may push
+    /// it again; and an application whose version cannot be read refuses the
+    /// push instead of counting as one that declares nothing.
+    ///
+    /// SABOTAGE (rk3-core): make `refuse_writeback_ids_another_application_declares`
+    /// return `Ok(())` at its top -- "CORE PUBLISH REFUSES" fails.
+    #[test]
+    fn core_publish_refuses_a_writeback_id_another_application_declares() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let wb = make_test_workbook();
+        let sheet = wb.sheets[0].id;
+        let region = "01a15d70-0000-7000-8000-00000000e001";
+        let column = "01a15d70-0000-7000-8000-00000000e002";
+        let mut first = object_request(&wb, "owner", vec![0]);
+        first.writeback_regions = Some(vec![rk3_region(sheet, region)]);
+        first.model_writebacks = Some(vec![rk3_model_column(column)]);
+        publish(&reg, &first, prof.path()).expect("the first application publishes");
+
+        let mut copy = object_request(&wb, "copy", vec![0]);
+        copy.writeback_regions = Some(vec![rk3_region(sheet, region)]);
+        let refused = publish(&reg, &copy, prof.path()).expect_err("CORE PUBLISH REFUSES a region id 'owner' declares");
+        let text = refused.to_string();
+        assert!(matches!(refused, CalpError::WritebackIdTaken { .. }), "{text}");
+        assert!(text.starts_with("CALP_REGION_TAKEN:") && text.contains("'owner'") && text.contains(region), "{text}");
+        assert!(reg.get_application_manifest("copy").is_err(), "nothing of the copy was written");
+
+        let mut model_copy = object_request(&wb, "copy", vec![0]);
+        model_copy.model_writebacks = Some(vec![rk3_model_column(column)]);
+        let refused = publish(&reg, &model_copy, prof.path()).expect_err("a model column id is taken the same way");
+        assert!(refused.to_string().contains("model column") && refused.to_string().contains(column), "{refused}");
+
+        // The owner's own history keeps its ids.
+        let mut again = object_request(&wb, "owner", vec![0]);
+        again.mode = PushMode::Update { expected_base: SemVer::new(1, 0, 0) };
+        again.version = SemVer::new(1, 1, 0);
+        again.change_summary = "again".to_string();
+        again.writeback_regions = Some(vec![rk3_region(sheet, region)]);
+        publish(&reg, &again, prof.path()).expect("the application that declares the id may push it again");
+
+        // An unreadable version of another application refuses: fail closed.
+        let manifest_path = dir.path().join("owner").join("1.0.0").join("version-manifest.json");
+        assert!(manifest_path.exists(), "fixture: the owner's first version manifest");
+        fs::write(&manifest_path, b"{ not json").unwrap();
+        let mut fresh = object_request(&wb, "fresh", vec![0]);
+        fresh.writeback_regions = Some(vec![rk3_region(sheet, "01a15d70-0000-7000-8000-00000000e003")]);
+        let refused = publish(&reg, &fresh, prof.path()).expect_err("an unreadable manifest is never 'declares nothing'");
+        assert!(matches!(refused, CalpError::WritebackIdsUnchecked { .. }), "{refused}");
+        // A push that declares no writeback id asks nothing.
+        publish(&reg, &object_request(&wb, "plain", vec![0]), prof.path()).expect("no writeback ids, no question");
     }
 }

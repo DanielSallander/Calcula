@@ -269,6 +269,25 @@ fn a_bound_navigator_background_colour_shows_the_background() {
     assert_eq!(painted.get("containerBackgroundShow").map(String::as_str), Some("false"), "{painted:?}");
 }
 
+/// BUG-0772: a shape's, text box's and button's background TRANSPARENCY is a
+/// key their painters read (`containerBackgroundTransparency`), so a formula
+/// may follow it -- Rust evaluates the binding and the resolved properties the
+/// painter reads carry the bound value (the Format pane offers the bind since
+/// this fix; it offered none).
+#[test]
+fn a_shapes_background_transparency_binds_and_resolves() {
+    let wb = Wb::new();
+    let shape = wb.control(SHAPE, "shape-1", "shape", &[("fill", "#4472c4")]);
+    let button = wb.control(BUTTON, "button-1", "button", &[("text", "Go")]);
+    for (object, (s, r, c)) in [(shape, SHAPE), (button, BUTTON)] {
+        wb.send(json!({ "op": "set", "object": object, "path": "/properties/containerBackgroundTransparency", "formula": "=20+20", "invariant": true }))
+            .expect("a painted key binds");
+        assert!(wb.has_binding(&object, "/properties/containerBackgroundTransparency"));
+        let painted = crate::controls::resolve_control_properties_core(&wb.state, s, r, c);
+        assert_eq!(painted.get("containerBackgroundTransparency").map(String::as_str), Some("40"), "{painted:?}");
+    }
+}
+
 /// BUG-0491, the remainder: EVERY `container*` key a control's type does not
 /// paint (`visual_format::CONTROL_PAINTED_CONTAINER_FIELDS`, the list the
 /// Controls painters read) is refused at every write door -- the property

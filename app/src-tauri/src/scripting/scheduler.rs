@@ -967,6 +967,9 @@ pub fn script_scheduler(
     window: tauri::Window,
 ) -> Result<serde_json::Value, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &file_state);
     let now = now_ms();
 
     // Ops a SCRIPT can reach carry a script_id and re-check the grant. `list`,
@@ -985,7 +988,7 @@ pub fn script_scheduler(
                 request.op
             );
             record_capability_call(
-                &app_state.audit_log,
+                &audit,
                 SCHEDULE_CAPABILITY,
                 script_id,
                 false,
@@ -1032,7 +1035,7 @@ pub fn script_scheduler(
             match job {
                 Ok(j) => {
                     record_capability_call(
-                        &app_state.audit_log,
+                        &audit,
                         SCHEDULE_CAPABILITY,
                         &script_id,
                         true,
@@ -1043,7 +1046,7 @@ pub fn script_scheduler(
                 }
                 Err(e) => {
                     record_capability_call(
-                        &app_state.audit_log,
+                        &audit,
                         SCHEDULE_CAPABILITY,
                         &script_id,
                         false,
@@ -1083,7 +1086,7 @@ pub fn script_scheduler(
             // missing job, or another script's job, audited NOWHERE: the exact
             // shape of probing that an audit trail exists to show.
             record_capability_call(
-                &app_state.audit_log,
+                &audit,
                 SCHEDULE_CAPABILITY,
                 request.script_id.as_deref().unwrap_or(""),
                 removed,
@@ -1128,7 +1131,7 @@ pub fn script_scheduler(
                     // all script activity" is false the moment a user action
                     // that starts or stops automation leaves no entry.
                     record_capability_call(
-                        &app_state.audit_log,
+                        &audit,
                         SCHEDULE_CAPABILITY,
                         &script_id,
                         true,
@@ -1167,7 +1170,7 @@ pub fn script_scheduler(
                     handler
                 );
                 record_capability_call(
-                    &app_state.audit_log,
+                    &audit,
                     SCHEDULE_CAPABILITY,
                     script_id,
                     false,
@@ -1183,7 +1186,7 @@ pub fn script_scheduler(
                     handler
                 );
                 record_capability_call(
-                    &app_state.audit_log,
+                    &audit,
                     SCHEDULE_CAPABILITY,
                     script_id,
                     false,
@@ -1193,7 +1196,7 @@ pub fn script_scheduler(
             }
             for (script_id, handler) in &sweep.watchdogged {
                 record_capability_call(
-                    &app_state.audit_log,
+                    &audit,
                     SCHEDULE_CAPABILITY,
                     script_id,
                     false,
@@ -1203,7 +1206,7 @@ pub fn script_scheduler(
             }
             for job in &sweep.due {
                 record_capability_call(
-                    &app_state.audit_log,
+                    &audit,
                     SCHEDULE_CAPABILITY,
                     &job.script_id,
                     true,
@@ -1227,7 +1230,7 @@ pub fn script_scheduler(
                 Some(job) => {
                     if !ok {
                         record_capability_call(
-                            &app_state.audit_log,
+                            &audit,
                             SCHEDULE_CAPABILITY,
                             &job.script_id,
                             false,

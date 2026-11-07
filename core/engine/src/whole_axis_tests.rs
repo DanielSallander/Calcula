@@ -286,6 +286,13 @@ fn error_literals_match_the_lexers_table() {
             err.as_literal()
         );
     }
+    // THE ONE EXCEPTION, deliberately: `#CALC!` (BUG-0774). [LIVE, Excel 16,
+    // lane formula p1.json] Excel refuses `=#CALC!` and `=ISERROR(#CALC!)` and
+    // stores a typed `#CALC!` as text, and no formula Calcula writes holds one
+    // (the shifters write `#REF!` only), so a formula never needs to spell it.
+    assert!(!parser::lexer::ERROR_LITERALS.contains(&CellError::Calc.as_literal()));
+    assert!(parser::parse("=#CALC!").is_err());
+    assert_eq!(CellError::from_literal("#CALC!"), CellError::Calc);
 }
 
 #[test]

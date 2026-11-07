@@ -354,6 +354,23 @@ describe("refreshFilterState", () => {
     expect(isFilterActive()).toBe(false);
     expect(getAutoFilterInfo()).toBeNull();
   });
+
+  // misc6: a sheet with no AutoFilter but an Advanced Filter in place keeps
+  // its filtered-out rows hidden in the grid: the union `get_hidden_rows`
+  // answers is pushed, never an empty set (the backend still hides them).
+  it("keeps an advanced filter's hidden rows when there is no AutoFilter", async () => {
+    mockGetAutoFilter.mockResolvedValue(null);
+    mockGetHiddenRows.mockResolvedValue([3, 7]);
+
+    await refreshFilterState();
+
+    expect(mockSetHiddenRows).toHaveBeenLastCalledWith([3, 7]);
+    expect(mockDispatchGridAction).toHaveBeenLastCalledWith({ type: "SET_HIDDEN_ROWS", payload: [3, 7] });
+
+    mockGetHiddenRows.mockResolvedValue([]);
+    await refreshFilterState();
+    expect(mockSetHiddenRows).toHaveBeenLastCalledWith([]);
+  });
 });
 
 // ============================================================================

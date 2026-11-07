@@ -213,6 +213,7 @@ fn resolved(
         rules,
         cells,
         crate::eval_budget::EvalSurface::Interactive,
+        None,
     )
 }
 

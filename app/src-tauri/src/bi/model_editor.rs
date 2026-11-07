@@ -7910,14 +7910,14 @@ fn note_batch_edit(bi_state: &BiState, connection_id: ConnectionId, script_id: &
 /// Record one gateway call in the always-on capability audit trail (success
 /// AND failure), mirroring bi.query/bi.sql.
 fn audit_gateway(
-    app_state: &crate::AppState,
+    audit: &crate::machine_audit::WorkbookAudit<'_>,
     script_id: &str,
     detail: &str,
     result: &Result<serde_json::Value, String>,
 ) {
     match result {
         Ok(_) => crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            audit,
             "bi.model",
             script_id,
             true,
@@ -7925,7 +7925,7 @@ fn audit_gateway(
             None,
         ),
         Err(e) => crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            audit,
             "bi.model",
             script_id,
             false,
@@ -7966,6 +7966,11 @@ pub async fn script_bi_model(
 ) -> Result<serde_json::Value, String> {
     // Broker-routed calls run in the main window.
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The workbook every audit row of this call belongs to, fixed at entry
+    // (BUG-0735; `machine_audit::WorkbookAudit`).
+    // (A cheap handle of its own: `file_state` itself moves into the dispatch.)
+    let audit_file_state = file_state.clone();
+    let audit = crate::machine_audit::WorkbookAudit::at_entry(&app_state.audit_log, &audit_file_state);
 
     // Authoritative capability re-check (A3): the renderer may be compromised,
     // so the TS broker's gate is not sufficient.
@@ -7976,7 +7981,7 @@ pub async fn script_bi_model(
             script_id
         );
         crate::net_commands::record_capability_call(
-            &app_state.audit_log,
+            &audit,
             "bi.model",
             &script_id,
             false,
@@ -8000,7 +8005,7 @@ pub async fn script_bi_model(
         check_gateway_rate(&script_id, RATE_BUCKET_READ, BI_MODEL_READS_PER_MINUTE)?;
         let result = gateway_read(&bi_state, connection_id, &action, &p, &window);
         audit_gateway(
-            &app_state,
+            &audit,
             &script_id,
             &format!("{} — connection {}", action, connection_id),
             &result,
@@ -8013,7 +8018,7 @@ pub async fn script_bi_model(
         let result =
             gateway_batch(&bi_state, &file_state, connection_id, &script_id, &action).await;
         audit_gateway(
-            &app_state,
+            &audit,
             &script_id,
             &format!("{} — connection {}", action, connection_id),
             &result,
@@ -8405,7 +8410,7 @@ pub async fn script_bi_model(
         .await;
 
     audit_gateway(
-        &app_state,
+        &audit,
         &sid,
         &format!("{} {} — connection {}", audit_action, audit_kind, connection_id),
         &result,

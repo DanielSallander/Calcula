@@ -96,6 +96,7 @@ import {
   type CellTarget,
   type CellTargetRef,
 } from "@api/cellTarget";
+import { activeCellOf } from "@api/activeCell";
 import { addRuleReporting, clearRulesReporting } from "../lib/ruleWrites";
 import { colorScaleRule, dataBarRule, iconSetRule } from "../lib/presetRules";
 import type { PresetColorScale, NewRuleCategory, NewRuleFormatStyle } from "../types";
@@ -113,22 +114,21 @@ export const NEW_RULE_DIALOG_ID = "cf-new-rule-dialog";
 // ============================================================================
 
 // Module-level selection cache (updated by index.ts via onSelectionChange).
-// startRow/startCol is the ANCHOR and endRow/endCol the ACTIVE cell, as in
-// Core's Selection -- not yet normalised, so the active cell survives.
-let currentSelection: {
+// startRow/startCol is the ANCHOR and endRow/endCol the far corner, as in
+// Core's Selection -- not yet normalised -- with the grid's activeRow /
+// activeCol when it set them, so the ACTIVE cell survives (`@api/activeCell`).
+interface MenuSelection {
   startRow: number;
   startCol: number;
   endRow: number;
   endCol: number;
-} | null = null;
+  activeRow?: number;
+  activeCol?: number;
+}
+let currentSelection: MenuSelection | null = null;
 
 /** Update the cached selection (called from index.ts) */
-export function setMenuSelection(sel: {
-  startRow: number;
-  startCol: number;
-  endRow: number;
-  endCol: number;
-} | null): void {
+export function setMenuSelection(sel: MenuSelection | null): void {
   currentSelection = sel;
 }
 
@@ -142,10 +142,10 @@ function getSelectionRange(): ConditionalFormatRange | null {
   return { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol };
 }
 
-/** The active cell: what Excel's "This Table" / "This PivotTable" ask about. */
+/** The active cell: what Excel's "This Table" / "This PivotTable" ask about,
+ *  and the cell a New Rule entry is typed for (BUG-0748). */
 function activeCell(): { row: number; col: number } | null {
-  if (!currentSelection) return null;
-  return { row: currentSelection.endRow, col: currentSelection.endCol };
+  return activeCellOf(currentSelection);
 }
 
 /**
@@ -159,6 +159,9 @@ interface CFPlace {
   range: ConditionalFormatRange | null;
   /** The object's target; undefined for the active sheet. */
   target: CellTargetRef | undefined;
+  /** The ACTIVE cell of that selection: a New Rule entry is typed for it
+   *  (BUG-0748), in the same coordinates as `range`. */
+  activeCell: { row: number; col: number } | null;
 }
 
 function rangeOf(sel: { startRow: number; startCol: number; endRow: number; endCol: number }): ConditionalFormatRange {
@@ -171,8 +174,8 @@ function rangeOf(sel: { startRow: number; startCol: number; endRow: number; endC
 }
 
 function placeOf(t: CellTarget): CFPlace {
-  if (t.kind === "object") return { range: rangeOf(t.selection), target: t.ref };
-  return { range: getSelectionRange(), target: undefined };
+  if (t.kind === "object") return { range: rangeOf(t.selection), target: t.ref, activeCell: activeCellOf(t.selection) };
+  return { range: getSelectionRange(), target: undefined, activeCell: activeCell() };
 }
 
 /** Ask the door's question; null = refused (announced once). */
@@ -217,6 +220,7 @@ function showQuickDialog(ruleType: string): void {
   showDialog(QUICK_CF_DIALOG_ID, {
     ruleType,
     selection: place.range,
+    activeCell: place.activeCell,
     ...(place.target ? { target: place.target } : {}),
   });
 }
@@ -231,6 +235,7 @@ function showNewRuleDialog(start?: {
   if (!place) return;
   showDialog(NEW_RULE_DIALOG_ID, {
     selection: place.range,
+    activeCell: place.activeCell,
     ...(place.target ? { target: place.target } : {}),
     ...(start ?? {}),
   });
@@ -256,14 +261,19 @@ async function handleClearRulesFromSelection(): Promise<void> {
  */
 export function showRulesManager(): void {
   const t = cellTargetFor("conditionalFormat", "Manage Rules");
+  // The selection and its active cell go too: the Manager's New Rule... is
+  // for the selected cells, as Excel's is.
   if ("kind" in t && t.kind === "object") {
     showDialog(RULES_MANAGER_DIALOG_ID, {
       target: targetRefOf(t),
       scopeLabel: `This floating grid (${t.label})`,
+      objectName: t.label,
+      selection: rangeOf(t.selection),
+      activeCell: activeCellOf(t.selection),
     });
     return;
   }
-  showDialog(RULES_MANAGER_DIALOG_ID);
+  showDialog(RULES_MANAGER_DIALOG_ID, { selection: getSelectionRange(), activeCell: activeCell() });
 }
 
 /** Clear all rules from the entire sheet */

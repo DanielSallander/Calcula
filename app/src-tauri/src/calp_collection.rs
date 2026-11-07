@@ -1803,6 +1803,10 @@ pub(crate) fn set_collection_streams(
     file_state: &crate::persistence::FileState,
     choice: Option<CollectStreams>,
 ) -> Result<CollectionStreamsView, String> {
+    // The workbook this choice is made in (BUG-0735): the command is async and
+    // reads the workspace, so File > Open / New can replace the workbook
+    // before the choice is stored or audited.
+    let epoch = file_state.settled_document_epoch();
     let link = state
         .working_copy_link
         .read()
@@ -1855,8 +1859,14 @@ pub(crate) fn set_collection_streams(
         // between the read above and this write would otherwise receive a
         // choice made for another application.
         let pending = state.working_copy_link.lock_pending().map_err(|e| e.to_string())?;
+        // ...and so is the WORKBOOK (asked under the link's lock; an open
+        // moves the epoch before it resets the link): another working copy of
+        // the same application opened meanwhile must not receive it either.
         match pending.as_ref() {
-            Some(current) if current.package_name == link.package_name && current.registry_url == link.registry_url => {}
+            Some(current)
+                if current.package_name == link.package_name
+                    && current.registry_url == link.registry_url
+                    && !file_state.document_replaced_since(epoch) => {}
             _ => return Err("The workbook's application changed while Collect From was being saved. Try again.".to_string()),
         }
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
@@ -1874,17 +1884,15 @@ pub(crate) fn set_collection_streams(
         extra.insert("workspace".to_string(), serde_json::Value::String(link.registry_url.clone()));
         extra.insert("from".to_string(), serde_json::Value::String(before.clone()));
         extra.insert("to".to_string(), serde_json::Value::String(after.clone()));
-        if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(
-            crate::document_effect::CleanReason::AuditTrail,
-        )) {
-            audit.record_with_extra(
-                calp::audit::AuditEvent::CollectionStreamsChanged,
-                &format!("Collect From for '{}' changed from {} to {}", link.package_name, before, after),
-                &user,
-                &now,
-                extra,
-            );
-        }
+        // Into the trail of the workbook the choice was stored in -- or, when
+        // it was replaced after the store (BUG-0735), this computer's trail.
+        crate::machine_audit::WorkbookAudit::of_epoch(&state.audit_log, file_state, epoch).record(
+            calp::audit::AuditEvent::CollectionStreamsChanged,
+            &format!("Collect From for '{}' changed from {} to {}", link.package_name, before, after),
+            &user,
+            &now,
+            extra,
+        );
     }
     // The author's model tables follow the choice.
     crate::bi::writeback_source::invalidate_writeback_bi();

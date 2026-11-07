@@ -558,7 +558,10 @@ pub(crate) fn update_named_range_core(
 
     let existing = {
         let ranges = state.named_ranges.read().map_err(|e| e.to_string())?;
-        ranges.get(&crate::name_resolution::name_key(&name)).cloned().ok_or_else(|| {
+        // Excel's Names(name): the first sheet's own name of that spelling,
+        // else the workbook's (BUG-0744: the registry holds one name per
+        // scope; `names_item_key`, [LIVE] lane obj4 n1/n2).
+        crate::named_ranges::names_item_key(&ranges, &name).and_then(|k| ranges.get(&k).cloned()).ok_or_else(|| {
             format!("Named range '{}' does not exist. Use list_named_ranges to see the names.", name)
         })?
     };
@@ -579,7 +582,9 @@ pub(crate) fn update_named_range_core(
         // The name's object scripts are bound by its TEXT; the rename itself
         // re-points them, inside its one undo step
         // (`named_ranges::repoint_named_range_scripts`).
-        let renamed = crate::named_ranges::rename_named_range_core(
+        // The name FOUND, by its own scope: with no scope the command would
+        // take the workbook's of that spelling (`addressed_key`).
+        let renamed = crate::named_ranges::rename_named_range_scoped_core(
             state,
             file_state,
             user_files_state,
@@ -588,6 +593,7 @@ pub(crate) fn update_named_range_core(
             ribbon_filter_state,
             &existing.name,
             &target_name,
+            existing.sheet_index,
         );
         if !renamed.success {
             // Refused before anything moved: nothing to put back.
@@ -641,6 +647,16 @@ pub(crate) fn update_named_range_core(
 pub fn delete_named_range(handle: &AppHandle, name: &str) -> Result<String, String> {
     require_tier(handle, "delete_named_range")?;
 
+    // Excel's Names(name) (`names_item_key`): the first sheet's own, else the
+    // workbook's. Its SCOPE is passed, because the command's no-scope answer
+    // is the workbook's name of that spelling (`addressed_key`).
+    let scope = {
+        let app = handle.state::<AppState>();
+        let ranges = app.named_ranges.read().map_err(|e| e.to_string())?;
+        crate::named_ranges::names_item_key(&ranges, name)
+            .and_then(|k| ranges.get(&k).map(|nr| nr.sheet_index))
+            .ok_or_else(|| format!("Named range '{}' does not exist. Use list_named_ranges to see the names.", name))?
+    };
     let result = crate::named_ranges::delete_named_range(
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
@@ -649,6 +665,7 @@ pub fn delete_named_range(handle: &AppHandle, name: &str) -> Result<String, Stri
         handle.state::<crate::pane_control::PaneControlState>(),
         handle.state::<crate::ribbon_filter::RibbonFilterState>(),
         name.to_string(),
+        scope,
     );
     if !result.success {
         return Err(result.error.unwrap_or_else(|| {

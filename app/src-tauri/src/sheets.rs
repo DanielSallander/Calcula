@@ -417,6 +417,38 @@ pub(crate) fn ensure_unsubscribed_sheet(
     }
 }
 
+/// The `table_name_key`s of the tables on sheet `index` (read and released).
+pub(crate) fn deleted_sheet_table_keys(state: &AppState, index: usize) -> Vec<String> {
+    state
+        .tables
+        .read()
+        .map(|tables| {
+            tables
+                .get(&index)
+                .map(|t| t.values().map(|table| crate::tables::table_name_key(&table.name)).collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
+/// A formula repaired for the delete of sheet `deleted_name` (at `index`): a
+/// structured reference to one of the deleted sheet's tables (`table_keys`)
+/// reads `#REF!` (`tables::retire_deleted_sheet_table_refs`, BUG-0750), and
+/// then every sheet reference is repaired as `repair_3d_refs_on_delete_at`
+/// does it. The ONE rule the pre-flight, the cells and the defined names use.
+pub(crate) fn repair_on_sheet_delete(
+    formula: &str,
+    deleted_name: &str,
+    index: usize,
+    names_after: &[String],
+    table_keys: &[String],
+) -> Option<String> {
+    match crate::tables::retire_deleted_sheet_table_refs(formula, table_keys) {
+        Some(retired) => crate::repair_3d_refs_on_delete_at(&retired, deleted_name, index, names_after).or(Some(retired)),
+        None => crate::repair_3d_refs_on_delete_at(formula, deleted_name, index, names_after),
+    }
+}
+
 /// How many sheets would still be VISIBLE if `removing` were deleted.
 ///
 /// "At least one sheet" and "at least one VISIBLE sheet" are different tests,
@@ -649,8 +681,10 @@ fn remap_cell_keyed_map<V>(
 /// sheet), and no sheet operation had ever remapped it: after a delete or a
 /// move the dropdown listed -- and validated against -- whichever sheet
 /// inherited the index, with no error anywhere. A source whose sheet is gone
-/// (`remap` answers `None`) becomes an EMPTY list: every entry is refused, as
-/// Excel refuses one against a `#REF!` source -- never another sheet's cells.
+/// (`remap` answers `None`) keeps its rectangle marked `sheet_gone` (BUG-0750):
+/// Excel keeps the rule, shows the source as `=#REF!$A$1:$A$3`, keeps the
+/// dropdown and refuses every entry [LIVE, Excel 16, 2026-11-06,
+/// cfdvb/probe1.ps1 F1] -- never another sheet's cells.
 /// Returns whether anything changed. Also resolves a PULLED list source's
 /// application position to its local sheet (`calp_commands.rs`, W11).
 pub(crate) fn remap_list_sources(
@@ -661,15 +695,17 @@ pub(crate) fn remap_list_sources(
     let mut changed = false;
     for range in ranges.iter_mut() {
         let DataValidationRule::List(list) = &mut range.validation.rule else { continue };
-        let ListSource::Range { sheet_index: Some(old), .. } = &mut list.source else { continue };
-        match remap(*old) {
-            Some(new) if new == *old => {}
+        let ListSource::Range { sheet_index, sheet_gone, .. } = &mut list.source else { continue };
+        let Some(old) = *sheet_index else { continue };
+        match remap(old) {
+            Some(new) if new == old => {}
             Some(new) => {
-                *old = new;
+                *sheet_index = Some(new);
                 changed = true;
             }
             None => {
-                list.source = ListSource::Values(Vec::new());
+                *sheet_index = None;
+                *sheet_gone = true;
                 changed = true;
             }
         }
@@ -844,6 +880,8 @@ fn remap_sheet_keyed_stores(
                 None => false,
             },
         });
+        // A sheet name's registry key carries its scope (BUG-0744).
+        crate::named_ranges::rekey_registry(&mut names);
     }
 }
 
@@ -1352,10 +1390,10 @@ pub(crate) fn recalculate_3d_span_readers(
 /// sheet, so the worst case became visible rather than wrong; this makes the
 /// name follow its sheet instead, which is what the user asked for.
 ///
-/// `repair` returns `None` when the name can no longer be resolved (its sheet
-/// was deleted); the name's text is then set to `#REF!` so it reports the same
-/// error a cell would, rather than being deleted out from under formulas that
-/// still mention it.
+/// A name whose sheet was deleted keeps its definition with `#REF!` where the
+/// sheet was (`=#REF!$A$1:$A$10`), so it reports the same error a cell would,
+/// rather than being deleted out from under formulas that still mention it;
+/// `repair` returning `None` leaves the text as it was.
 #[cfg(test)]
 pub(crate) fn repair_named_ranges_for_test(
     state: &AppState,
@@ -1425,9 +1463,13 @@ fn repair_named_ranges(
 ) {
     let mut names = state.named_ranges.write(effect).unwrap();
     for nr in names.values_mut() {
-        match repair(&nr.refers_to) {
-            Some(repaired) => nr.refers_to = repaired,
-            None => nr.refers_to = "=#REF!".to_string(),
+        // `None` leaves the definition as it was. Both repairs answer every
+        // text (an unparseable one comes back unchanged), and a reference to
+        // a deleted sheet keeps its cell part behind `#REF!` as Excel writes
+        // it; the old `None => "=#REF!"` arm could only have thrown a
+        // definition away whole (BUG-0751).
+        if let Some(repaired) = repair(&nr.refers_to) {
+            nr.refers_to = repaired;
         }
     }
 }
@@ -1638,7 +1680,15 @@ fn delete_rule_references(
     deleted_index: usize,
     sheet_names_after: &[String],
 ) {
-    let gone = calp::sheet_renames::SheetRenames::default().with_gone([deleted_name]);
+    // The tabs as they stood before the delete: an override's upstream 3-D
+    // span with the deleted sheet as an endpoint moves inward over them, the
+    // rule the refresh's own rewrite applies over the payload's order
+    // (BUG-0751), so the two write one text.
+    let mut tabs_before: Vec<String> = sheet_names_after.to_vec();
+    tabs_before.insert(deleted_index.min(tabs_before.len()), deleted_name.to_string());
+    let gone = calp::sheet_renames::SheetRenames::default()
+        .with_gone([deleted_name])
+        .with_span_order(tabs_before.iter());
     if gone.is_empty() {
         return;
     }
@@ -3689,8 +3739,11 @@ pub(crate) fn delete_sheet_impl(
                 .filter(|(i, _)| *i != index)
                 .map(|(_, n)| n.clone())
                 .collect();
+            // The deleted sheet's TABLES: a structured reference naming one
+            // reads `#REF!`, as Excel writes it (BUG-0750).
+            let deleted_table_keys = deleted_sheet_table_keys(state, index);
             let repair = |formula: &str| {
-                crate::repair_3d_refs_on_delete_at(formula, &deleted_name, index, &names_after)
+                repair_on_sheet_delete(formula, &deleted_name, index, &names_after, &deleted_table_keys)
             };
             if let Err(refusal) =
                 check_workbook_repairable(&grids, &current_grid, active, Some(index), &repair)
@@ -3758,9 +3811,13 @@ pub(crate) fn delete_sheet_impl(
     // The ids are KEPT (§3bn): slicers on OTHER sheets can be bound to a table
     // that lived here, and a table removed as a side effect of a sheet delete
     // orphans them exactly as `delete_table` did.
+    // Their names, for the repair below: a structured reference naming one
+    // reads `#REF!` (BUG-0750, `repair_on_sheet_delete`).
+    let mut removed_table_keys: Vec<String> = Vec::new();
     if let Some(sheet_tables) = tables.remove(&index) {
         for table in sheet_tables.values() {
             table_names.remove(&crate::tables::table_name_key(&table.name));
+            removed_table_keys.push(crate::tables::table_name_key(&table.name));
             removed_sources.push(crate::object_deps::DeletedSource::table(table.id));
         }
     }
@@ -3908,6 +3965,30 @@ pub(crate) fn delete_sheet_impl(
             }
         },
     );
+    // A CHART ON A SURVIVING SHEET THAT READS THE DELETED ONE (BUG-0750). A
+    // string source ("S2!A1:A3") is bound by NAME, so it was left as it was
+    // and a sheet later named S2 -- a new one, an unrelated one -- would have
+    // been charted in its place. Excel keeps the series and its reference
+    // reads `#REF!` from then on, for good [LIVE, Excel 16, 2026-11-06,
+    // backmisc/probe1.ps1: a chart on S1 with =SERIES('S2'!$B$1,,'S2'!$A$1:$A$3,1),
+    // S2 deleted -> the series stays, its saved values ref is `#REF!`, its name
+    // falls back to Series1; the S1 series is untouched]. The same rule a pull
+    // applies to a gone sheet (`SheetRenames::with_gone`). A coordinate source
+    // already follows the sheet by id or, without one, was given an id no sheet
+    // has (`remap_chart_index_ranges` above), so it never rebinds either.
+    {
+        let gone = calp::sheet_renames::SheetRenames::new(std::iter::empty::<(&str, &str)>())
+            .with_gone([deleted_name.as_str()]);
+        let mut charts = state.charts.write(&effect).unwrap();
+        for chart in charts.iter_mut() {
+            let Ok(mut spec) = serde_json::from_str::<serde_json::Value>(&chart.spec_json) else { continue };
+            if calp::chart_refs::rename_chart_spec_sheet_names(&mut spec, &gone) {
+                if let Ok(text) = serde_json::to_string(&spec) {
+                    chart.spec_json = text;
+                }
+            }
+        }
+    }
     if !sheet_cascade.is_empty() {
         crate::log_info!(
             "SHEET",
@@ -3992,7 +4073,7 @@ pub(crate) fn delete_sheet_impl(
     // NOTHING (it is all-or-nothing), so no formula has been corrupted — the
     // workbook is left with the sheet removed and a refusal the log names.
     match crate::repair_all_formulas(&mut grids, &|formula| {
-        crate::repair_3d_refs_on_delete_at(formula, &deleted_name, index, &names_after)
+        repair_on_sheet_delete(formula, &deleted_name, index, &names_after, &removed_table_keys)
     }) {
         Ok(rewritten) => formulas_repaired = rewritten,
         Err(refusal) => {
@@ -4008,7 +4089,7 @@ pub(crate) fn delete_sheet_impl(
     // repair; one whose sheet just vanished reads `=#REF!$A$1:$A$3`, as Excel
     // [LIVE] writes it.
     repair_named_ranges(&state, &effect, &|refers_to| {
-        crate::repair_3d_refs_on_delete_at(refers_to, &deleted_name, index, &names_after)
+        repair_on_sheet_delete(refers_to, &deleted_name, index, &names_after, &removed_table_keys)
     });
     if index < freeze_configs.len() {
         freeze_configs.remove(index);
@@ -5363,6 +5444,69 @@ pub(crate) fn copy_sheet_impl(
     Ok(result)
 }
 
+/// THE COPY'S DEFINED NAMES (BUG-0744). [LIVE, Excel 16, 2026-11-06, lane
+/// names q1.ps1 + q3.ps1] `Worksheet.Copy` of `Src` gives the copy `Src (2)`:
+/// - a SHEET-scoped copy of every name scoped to `Src`, its references to
+///   `Src` re-pointed at the copy and the rest kept (`LocOwn` =
+///   `=Src!$A$1` -> `'Src (2)'!LocOwn` = `='Src (2)'!$A$1`; `LocOther` =
+///   `=Sheet2!$B$2` and `LocConst` = `=42` copied as they are; `LocMix` =
+///   `=Src!$A$1+Other!$B$1` -> `='Src (2)'!$A$1+Other!$B$1`; a relative
+///   `LocRel` = `=Src!B2` -> `='Src (2)'!B2`);
+/// - a SHEET-scoped copy of every WORKBOOK name whose definition reads `Src`
+///   anywhere (`GlobOwn`, `GMix`, `GRel`, `GConstSrc` = `=SUM(Src!$A:$A)`,
+///   and `GNoUse`, which no formula reads), re-pointed the same way -- unless
+///   `Src` already has a name of that spelling of its own (`Shadow`), whose
+///   copy is the one the copy gets; a workbook name reading only other sheets
+///   (`GlobOther`) is not copied.
+///
+/// The copied formulas then read the copy's names, exactly as the source's
+/// read the source's. Copy Sheet ends the undo history (BUG-0005), as Excel's
+/// does, so there is no undo step to give these names; a Delete Sheet of the
+/// copy takes them with it (`remap_sheet_keyed_stores`). Each is inserted at
+/// its (copy, name) registry key; a name the copy somehow already holds is
+/// kept. Takes `named_ranges` alone.
+fn copy_defined_names_to_copied_sheet(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    source: usize,
+    copy: usize,
+    source_name: &str,
+    copy_name: &str,
+    sheet_names: &[String],
+) {
+    let Ok(mut names) = state.named_ranges.write(effect) else { return };
+    let renames = calp::sheet_renames::SheetRenames::new([(source_name, copy_name)]);
+    let snapshot = names.clone();
+    let source_keys: std::collections::HashSet<String> = snapshot
+        .values()
+        .filter(|nr| nr.sheet_index == Some(source))
+        .map(|nr| identity::defined_name_key(&nr.name))
+        .collect();
+    let mut copies: Vec<crate::named_ranges::NamedRange> = Vec::new();
+    for nr in snapshot.values() {
+        let repointed = renames.rename_formula(&nr.refers_to);
+        let wanted = match nr.sheet_index {
+            Some(s) => s == source,
+            None => repointed.is_some() && !source_keys.contains(&identity::defined_name_key(&nr.name)),
+        };
+        if !wanted {
+            continue;
+        }
+        let refers_to = repointed
+            .map(|t| respell_rule_formula(&t, sheet_names, &snapshot).unwrap_or(t))
+            .unwrap_or_else(|| nr.refers_to.clone());
+        copies.push(crate::named_ranges::NamedRange {
+            name: nr.name.clone(),
+            sheet_index: Some(copy),
+            refers_to,
+            comment: nr.comment.clone(),
+            folder: nr.folder.clone(),
+        });
+    }
+    for nr in copies {
+        names.entry(nr.registry_key()).or_insert(nr);
+    }
+}
 /// What Excel's `Worksheet.Copy` carries onto the copy besides its cells
 /// (NEW-copy-sheet-cfdv-names). [LIVE, Excel 16, 2026-11-05,
 /// cfdv/probe1.ps1 K] the copy `Src (2)` has every conditional format of
@@ -5379,12 +5523,9 @@ pub(crate) fn copy_sheet_impl(
 /// copied rule gets a fresh id, each comment, reply and note a fresh id. Every
 /// store is taken alone; call holding no sheet guard.
 ///
-/// NOT CARRIED (yet): defined names. Excel gives the copy a SHEET-scoped copy
-/// of every name scoped to the source and of every workbook name whose
-/// definition reads the source, re-pointed at the copy (`'Src (2)'!WbRef =
-/// ='Src (2)'!$A$1:$A$3` beside the workbook's own `WbRef`). Calcula's name
-/// registry is keyed by the name alone (`identity::defined_name_key`), so a
-/// second `WbRef` in another scope cannot be held.
+/// The DEFINED NAMES are [`copy_defined_names_to_copied_sheet`]'s.
+///
+/// Called after the copy was inserted and every sheet guard released.
 fn copy_rules_and_annotations_to_copied_sheet(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -5397,6 +5538,7 @@ fn copy_rules_and_annotations_to_copied_sheet(
     else {
         return;
     };
+    copy_defined_names_to_copied_sheet(state, effect, source, copy, &source_name, &copy_name, &sheet_names);
     let named_ranges = state.named_ranges.read().map(|g| g.clone()).unwrap_or_default();
     let renames = calp::sheet_renames::SheetRenames::new([(source_name.as_str(), copy_name.as_str())]);
     let mut slot = |text: &mut String| {

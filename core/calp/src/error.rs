@@ -29,6 +29,20 @@ pub enum CalpError {
     #[error("Application already exists: {0}")]
     ApplicationAlreadyExists(String),
 
+    /// ONE WRITEBACK ID, ONE APPLICATION (BUG-0734, owner decision 2026-11-06):
+    /// the push declares a writeback region or model writeback column id that
+    /// ANOTHER application in the workspace already declares, while the pushed
+    /// application's own history does not. Answers are routed by that id, so
+    /// two applications sharing it could each receive the other's.
+    #[error("CALP_REGION_TAKEN: This workbook designates the writeback {what} '{id}', which the application '{application}' in this workspace already declares, so publishing it as '{package}' would give two applications one id and answers typed into it could reach either publisher. Nothing was published. To publish a copy of '{application}' as a new application, open '{application}' for editing (Collaboration > Open Application for Editing) and publish that working copy as the new application -- it gives the copy ids of its own. Otherwise remove the designation (Writeback) and designate it again, then update any GATHER formula that names it.")]
+    WritebackIdTaken { what: String, id: String, application: String, package: String },
+
+    /// The workspace could not be read well enough to know whether another
+    /// application declares one of the push's writeback ids. FAIL CLOSED: an
+    /// unread manifest is never "declares nothing" (BUG-0734).
+    #[error("CALP_REGION_TAKEN: Could not check the workspace for writeback region ids ({reason}), so nothing was published as '{package}'. Try again once every application in the workspace can be read.")]
+    WritebackIdsUnchecked { package: String, reason: String },
+
     #[error("Version already published: {package} {version}")]
     VersionAlreadyPublished { package: String, version: String },
 

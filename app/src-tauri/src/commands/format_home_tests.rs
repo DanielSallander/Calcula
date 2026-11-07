@@ -2154,7 +2154,7 @@ fn a_sort_moves_each_record_with_its_look_across_a_row_format() {
 fn every_sort_arm_carries_an_inheriting_cells_look() {
     const DATA: &str = include_str!("data.rs");
     let data = DATA.replace("\r\n", "\n");
-    for signature in ["pub fn sort_range(", "fn sort_range_off_sheet_at("] {
+    for signature in ["pub(crate) fn sort_range_core(", "fn sort_range_off_sheet_at("] {
         let start = data.find(signature).unwrap_or_else(|| panic!("{signature} not found"));
         let rest = &data[start..];
         let body = &rest[..rest.find("\n}\n").expect("end of fn")];

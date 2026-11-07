@@ -10,6 +10,7 @@ import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dim
 import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
 import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 import { sheetNamesEqual } from "../../../../api/sheetNames";
+import { lineTargetHalf } from "../../pointerPrecision";
 
 // =============================================================================
 // SELECTION THRESHOLDS
@@ -308,12 +309,13 @@ export function getColumnResizeHandle(
   if (pixelX < rowHeaderWidth) return null;
 
   const dims = ensureDimensions(dimensions);
-  const range = calculateVisibleRange(viewport, config, pixelX + handleWidth, colHeaderHeight, dims);
+  const range = calculateVisibleRange(viewport, config, pixelX + lineTargetHalf(handleWidth, Infinity) * 2, colHeaderHeight, dims);
   let x = rowHeaderWidth + range.offsetX;
   for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
     const colWidth = getColumnWidth(col, config, dims);
     x += colWidth;
-    if (Math.abs(pixelX - x) <= handleWidth / 2) {
+    // A finger or a pen: a 44 px touch target, at most half the column (BUG-0729).
+    if (Math.abs(pixelX - x) <= lineTargetHalf(handleWidth / 2, colWidth / 2)) {
       return col;
     }
   }
@@ -342,12 +344,13 @@ export function getRowResizeHandle(
   if (pixelY < colHeaderHeight) return null;
 
   const dims = ensureDimensions(dimensions);
-  const range = calculateVisibleRange(viewport, config, rowHeaderWidth, pixelY + handleHeight, dims);
+  const range = calculateVisibleRange(viewport, config, rowHeaderWidth, pixelY + lineTargetHalf(handleHeight, Infinity) * 2, dims);
   let y = colHeaderHeight + range.offsetY;
   for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
     const rowHeight = getRowHeight(row, config, dims);
     y += rowHeight;
-    if (Math.abs(pixelY - y) <= handleHeight / 2) {
+    // A finger or a pen: a 44 px touch target, at most half the row (BUG-0729).
+    if (Math.abs(pixelY - y) <= lineTargetHalf(handleHeight / 2, rowHeight / 2)) {
       return row;
     }
   }

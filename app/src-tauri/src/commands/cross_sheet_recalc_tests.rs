@@ -1119,7 +1119,7 @@ fn sort_range_recalculates_the_range_it_rewrote() {
     // being guarded is silent (stale values, no error), so the wiring is
     // asserted from source.
     const DATA_RS: &str = include_str!("data.rs");
-    let body = body_of(DATA_RS, "sort_range");
+    let body = body_of(DATA_RS, "sort_range_core"); // the command body since lane tabxlsx (BUG-0740)
     assert!(
         body.contains("recalc_after_active_sheet_bulk_rewrite("),
         "`sort_range` rewrites its range without recalculating any dependent — \

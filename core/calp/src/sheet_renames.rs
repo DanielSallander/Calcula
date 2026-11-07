@@ -65,6 +65,10 @@ pub struct SheetRenames {
     /// a name matches only spelled exactly so -- in a formula, only in a
     /// spelling no bare identifier can produce ([`spelling_survives_the_lexer`]).
     exact: bool,
+    /// The sheets, in tab order and GONE ones included, in the spelling the
+    /// references use ([`Self::with_span_order`]): what a 3-D span with a
+    /// gone endpoint is walked inward over. Empty: such a span reads `#REF!`.
+    span_order: Vec<String>,
 }
 
 /// What one sheet-qualified reference becomes.
@@ -123,8 +127,32 @@ fn gone_reference(expr: &Expression) -> Expression {
     out
 }
 
+/// Where a 3-D span `start:end` with a GONE endpoint now runs, as its new
+/// `(start, end)` in the names the span spells (before any rename); `None`
+/// when no sheet of the span is left, or the sheets' order is unknown.
+type SpanRule<'a> = dyn Fn(&str, &str) -> Option<(String, String)> + 'a;
+
+/// No order known: a span with a gone endpoint reads `#REF!` whole.
+fn no_span_order(_: &str, _: &str) -> Option<(String, String)> {
+    None
+}
+
+/// The span `start:end` walked inward past every gone sheet, over `order`
+/// (the sheets in tab order, gone ones included): the nearest sheet still
+/// here on each side, the reference's direction kept. `None` when either
+/// endpoint is not in `order` or every sheet between them is gone.
+fn shrink_span(order: &[String], is_gone: &dyn Fn(&str) -> bool, start: &str, end: &str) -> Option<(String, String)> {
+    let at = |name: &str| order.iter().position(|n| identity::sheet_names_equal(n, name));
+    let (ps, pe) = (at(start)?, at(end)?);
+    let (lo, hi) = (ps.min(pe), ps.max(pe));
+    let kept: Vec<&String> = order[lo..=hi].iter().filter(|n| !is_gone(n)).collect();
+    let (first, last) = ((*kept.first()?).clone(), (*kept.last()?).clone());
+    Some(if ps <= pe { (first, last) } else { (last, first) })
+}
+
 /// Call `f` on every sheet name a reference in `expr` carries, and apply its
-/// answer. True when anything changed.
+/// answer. True when anything changed. A 3-D span with a gone endpoint is
+/// walked inward by `span` (see [`shrink_span`]).
 ///
 /// EXHAUSTIVE on purpose -- no `_` arm. A new reference-bearing node must be
 /// decided here, not silently skipped (the sheet-rename repair in the host
@@ -132,7 +160,7 @@ fn gone_reference(expr: &Expression) -> Expression {
 /// `@Data!A1:A9` and `Data!A1#` escape a rename there). Both the rename and
 /// the spelling-blind comparison walk through here, so they cannot disagree
 /// about which names a formula carries.
-fn walk_sheet_slots(expr: &mut Expression, f: &mut dyn FnMut(&mut String) -> SlotEdit) -> bool {
+fn walk_sheet_slots(expr: &mut Expression, f: &mut dyn FnMut(&mut String) -> SlotEdit, span: &SpanRule<'_>) -> bool {
     let gone = match expr {
         Expression::Literal(_) | Expression::NamedRef { .. } | Expression::TableRef { .. } => {
             return false
@@ -149,46 +177,83 @@ fn walk_sheet_slots(expr: &mut Expression, f: &mut dyn FnMut(&mut String) -> Slo
                 SlotEdit::Gone => true,
                 own => {
                     let mut changed = matches!(own, SlotEdit::Changed);
-                    changed |= walk_sheet_slots(start, f);
-                    changed |= walk_sheet_slots(end, f);
+                    changed |= walk_sheet_slots(start, f, span);
+                    changed |= walk_sheet_slots(end, f, span);
                     return changed;
                 }
             }
         }
         Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
+            let (start_was, end_was) = (start_sheet.clone(), end_sheet.clone());
             let first = f(start_sheet);
             let last = f(end_sheet);
             if matches!(first, SlotEdit::Gone) || matches!(last, SlotEdit::Gone) {
-                true
+                // A GONE ENDPOINT MOVES INWARD, as the host's sheet delete moves
+                // it (`repair_3d_delete_recursive`, lib.rs): to the nearest sheet
+                // inside the span that is still here, and a span left with one
+                // sheet is that sheet's plain reference [LIVE, Excel 16,
+                // 2026-11-06, lane namescalp p2.ps1: of Al..Fo, deleting Ch
+                // turns `Al:Ch!A1` into `Al:Br!A1`, `Ch:Ec!A1` into `De:Ec!A1`
+                // and `Br:Ch!A1` into `Br!A1`; a span with nothing left reads
+                // `#REF!A1`]. Without the sheets' order the span cannot be
+                // walked inward, and it reads `#REF!` where the sheets were.
+                match span(&start_was, &end_was) {
+                    Some((new_start, new_end)) => {
+                        *start_sheet = new_start;
+                        *end_sheet = new_end;
+                        // Renamed like any other slot; neither is gone.
+                        f(start_sheet);
+                        f(end_sheet);
+                        walk_sheet_slots(reference, f, span);
+                        if identity::sheet_name_key(start_sheet) == identity::sheet_name_key(end_sheet) {
+                            let mut single = (**reference).clone();
+                            let qualified = match &mut single {
+                                Expression::CellRef { sheet, .. }
+                                | Expression::ColumnRef { sheet, .. }
+                                | Expression::RowRef { sheet, .. }
+                                | Expression::Range { sheet, .. } => {
+                                    *sheet = Some(start_sheet.clone());
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if qualified {
+                                *expr = single;
+                            }
+                        }
+                        return true;
+                    }
+                    None => true,
+                }
             } else {
                 let mut changed = matches!(first, SlotEdit::Changed) | matches!(last, SlotEdit::Changed);
-                changed |= walk_sheet_slots(reference, f);
+                changed |= walk_sheet_slots(reference, f, span);
                 return changed;
             }
         }
         Expression::BinaryOp { left, right, .. } => {
-            let l = walk_sheet_slots(left, f);
-            let r = walk_sheet_slots(right, f);
+            let l = walk_sheet_slots(left, f, span);
+            let r = walk_sheet_slots(right, f, span);
             return l | r;
         }
-        Expression::UnaryOp { operand, .. } => return walk_sheet_slots(operand, f),
+        Expression::UnaryOp { operand, .. } => return walk_sheet_slots(operand, f, span),
         Expression::FunctionCall { args, .. } => {
             let mut changed = false;
             for a in args.iter_mut() {
-                changed |= walk_sheet_slots(a, f);
+                changed |= walk_sheet_slots(a, f, span);
             }
             return changed;
         }
         Expression::IndexAccess { target, index } => {
-            let t = walk_sheet_slots(target, f);
-            let i = walk_sheet_slots(index, f);
+            let t = walk_sheet_slots(target, f, span);
+            let i = walk_sheet_slots(index, f, span);
             return t | i;
         }
         Expression::ArrayLiteral { rows } => {
             let mut changed = false;
             for row in rows.iter_mut() {
                 for e in row.iter_mut() {
-                    changed |= walk_sheet_slots(e, f);
+                    changed |= walk_sheet_slots(e, f, span);
                 }
             }
             return changed;
@@ -196,15 +261,15 @@ fn walk_sheet_slots(expr: &mut Expression, f: &mut dyn FnMut(&mut String) -> Slo
         Expression::ListLiteral { elements } => {
             let mut changed = false;
             for e in elements.iter_mut() {
-                changed |= walk_sheet_slots(e, f);
+                changed |= walk_sheet_slots(e, f, span);
             }
             return changed;
         }
         Expression::DictLiteral { entries } => {
             let mut changed = false;
             for (k, v) in entries.iter_mut() {
-                changed |= walk_sheet_slots(k, f);
-                changed |= walk_sheet_slots(v, f);
+                changed |= walk_sheet_slots(k, f, span);
+                changed |= walk_sheet_slots(v, f, span);
             }
             return changed;
         }
@@ -215,14 +280,14 @@ fn walk_sheet_slots(expr: &mut Expression, f: &mut dyn FnMut(&mut String) -> Slo
         // literal does the wrapper go with it, because `#REF!#` and `@#REF!`
         // are not formulas.
         Expression::SpillRef { cell, .. } => {
-            let changed = walk_sheet_slots(cell, f);
+            let changed = walk_sheet_slots(cell, f, span);
             if !(changed && is_ref_error(cell)) {
                 return changed;
             }
             true
         }
         Expression::ImplicitIntersection { operand } => {
-            let changed = walk_sheet_slots(operand, f);
+            let changed = walk_sheet_slots(operand, f, span);
             if !(changed && is_ref_error(operand)) {
                 return changed;
             }
@@ -253,7 +318,7 @@ fn comparable_formula(text: &str) -> Option<String> {
             *name = upper;
             SlotEdit::Changed
         }
-    });
+    }, &no_span_order);
     Some(engine::ast_render::render_formula_raw(&ast))
 }
 
@@ -399,7 +464,7 @@ impl SheetRenames {
             }
             by_upper.insert(key(from), to.to_string());
         }
-        SheetRenames { by_upper, gone: HashSet::new(), exact: false }
+        SheetRenames { by_upper, gone: HashSet::new(), exact: false, span_order: Vec::new() }
     }
 
     /// The renames a LOAD makes when a file holds two sheet names Excel's rule
@@ -427,7 +492,7 @@ impl SheetRenames {
             }
             by_exact.insert(from.to_string(), to.to_string());
         }
-        SheetRenames { by_upper: by_exact, gone: HashSet::new(), exact: true }
+        SheetRenames { by_upper: by_exact, gone: HashSet::new(), exact: true, span_order: Vec::new() }
     }
 
     /// Also turn every reference to these sheets into `#REF!`: sheets of the
@@ -445,6 +510,22 @@ impl SheetRenames {
                 self.gone.insert(k);
             }
         }
+        self
+    }
+
+    /// The sheets in TAB ORDER, the gone ones included, spelled as the
+    /// references spell them (before any rename): a 3-D span whose endpoint is
+    /// gone then moves that endpoint inward to the nearest sheet still here,
+    /// as the host's own sheet delete does (`repair_3d_delete_recursive`),
+    /// rather than reading `#REF!` whole (BUG-0751). A refresh passes the
+    /// payload's order (the publisher's tabs); a sheet delete the order the
+    /// tabs had before it.
+    pub fn with_span_order<I, K>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = K>,
+        K: AsRef<str>,
+    {
+        self.span_order = names.into_iter().map(|n| n.as_ref().to_string()).collect();
         self
     }
 
@@ -493,6 +574,13 @@ impl SheetRenames {
         if self.is_empty() {
             return false;
         }
+        let is_gone = |name: &str| self.is_gone(name);
+        let span = |start: &str, end: &str| {
+            if self.span_order.is_empty() {
+                return None;
+            }
+            shrink_span(&self.span_order, &is_gone, start, end)
+        };
         walk_sheet_slots(expr, &mut |sheet| {
             if self.is_gone(sheet) {
                 SlotEdit::Gone
@@ -501,7 +589,7 @@ impl SheetRenames {
             } else {
                 SlotEdit::Keep
             }
-        })
+        }, &span)
     }
 
     /// Rename the sheet references in one formula TEXT. `None` when nothing
@@ -533,7 +621,12 @@ impl SheetRenames {
     /// `"'My Data'!A1"`), the shape a chart's string source and a dropdown's
     /// cell range use. `None` when it has no prefix or the prefix is not renamed.
     /// A reference to a GONE sheet becomes `"#REF!"`, which no sheet, range or
-    /// defined name answers to.
+    /// defined name answers to -- the CHART's rule: `#REF!A1:B5` would be a
+    /// reference to a sheet a user may call `#REF` (a legal name) in the
+    /// chart's A1 reader, and Excel drops a deleted sheet's series references
+    /// rather than respelling them [LIVE, lane namescalp p6.ps1: the series'
+    /// name falls back to `Series1` and its formula reads empty]. A dropdown's
+    /// source keeps its address ([`Self::rename_reference_keeping_address`]).
     pub fn rename_reference(&self, reference: &str) -> Option<String> {
         // ONE scan decides both the name and where the range after it starts
         // (`split_sheet_reference`): a quoted name may itself contain `'!`.
@@ -546,6 +639,18 @@ impl SheetRenames {
         }
         let to = self.target(&name)?;
         Some(format!("{}!{}", engine::ast_render::quote_sheet_name(to), rest))
+    }
+
+    /// [`Self::rename_reference`], except that a reference to a GONE sheet
+    /// keeps its address behind the deleted-sheet marker (`Data!A1:A5` ->
+    /// `#REF!A1:A5`), Excel's text for a list source whose sheet was deleted
+    /// (see [`Self::rename_pane_control_config`]).
+    pub fn rename_reference_keeping_address(&self, reference: &str) -> Option<String> {
+        let (name, rest) = crate::publish::split_sheet_reference(reference)?;
+        if !name.is_empty() && self.is_gone(&name) {
+            return Some(format!("#REF!{}", rest));
+        }
+        self.rename_reference(reference)
     }
 
     /// `saved` with its formula spelled in the names this set renames to --
@@ -747,8 +852,16 @@ impl SheetRenames {
     /// A pane control's config (the host's `PaneControlConfig`): a dropdown's
     /// cell-range source (see [`visit_pane_control_reference`]). Returns 1
     /// when it changed.
+    ///
+    /// A source on a GONE sheet keeps its address behind the marker,
+    /// `#REF!A1:A5`, as Excel's own list source does [LIVE, Excel 16,
+    /// 2026-11-06, lane namescalp p5.ps1: a validation list
+    /// `=Data!$A$2:$A$4` reads `=#REF!$A$2:$A$4` once Data is deleted] -- so
+    /// the pane still shows what it listed (BUG-0751). The dropdown lists
+    /// nothing from it (`resolveCellRangeSource` refuses any `#REF!`). A
+    /// CHART's string source stays the whole `#REF!` ([`Self::rename_reference`]).
     pub fn rename_pane_control_config(&self, config: &mut serde_json::Value) -> usize {
-        visit_pane_control_reference(config, &mut |reference| match self.rename_reference(reference) {
+        visit_pane_control_reference(config, &mut |reference| match self.rename_reference_keeping_address(reference) {
             Some(renamed) => {
                 *reference = renamed;
                 true
@@ -1455,7 +1568,73 @@ mod tests {
             pane_controls: &mut panes,
         });
         assert_eq!(cfs[0].rules[0]["rule"]["formula"], "=A1>#REF!$B$1", "Excel's rule text after the delete");
-        assert_eq!(panes[0].config["source"]["reference"], "#REF!");
+        // Excel's list-source text keeps the address [LIVE namescalp p5.ps1].
+        assert_eq!(panes[0].config["source"]["reference"], "#REF!A1:A5");
+    }
+
+    /// BUG-0751: a 3-D span with an endpoint on a GONE sheet moves that
+    /// endpoint inward to the nearest sheet still here, the host's sheet-delete
+    /// rule (`repair_3d_delete_recursive`), and a span left with one sheet is
+    /// that sheet's plain reference. [LIVE, Excel 16, 2026-11-06, lane
+    /// namescalp p2.ps1, tabs Al..Fo: deleting Ch turns `Al:Ch!A1` into
+    /// `Al:Br!A1`, `Ch:Ec!A1` into `De:Ec!A1`, `Br:Ch!A1` into `Br!A1`,
+    /// `Ch:De!A1` into `De!A1` and leaves `Al:Ec!A1`; after Br, Al and De go
+    /// too, `Al:De!A1` reads `#REF!A1` and `Ch:Ec!A1` reads `Ec!A1`.] The
+    /// walker turned every such span into `#REF!A1`.
+    ///
+    /// SABOTAGE (namescalp-span): `shrink_span` answers `None` -- fails at
+    /// "SPAN MOVES INWARD".
+    #[test]
+    fn a_span_with_a_gone_endpoint_moves_inward_like_the_hosts_delete() {
+        let tabs = ["Al", "Br", "Ch", "De", "Ec", "Fo"];
+        let one_gone = SheetRenames::default().with_gone(["Ch"]).with_span_order(tabs);
+        assert_eq!(one_gone.rename_formula("=SUM(Al:Ch!A1)").as_deref(), Some("=SUM(Al:Br!A1)"), "SPAN MOVES INWARD");
+        assert_eq!(one_gone.rename_formula("=SUM(Ch:Ec!A1)").as_deref(), Some("=SUM(De:Ec!A1)"));
+        assert_eq!(one_gone.rename_formula("=SUM(Br:Ch!A1)").as_deref(), Some("=SUM(Br!A1)"), "one sheet left");
+        assert_eq!(one_gone.rename_formula("=SUM(Ch:De!A1:B2)").as_deref(), Some("=SUM(De!A1:B2)"));
+        assert_eq!(one_gone.rename_formula("=SUM(Ch:Al!A1)").as_deref(), Some("=SUM(Br:Al!A1)"), "direction kept");
+        assert_eq!(one_gone.rename_formula("=SUM(Al:Ec!A1)"), None, "a span that keeps its endpoints is untouched");
+        assert_eq!(one_gone.rename_formula("=Ch!A1").as_deref(), Some("=#REF!A1"), "a plain reference is gone");
+
+        let four_gone = SheetRenames::default().with_gone(["Al", "Br", "Ch", "De"]).with_span_order(tabs);
+        assert_eq!(four_gone.rename_formula("=SUM(Al:De!A1)").as_deref(), Some("=SUM(#REF!A1)"), "nothing left");
+        assert_eq!(four_gone.rename_formula("=SUM(Ch:Ec!A1)").as_deref(), Some("=SUM(Ec!A1)"));
+
+        // A rename in the same set renames the endpoint the span moved to.
+        let renamed = SheetRenames::new([("De", "De (2)")]).with_gone(["Ch"]).with_span_order(tabs);
+        assert_eq!(renamed.rename_formula("=SUM(Ch:De!A1)").as_deref(), Some("=SUM('De (2)'!A1)"));
+        assert_eq!(renamed.rename_formula("=SUM(Al:Ch!A1)").as_deref(), Some("=SUM(Al:Br!A1)"));
+
+        // Without the tabs' order the span cannot be walked: `#REF!` whole.
+        let no_order = SheetRenames::default().with_gone(["Ch"]);
+        assert_eq!(no_order.rename_formula("=SUM(Al:Ch!A1)").as_deref(), Some("=SUM(#REF!A1)"));
+    }
+
+    /// The pane dropdown keeps its address behind the marker (Excel's list
+    /// source, [LIVE namescalp p5.ps1]); a chart's string source stays the
+    /// whole `#REF!`, which no sheet answers to (a sheet may be called `#REF`).
+    ///
+    /// SABOTAGE (namescalp-pane): `rename_pane_control_config` calls
+    /// `rename_reference` -- fails at "THE ADDRESS STAYS".
+    #[test]
+    fn a_dropdown_source_on_a_gone_sheet_keeps_its_address() {
+        let gone = SheetRenames::default().with_gone(["Data"]);
+        let mut config = serde_json::json!({ "type": "dropdown", "source": { "type": "cellRange", "reference": "'data'!$A$1:$A$5" } });
+        assert_eq!(gone.rename_pane_control_config(&mut config), 1);
+        assert_eq!(config["source"]["reference"], "#REF!$A$1:$A$5", "THE ADDRESS STAYS");
+        assert_eq!(gone.rename_reference("Data!A1:B5").as_deref(), Some("#REF!"), "a chart source is gone whole");
+        assert_eq!(gone.rename_reference_keeping_address("Other!A1"), None);
+    }
+
+    /// The comparison across a rename boundary keeps a quoted cell-shaped NAME
+    /// apart from the cell it spells (BUG-0751 residual): `'D1'+1` reads the
+    /// name, `D1+1` the cell. Already so since BUG-0739 taught the stored
+    /// renderer to quote such a name; pinned here.
+    #[test]
+    fn a_quoted_cell_shaped_name_is_not_the_cell() {
+        assert!(!same_formula_text("'D1'+1", "D1+1"), "a name spelled like a cell is not the cell");
+        assert!(!same_formula_text("='D1'+1", "=D1+1"));
+        assert!(same_formula_text("'Data'!A1+'D1'", "DATA!A1+'D1'"), "sheet quoting is still spelling");
     }
 
     /// NEW-calp-gone-walker-ref. A reference to a GONE sheet keeps its cell

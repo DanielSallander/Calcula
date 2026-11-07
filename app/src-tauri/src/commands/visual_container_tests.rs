@@ -274,6 +274,136 @@ fn a_floating_range_container_only_patch_persists_dirties_undoes_and_passes_a_lo
 }
 
 // ---------------------------------------------------------------------------
+// 2b. Only the fields a family paints (BUG-0773)
+// ---------------------------------------------------------------------------
+
+/// BUG-0773 (the BUG-0491 rule for the JSON container doors): a slicer's, a
+/// timeline's and a floating grid's door stored ANY valid container field --
+/// a subtitle, a divider, a slicer's gradient, a second spelling of the title
+/// text -- that nothing paints, listed to the AI and carried in a `.calp`.
+/// Each door now refuses a field its family does not paint
+/// (`visual_format::FAMILY_PAINTED_CONTAINER_FIELDS`), cleanly and naming
+/// the real setting where one exists; a painted container still sets; and a
+/// dead field the stored record already carried (a document from before the
+/// rule, re-sent whole by the Format pane) does not block an edit of
+/// something else -- it is dropped from what is stored.
+///
+/// SABOTAGE: make `check_family_container_write` return `Ok(incoming.clone())`
+/// at once -- "the slicer stored a subtitle it never paints".
+#[test]
+fn each_family_door_stores_only_the_container_fields_it_paints() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb);
+
+    // Slicer.
+    let id = insert_slicer(&wb, canvas);
+    let update = |v: serde_json::Value| crate::slicer::commands::update_slicer_core(&wb.state, &wb.file, &wb.slicer, id, slicer_params(v));
+    let stored = || wb.slicer.slicers.read().unwrap()[&id].container.clone();
+    let err = assert_clean_refusal(&wb, "slicer subtitle", || update(serde_json::json!({"container": {"subtitle": {"text": "x"}}})));
+    assert!(err.contains("subtitle.text"), "{err}");
+    assert_eq!(stored(), None, "the slicer stored a subtitle it never paints");
+    let err = assert_clean_refusal(&wb, "slicer title text", || update(serde_json::json!({"container": {"title": {"text": "x"}}})));
+    assert!(err.contains("headerText"), "the real setting is named: {err}");
+    let gradient = serde_json::json!({"type": "linear", "stops": [{"offset": 0, "color": "#ffffff"}, {"offset": 1, "color": "#000000"}]});
+    assert_clean_refusal(&wb, "slicer gradient", || update(serde_json::json!({"container": {"background": {"gradient": gradient.clone()}}})));
+    update(serde_json::json!({"container": serde_json::to_value(rounded()).unwrap()})).expect("painted fields set");
+    assert_eq!(stored(), Some(rounded()));
+    // A dead field the record already carried: dropped, not a refusal.
+    let mut carried = rounded();
+    carried.divider = Some(visual_format::VisualDivider { show: Some(true), ..Default::default() });
+    wb.slicer.slicers.write(&crate::document_effect::test_seed_effect()).unwrap().get_mut(&id).unwrap().container = Some(carried.clone());
+    let mut edit = serde_json::to_value(&carried).unwrap();
+    edit["padding"]["top"] = serde_json::json!(9);
+    update(serde_json::json!({"container": edit})).expect("an edit of a painted field passes");
+    let after = stored().unwrap();
+    assert!(after.divider.is_none(), "the carried dead divider is dropped");
+    assert_eq!(after.padding.unwrap().top, Some(9.0));
+
+    // Timeline.
+    let timeline = crate::timeline_slicer::TimelineSlicer {
+        id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+        name: "Order Date".to_string(),
+        header_text: None,
+        sheet_index: canvas,
+        x: 10.0,
+        y: 20.0,
+        width: 350.0,
+        height: 100.0,
+        source_type: crate::timeline_slicer::TimelineSourceType::Pivot,
+        source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+        field_name: "OrderDate".to_string(),
+        level: crate::timeline_slicer::TimelineLevel::Months,
+        selection_start: None,
+        selection_end: None,
+        show_header: true,
+        show_level_selector: true,
+        show_scrollbar: true,
+        style_preset: "TimelineStyleLight1".to_string(),
+        connected_pivot_ids: vec![],
+        container: None,
+    };
+    let tid = timeline.id;
+    wb.timelines.timelines.write(&crate::document_effect::test_seed_effect()).unwrap().insert(tid, timeline);
+    let update_tl = |v: serde_json::Value| {
+        let params: crate::timeline_slicer::types::UpdateTimelineParams = serde_json::from_value(v).unwrap();
+        crate::timeline_slicer::commands::update_timeline_slicer_core(&wb.state, &wb.timelines, &wb.file, tid, params)
+    };
+    let err = assert_clean_refusal(&wb, "timeline divider", || {
+        update_tl(serde_json::json!({"name": "Renamed", "container": {"divider": {"show": true}}}))
+    });
+    assert!(err.contains("divider.show"), "{err}");
+    let tl = wb.timelines.timelines.read().unwrap()[&tid].clone();
+    assert_eq!((tl.name.as_str(), tl.container.clone()), ("Order Date", None), "a refused write changed nothing else either");
+    update_tl(serde_json::json!({"container": serde_json::to_value(rounded()).unwrap()})).expect("painted fields set");
+
+    // Floating grid.
+    let info = crate::floating_range::create_floating_range_inner(&wb.state, &wb.file, None, 100.0, 50.0).expect("a floating range");
+    let fid = info.range.id;
+    let update_fr = |c: serde_json::Value| {
+        crate::floating_range::update_floating_range_inner(
+            &wb.state,
+            &wb.file,
+            fid,
+            FloatingRangePatch { container: Some(Some(container(c))), ..Default::default() },
+            crate::floating_range::PatchGate::ObjectEdit,
+        )
+    };
+    let err = assert_clean_refusal(&wb, "floating grid lock aspect", || update_fr(serde_json::json!({"lockAspect": true})));
+    assert!(err.contains("lockAspect"), "{err}");
+    let err = assert_clean_refusal(&wb, "floating grid title text", || update_fr(serde_json::json!({"title": {"text": "Q1"}})));
+    assert!(err.contains("rename"), "{err}");
+    assert_clean_refusal(&wb, "floating grid spacing", || update_fr(serde_json::json!({"spacing": {"custom": true}})));
+    update_fr(serde_json::json!({"background": {"gradient": gradient}, "padding": {"top": 4}})).expect("a floating grid paints a gradient");
+}
+
+/// The painted lists and the binding catalogue cannot drift apart: every
+/// `/container/...` row a slicer, a timeline or a floating grid can BIND is a
+/// field its family paints (a binding of a field nothing paints would be a
+/// formula driving nothing).
+#[test]
+fn every_bindable_container_row_of_a_family_is_painted() {
+    use crate::api_types::ObjectBindingKind as K;
+    for (kind, family) in [
+        (K::Slicer, visual_format::FAMILY_SLICER),
+        (K::TimelineSlicer, visual_format::FAMILY_TIMELINE),
+        (K::FloatingRange, visual_format::FAMILY_FLOATING_GRID),
+    ] {
+        let mut seen = 0;
+        for row in crate::object_bindings::catalog::rows_of(kind) {
+            let Some(rest) = row.pointer.strip_prefix("/container/") else { continue };
+            seen += 1;
+            let field = rest.replace('/', ".");
+            assert_eq!(
+                visual_format::family_paints_container_field(family, &field),
+                Some(true),
+                "{family}: bindable {field} is not painted"
+            );
+        }
+        assert!(seen > 10, "{family}: the catalogue's container rows moved");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 3. Charts
 // ---------------------------------------------------------------------------
 

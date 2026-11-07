@@ -206,7 +206,7 @@ async fn run(config: SemiJoinConfig) -> (BTreeMap<String, f64>, PlanNode) {
         "cross-source query must plan as LocalAggregation"
     );
     let (batches, node) =
-        QueryExecutor::execute_explained(&plan, &model, &registry, None, None, None, &[])
+        QueryExecutor::execute_explained(&plan, &model, &registry, None, None, None, &[], false)
             .await
             .unwrap();
     (result_map(&batches), node)

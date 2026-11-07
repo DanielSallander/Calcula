@@ -122,6 +122,54 @@ pub struct PivotField {
     /// Absent reads None: an older reader shows the items in label order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_sort: Option<ValueSort>,
+
+    /// The MANUAL item order (BUG-0733, Excel's `PivotItem.Position` and the
+    /// item menu's Move): the items' MEMBER KEYS (`FieldCache::member_key`)
+    /// in the order they are shown while [`Self::sort_order`] is
+    /// `Manual`. An item the list does not name -- one a refresh brought --
+    /// follows the listed ones in source order, as Excel appends a new item
+    /// [LIVE, piv4 probe5 M_AFTER_NEW]. Ignored under any other order;
+    /// empty: Manual shows the source's order. Absent reads empty: an older
+    /// reader shows the items in source order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_item_order: Vec<String>,
+
+    /// The sorts of the fields a GROUPING made from this one: a manual
+    /// group's parent field and every date level but the finest (which is
+    /// this field, as in Excel). Excel keeps one sort per pivot field, and a
+    /// grouped field is a field of its own [LIVE, verify-pivotfix probe3
+    /// A_ORDERS: sorting Region2 leaves Region ascending]; a level with no
+    /// entry is sorted Ascending by label. Absent reads empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub level_sorts: Vec<LevelSort>,
+}
+
+/// The sort of one grouping level ([`PivotField::level_sorts`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LevelSort {
+    /// Which level: [`MANUAL_GROUP_LEVEL`] for a manual group's parent, or a
+    /// date level's [`DateGroupLevel::level_key`].
+    pub level: String,
+    pub sort_order: SortOrder,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_sort: Option<ValueSort>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_item_order: Vec<String>,
+}
+
+/// The [`LevelSort::level`] of a manual group's parent field.
+pub const MANUAL_GROUP_LEVEL: &str = "group";
+
+impl LevelSort {
+    /// A level nothing has sorted: Ascending by label.
+    pub fn unsorted(level: &str) -> Self {
+        LevelSort {
+            level: level.to_string(),
+            sort_order: SortOrder::Ascending,
+            value_sort: None,
+            manual_item_order: Vec::new(),
+        }
+    }
 }
 
 /// What a field's items are sorted by when they are sorted by VALUE
@@ -149,6 +197,24 @@ pub struct ValueSort {
 }
 
 impl PivotField {
+    /// The sort of grouping level `level` (see [`Self::level_sorts`]).
+    pub fn level_sort(&self, level: &str) -> LevelSort {
+        self.level_sorts
+            .iter()
+            .find(|l| l.level == level)
+            .cloned()
+            .unwrap_or_else(|| LevelSort::unsorted(level))
+    }
+
+    /// The sort of grouping level `level` to write: its entry, made when absent.
+    pub fn level_sort_mut(&mut self, level: &str) -> &mut LevelSort {
+        if let Some(i) = self.level_sorts.iter().position(|l| l.level == level) {
+            return &mut self.level_sorts[i];
+        }
+        self.level_sorts.push(LevelSort::unsorted(level));
+        self.level_sorts.last_mut().expect("just pushed")
+    }
+
     pub fn new(source_index: FieldIndex, name: String) -> Self {
         PivotField {
             source_index,
@@ -165,6 +231,8 @@ impl PivotField {
             number_format: None,
             is_synthetic_total: false,
             value_sort: None,
+            manual_item_order: Vec::new(),
+            level_sorts: Vec::new(),
         }
     }
 
@@ -185,6 +253,8 @@ impl PivotField {
             number_format: None,
             is_synthetic_total: false,
             value_sort: None,
+            manual_item_order: Vec::new(),
+            level_sorts: Vec::new(),
         }
     }
 }
@@ -241,6 +311,19 @@ pub enum DateGroupLevel {
     Month,
     Week,
     Day,
+}
+
+impl DateGroupLevel {
+    /// The level's [`LevelSort::level`] key.
+    pub fn level_key(self) -> &'static str {
+        match self {
+            DateGroupLevel::Year => "year",
+            DateGroupLevel::Quarter => "quarter",
+            DateGroupLevel::Month => "month",
+            DateGroupLevel::Week => "week",
+            DateGroupLevel::Day => "day",
+        }
+    }
 }
 
 /// A user-defined manual group: combines specific items under a parent label.
